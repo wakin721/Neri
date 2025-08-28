@@ -1,2 +1,2 @@
-# YSIS
-YSIS：YOLO-based Species Identification System
+# Neri
+Neural Ecological Recognition Intelligence
