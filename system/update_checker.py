@@ -16,7 +16,7 @@ from system.config import APP_VERSION
 
 # GitHub仓库信息
 GITHUB_USER = "wakin721"
-GITHUB_REPO = "animal_detect"
+GITHUB_REPO = "Neri"
 
 
 def get_icon_path():
@@ -328,4 +328,5 @@ def _show_messagebox(parent, title, message, msg_type):
             transient_parent.destroy()
 
     if parent.winfo_exists():
+
         parent.after(0, show_message)
