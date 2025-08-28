@@ -34,7 +34,7 @@ class AboutPage(ttk.Frame):
             logo_label.pack(pady=(20, 10))
 
         # 应用名称
-        app_name = ttk.Label(about_content, text="Neri", font=("Segoe UI", 16, "bold"))
+        app_name = ttk.Label(about_content, text="Neri - 红外相机图像智能处理工具", font=("Segoe UI", 16, "bold"))
         app_name.pack(pady=5)
 
         # 应用描述
@@ -58,4 +58,5 @@ class AboutPage(ttk.Frame):
 
     def open_link(self, url: str):
         """打开网页链接"""
+
         webbrowser.open_new(url)
