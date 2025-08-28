@@ -1,8 +1,8 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 from PIL import Image, ImageTk
 import os
-import shutil
+import webbrowser
 
 from system.config import APP_TITLE, NORMAL_FONT
 from system.utils import resource_path
@@ -23,7 +23,7 @@ class AboutPage(ttk.Frame):
 
         # 应用Logo
         try:
-            logo_path = resource_path(os.path.join("res", "logo.png"))
+            logo_path = resource_path(os.path.join("res", "ico.ico"))
             logo_img = Image.open(logo_path)
             logo_img = logo_img.resize((120, 120), Image.LANCZOS)
             self.logo_photo = ImageTk.PhotoImage(logo_img)
@@ -34,13 +34,13 @@ class AboutPage(ttk.Frame):
             logo_label.pack(pady=(20, 10))
 
         # 应用名称
-        app_name = ttk.Label(about_content, text="物种信息检测系统", font=("Segoe UI", 16, "bold"))
+        app_name = ttk.Label(about_content, text="Neri", font=("Segoe UI", 16, "bold"))
         app_name.pack(pady=5)
 
         # 应用描述
         desc_label = ttk.Label(
             about_content,
-            text="一款高效的物种信息检测应用程序，支持图像物种识别、探测图片保存、Excel输出和图像分类功能。",
+            text="Neri (Neural Ecological Recognition Intelligence) 是一款专为处理红外相机影像数据设计的智能桌面应用。它基于目标检测模型，能够高效、自动地识别和处理大批量由红外相机拍摄的野生动物照片。本工具旨在为生态保护工作者、野生动物研究人员和爱好者提供一个强大的数据整理和分析平台，将繁琐的手动筛选工作自动化，极大地提升科研和监测效率。",
             font=NORMAL_FONT,
             wraplength=500,
             justify="center"
@@ -51,4 +51,11 @@ class AboutPage(ttk.Frame):
         author_label = ttk.Label(about_content, text="作者：和錦わきん", font=NORMAL_FONT)
         author_label.pack(pady=5)
 
-        # 移除了按钮容器和按钮
+        # GitHub 链接
+        github_link = ttk.Label(about_content, text="GitHub Repository", foreground="blue", cursor="hand2", font=NORMAL_FONT)
+        github_link.pack(pady=5)
+        github_link.bind("<Button-1>", lambda e: self.open_link("https://github.com/wakin721/Neri"))
+
+    def open_link(self, url: str):
+        """打开网页链接"""
+        webbrowser.open_new(url)

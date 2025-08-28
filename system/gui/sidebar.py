@@ -19,25 +19,44 @@ class Sidebar(ttk.Frame):
         self._create_widgets()
 
     def _create_widgets(self):
-        logo_frame = ttk.Frame(self, style="Sidebar.TFrame")
-        logo_frame.pack(fill="x", pady=(20, 10))
-        try:
-            logo_path = resource_path("res/logo.png")
-            logo_img = Image.open(logo_path).resize((50, 50), Image.LANCZOS)
-            self.logo_photo = ImageTk.PhotoImage(logo_img)
-            ttk.Label(logo_frame, image=self.logo_photo, background=self.controller.sidebar_bg).pack(pady=(0, 5))
-        except Exception:
-            pass
+        self.logo_frame = ttk.Frame(self, style="Sidebar.TFrame")
+        self.logo_frame.pack(fill="x", pady=(20, 10))
+        # Center the content within logo_frame
+        self.logo_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(
-            logo_frame, text="动物检测系统", font=("Segoe UI", 12, "bold"),
-            foreground=self.controller.sidebar_fg, background=self.controller.sidebar_bg
-        ).pack()
+        try:
+            # 加载并显示ico.ico图标
+            ico_path = resource_path(os.path.join("res", "ico.ico"))
+            icon_image = Image.open(ico_path).resize((30, 30), Image.LANCZOS)
+            self.app_icon = ImageTk.PhotoImage(icon_image)
+
+            # A container frame to hold icon and text together for centering
+            container = tk.Frame(self.logo_frame, bg=self.controller.sidebar_bg) # Use tk.Frame for explicit bg
+            container.grid(row=0, column=0)
+
+            self.icon_label = ttk.Label(container, image=self.app_icon, background=self.controller.sidebar_bg)
+            self.icon_label.pack(side="left", padx=(0, 5))
+
+            self.text_label = ttk.Label(
+                container, text="Neri", font=("Segoe UI", 20, "bold"), # Increased font size
+                foreground=self.controller.sidebar_fg, background=self.controller.sidebar_bg
+            )
+            self.text_label.pack(side="left")
+
+        except Exception as e:
+            print(f"Error loading icon: {e}")
+            # Fallback if icon fails to load
+            self.text_label = ttk.Label(
+                self.logo_frame, text="Neri", font=("Segoe UI", 14, "bold"), # Increased font size
+                foreground=self.controller.sidebar_fg, background=self.controller.sidebar_bg
+            )
+            self.text_label.grid(row=0, column=0)
+
 
         # 使用StringVar来确保UI更新
         self.update_notification_text = tk.StringVar()
         self.update_notification_label = ttk.Label(
-            logo_frame, textvariable=self.update_notification_text, font=("Segoe UI", 9, "bold"),
+            self, textvariable=self.update_notification_text, font=("Segoe UI", 9, "bold"),
             foreground="#FFFF00",  # 使用明确的亮黄色
             background=self.controller.sidebar_bg
         )
@@ -88,31 +107,31 @@ class Sidebar(ttk.Frame):
         self.update_notification_text.set(message)
 
     def update_theme(self):
-        # 1. Update the style definition. This is the proper way to style ttk widgets.
         style = ttk.Style()
         style.configure("Sidebar.TFrame", background=self.controller.sidebar_bg)
-
-        # 2. Apply the updated style to the main sidebar frame and its ttk children.
         self.configure(style="Sidebar.TFrame")
 
-        # 3. Manually update the background of specific widgets.
-        # This is necessary for standard tk widgets or complex custom widgets.
-        for widget in self.winfo_children():
-            # Update standard tk.Frame (used as a container for buttons)
-            if isinstance(widget, tk.Frame):
-                widget.configure(bg=self.controller.sidebar_bg)
+        # Manually update backgrounds of key components
+        self.logo_frame.configure(style="Sidebar.TFrame")
 
-            # Update ttk.Labels directly.
-            elif isinstance(widget, ttk.Label):
-                widget.configure(background=self.controller.sidebar_bg)
+        # Update the tk.Frame container and its children
+        if hasattr(self, 'icon_label'):
+            container = self.icon_label.master
+            container.configure(bg=self.controller.sidebar_bg)
+            self.icon_label.configure(background=self.controller.sidebar_bg)
 
-            # Update children of the ttk.Frame that holds the logo
-            elif isinstance(widget, ttk.Frame):
-                for sub_widget in widget.winfo_children():
-                    if isinstance(sub_widget, ttk.Label):
-                        sub_widget.configure(background=self.controller.sidebar_bg)
+        if hasattr(self, 'text_label'):
+             self.text_label.configure(background=self.controller.sidebar_bg, foreground=self.controller.sidebar_fg)
 
-        # 4. Update the custom RoundedButton widgets with their new colors.
+        self.update_notification_label.configure(background=self.controller.sidebar_bg)
+        # Version label is the last child
+        self.nametowidget(self.winfo_children()[-1]).configure(background=self.controller.sidebar_bg, foreground=self.controller.sidebar_fg)
+
+        # The buttons frame is a tk.Frame
+        buttons_frame = self.nav_buttons["settings"].master
+        buttons_frame.configure(bg=self.controller.sidebar_bg)
+
+        # Update the custom RoundedButton widgets
         for button in self.nav_buttons.values():
             button.bg = self.controller.sidebar_bg
             button.fg = self.controller.sidebar_fg
@@ -121,5 +140,5 @@ class Sidebar(ttk.Frame):
             button.configure(bg=self.controller.sidebar_bg)  # Update the canvas background
             button.set_active(button.active)  # Redraw the button with new colors
 
-        # 5. Re-set the active button to ensure highlighting is correct.
+        # Re-set the active button to ensure highlighting is correct.
         self.set_active_button(self.controller.current_page)

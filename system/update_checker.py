@@ -328,5 +328,4 @@ def _show_messagebox(parent, title, message, msg_type):
             transient_parent.destroy()
 
     if parent.winfo_exists():
-
         parent.after(0, show_message)
