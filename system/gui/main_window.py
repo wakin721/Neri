@@ -13,6 +13,8 @@ import sv_ttk
 import hashlib
 import shutil
 from PIL import Image, ImageTk
+import ctypes
+from ctypes import wintypes
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS
 from system.utils import resource_path
@@ -78,6 +80,8 @@ class ObjectDetectionGUI:
             # 4. (可选) 加载新创建的默认主题
             if hasattr(self, 'advanced_page'):
                 self.change_theme()
+
+        self.master.after(100, self._set_title_bar_color)
 
         # 确保UI完全加载后再执行启动检查
         self._check_for_updates(silent=True)
@@ -205,6 +209,7 @@ class ObjectDetectionGUI:
         """在主题设置后完成UI更新。"""
         self._setup_styles()
         self._update_ui_theme()
+        self._set_title_bar_color()
         self._save_current_settings()
 
     def _apply_system_theme(self):
@@ -252,6 +257,10 @@ class ObjectDetectionGUI:
             self.start_page.update_theme()
         if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'update_theme'):
             self.advanced_page.update_theme()
+        self._show_page(self.current_page)
+
+        if hasattr(self, 'about_page') and hasattr(self.about_page, 'update_theme'):
+            self.about_page.update_theme()
         self._show_page(self.current_page)
 
     def _setup_window(self):
@@ -917,3 +926,28 @@ class ObjectDetectionGUI:
         if self.current_page == "preview":
             self.preview_page.navigate_listbox('down')
             return "break"  # 新增：阻止事件继续传播
+
+    def _set_title_bar_color(self):
+        """根据当前主题设置标题栏颜色（仅限Windows）。"""
+        if platform.system() == "Windows":
+            try:
+                # 颜色格式需要是 BGR，而不是常规的 RGB
+                hex_color = self.accent_color.replace("#", "")
+                r = int(hex_color[0:2], 16)
+                g = int(hex_color[2:4], 16)
+                b = int(hex_color[4:6], 16)
+                color = (b << 16) | (g << 8) | r
+
+                # 获取窗口句柄
+                hwnd = ctypes.windll.user32.GetParent(self.master.winfo_id())
+
+                # DWMWA_CAPTION_COLOR = 35
+                DWMWA_CAPTION_COLOR = 35
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_CAPTION_COLOR,
+                    ctypes.byref(ctypes.c_int(color)),
+                    ctypes.sizeof(ctypes.c_int)
+                )
+            except Exception as e:
+                logger.warning(f"设置标题栏颜色失败: {e}")
