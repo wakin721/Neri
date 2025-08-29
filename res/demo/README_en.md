@@ -124,4 +124,4 @@ If you encounter any problems during use or have any suggestions, please feel fr
 
 ## Acknowledgments
 
-Thanks to Suger from 44°N for providing the logo for this project.
+Thanks to 北纬44度的Suger for providing the logo for this project.
