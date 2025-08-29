@@ -5,7 +5,7 @@
 </div>
 
 <div align="center">
-<img src="res/logo.png" alt="Logo" width="120" height="120">
+<img src="https://github.com/wakin721/Neri/blob/main/res/logo.png" alt="Logo" width="120" height="120">
 <h1 align="center">Neri - Infrared Camera Image Intelligent Processing Tool</h1>
 </div>
 
