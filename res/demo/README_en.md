@@ -1,6 +1,6 @@
 <div align="left">
 <a href="/README.md">中文</a>&nbsp;|&nbsp;
-<a href="/README_en.md">English</a> &nbsp;|&nbsp;
+<a href="/res/demo/README_en.md">English</a> &nbsp;|&nbsp;
 <a href="/res/demo/README_Update.md">Changelog</a> &nbsp;
 </div>
 
