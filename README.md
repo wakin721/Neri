@@ -7,10 +7,6 @@
 
 </div>
 </div>
- 
-  <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/demo1.png" width="750px">
-</p>
 
 </p>
 <p align="center">
@@ -19,8 +15,11 @@
 </p>
 
 
-## 📖 项目简介
+### 📖 项目简介
   Neri (NERI Enables Rapid Identification) 是一款专为处理红外相机影像数据设计的智能桌面应用。它基于 YOLO (You Only Look Once) 目标检测模型，能够高效、自动地识别和处理大批量由红外相机拍摄的野生动物照片。本工具旨在为生态保护工作者、野生动物研究人员和爱好者提供一个强大的数据整理和分析平台，将繁琐的手动筛选工作自动化，极大地提升科研和监测效率。
+  <p align="center">
+   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/demo1.png" width="750px">
+</p>
  
 
 ## 目录
