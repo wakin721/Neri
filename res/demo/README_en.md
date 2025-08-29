@@ -112,6 +112,8 @@ We plan to add more features in future versions:
 
 [4] Support more diverse data filtering and labeling functions.
 
+[5] Update English version.
+
 ## ⚠️ Warning
 
 The project is still under development - do not rely too heavily on this project. The built-in model is for testing purposes only and does not currently provide identification for many species.
