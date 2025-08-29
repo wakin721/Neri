@@ -1,1 +1,1 @@
-English README is updating
+English README is coming soon.
