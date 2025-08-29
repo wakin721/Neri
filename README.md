@@ -81,7 +81,7 @@
 
   2.在控制面板的菜单栏中，选择“帮助”，然后点击“系统信息”。
 <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda1.png">
+   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda1.png" width="750px">
 </p>
   3.在弹出的窗口中，查看“显示”下的信息，找到“NVCUDA64.DLL”等相关文件，即可看到对应的CUDA版本。
   <p align="center">
@@ -89,12 +89,12 @@
 </p>
   4.在高级设置-环境维护-安装Pytorch中选择对应版本进行安装
   <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda3.png">
+   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda3.png" width="750px">
 </p>
 
 ## 🗺️ 未来蓝图
 
-  我们计划在未来的版本中加入更多激动人心的功能：
+  我们计划在未来的版本中加入更多功能：
 
   [1] 引入更高效的 YOLO 模型版本，进一步提升识别速度和准确率。
 
@@ -114,6 +114,9 @@
 ## 📧 联系我们
 
   作者: 和錦わきん
-## 鸣谢
 
   如果您在使用过程中遇到任何问题或有任何建议，欢迎通过 Issues 与我们联系。
+  
+## 鸣谢
+
+  感谢北纬44度的Suger为本项目提供logo
