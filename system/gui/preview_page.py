@@ -39,6 +39,38 @@ class CorrectionDialog(tk.Toplevel):
         self.species_count_var = tk.StringVar()
         self.remark_var = tk.StringVar()
 
+        # 如果有原始信息，则预先填充输入框
+        if self.original_info:
+            # 根据置信度重新计算物种和数量
+            # 这个逻辑可以根据实际需求调整
+            conf_threshold = parent.validation_conf_var.get()  # 或者 species_conf_var
+
+            recalculated_info = {}
+            if self.original_info.get('最低置信度') != '人工校验' and '检测框' in self.original_info:
+                boxes_info = self.original_info.get("检测框", [])
+                filtered_species_counts = Counter()
+
+                for box in boxes_info:
+                    confidence = box.get("置信度", 0)
+                    if confidence >= conf_threshold:
+                        species_name = box.get("物种")
+                        if species_name:
+                            filtered_species_counts[species_name] += 1
+
+                if not filtered_species_counts:
+                    recalculated_info['物种名称'] = "空"
+                    recalculated_info['物种数量'] = "空"
+                else:
+                    recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
+                    recalculated_info['物种数量'] = ",".join(map(str, filtered_species_counts.values()))
+            else:
+                recalculated_info['物种名称'] = self.original_info.get('物种名称', '')
+                recalculated_info['物种数量'] = self.original_info.get('物种数量', '')
+
+            self.species_name_var.set(recalculated_info.get('物种名称', ''))
+            self.species_count_var.set(recalculated_info.get('物种数量', ''))
+            self.remark_var.set(self.original_info.get('备注', ''))
+
         # 创建窗口内容
         body = ttk.Frame(self)
         self.initial_focus = self.create_body(body)
@@ -90,8 +122,9 @@ class CorrectionDialog(tk.Toplevel):
 
     def ok(self, event=None):
         """“确定”按钮的回调函数"""
-        species_name = self.species_name_var.get().strip()
-        species_count_str = self.species_count_var.get().strip()
+        # 将中文逗号替换为英文逗号
+        species_name = self.species_name_var.get().strip().replace('，', ',')
+        species_count_str = self.species_count_var.get().strip().replace('，', ',')
         remark = self.remark_var.get().strip()
 
         # 校验物种名称
@@ -108,7 +141,6 @@ class CorrectionDialog(tk.Toplevel):
                     species_count_str = '1'
             else:
                 species_count_str = '1'
-
 
         # 检查物种数量格式
         if species_count_str.lower() != '空':
