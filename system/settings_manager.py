@@ -1,6 +1,4 @@
-"""
-配置管理模块 - 提供JSON配置的保存和加载功能
-"""
+# system/settings_manager.py
 
 import os
 import json
@@ -22,9 +20,11 @@ class SettingsManager:
         self.settings_dir = os.path.join(base_dir, "temp")
         self.settings_file = os.path.join(self.settings_dir, "settings.json")
         self.cache_file = os.path.join(self.settings_dir, "cache.json")
+        self.quick_mark_file = os.path.join(self.settings_dir, "quick_mark.json") # 新增快速标记文件路径
 
         # 确保设置目录存在
         self._ensure_settings_dir()
+        self._initialize_quick_mark_file() # 在启动时初始化快速标记文件
 
     def _ensure_settings_dir(self) -> None:
         """确保设置目录存在"""
@@ -34,6 +34,24 @@ class SettingsManager:
                 logger.info(f"创建设置目录: {self.settings_dir}")
             except Exception as e:
                 logger.error(f"创建设置目录失败: {e}")
+
+    def _initialize_quick_mark_file(self):
+        """如果快速标记文件不存在，则初始化它"""
+        if not os.path.exists(self.quick_mark_file):
+            default_species = {
+                "骆驼": "1,1",
+                "北山羊": "2,1",
+                "狗": "3,1",
+                "蒙古野驴": "4,1",
+                "鹅喉羚": "5,1",
+                "马": "6,1",
+                "中亚兔": "7,1",
+                "猞猁": "8,1",
+                "盘羊": "9,1",
+                "赤狐": "10,1",
+                "狼": "11,1",
+            }
+            self.save_quick_mark_species(default_species)
 
     def save_settings(self, settings: Dict[str, Any]) -> bool:
         """保存设置到JSON文件
@@ -174,4 +192,25 @@ class SettingsManager:
             return True
         except Exception as e:
             logger.error(f"保存置信度配置文件失败: {e}")
+            return False
+
+    def load_quick_mark_species(self) -> Dict[str, int]:
+        """从temp/quick_mark.json加载快速标记物种"""
+        if not os.path.exists(self.quick_mark_file):
+            return {}
+        try:
+            with open(self.quick_mark_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.error(f"加载快速标记物种文件失败: {e}")
+            return {}
+
+    def save_quick_mark_species(self, species_data: Dict[str, int]) -> bool:
+        """保存快速标记物种到temp/quick_mark.json"""
+        try:
+            with open(self.quick_mark_file, 'w', encoding='utf-8') as f:
+                json.dump(species_data, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            logger.error(f"保存快速标记物种文件失败: {e}")
             return False

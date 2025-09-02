@@ -10,7 +10,7 @@ import sys
 
 from system.gui.ui_components import CollapsiblePanel
 from system.utils import resource_path
-from system.config import APP_VERSION
+from system.config import APP_VERSION, NORMAL_FONT
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class AdvancedPage(ttk.Frame):
         panels = [
             self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
             self.pytorch_panel, self.model_panel, self.python_panel,
-            self.theme_panel, self.cache_panel, self.update_panel
+            self.theme_panel, self.cache_panel, self.update_panel, self.quick_mark_panel
         ]
         for panel in panels:
             if hasattr(panel, 'update_theme'):
@@ -94,6 +94,16 @@ class AdvancedPage(ttk.Frame):
         self.software_canvas_window = self.software_canvas.create_window(
             (0, 0), window=self.software_content_frame, anchor="nw"
         )
+
+        # --- Quick Mark Settings Panel ---
+        self.quick_mark_panel = CollapsiblePanel(
+            self.software_content_frame,
+            "快速标记设置",
+            subtitle="手动增减、更改快速标记",
+            icon="🏷️"
+        )
+        self.quick_mark_panel.pack(fill="x", expand=False, pady=(0, 1))
+        self._create_quick_mark_widgets(self.quick_mark_panel.content_padding)
 
         # --- Theme Panel ---
         self.theme_panel = CollapsiblePanel(
@@ -956,3 +966,164 @@ class AdvancedPage(ttk.Frame):
                 self.master.after(10,
                                   lambda: self.software_canvas.configure(scrollregion=self.software_canvas.bbox("all")))
                 self.update_cache_size()
+
+    def _create_quick_mark_widgets(self, parent):
+        """创建快速标记设置的控件"""
+        self.quick_mark_edit_frame = ttk.Frame(parent)
+        self.quick_mark_edit_frame.pack(fill="x", pady=5, padx=5)
+        self.quick_mark_edit_frame.columnconfigure(1, weight=1) # ให้คอลัมน์ชื่อสปีชีส์ขยายได้
+
+        # Frame for the list of species
+        self.species_list_frame = ttk.Frame(self.quick_mark_edit_frame)
+        self.species_list_frame.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 10))
+        self.species_list_frame.columnconfigure(1, weight=1) # ให้คอลัมน์ชื่อสปีชีส์ขยายได้
+
+
+        # Header
+        ttk.Label(self.species_list_frame, text="排列序号", font=NORMAL_FONT).grid(row=0, column=0, sticky="w", pady=(0, 5), padx=(5,0))
+        ttk.Label(self.species_list_frame, text="物种名称", font=NORMAL_FONT).grid(row=0, column=1, sticky="w", pady=(0, 5), padx=(5,0))
+
+        self.load_quick_mark_settings()  # Load initial data in the new format
+
+        # Buttons
+        button_frame = ttk.Frame(self.quick_mark_edit_frame)
+        button_frame.grid(row=1, column=0, columnspan=4, sticky="e", pady=5)
+
+        add_button = ttk.Button(button_frame, text="新增", command=self._add_new_quick_mark_row)
+        add_button.pack(side="left", padx=(0, 5))
+
+        refresh_button = ttk.Button(button_frame, text="刷新", command=self.load_quick_mark_settings)
+        refresh_button.pack(side="left", padx=(0, 5))
+
+        save_button = ttk.Button(button_frame, text="保存更改", command=self.save_quick_mark_settings,
+                                 style="Action.TButton")
+        save_button.pack(side="left")
+
+    def load_quick_mark_settings(self):
+        """加载快速标记设置并显示在UI中"""
+        for widget in self.species_list_frame.winfo_children():
+            if widget.grid_info()['row'] > 0:
+                widget.destroy()
+
+        self.quick_marks_entries = {}
+        quick_marks = self.controller.settings_manager.load_quick_mark_species()
+
+        if quick_marks:
+            sorted_marks = sorted(quick_marks.items(), key=lambda item: int(item[1].split(',')[0]))
+            row_index = 1
+            for species, value in sorted_marks:
+                order = value.split(',')[0]
+                if int(order) != 0:
+                    species_name_var = tk.StringVar(value=species)
+
+                    order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
+                    order_entry.insert(0, order)
+                    order_entry.config(state='readonly')
+                    order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5,0))
+
+                    species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
+                    species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
+
+                    delete_button = ttk.Button(self.species_list_frame, text="删除",
+                                               command=lambda s=species: self._delete_quick_mark(s))
+                    delete_button.grid(row=row_index, column=2, padx=(5, 0), pady=2)
+
+                    self.quick_marks_entries[species] = (species_name_var, order)
+                    row_index += 1
+
+    def _delete_quick_mark(self, species_to_delete):
+        """删除一个快速标记条目"""
+        current_marks = self.controller.settings_manager.load_quick_mark_species()
+        if species_to_delete in current_marks:
+            parts = current_marks[species_to_delete].split(',')
+            parts[0] = '0'
+            current_marks[species_to_delete] = ','.join(parts)
+            self.controller.settings_manager.save_quick_mark_species(current_marks)
+            self.load_quick_mark_settings()
+
+    def add_or_modify_quick_mark(self):
+        """在UI上预览添加或修改的快速标记"""
+        species = self.species_name_entry.get().strip()
+        order_str = self.species_order_entry.get().strip()
+
+        if not species:
+            messagebox.showerror("错误", "物种名称不能为空。", parent=self)
+            return
+
+        try:
+            order = int(order_str)
+        except ValueError:
+            messagebox.showerror("错误", "排列序号必须是数字。", parent=self)
+            return
+
+        current_marks = self.controller.settings_manager.load_quick_mark_species()
+
+        if species in current_marks:
+             parts = current_marks[species].split(',')
+             parts[0] = str(order)
+             current_marks[species] = ','.join(parts)
+        else:
+             current_marks[species] = f"{order},1"
+
+
+        self.controller.settings_manager.save_quick_mark_species(current_marks)
+        self.load_quick_mark_settings()
+
+        self.species_name_entry.delete(0, tk.END)
+        self.species_order_entry.delete(0, tk.END)
+
+    def _add_new_quick_mark_row(self):
+        """新增一行用于添加新的快速标记"""
+        row_index = self.species_list_frame.grid_size()[1]
+
+        quick_marks = self.controller.settings_manager.load_quick_mark_species()
+        if quick_marks:
+            # Find the maximum existing order number
+            max_order = 0
+            for value in quick_marks.values():
+                order = int(value.split(',')[0])
+                if order > max_order:
+                    max_order = order
+            new_order = max_order + 1
+        else:
+            new_order = 1
+
+        species_name_var = tk.StringVar()
+
+        order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
+        order_entry.insert(0, str(new_order))
+        order_entry.config(state='readonly')
+        order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
+
+        species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
+        species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
+
+        # Add a temporary key for the new entry
+        temp_key = f"new_species_{row_index}"
+        self.quick_marks_entries[temp_key] = (species_name_var, str(new_order))
+
+    def save_quick_mark_settings(self):
+        """将UI中的快速标记设置保存到json文件"""
+        new_marks = {}
+        for original_species, (name_var, order) in self.quick_marks_entries.items():
+            new_name = name_var.get().strip()
+            if new_name:
+                current_marks = self.controller.settings_manager.load_quick_mark_species()
+                second_value = "1"  # Default second value
+
+                # Check if the original species exists to get its second value
+                if original_species in current_marks:
+                    try:
+                        second_value = current_marks[original_species].split(',')[1]
+                    except IndexError:
+                        pass  # Keep default
+
+                new_marks[new_name] = f"{order},{second_value}"
+
+        if self.controller.settings_manager.save_quick_mark_species(new_marks):
+            messagebox.showinfo("成功", "快速标记设置已保存。", parent=self)
+            self.load_quick_mark_settings()  # Reload to reflect any changes and sorting
+            if hasattr(self.controller, 'preview_page'):
+                self.controller.preview_page._load_species_buttons()
+        else:
+            messagebox.showerror("错误", "保存快速标记设置失败。", parent=self)

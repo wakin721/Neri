@@ -56,7 +56,7 @@ class ObjectDetectionGUI:
         self.excel_data = []
         self.current_page = "settings"
         self.update_channel_var = tk.StringVar(value="稳定版 (Release)")
-        self.model_var = tk.StringVar()  # <<< 新增：用于跟踪所选模型的变量
+        self.model_var = tk.StringVar()
         self.confidence_settings = self.settings_manager.load_confidence_settings()
 
         self._apply_system_theme()

@@ -1469,26 +1469,26 @@ class PreviewPage(ttk.Frame):
             self.species_photo_listbox.event_generate("<<ListboxSelect>>")
 
     def _load_species_buttons(self):
-        """从/res/model.json加载物种按钮"""
+        """从temp/quick_mark.json加载物种按钮"""
         for widget in self.species_buttons_frame.winfo_children():
             widget.destroy()
 
         try:
-            model_json_path = resource_path("res/model.json")
-            if os.path.exists(model_json_path):
-                with open(model_json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    species_list = data.get("species", [])
-                    for species_name in species_list:
-                        # 使用lambda来捕获按钮实例
-                        def create_command(s, b):
-                            return lambda: self._on_species_button_press(s, b)
+            species_data = self.controller.settings_manager.load_quick_mark_species()
+            if species_data:
+                # Sort species based on the first number in the value string
+                sorted_species = sorted(species_data.items(), key=lambda item: int(item[1].split(',')[0]))
 
-                        btn = ttk.Button(self.species_buttons_frame, text=species_name)
-                        btn['command'] = create_command(species_name, btn)
-                        btn.pack(fill="x", pady=2)
+                for species_name, _ in sorted_species:
+                    # 使用lambda来捕获按钮实例
+                    def create_command(s, b):
+                        return lambda: self._on_species_button_press(s, b)
+
+                    btn = ttk.Button(self.species_buttons_frame, text=species_name)
+                    btn['command'] = create_command(species_name, btn)
+                    btn.pack(fill="x", pady=2)
             else:
-                ttk.Label(self.species_buttons_frame, text="未找到model.json").pack()
+                ttk.Label(self.species_buttons_frame, text="未找到快速标记物种").pack()
         except Exception as e:
             logger.error(f"加载物种按钮失败: {e}")
             ttk.Label(self.species_buttons_frame, text="加载物种按钮失败").pack()
@@ -1716,20 +1716,17 @@ class PreviewPage(ttk.Frame):
             widget.destroy()
 
         try:
-            model_json_path = resource_path("res/model.json")
-            if os.path.exists(model_json_path):
-                with open(model_json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    species_list = data.get("species", [])
-                    for species_name in species_list:
-                        def create_command(s, b):
-                            return lambda: self._on_validation_species_button_press(s, b)
+            species_data = self.controller.settings_manager.load_quick_mark_species()
+            if species_data:
+                for species_name in species_data.keys():
+                    def create_command(s, b):
+                        return lambda: self._on_validation_species_button_press(s, b)
 
-                        btn = ttk.Button(self.validation_species_buttons_frame, text=species_name)
-                        btn['command'] = create_command(species_name, btn)
-                        btn.pack(fill="x", pady=2)
+                    btn = ttk.Button(self.validation_species_buttons_frame, text=species_name)
+                    btn['command'] = create_command(species_name, btn)
+                    btn.pack(fill="x", pady=2)
             else:
-                ttk.Label(self.validation_species_buttons_frame, text="未找到model.json").pack()
+                ttk.Label(self.validation_species_buttons_frame, text="未找到快速标记物种").pack()
         except Exception as e:
             logger.error(f"加载物种按钮失败: {e}")
             ttk.Label(self.validation_species_buttons_frame, text="加载物种按钮失败").pack()
