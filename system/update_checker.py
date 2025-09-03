@@ -244,57 +244,100 @@ def perform_download(parent_window, download_url):
         def ask_restart():
             if messagebox.askyesno("更新成功", "程序已成功更新！\n是否立即重启应用程序以应用更改？",
                                    parent=parent_window):
-                # 确定重启命令的参数
-                if getattr(sys, 'frozen', False):
-                    args = [sys.executable]
-                else:
-                    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    python_exe_path = os.path.join(app_root, "toolkit", "python.exe")
-                    main_script_path = os.path.join(app_root, 'gui.py')
-
-                    if not os.path.exists(python_exe_path):
-                        # 如果 toolkit/python.exe 不存在，则回退到 sys.executable
-                        python_exe_path = sys.executable
-
-                    if not os.path.exists(main_script_path):
-                        _show_messagebox(parent_window, "重启错误", f"找不到主脚本: {main_script_path}", "error")
-                        return
-                    args = [python_exe_path, main_script_path]
-
                 try:
-                    # 在新的控制台中重新启动应用程序
-                    if platform.system() == "Windows":
-                        # 在Windows上，使用'start'命令在一个新窗口中创建一个独立的进程。
-                        # 这能正确地模拟用户双击应用程序的效果, 弹出命令行并在之后自动关闭。
-                        cmd = ' '.join(f'"{arg}"' for arg in args)
-                        subprocess.Popen(f'start "Restarting Application" {cmd}', shell=True)
-                    elif platform.system() == "Darwin":  # macOS
-                        # 在macOS上，使用AppleScript在新Terminal窗口中运行命令。
-                        cmd = ' '.join(f'"{arg}"' for arg in args)
-                        mac_cmd = cmd.replace("\"", "\\\"")
-                        subprocess.Popen(
-                            ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
-                            close_fds=True
-                        )
-                    else:  # Linux
-                        # 在Linux上，尝试在新的终端模拟器中启动。
-                        terminal_found = False
-                        for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                            try:
-                                if terminal == "gnome-terminal":
-                                    subprocess.Popen([terminal, "--"] + args, close_fds=True)
-                                elif terminal == "konsole":
-                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                elif terminal == "xterm":
-                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                terminal_found = True
-                                break
-                            except FileNotFoundError:
-                                continue
-                        if not terminal_found:
-                            # 如果找不到终端，则显示消息提示用户手动重启
-                            _show_messagebox(parent_window, "重启提示", "无法自动打开新终端，请手动重启程序以应用更新。",
-                                             "info")
+                    # 确定重启命令的参数
+                    if getattr(sys, 'frozen', False):
+                        # 对于打包后的程序（frozen=True），重启逻辑保持不变，直接重启主程序
+                        args = [sys.executable]
+                        if platform.system() == "Windows":
+                            cmd = ' '.join(f'"{arg}"' for arg in args)
+                            subprocess.Popen(f'start "Restarting Application" {cmd}', shell=True)
+                        elif platform.system() == "Darwin":  # macOS
+                            cmd = ' '.join(f'"{arg}"' for arg in args)
+                            mac_cmd = cmd.replace("\"", "\\\"")
+                            subprocess.Popen(
+                                ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
+                                close_fds=True
+                            )
+                        else:  # Linux
+                            terminal_found = False
+                            for terminal in ["gnome-terminal", "konsole", "xterm"]:
+                                try:
+                                    if terminal == "gnome-terminal":
+                                        subprocess.Popen([terminal, "--"] + args, close_fds=True)
+                                    elif terminal == "konsole":
+                                        subprocess.Popen([terminal, "-e"] + args, close_fds=True)
+                                    elif terminal == "xterm":
+                                        subprocess.Popen([terminal, "-e"] + args, close_fds=True)
+                                    terminal_found = True
+                                    break
+                                except FileNotFoundError:
+                                    continue
+                            if not terminal_found:
+                                _show_messagebox(parent_window, "重启提示", "无法自动打开新终端，请手动重启程序以应用更新。",
+                                                 "info")
+                    else:
+                        # 对于开发环境（直接运行 .py 文件）
+                        app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        python_exe_path = os.path.join(app_root, "toolkit", "python.exe")
+                        pythonw_exe_path = os.path.join(app_root, "toolkit", "pythonw.exe")
+                        checker_script_path = os.path.join(app_root, 'checker.py')
+                        main_script_path = os.path.join(app_root, 'gui.py')
+
+                        if not os.path.exists(python_exe_path):
+                            python_exe_path = sys.executable
+                            # 尝试基于 sys.executable 推断 pythonw.exe 的路径
+                            pythonw_exe_path = python_exe_path.replace("python.exe", "pythonw.exe")
+
+                        if not os.path.exists(pythonw_exe_path):
+                            # 如果 pythonw.exe 不存在，则回退到 python.exe
+                            pythonw_exe_path = python_exe_path
+
+                        if not os.path.exists(checker_script_path):
+                            _show_messagebox(parent_window, "重启错误", f"找不到脚本: {checker_script_path}", "error")
+                            return
+                        if not os.path.exists(main_script_path):
+                            _show_messagebox(parent_window, "重启错误", f"找不到主脚本: {main_script_path}", "error")
+                            return
+
+                        # checker.py 使用标准 python 解释器（带命令行窗口）
+                        cmd_checker = f'"{python_exe_path}" "{checker_script_path}"'
+                        # gui.py 尝试使用 pythonw 解释器（无命令行窗口）
+                        cmd_gui = f'"{pythonw_exe_path}" "{main_script_path}"'
+
+                        # 在新的控制台中重新启动应用程序
+                        if platform.system() == "Windows":
+                            # 使用 '&&' 连接命令，实现在同一个命令行窗口中顺序执行
+                            # checker.py 执行完毕后，启动 gui.py
+                            chained_cmd = f'{cmd_checker} && {cmd_gui}'
+                            subprocess.Popen(f'start "Restarting Neri" cmd /c "{chained_cmd}"', shell=True)
+                        elif platform.system() == "Darwin":  # macOS
+                            # 使用 ';' 顺序执行命令，并用 '&' 使 gui.py 在后台运行
+                            chained_cmd = f'{cmd_checker}; {cmd_gui} &'
+                            mac_cmd = chained_cmd.replace("\"", "\\\"")
+                            subprocess.Popen(
+                                ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
+                                close_fds=True
+                            )
+                        else:  # Linux
+                            # 使用 '&&' 顺序执行命令，并用 '&' 使 gui.py 在后台运行
+                            chained_cmd = f'{cmd_checker} && {cmd_gui} &'
+                            terminal_found = False
+                            for terminal in ["gnome-terminal", "konsole", "xterm"]:
+                                try:
+                                    # 使用 bash -c 来执行整个命令链
+                                    if terminal == "gnome-terminal":
+                                        subprocess.Popen([terminal, "--", "bash", "-c", chained_cmd], close_fds=True)
+                                    elif terminal == "konsole":
+                                        subprocess.Popen([terminal, "-e", "bash", "-c", chained_cmd], close_fds=True)
+                                    elif terminal == "xterm":
+                                        subprocess.Popen([terminal, "-e", "bash", "-c", chained_cmd], close_fds=True)
+                                    terminal_found = True
+                                    break
+                                except FileNotFoundError:
+                                    continue
+                            if not terminal_found:
+                                _show_messagebox(parent_window, "重启提示", "无法自动打开新终端，请手动重启程序以应用更新。", "info")
 
                     # 关闭当前的应用程序实例
                     parent_window.destroy()
@@ -303,12 +346,6 @@ def perform_download(parent_window, download_url):
                 except Exception as e:
                     _show_messagebox(parent_window, "重启失败", f"无法重新启动应用程序: {e}", "error")
 
-        parent_window.after(0, ask_restart)
-
-    except Exception as e:
-        parent_window.after(0,
-                            lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
-        _show_messagebox(parent_window, "更新失败", f"更新过程中发生错误: {e}", "error")
 
 
 def _show_messagebox(parent, title, message, msg_type):
@@ -328,4 +365,5 @@ def _show_messagebox(parent, title, message, msg_type):
             transient_parent.destroy()
 
     if parent.winfo_exists():
+
         parent.after(0, show_message)
