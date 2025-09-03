@@ -971,11 +971,24 @@ class AdvancedPage(ttk.Frame):
         """创建快速标记设置的控件"""
         self.quick_mark_edit_frame = ttk.Frame(parent)
         self.quick_mark_edit_frame.pack(fill="x", pady=5, padx=5)
-        self.quick_mark_edit_frame.columnconfigure(1, weight=1) # ให้คอลัมน์ชื่อสปีชีส์ขยายได้
+        self.quick_mark_edit_frame.columnconfigure(1, weight=1)
+
+        # Auto sort switch and reset button
+        auto_sort_frame = ttk.Frame(self.quick_mark_edit_frame)
+        auto_sort_frame.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        self.auto_sort_var = tk.BooleanVar()
+        auto_sort_check = ttk.Checkbutton(auto_sort_frame, text="自动排序", variable=self.auto_sort_var,
+                                          command=self.toggle_auto_sort)
+        auto_sort_check.pack(side="left", padx=(0, 10))
+
+        # 新增“清空排序数据”按钮
+        reset_button = ttk.Button(auto_sort_frame, text="清空排序数据", command=self._reset_quick_mark_data)
+        reset_button.pack(side="left")
+
 
         # Frame for the list of species
         self.species_list_frame = ttk.Frame(self.quick_mark_edit_frame)
-        self.species_list_frame.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 10))
+        self.species_list_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=(0, 10))
         self.species_list_frame.columnconfigure(1, weight=1) # ให้คอลัมน์ชื่อสปีชีส์ขยายได้
 
 
@@ -983,21 +996,61 @@ class AdvancedPage(ttk.Frame):
         ttk.Label(self.species_list_frame, text="排列序号", font=NORMAL_FONT).grid(row=0, column=0, sticky="w", pady=(0, 5), padx=(5,0))
         ttk.Label(self.species_list_frame, text="物种名称", font=NORMAL_FONT).grid(row=0, column=1, sticky="w", pady=(0, 5), padx=(5,0))
 
-        self.load_quick_mark_settings()  # Load initial data in the new format
+        self.load_quick_mark_settings()
 
         # Buttons
         button_frame = ttk.Frame(self.quick_mark_edit_frame)
-        button_frame.grid(row=1, column=0, columnspan=4, sticky="e", pady=5)
+        button_frame.grid(row=2, column=0, columnspan=4, sticky="e", pady=5)
 
         add_button = ttk.Button(button_frame, text="新增", command=self._add_new_quick_mark_row)
         add_button.pack(side="left", padx=(0, 5))
 
-        refresh_button = ttk.Button(button_frame, text="刷新", command=self.load_quick_mark_settings)
-        refresh_button.pack(side="left", padx=(0, 5))
-
         save_button = ttk.Button(button_frame, text="保存更改", command=self.save_quick_mark_settings,
                                  style="Action.TButton")
         save_button.pack(side="left")
+
+    def _reset_quick_mark_data(self):
+        """清空快速标记排序数据并恢复默认设置"""
+        if messagebox.askyesno("确认操作", "此操作将重置所有快速标记的排序和计数，并恢复为默认物种列表。\n确定要继续吗？", parent=self):
+            # 调用settings_manager中的重置方法
+            self.controller.settings_manager.reset_quick_mark_to_default()
+            # 重新加载UI显示
+            self.load_quick_mark_settings()
+            # 刷新预览页面的按钮
+            if hasattr(self.controller, 'preview_page'):
+                self.controller.preview_page._load_species_buttons()
+                self.controller.preview_page._load_validation_species_buttons()
+            messagebox.showinfo("成功", "快速标记数据已重置。", parent=self)
+
+    def toggle_auto_sort(self):
+        """Toggles the auto sort setting and saves it."""
+        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+        quick_marks_data["auto"] = self.auto_sort_var.get()
+        self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+        self.load_quick_mark_settings()
+
+    def update_auto_sorted_list(self):
+        """
+        根据使用次数对物种进行排序，并更新 quick_mark.json 文件中的 'list_auto'。
+        此方法在启用自动排序时调用。
+        """
+        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+        # 提取物种和它们的计数值
+        species_counts = {k: v for k, v in quick_marks_data.items() if k not in ["list", "list_auto", "auto"]}
+
+        # 按计数值降序排序
+        sorted_species = sorted(species_counts.items(), key=lambda item: item[1], reverse=True)
+
+        # 决定自动排序列表应包含多少个物种（基于手动列表的长度）
+        num_to_take = len(quick_marks_data.get("list", []))
+
+        # 生成新的自动排序列表
+        list_auto = [species for species, count in sorted_species[:num_to_take]]
+
+        # 将新的自动排序列表保存回文件
+        quick_marks_data["list_auto"] = list_auto
+        self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+        return list_auto
 
     def load_quick_mark_settings(self):
         """加载快速标记设置并显示在UI中"""
@@ -1006,40 +1059,69 @@ class AdvancedPage(ttk.Frame):
                 widget.destroy()
 
         self.quick_marks_entries = {}
-        quick_marks = self.controller.settings_manager.load_quick_mark_species()
+        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+        self.auto_sort_var.set(quick_marks_data.get("auto", False))
 
-        if quick_marks:
-            sorted_marks = sorted(quick_marks.items(), key=lambda item: int(item[1].split(',')[0]))
+        species_list_to_display = []
+        if self.auto_sort_var.get():
+            # 调用新的方法来处理自动排序逻辑
+            species_list_to_display = self.update_auto_sorted_list()
+        else:
+            species_list_to_display = quick_marks_data.get("list", [])
+
+        if species_list_to_display:
             row_index = 1
-            for species, value in sorted_marks:
-                order = value.split(',')[0]
-                if int(order) != 0:
-                    species_name_var = tk.StringVar(value=species)
+            for i, species in enumerate(species_list_to_display):
+                species_name_var = tk.StringVar(value=species)
 
-                    order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
-                    order_entry.insert(0, order)
-                    order_entry.config(state='readonly')
-                    order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5,0))
+                order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
+                order_entry.insert(0, str(i + 1))
+                order_entry.config(state='readonly')
+                order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
 
-                    species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
-                    species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
+                species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
+                species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
 
-                    delete_button = ttk.Button(self.species_list_frame, text="删除",
-                                               command=lambda s=species: self._delete_quick_mark(s))
-                    delete_button.grid(row=row_index, column=2, padx=(5, 0), pady=2)
+                delete_button = ttk.Button(self.species_list_frame, text="删除",
+                                           command=lambda s=species: self._delete_quick_mark(s))
+                delete_button.grid(row=row_index, column=2, padx=(5, 0), pady=2)
 
-                    self.quick_marks_entries[species] = (species_name_var, order)
-                    row_index += 1
+                self.quick_marks_entries[species] = (species_name_var, str(i + 1))
+                row_index += 1
 
     def _delete_quick_mark(self, species_to_delete):
         """删除一个快速标记条目"""
         current_marks = self.controller.settings_manager.load_quick_mark_species()
-        if species_to_delete in current_marks:
-            parts = current_marks[species_to_delete].split(',')
-            parts[0] = '0'
-            current_marks[species_to_delete] = ','.join(parts)
+        if species_to_delete in current_marks.get("list", []):
+            current_marks["list"].remove(species_to_delete)
             self.controller.settings_manager.save_quick_mark_species(current_marks)
             self.load_quick_mark_settings()
+
+    def _add_new_quick_mark_row(self):
+        """新增一行用于添加新的快速标记"""
+        row_index = self.species_list_frame.grid_size()[1]
+
+        quick_marks = self.controller.settings_manager.load_quick_mark_species()
+
+        if self.auto_sort_var.get():
+            display_list = quick_marks.get("list_auto", [])
+        else:
+            display_list = quick_marks.get("list", [])
+
+        new_order = len(display_list) + 1
+
+        species_name_var = tk.StringVar()
+
+        order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
+        order_entry.insert(0, str(new_order))
+        order_entry.config(state='readonly')
+        order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
+
+        species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
+        species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
+
+        temp_key = f"new_species_{row_index}"
+        self.quick_marks_entries[temp_key] = (species_name_var, str(new_order))
 
     def add_or_modify_quick_mark(self):
         """在UI上预览添加或修改的快速标记"""
@@ -1072,57 +1154,31 @@ class AdvancedPage(ttk.Frame):
         self.species_name_entry.delete(0, tk.END)
         self.species_order_entry.delete(0, tk.END)
 
-    def _add_new_quick_mark_row(self):
-        """新增一行用于添加新的快速标记"""
-        row_index = self.species_list_frame.grid_size()[1]
-
-        quick_marks = self.controller.settings_manager.load_quick_mark_species()
-        if quick_marks:
-            # Find the maximum existing order number
-            max_order = 0
-            for value in quick_marks.values():
-                order = int(value.split(',')[0])
-                if order > max_order:
-                    max_order = order
-            new_order = max_order + 1
-        else:
-            new_order = 1
-
-        species_name_var = tk.StringVar()
-
-        order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
-        order_entry.insert(0, str(new_order))
-        order_entry.config(state='readonly')
-        order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
-
-        species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
-        species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
-
-        # Add a temporary key for the new entry
-        temp_key = f"new_species_{row_index}"
-        self.quick_marks_entries[temp_key] = (species_name_var, str(new_order))
-
     def save_quick_mark_settings(self):
         """将UI中的快速标记设置保存到json文件"""
-        new_marks = {}
+        current_marks = self.controller.settings_manager.load_quick_mark_species()
+
+        new_list = []
+        temp_list = []
+
         for original_species, (name_var, order) in self.quick_marks_entries.items():
             new_name = name_var.get().strip()
             if new_name:
-                current_marks = self.controller.settings_manager.load_quick_mark_species()
-                second_value = "1"  # Default second value
+                temp_list.append((int(order), new_name))
 
-                # Check if the original species exists to get its second value
-                if original_species in current_marks:
-                    try:
-                        second_value = current_marks[original_species].split(',')[1]
-                    except IndexError:
-                        pass  # Keep default
+        temp_list.sort()
 
-                new_marks[new_name] = f"{order},{second_value}"
+        for order, new_name in temp_list:
+            new_list.append(new_name)
+            if new_name not in current_marks:
+                current_marks[new_name] = 0
 
-        if self.controller.settings_manager.save_quick_mark_species(new_marks):
+        current_marks["list"] = new_list
+        current_marks["auto"] = self.auto_sort_var.get()
+
+        if self.controller.settings_manager.save_quick_mark_species(current_marks):
             messagebox.showinfo("成功", "快速标记设置已保存。", parent=self)
-            self.load_quick_mark_settings()  # Reload to reflect any changes and sorting
+            self.load_quick_mark_settings()
             if hasattr(self.controller, 'preview_page'):
                 self.controller.preview_page._load_species_buttons()
         else:

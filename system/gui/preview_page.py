@@ -1476,11 +1476,13 @@ class PreviewPage(ttk.Frame):
         try:
             species_data = self.controller.settings_manager.load_quick_mark_species()
             if species_data:
-                # Sort species based on the first number in the value string
-                sorted_species = sorted(species_data.items(), key=lambda item: int(item[1].split(',')[0]))
+                species_list_to_display = []
+                if species_data.get("auto", False):
+                    species_list_to_display = species_data.get("list_auto", [])
+                else:
+                    species_list_to_display = species_data.get("list", [])
 
-                for species_name, _ in sorted_species:
-                    # 使用lambda来捕获按钮实例
+                for species_name in species_list_to_display:
                     def create_command(s, b):
                         return lambda: self._on_species_button_press(s, b)
 
@@ -1509,6 +1511,12 @@ class PreviewPage(ttk.Frame):
         btn_widget.configure(style="Selected.TButton")
         self._selected_species_button = btn_widget
         self._species_marked = species_name
+        self._increment_quick_mark_count(species_name)
+
+        # 如果自动排序开启，则刷新按钮列表
+        if self.controller.advanced_page.auto_sort_var.get():
+            self.controller.advanced_page.update_auto_sorted_list()
+            self._load_species_buttons()
 
         # 只要点击了快速标记按钮，就将其标记为错误
         self._mark_as_error_and_save(file_name)
@@ -1614,6 +1622,23 @@ class PreviewPage(ttk.Frame):
             # 否则，只更新JSON中的数量
             self._update_json_file(file_name, new_count=str(final_count))
 
+    def _increment_quick_mark_count(self, species_name):
+        """在quick_mark.json中为给定物种增加计数。"""
+        if not species_name:
+            return
+        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+        species_list = [s.strip() for s in species_name.split(',') if s.strip()]
+
+        for species in species_list:
+            if species in quick_marks_data:
+                if isinstance(quick_marks_data[species], int):
+                    quick_marks_data[species] += 1
+            else:
+                # 如果物种不存在，则添加并设置为1
+                quick_marks_data[species] = 1
+
+        self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+
     def _mark_other_species(self):
         """处理“其他”按钮的逻辑，弹出对话框"""
         selection = self.species_photo_listbox.curselection()
@@ -1628,6 +1653,13 @@ class PreviewPage(ttk.Frame):
             self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
             # 标记为错误并跳转
             self._mark_as_error_and_save(file_name)
+            self._increment_quick_mark_count(species_name)
+
+            # 如果自动排序开启，则刷新按钮列表
+            if self.controller.advanced_page.auto_sort_var.get():
+                self.controller.advanced_page.update_auto_sorted_list()
+                self._load_species_buttons()
+
             self._move_to_next_image()
 
     def _move_to_next_image(self):
@@ -1718,7 +1750,13 @@ class PreviewPage(ttk.Frame):
         try:
             species_data = self.controller.settings_manager.load_quick_mark_species()
             if species_data:
-                for species_name in species_data.keys():
+                species_list_to_display = []
+                if species_data.get("auto", False):
+                    species_list_to_display = species_data.get("list_auto", [])
+                else:
+                    species_list_to_display = species_data.get("list", [])
+
+                for species_name in species_list_to_display:
                     def create_command(s, b):
                         return lambda: self._on_validation_species_button_press(s, b)
 
@@ -1744,6 +1782,12 @@ class PreviewPage(ttk.Frame):
         btn_widget.configure(style="Selected.TButton")
         self._selected_validation_species_button = btn_widget
         self._species_validation_marked = species_name
+        self._increment_quick_mark_count(species_name)
+
+        # 如果自动排序开启，则刷新按钮列表
+        if self.controller.advanced_page.auto_sort_var.get():
+            self.controller.advanced_page.update_auto_sorted_list()
+            self._load_validation_species_buttons()
 
         # 修复： 只要点击了快速标记按钮，就将其标记为错误
         self._mark_as_error_and_save(file_name)

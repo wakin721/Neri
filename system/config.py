@@ -3,8 +3,8 @@
 """
 
 # 应用信息常量
-APP_TITLE = "Neri v1.0.2"
-APP_VERSION = "1.0.2-beta"
+APP_TITLE = "Neri v1.0.3"
+APP_VERSION = "1.0.3-beta"
 DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
 
 # 文件支持相关常量

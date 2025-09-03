@@ -38,20 +38,24 @@ class SettingsManager:
     def _initialize_quick_mark_file(self):
         """如果快速标记文件不存在，则初始化它"""
         if not os.path.exists(self.quick_mark_file):
-            default_species = {
-                "骆驼": "1,1",
-                "北山羊": "2,1",
-                "狗": "3,1",
-                "蒙古野驴": "4,1",
-                "鹅喉羚": "5,1",
-                "马": "6,1",
-                "中亚兔": "7,1",
-                "猞猁": "8,1",
-                "盘羊": "9,1",
-                "赤狐": "10,1",
-                "狼": "11,1",
-            }
-            self.save_quick_mark_species(default_species)
+            self.reset_quick_mark_to_default()
+
+    def reset_quick_mark_to_default(self):
+        """将 quick_mark.json 文件重置为默认值"""
+        default_species = [
+            "骆驼", "北山羊", "狗", "蒙古野驴", "鹅喉羚",
+            "马", "中亚兔", "猞猁", "盘羊", "赤狐", "狼"
+        ]
+        default_settings = {
+            "list": default_species,
+            "list_auto": default_species,
+            "auto": False
+        }
+        for species in default_species:
+            default_settings[species] = 0
+
+        self.save_quick_mark_species(default_settings)
+        logger.info("快速标记数据已重置为默认值。")
 
     def save_settings(self, settings: Dict[str, Any]) -> bool:
         """保存设置到JSON文件
@@ -194,7 +198,7 @@ class SettingsManager:
             logger.error(f"保存置信度配置文件失败: {e}")
             return False
 
-    def load_quick_mark_species(self) -> Dict[str, int]:
+    def load_quick_mark_species(self) -> Dict[str, Any]:
         """从temp/quick_mark.json加载快速标记物种"""
         if not os.path.exists(self.quick_mark_file):
             return {}
@@ -205,7 +209,7 @@ class SettingsManager:
             logger.error(f"加载快速标记物种文件失败: {e}")
             return {}
 
-    def save_quick_mark_species(self, species_data: Dict[str, int]) -> bool:
+    def save_quick_mark_species(self, species_data: Dict[str, Any]) -> bool:
         """保存快速标记物种到temp/quick_mark.json"""
         try:
             with open(self.quick_mark_file, 'w', encoding='utf-8') as f:
