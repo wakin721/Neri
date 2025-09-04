@@ -274,7 +274,8 @@ def perform_download(parent_window, download_url):
                                 except FileNotFoundError:
                                     continue
                             if not terminal_found:
-                                _show_messagebox(parent_window, "重启提示", "无法自动打开新终端，请手动重启程序以应用更新。",
+                                _show_messagebox(parent_window, "重启提示",
+                                                 "无法自动打开新终端，请手动重启程序以应用更新。",
                                                  "info")
                     else:
                         # 对于开发环境（直接运行 .py 文件）
@@ -302,20 +303,16 @@ def perform_download(parent_window, download_url):
 
                         # 在新的控制台中重新启动应用程序
                         if platform.system() == "Windows":
-                            # 方案1：使用PowerShell执行命令序列（推荐）
-                            # PowerShell命令：先运行checker.py，成功后运行gui.py，然后退出
-                            ps_cmd = f'''
-& "{python_exe_path}" "{checker_script_path}"; 
-if ($LASTEXITCODE -eq 0) {{ 
-    & "{pythonw_exe_path}" "{main_script_path}" 
-}}; 
-exit
-'''.strip().replace('\n', ' ')
-                            
-                            subprocess.Popen([
-                                'powershell', '-WindowStyle', 'Normal', '-Command', ps_cmd
-                            ], shell=False)
-                            
+                            # 使用 cmd 的条件执行功能
+                            # && 表示前一个命令成功时才执行下一个命令
+                            # start "" 用于启动 gui.py 而不阻塞命令行
+                            # exit 用于关闭命令行窗口
+                            cmd_sequence = f'"{python_exe_path}" "{checker_script_path}" && start "" "{pythonw_exe_path}" "{main_script_path}" && exit'
+
+                            # 使用 cmd /c 执行命令序列，/c 表示执行完命令后关闭窗口
+                            subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True,
+                                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+
                         elif platform.system() == "Darwin":  # macOS
                             # 使用bash执行命令序列
                             bash_cmd = f'''
@@ -324,12 +321,12 @@ if "{python_exe_path}" "{checker_script_path}"; then
 fi; 
 exit
 '''.strip().replace('\n', ' ')
-                            
+
                             subprocess.Popen([
-                                "osascript", "-e", 
-                                f'tell app "Terminal" to do script "{bash_cmd.replace(chr(34), chr(92)+chr(34))}"'
+                                "osascript", "-e",
+                                f'tell app "Terminal" to do script "{bash_cmd.replace(chr(34), chr(92) + chr(34))}"'
                             ], close_fds=True)
-                            
+
                         else:  # Linux
                             # 使用bash执行命令序列
                             bash_cmd = f'''
@@ -338,7 +335,7 @@ if "{python_exe_path}" "{checker_script_path}"; then
 fi; 
 exit
 '''.strip().replace('\n', ' ')
-                            
+
                             terminal_found = False
                             for terminal in ["gnome-terminal", "konsole", "xterm"]:
                                 try:
@@ -353,7 +350,8 @@ exit
                                 except FileNotFoundError:
                                     continue
                             if not terminal_found:
-                                _show_messagebox(parent_window, "重启提示", "无法自动打开新终端，请手动重启程序以应用更新。", "info")
+                                _show_messagebox(parent_window, "重启提示",
+                                                 "无法自动打开新终端，请手动重启程序以应用更新。", "info")
 
                     # 关闭当前的应用程序实例
                     parent_window.destroy()
@@ -368,7 +366,8 @@ exit
         parent_window.after(0,
                             lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
         _show_messagebox(parent_window, "更新失败", f"更新过程中发生错误: {e}", "error")
-        
+
+
 def _show_messagebox(parent, title, message, msg_type):
     """内部辅助函数，确保在主线程中调用messagebox。"""
 
