@@ -307,7 +307,7 @@ def perform_download(parent_window, download_url):
                             # 使用 start 命令打开新的命令行窗口，并在其中运行 checker.py
                             # /WAIT 参数确保等待 checker.py 执行完毕
                             # 然后使用 pythonw.exe 启动 gui.py（无窗口）
-                            cmd_sequence = f'start "Neri 依赖检查" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
+                            cmd_sequence = f'start "Neri checker" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
                             
                             # 使用 cmd /c 执行命令序列
                             subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
@@ -384,3 +384,4 @@ def _show_messagebox(parent, title, message, msg_type):
 
     if parent.winfo_exists():
         parent.after(0, show_message)
+
