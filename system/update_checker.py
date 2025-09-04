@@ -346,8 +346,13 @@ def perform_download(parent_window, download_url):
                 except Exception as e:
                     _show_messagebox(parent_window, "重启失败", f"无法重新启动应用程序: {e}", "error")
 
+        parent_window.after(0, ask_restart)
 
-
+    except Exception as e:
+        parent_window.after(0,
+                            lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
+        _show_messagebox(parent_window, "更新失败", f"更新过程中发生错误: {e}", "error")
+        
 def _show_messagebox(parent, title, message, msg_type):
     """内部辅助函数，确保在主线程中调用messagebox。"""
 
@@ -367,3 +372,4 @@ def _show_messagebox(parent, title, message, msg_type):
     if parent.winfo_exists():
 
         parent.after(0, show_message)
+
