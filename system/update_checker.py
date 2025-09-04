@@ -303,15 +303,14 @@ def perform_download(parent_window, download_url):
 
                         # 在新的控制台中重新启动应用程序
                         if platform.system() == "Windows":
-                            # 使用 cmd 的条件执行功能
-                            # && 表示前一个命令成功时才执行下一个命令
-                            # start "" 用于启动 gui.py 而不阻塞命令行
-                            # exit 用于关闭命令行窗口
-                            cmd_sequence = f'"{python_exe_path}" "{checker_script_path}" && start "" "{pythonw_exe_path}" "{main_script_path}" && exit'
-
-                            # 使用 cmd /c 执行命令序列，/c 表示执行完命令后关闭窗口
-                            subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True,
-                                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+                            # 修改后的 Windows 重启逻辑，确保 checker.py 在可见的命令行窗口中运行
+                            # 使用 start 命令打开新的命令行窗口，并在其中运行 checker.py
+                            # /WAIT 参数确保等待 checker.py 执行完毕
+                            # 然后使用 pythonw.exe 启动 gui.py（无窗口）
+                            cmd_sequence = f'start "Neri 依赖检查" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
+                            
+                            # 使用 cmd /c 执行命令序列
+                            subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
 
                         elif platform.system() == "Darwin":  # macOS
                             # 使用bash执行命令序列
@@ -366,8 +365,7 @@ exit
         parent_window.after(0,
                             lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
         _show_messagebox(parent_window, "更新失败", f"更新过程中发生错误: {e}", "error")
-
-
+        
 def _show_messagebox(parent, title, message, msg_type):
     """内部辅助函数，确保在主线程中调用messagebox。"""
 
