@@ -302,35 +302,40 @@ def perform_download(parent_window, download_url):
 
                         # checker.py 使用标准 python 解释器（带命令行窗口）
                         cmd_checker = f'"{python_exe_path}" "{checker_script_path}"'
-                        # gui.py 尝试使用 pythonw 解释器（无命令行窗口）
+                        # gui.py 使用 pythonw 解释器（无命令行窗口）
                         cmd_gui = f'"{pythonw_exe_path}" "{main_script_path}"'
 
                         # 在新的控制台中重新启动应用程序
                         if platform.system() == "Windows":
-                            # 使用 '&&' 连接命令，实现在同一个命令行窗口中顺序执行
-                            # checker.py 执行完毕后，启动 gui.py
-                            chained_cmd = f'{cmd_checker} && {cmd_gui}'
+                            # 使用 cmd /c 执行 checker.py，执行完毕后自动关闭命令行窗口
+                            # 然后使用 start 启动 gui.py（无窗口）
+                            chained_cmd = f'{cmd_checker} && start "" {cmd_gui}'
                             subprocess.Popen(f'start "Restarting Neri" cmd /c "{chained_cmd}"', shell=True)
                         elif platform.system() == "Darwin":  # macOS
-                            # 使用 ';' 顺序执行命令，并用 '&' 使 gui.py 在后台运行
+                            # 使用 bash -c 执行命令序列，checker.py 执行完毕后启动 gui.py 并在后台运行
                             chained_cmd = f'{cmd_checker}; {cmd_gui} &'
-                            mac_cmd = chained_cmd.replace("\"", "\\\"")
+                            # 使用 osascript 在新的 Terminal 窗口中执行，命令执行完毕后 Terminal 会保持打开
+                            # 如果需要自动关闭，可以在命令末尾添加 exit
+                            chained_cmd_with_exit = f'{cmd_checker}; {cmd_gui} & exit'
+                            mac_cmd = chained_cmd_with_exit.replace("\"", "\\\"")
                             subprocess.Popen(
                                 ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
                                 close_fds=True
                             )
                         else:  # Linux
-                            # 使用 '&&' 顺序执行命令，并用 '&' 使 gui.py 在后台运行
-                            chained_cmd = f'{cmd_checker} && {cmd_gui} &'
+                            # 使用 bash -c 执行命令序列
+                            chained_cmd = f'{cmd_checker} && {cmd_gui} & exit'
                             terminal_found = False
                             for terminal in ["gnome-terminal", "konsole", "xterm"]:
                                 try:
-                                    # 使用 bash -c 来执行整个命令链
+                                    # 使用 bash -c 来执行整个命令链，并在最后添加 exit 以关闭终端
                                     if terminal == "gnome-terminal":
+                                        # 对于 gnome-terminal，可以使用 --wait 参数等待命令执行完毕
                                         subprocess.Popen([terminal, "--", "bash", "-c", chained_cmd], close_fds=True)
                                     elif terminal == "konsole":
                                         subprocess.Popen([terminal, "-e", "bash", "-c", chained_cmd], close_fds=True)
                                     elif terminal == "xterm":
+                                        # 对于 xterm，添加 -hold 参数可以保持窗口打开，但我们想要自动关闭
                                         subprocess.Popen([terminal, "-e", "bash", "-c", chained_cmd], close_fds=True)
                                     terminal_found = True
                                     break
@@ -370,6 +375,4 @@ def _show_messagebox(parent, title, message, msg_type):
             transient_parent.destroy()
 
     if parent.winfo_exists():
-
         parent.after(0, show_message)
-
