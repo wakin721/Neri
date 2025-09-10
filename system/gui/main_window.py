@@ -317,7 +317,8 @@ class ObjectDetectionGUI(QMainWindow):
             self.setWindowIcon(QIcon(ico_path))
             # --- 为Windows设置任务栏图标 ---
             if platform.system() == "Windows":
-                myappid = u'mycompany.myproduct.subproduct.version'  # 任意唯一的ID
+                # 使用APP_TITLE和APP_VERSION创建一个更独特的ID
+                myappid = f'mycompany.{APP_TITLE}.{APP_VERSION}'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             # ---------------------------------
         except Exception as e:
