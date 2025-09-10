@@ -1,17 +1,17 @@
 # system/update_checker.py
 
 import requests
-import re  # 确保导入 re 模块
+import re
 import os
 import zipfile
 import io
 import shutil
-import tkinter as tk
-from tkinter import ttk, messagebox
 import sys
 import subprocess
 import threading
 import platform
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QProgressBar, QMessageBox
+from PySide6.QtCore import Qt, QThread, Signal, QMetaObject
 from system.config import APP_VERSION
 
 # GitHub仓库信息
@@ -120,7 +120,7 @@ def check_for_updates(parent, silent=False, channel='preview'):
     try:
         latest_info = get_latest_version_info(channel=channel)
         if not latest_info:
-            if not silent and parent.winfo_exists():
+            if not silent:
                 _show_messagebox(parent, "更新错误", "无法在远程仓库中找到版本信息。", "error")
             return
 
@@ -128,17 +128,18 @@ def check_for_updates(parent, silent=False, channel='preview'):
 
         if compare_versions(APP_VERSION, remote_version):
             # 只有在找到更新时才与UI交互
-            if parent.winfo_exists():
+            if parent:
                 # 安全地调用主窗口的方法来更新侧边栏
-                parent.after(0, parent.show_update_notification_on_sidebar)
+                QMetaObject.invokeMethod(parent, "show_update_notification_on_sidebar", Qt.QueuedConnection)
+
 
             # 非静默模式下弹窗提示
-            if not silent and parent.winfo_exists():
+            if not silent and parent:
                 update_message = f"新版本 ({remote_version}) 可用，是否前往高级设置进行更新？"
                 _show_messagebox(parent, "发现新版本", update_message, "info")
 
     except Exception as e:
-        if not silent and parent.winfo_exists():
+        if not silent and parent:
             _show_messagebox(parent, "更新错误", f"检查更新失败: {e}", "error")
 
 
@@ -147,241 +148,209 @@ def start_download_thread(parent, download_url):
     if not download_url:
         _show_messagebox(parent, "错误", "下载链接无效！", "error")
         return
-    download_thread = threading.Thread(target=download_and_install_update, args=(parent, download_url), daemon=True)
-    download_thread.start()
+    
+    progress_dialog = UpdateProgressDialog(parent, download_url)
+    progress_dialog.exec()
 
 
-def download_and_install_update(parent, download_url):
-    """创建带进度条的更新窗口。"""
+class UpdateProgressDialog(QDialog):
+    def __init__(self, parent, download_url):
+        super().__init__(parent)
+        self.setWindowTitle("正在更新...")
+        self.setWindowIcon(parent.windowIcon())
+        self.setModal(True)
+        self.download_url = download_url
 
-    def create_progress_window():
-        global progress_window, label, progress_bar
-        progress_window = tk.Toplevel(parent)
-        progress_window.title("正在更新...")
-        progress_window.geometry("350x120")
+        self.layout = QVBoxLayout(self)
+        self.label = QLabel("正在连接到服务器...", self)
+        self.progress_bar = QProgressBar(self)
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.progress_bar)
 
-        icon_path = get_icon_path()
-        if os.path.exists(icon_path):
-            try:
-                progress_window.iconbitmap(icon_path)
-            except tk.TclError:
-                pass
+        self.download_thread = threading.Thread(target=self.perform_download, daemon=True)
+        self.download_thread.start()
 
-        parent.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() // 2) - (350 // 2)
-        y = parent.winfo_y() + (parent.winfo_height() // 2) - (120 // 2)
-        progress_window.geometry(f'+{x}+{y}')
-        progress_window.transient(parent)
-        progress_window.grab_set()
+    def perform_download(self):
+        """执行下载、解压、安装和重启的完整流程。"""
+        try:
+            self.update_ui("正在从GitHub下载更新...")
+            response = requests.get(self.download_url, stream=True, timeout=30)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            self.progress_bar.setMaximum(total_size if total_size > 0 else 100)
 
-        label = ttk.Label(progress_window, text="正在连接到服务器...")
-        label.pack(padx=20, pady=10)
-        progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=300, mode='determinate')
-        progress_bar.pack(padx=20, pady=5)
+            downloaded_size = 0
+            file_buffer = io.BytesIO()
 
-        threading.Thread(target=perform_download, args=(parent, download_url), daemon=True).start()
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    file_buffer.write(chunk)
+                    downloaded_size += len(chunk)
+                    if total_size > 0:
+                        self.progress_bar.setValue(downloaded_size)
 
-    if parent.winfo_exists():
-        parent.after(0, create_progress_window)
+            self.update_ui("下载完成，正在解压并安装...")
+            self.progress_bar.setRange(0, 0) # Indeterminate
 
+            if getattr(sys, 'frozen', False):
+                app_root = os.path.dirname(sys.executable)
+            else:
+                app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def perform_download(parent_window, download_url):
-    """执行下载、解压、安装和重启的完整流程。"""
+            file_buffer.seek(0)
 
-    def update_ui(text=None, p_value=None, p_mode=None, start=False, stop=False):
-        if 'progress_window' in globals() and progress_window.winfo_exists():
-            if text: label.config(text=text)
-            if p_value is not None: progress_bar['value'] = p_value
-            if p_mode: progress_bar['mode'] = p_mode
-            if start: progress_bar.start(10)
-            if stop: progress_bar.stop()
-            progress_window.update_idletasks()
-
-    try:
-        parent_window.after(0, lambda: update_ui(text="正在从GitHub下载更新..."))
-        response = requests.get(download_url, stream=True, timeout=30)
-        response.raise_for_status()
-        total_size = int(response.headers.get('content-length', 0))
-        parent_window.after(0, lambda: progress_bar.config(maximum=total_size if total_size > 0 else 100))
-
-        downloaded_size = 0
-        file_buffer = io.BytesIO()
-
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                file_buffer.write(chunk)
-                downloaded_size += len(chunk)
-                if total_size > 0:
-                    parent_window.after(0, lambda v=downloaded_size: update_ui(p_value=v))
-
-        parent_window.after(0, lambda: update_ui(text="下载完成，正在解压并安装...", p_mode='indeterminate', start=True))
-
-        if getattr(sys, 'frozen', False):
-            app_root = os.path.dirname(sys.executable)
-        else:
-            app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-        file_buffer.seek(0)
-
-        with zipfile.ZipFile(file_buffer) as z:
-            root_folder_in_zip = z.namelist()[0]
-            for member in z.infolist():
-                path_in_zip = member.filename.replace(root_folder_in_zip, '', 1)
-                if not path_in_zip or ".git" in path_in_zip: continue
-                target_path = os.path.join(app_root, path_in_zip)
-                if member.is_dir():
-                    os.makedirs(target_path, exist_ok=True)
-                else:
-                    target_dir = os.path.dirname(target_path)
-                    os.makedirs(target_dir, exist_ok=True)
-                    with z.open(member) as source, open(target_path, "wb") as target:
-                        shutil.copyfileobj(source, target)
-
-        parent_window.after(0, lambda: update_ui(stop=True))
-        parent_window.after(0,
-                            lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
-
-        def ask_restart():
-            if messagebox.askyesno("更新成功", "程序已成功更新！\n是否立即重启应用程序以应用更改？",
-                                   parent=parent_window):
-                try:
-                    # 确定重启命令的参数
-                    if getattr(sys, 'frozen', False):
-                        # 对于打包后的程序（frozen=True），重启逻辑保持不变，直接重启主程序
-                        args = [sys.executable]
-                        if platform.system() == "Windows":
-                            cmd = ' '.join(f'"{arg}"' for arg in args)
-                            subprocess.Popen(f'start "Restarting Application" {cmd}', shell=True)
-                        elif platform.system() == "Darwin":  # macOS
-                            cmd = ' '.join(f'"{arg}"' for arg in args)
-                            mac_cmd = cmd.replace("\"", "\\\"")
-                            subprocess.Popen(
-                                ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
-                                close_fds=True
-                            )
-                        else:  # Linux
-                            terminal_found = False
-                            for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                                try:
-                                    if terminal == "gnome-terminal":
-                                        subprocess.Popen([terminal, "--"] + args, close_fds=True)
-                                    elif terminal == "konsole":
-                                        subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                    elif terminal == "xterm":
-                                        subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                    terminal_found = True
-                                    break
-                                except FileNotFoundError:
-                                    continue
-                            if not terminal_found:
-                                _show_messagebox(parent_window, "重启提示",
-                                                 "无法自动打开新终端，请手动重启程序以应用更新。",
-                                                 "info")
+            with zipfile.ZipFile(file_buffer) as z:
+                root_folder_in_zip = z.namelist()[0]
+                for member in z.infolist():
+                    path_in_zip = member.filename.replace(root_folder_in_zip, '', 1)
+                    if not path_in_zip or ".git" in path_in_zip: continue
+                    target_path = os.path.join(app_root, path_in_zip)
+                    if member.is_dir():
+                        os.makedirs(target_path, exist_ok=True)
                     else:
-                        # 对于开发环境（直接运行 .py 文件）
-                        app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                        python_exe_path = os.path.join(app_root, "toolkit", "python.exe")
-                        pythonw_exe_path = os.path.join(app_root, "toolkit", "pythonw.exe")
-                        checker_script_path = os.path.join(app_root, 'checker.py')
-                        main_script_path = os.path.join(app_root, 'gui.py')
+                        target_dir = os.path.dirname(target_path)
+                        os.makedirs(target_dir, exist_ok=True)
+                        with z.open(member) as source, open(target_path, "wb") as target:
+                            shutil.copyfileobj(source, target)
+            
+            self.close()
+            self.ask_restart()
 
-                        if not os.path.exists(python_exe_path):
-                            python_exe_path = sys.executable
-                            # 尝试基于 sys.executable 推断 pythonw.exe 的路径
-                            pythonw_exe_path = python_exe_path.replace("python.exe", "pythonw.exe")
 
-                        if not os.path.exists(pythonw_exe_path):
-                            # 如果 pythonw.exe 不存在，则回退到 python.exe
-                            pythonw_exe_path = python_exe_path
+        except Exception as e:
+            self.close()
+            _show_messagebox(self.parent(), "更新失败", f"更新过程中发生错误: {e}", "error")
 
-                        if not os.path.exists(checker_script_path):
-                            _show_messagebox(parent_window, "重启错误", f"找不到脚本: {checker_script_path}", "error")
-                            return
-                        if not os.path.exists(main_script_path):
-                            _show_messagebox(parent_window, "重启错误", f"找不到主脚本: {main_script_path}", "error")
-                            return
+    def update_ui(self, text):
+        self.label.setText(text)
 
-                        # 在新的控制台中重新启动应用程序
-                        if platform.system() == "Windows":
-                            # 修改后的 Windows 重启逻辑，确保 checker.py 在可见的命令行窗口中运行
-                            # 使用 start 命令打开新的命令行窗口，并在其中运行 checker.py
-                            # /WAIT 参数确保等待 checker.py 执行完毕
-                            # 然后使用 pythonw.exe 启动 gui.py（无窗口）
-                            cmd_sequence = f'start "Neri checker" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
-                            
-                            # 使用 cmd /c 执行命令序列
-                            subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
+    def ask_restart(self):
+        reply = QMessageBox.question(self.parent(), "更新成功",
+                                         "程序已成功更新！\n是否立即重启应用程序以应用更改？",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            try:
+                # 确定重启命令的参数
+                if getattr(sys, 'frozen', False):
+                    # 对于打包后的程序（frozen=True），重启逻辑保持不变，直接重启主程序
+                    args = [sys.executable]
+                    if platform.system() == "Windows":
+                        cmd = ' '.join(f'"{arg}"' for arg in args)
+                        subprocess.Popen(f'start "Restarting Application" {cmd}', shell=True)
+                    elif platform.system() == "Darwin":  # macOS
+                        cmd = ' '.join(f'"{arg}"' for arg in args)
+                        mac_cmd = cmd.replace("\"", "\\\"")
+                        subprocess.Popen(
+                            ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
+                            close_fds=True
+                        )
+                    else:  # Linux
+                        terminal_found = False
+                        for terminal in ["gnome-terminal", "konsole", "xterm"]:
+                            try:
+                                if terminal == "gnome-terminal":
+                                    subprocess.Popen([terminal, "--"] + args, close_fds=True)
+                                elif terminal == "konsole":
+                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
+                                elif terminal == "xterm":
+                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
+                                terminal_found = True
+                                break
+                            except FileNotFoundError:
+                                continue
+                        if not terminal_found:
+                            _show_messagebox(self.parent(), "重启提示",
+                                                "无法自动打开新终端，请手动重启程序以应用更新。",
+                                                "info")
+                else:
+                    # 对于开发环境（直接运行 .py 文件）
+                    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    python_exe_path = os.path.join(app_root, "toolkit", "python.exe")
+                    pythonw_exe_path = os.path.join(app_root, "toolkit", "pythonw.exe")
+                    checker_script_path = os.path.join(app_root, 'checker.py')
+                    main_script_path = os.path.join(app_root, 'gui.py')
 
-                        elif platform.system() == "Darwin":  # macOS
-                            # 使用bash执行命令序列
-                            bash_cmd = f'''
+                    if not os.path.exists(python_exe_path):
+                        python_exe_path = sys.executable
+                        # 尝试基于 sys.executable 推断 pythonw.exe 的路径
+                        pythonw_exe_path = python_exe_path.replace("python.exe", "pythonw.exe")
+
+                    if not os.path.exists(pythonw_exe_path):
+                        # 如果 pythonw.exe 不存在，则回退到 python.exe
+                        pythonw_exe_path = python_exe_path
+
+                    if not os.path.exists(checker_script_path):
+                        _show_messagebox(self.parent(), "重启错误", f"找不到脚本: {checker_script_path}", "error")
+                        return
+                    if not os.path.exists(main_script_path):
+                        _show_messagebox(self.parent(), "重启错误", f"找不到主脚本: {main_script_path}", "error")
+                        return
+
+                    # 在新的控制台中重新启动应用程序
+                    if platform.system() == "Windows":
+                        # 修改后的 Windows 重启逻辑，确保 checker.py 在可见的命令行窗口中运行
+                        # 使用 start 命令打开新的命令行窗口，并在其中运行 checker.py
+                        # /WAIT 参数确保等待 checker.py 执行完毕
+                        # 然后使用 pythonw.exe 启动 gui.py（无窗口）
+                        cmd_sequence = f'start "Neri checker" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
+                        
+                        # 使用 cmd /c 执行命令序列
+                        subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
+
+                    elif platform.system() == "Darwin":  # macOS
+                        # 使用bash执行命令序列
+                        bash_cmd = f'''
 if "{python_exe_path}" "{checker_script_path}"; then 
-    "{pythonw_exe_path}" "{main_script_path}" & 
+"{pythonw_exe_path}" "{main_script_path}" & 
 fi; 
 exit
 '''.strip().replace('\n', ' ')
 
-                            subprocess.Popen([
-                                "osascript", "-e",
-                                f'tell app "Terminal" to do script "{bash_cmd.replace(chr(34), chr(92) + chr(34))}"'
-                            ], close_fds=True)
+                        subprocess.Popen([
+                            "osascript", "-e",
+                            f'tell app "Terminal" to do script "{bash_cmd.replace(chr(34), chr(92) + chr(34))}"'
+                        ], close_fds=True)
 
-                        else:  # Linux
-                            # 使用bash执行命令序列
-                            bash_cmd = f'''
+                    else:  # Linux
+                        # 使用bash执行命令序列
+                        bash_cmd = f'''
 if "{python_exe_path}" "{checker_script_path}"; then 
-    "{pythonw_exe_path}" "{main_script_path}" & 
+"{pythonw_exe_path}" "{main_script_path}" & 
 fi; 
 exit
 '''.strip().replace('\n', ' ')
 
-                            terminal_found = False
-                            for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                                try:
-                                    if terminal == "gnome-terminal":
-                                        subprocess.Popen([terminal, "--", "bash", "-c", bash_cmd], close_fds=True)
-                                    elif terminal == "konsole":
-                                        subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
-                                    elif terminal == "xterm":
-                                        subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
-                                    terminal_found = True
-                                    break
-                                except FileNotFoundError:
-                                    continue
-                            if not terminal_found:
-                                _show_messagebox(parent_window, "重启提示",
-                                                 "无法自动打开新终端，请手动重启程序以应用更新。", "info")
+                        terminal_found = False
+                        for terminal in ["gnome-terminal", "konsole", "xterm"]:
+                            try:
+                                if terminal == "gnome-terminal":
+                                    subprocess.Popen([terminal, "--", "bash", "-c", bash_cmd], close_fds=True)
+                                elif terminal == "konsole":
+                                    subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
+                                elif terminal == "xterm":
+                                    subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
+                                terminal_found = True
+                                break
+                            except FileNotFoundError:
+                                continue
+                        if not terminal_found:
+                            _show_messagebox(self.parent(), "重启提示",
+                                                "无法自动打开新终端，请手动重启程序以应用更新。", "info")
 
-                    # 关闭当前的应用程序实例
-                    parent_window.destroy()
-                    sys.exit()
+                # 关闭当前的应用程序实例
+                self.parent().close()
+                QApplication.instance().quit()
 
-                except Exception as e:
-                    _show_messagebox(parent_window, "重启失败", f"无法重新启动应用程序: {e}", "error")
 
-        parent_window.after(0, ask_restart)
+            except Exception as e:
+                _show_messagebox(self.parent(), "重启失败", f"无法重新启动应用程序: {e}", "error")
 
-    except Exception as e:
-        parent_window.after(0,
-                            lambda: progress_window.destroy() if 'progress_window' in globals() and progress_window.winfo_exists() else None)
-        _show_messagebox(parent_window, "更新失败", f"更新过程中发生错误: {e}", "error")
-        
+
 def _show_messagebox(parent, title, message, msg_type):
     """内部辅助函数，确保在主线程中调用messagebox。"""
-
-    def show_message():
-        if not parent.winfo_exists(): return
-        transient_parent = tk.Toplevel(parent)
-        transient_parent.withdraw()
-        if msg_type == "info":
-            messagebox.showinfo(title, message, parent=transient_parent)
-        elif msg_type == "error":
-            messagebox.showerror(title, message, parent=transient_parent)
-        elif msg_type == "askyesno":
-            messagebox.askyesno(title, message, parent=transient_parent)
-        if transient_parent.winfo_exists():
-            transient_parent.destroy()
-
-    if parent.winfo_exists():
-        parent.after(0, show_message)
-
+    if msg_type == "info":
+        QMessageBox.information(parent, title, message)
+    elif msg_type == "error":
+        QMessageBox.critical(parent, title, message)
+    elif msg_type == "askyesno":
+        return QMessageBox.question(parent, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)

@@ -1,99 +1,264 @@
-import tkinter as tk
-from tkinter import ttk
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem
+)
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QFont, QPalette, QIcon, QPixmap, QPainter, QColor
+from PySide6.QtSvg import QSvgRenderer
 
-from system.gui.ui_components import SpeedProgressBar, RoundedButton
+
+from system.gui.ui_components import (
+    Win11Colors, RoundedButton,
+    ModernLineEdit, PathInputWidget, ModernGroupBox
+)
+import os
+from system.utils import resource_path
 
 
-class StartPage(ttk.Frame):
-    """开始处理页面"""
+class StartPage(QWidget):
+    """开始处理页面 - PySide6版本"""
 
-    def __init__(self, parent, controller, **kwargs):
-        super().__init__(parent, **kwargs)
+    # 信号定义
+    browse_file_path_requested = Signal()
+    browse_save_path_requested = Signal()
+    file_path_changed = Signal(str)
+    save_path_changed = Signal(str)
+    toggle_processing_requested = Signal()
+    settings_changed = Signal()
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
         self.controller = controller
-        self._create_widgets()
+        self._load_icons()
+        self._setup_ui()
+        self._setup_connections()
+
+    def _load_icons(self):
+        """加载图标"""
+        self.play_icon = self._load_svg_icon(resource_path("res/icon/play.svg"))
+        self.stop_icon = self._load_svg_icon(resource_path("res/icon/stop.svg"))
+
+    def _load_svg_icon(self, icon_path):
+        """加载SVG图标"""
+        if os.path.exists(icon_path):
+            renderer = QSvgRenderer(icon_path)
+            if renderer.isValid():
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter)
+                painter.end()
+                return pixmap
+        return None
+
+    def _create_colored_pixmap(self, original_pixmap, color):
+        """根据颜色创建着色的图标"""
+        if not original_pixmap:
+            return QIcon()
+
+        colored_pixmap = QPixmap(original_pixmap.size())
+        colored_pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(colored_pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.drawPixmap(0, 0, original_pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(colored_pixmap.rect(), color)
+        painter.end()
+        return QIcon(colored_pixmap)
+
+    def _setup_ui(self):
+        """设置UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+
+        # 路径设置组
+        self._create_paths_group(layout)
+
+        # 添加弹性空间
+        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        # 底部控制区域
+        self._create_bottom_controls(layout)
+
+    def _create_paths_group(self, parent_layout):
+        """创建路径设置组"""
+        paths_group = ModernGroupBox("路径设置")
+        paths_layout = QVBoxLayout(paths_group)
+        paths_layout.setSpacing(16)
+        paths_layout.setContentsMargins(16, 16, 16, 16)
+
+        # 图像文件路径
+        self.file_path_widget = PathInputWidget(
+            "图像文件路径:",
+            "请选择包含图像文件的文件夹"
+        )
+        paths_layout.addWidget(self.file_path_widget)
+
+        # 结果保存路径
+        self.save_path_widget = PathInputWidget(
+            "结果保存路径:",
+            "请选择保存处理结果的文件夹"
+        )
+        paths_layout.addWidget(self.save_path_widget)
+
+        parent_layout.addWidget(paths_group)
+
+    def _create_bottom_controls(self, parent_layout):
+        """创建底部控制区域"""
+        bottom_widget = QWidget()
+        bottom_layout = QVBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(12)
+
+        # 开始按钮容器
+        button_container = QWidget()
+        button_layout = QHBoxLayout(button_container)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 添加弹性空间，使按钮右对齐
+        button_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+
+        # 开始/停止按钮
+        self.start_stop_button = RoundedButton("开始处理")
+        self.start_stop_button.setMinimumSize(160, 50)
+        self.start_stop_button.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+
+        # 设置按钮样式
+        self._update_button_style(False)
+
+        button_layout.addWidget(self.start_stop_button)
+        bottom_layout.addWidget(button_container)
+
+        parent_layout.addWidget(bottom_widget)
+
+    def _update_button_style(self, is_processing):
+        """更新按钮样式"""
+        palette = self.palette()
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        icon_color = QColor("#ffffff")
+
+        if is_processing:
+            # 停止状态 - 使用红色
+            bg_color = "#e74c3c"
+            hover_color = "#c0392b"
+            pressed_color = "#a93226"
+            text_color = "#ffffff"
+            self.start_stop_button.setText(" 停止处理")
+            if self.stop_icon:
+                self.start_stop_button.setIcon(self._create_colored_pixmap(self.stop_icon, icon_color))
+        else:
+            # 开始状态 - 使用主题色
+            if is_dark:
+                bg_color = Win11Colors.DARK_ACCENT.name()
+                hover_color = Win11Colors.DARK_ACCENT.lighter(120).name()
+                pressed_color = Win11Colors.DARK_ACCENT.darker(110).name()
+            else:
+                bg_color = Win11Colors.LIGHT_ACCENT.name()
+                hover_color = Win11Colors.LIGHT_ACCENT.darker(110).name()
+                pressed_color = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            text_color = "#ffffff"
+            self.start_stop_button.setText(" 开始处理")
+            if self.play_icon:
+                self.start_stop_button.setIcon(self._create_colored_pixmap(self.play_icon, icon_color))
+
+
+        self.start_stop_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: {text_color};
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 14px;
+                font-weight: 600;
+                text-align: center;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed_color};
+            }}
+            QPushButton:disabled {{
+                background-color: #cccccc;
+                color: #666666;
+            }}
+        """)
+
+    def _setup_connections(self):
+        """设置信号连接"""
+        # 路径输入控件
+        self.file_path_widget.browse_requested.connect(self.browse_file_path_requested.emit)
+        self.file_path_widget.path_changed.connect(self.file_path_changed.emit)
+        self.save_path_widget.browse_requested.connect(self.browse_save_path_requested.emit)
+        self.save_path_widget.path_changed.connect(self.save_path_changed.emit)
+
+        # 开始/停止按钮
+        self.start_stop_button.clicked.connect(self.toggle_processing_requested.emit)
+
+    def set_processing_state(self, is_processing: bool):
+        """设置UI的处理状态"""
+        # 禁用或启用设置控件
+        self.file_path_widget.set_enabled(not is_processing)
+        self.save_path_widget.set_enabled(not is_processing)
+
+        # 更新处理按钮的样式和文本
+        self._update_button_style(is_processing)
+
+    def update_progress(self, value, total, speed, remaining_time, current_file=None):
+        """更新进度"""
+        if hasattr(self.progress_frame, 'update_progress'):
+            self.progress_frame.update_progress(value, total, speed, remaining_time, current_file)
+
+    def set_processing_enabled(self, enabled):
+        """设置处理功能的启用状态"""
+        self.start_stop_button.setEnabled(enabled)
+
+    # 获取器方法
+    def get_file_path(self):
+        """获取文件路径"""
+        return self.file_path_widget.get_path()
+
+    def get_save_path(self):
+        """获取保存路径"""
+        return self.save_path_widget.get_path()
+
+    # 设置器方法
+    def set_file_path(self, path):
+        """设置文件路径"""
+        self.file_path_widget.set_path(path)
+
+    def set_save_path(self, path):
+        """设置保存路径"""
+        self.save_path_widget.set_path(path)
+
+    # 设置和加载方法
+    def get_settings(self):
+        """获取页面设置"""
+        return {
+            "file_path": self.get_file_path(),
+            "save_path": self.get_save_path(),
+        }
+
+    def load_settings(self, settings):
+        """加载页面设置"""
+        if "file_path" in settings and settings["file_path"] and os.path.exists(settings["file_path"]):
+            self.set_file_path(settings["file_path"])
+
+        if "save_path" in settings and settings["save_path"]:
+            self.set_save_path(settings["save_path"])
 
     def update_theme(self):
-        """更新开始页面的主题。"""
-        # 这会更新按钮的画布背景
-        self.start_stop_button.update_theme()
+        """更新主题"""
+        # 重新应用样式到所有子组件
+        for child in self.findChildren(ModernGroupBox):
+            child._setup_style()
+        for child in self.findChildren(ModernLineEdit):
+            child._setup_style()
+        for child in self.findChildren(PathInputWidget):
+            if hasattr(child, 'update_theme'):
+                child.update_theme()
 
-        # 这会更新按钮本身的颜色并重绘它
-        self.set_processing_state(self.controller.is_processing)
-
-    def _create_widgets(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
-
-        paths_frame = ttk.LabelFrame(self, text="路径设置")
-        paths_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=10)
-        file_path_frame = ttk.Frame(paths_frame)
-        file_path_frame.pack(fill="x", padx=10, pady=10)
-        ttk.Label(file_path_frame, text="图像文件路径:").pack(side="top", anchor="w")
-        file_path_entry_frame = ttk.Frame(file_path_frame)
-        file_path_entry_frame.pack(fill="x", pady=5)
-        self.file_path_entry = ttk.Entry(file_path_entry_frame)
-        self.file_path_entry.pack(side="left", fill="x", expand=True)
-        self.file_path_button = ttk.Button(
-            file_path_entry_frame, text="浏览", command=self.controller.browse_file_path, width=8)
-        self.file_path_button.pack(side="right", padx=(5, 0))
-
-        save_path_frame = ttk.Frame(paths_frame)
-        save_path_frame.pack(fill="x", padx=10, pady=10)
-        ttk.Label(save_path_frame, text="结果保存路径:").pack(side="top", anchor="w")
-        save_path_entry_frame = ttk.Frame(save_path_frame)
-        save_path_entry_frame.pack(fill="x", pady=5)
-        self.save_path_entry = ttk.Entry(save_path_entry_frame)
-        self.save_path_entry.pack(side="left", fill="x", expand=True)
-        self.save_path_button = ttk.Button(
-            save_path_entry_frame, text="浏览", command=self.controller.browse_save_path, width=8)
-        self.save_path_button.pack(side="right", padx=(5, 0))
-
-        options_frame = ttk.LabelFrame(self, text="功能选项")
-        options_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
-        self.save_detect_image_var = tk.BooleanVar(value=True)
-        self.copy_img_var = tk.BooleanVar(value=False)
-        options_container = ttk.Frame(options_frame)
-        options_container.pack(fill="x", padx=10, pady=10)
-
-        ttk.Checkbutton(
-            options_container, text="保存探测结果图片", variable=self.save_detect_image_var
-        ).grid(row=0, column=0, sticky="w", pady=5, padx=10)
-
-        ttk.Checkbutton(
-            options_container, text="按物种分类图片", variable=self.copy_img_var
-        ).grid(row=1, column=0, sticky="w", pady=5, padx=10)
-
-        ttk.Frame(self).grid(row=3, column=0, sticky="nsew")
-
-        bottom_frame = ttk.Frame(self)
-        bottom_frame.grid(row=4, column=0, sticky="ew", padx=20, pady=(10, 20))
-        bottom_frame.columnconfigure(0, weight=1)
-        progress_container = ttk.Frame(bottom_frame, height=50)
-        progress_container.grid(row=1, column=0, sticky="ew")
-        progress_container.grid_propagate(False)
-
-        self.progress_frame = SpeedProgressBar(progress_container, accent_color=self.controller.accent_color)
-        self.progress_frame.pack(fill="both", expand=True)
-        self.progress_frame.hide()
-
-        button_container = ttk.Frame(bottom_frame)
-        button_container.grid(row=0, column=0, sticky="ew", pady=(10, 0))
-        button_container.columnconfigure(1, weight=1)
-        self.start_stop_button = RoundedButton(
-            button_container,
-            text="▶️开始处理",
-            bg=self.controller.sidebar_bg,
-            fg=self.controller.sidebar_fg,
-            width=160, height=50, radius=15,
-            command=self.controller.toggle_processing_state,
-            show_indicator=False
-        )
-        self.start_stop_button.grid(row=0, column=1, sticky="e")
-
-    def set_processing_state(self, is_processing):
-        self.progress_frame.show() if is_processing else self.progress_frame.hide()
-        self.start_stop_button.bg = "#e74c3c" if is_processing else self.controller.sidebar_bg
-        self.start_stop_button.text = "停止处理" if is_processing else "▶️开始处理"
-        self.start_stop_button._draw_button("normal")
-        for widget in [self.file_path_entry, self.file_path_button, self.save_path_entry, self.save_path_button]:
-            widget["state"] = "disabled" if is_processing else "normal"
+        # 更新按钮样式
+        self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)

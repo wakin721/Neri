@@ -1,5 +1,13 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QTabWidget, QLabel, QSlider, QCheckBox, QComboBox,
+    QPushButton, QFrame, QScrollArea, QSizePolicy,
+    QSpacerItem, QMessageBox, QInputDialog, QGroupBox,
+    QLineEdit, QApplication
+)
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QRect, QObject
+from PySide6.QtGui import QFont, QPalette, QPainter, QPainterPath, QColor, QPen, QBrush
+
 import os
 import platform
 import re
@@ -8,708 +16,799 @@ import logging
 import threading
 import sys
 
-from system.gui.ui_components import CollapsiblePanel
+from system.gui.ui_components import (
+    CollapsiblePanel, Win11Colors, RoundedButton,
+    ModernSlider, ModernComboBox, SwitchRow, ModernLineEdit, ModernGroupBox
+)
 from system.utils import resource_path
 from system.config import APP_VERSION, NORMAL_FONT
 
 logger = logging.getLogger(__name__)
 
+class ModelLoadWorker(QObject):
+    finished = Signal(str, str)  # model_name, error_string
 
-class AdvancedPage(ttk.Frame):
-    """高级设置页面"""
-
-    def __init__(self, parent, controller, **kwargs):
-        super().__init__(parent, **kwargs)
+    def __init__(self, controller, model_path, model_name):
+        super().__init__()
         self.controller = controller
-        self.is_dark_mode = self.controller.is_dark_mode
+        self.model_path = model_path
+        self.model_name = model_name
 
-        self.controller.iou_var = tk.DoubleVar(value=0.3)
-        self.controller.conf_var = tk.DoubleVar(value=0.25)
-        self.controller.use_fp16_var = tk.BooleanVar(value=self.controller.cuda_available)
-        self.controller.use_augment_var = tk.BooleanVar(value=True)
-        self.controller.use_agnostic_nms_var = tk.BooleanVar(value=True)
+    def run(self):
+        """加载模型并更新控制器属性。"""
+        try:
+            self.controller.image_processor.load_model(self.model_path)
+            self.controller.image_processor.model_path = self.model_path
+            if hasattr(self.controller, 'model_var'):
+                self.controller.model_var = self.model_name
+            else:
+                setattr(self.controller, 'model_var', self.model_name)
+            self.finished.emit(self.model_name, None)
+        except Exception as e:
+            logger.error(f"自动加载模型失败: {e}")
+            self.finished.emit(self.model_name, str(e))
 
-        # Theme variable
-        self.theme_var = tk.StringVar(value="自动")
 
-        self.cache_size_var = tk.StringVar(value="正在计算...")
+
+class AdvancedPage(QWidget):
+    """高级设置页面 - PySide6版本"""
+
+    # 信号定义
+    settings_changed = Signal()
+    update_check_requested = Signal()
+    theme_changed = Signal()
+    params_help_requested = Signal()
+    cache_clear_requested = Signal()
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.is_dark_mode = False
+
+        # 检测系统主题
+        palette = self.palette()
+        self.is_dark_mode = palette.color(QPalette.ColorRole.Window).lightness() < 128
+
+        # 初始化变量
+        self.iou_var = 0.3
+        self.conf_var = 0.25
+        self.use_fp16_var = self.controller.cuda_available if hasattr(controller, 'cuda_available') else False
+        self.use_augment_var = True
+        self.use_agnostic_nms_var = True
+        self.theme_var = "自动"
+        self.cache_size_var = "正在计算..."
+        self.update_channel_var = "稳定版 (Release)"
+        self.pytorch_version_var = "2.8.0 (CUDA 12.9)"
+        self.package_var = ""
+        self.version_constraint_var = ""
+        self.pytorch_status_var = "未检查"
+        self.model_status_var = ""
+        self.package_status_var = ""
+        self.auto_sort_var = False
+
+        # 存储引用以便主题更新
+        self.components_to_update = []
+
+        # 设置Win11风格
+        self._apply_win11_style()
 
         self._create_widgets()
+        self._setup_connections()
 
-    def update_theme(self):
-        """更新此页面上所有自定义组件的主题"""
-        self.is_dark_mode = self.controller.is_dark_mode
-        # 更新所有可折叠面板
-        panels = [
-            self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
-            self.pytorch_panel, self.model_panel, self.python_panel,
-            self.theme_panel, self.cache_panel, self.update_panel, self.quick_mark_panel
-        ]
-        for panel in panels:
-            if hasattr(panel, 'update_theme'):
-                panel.update_theme()
+        # 初始化数据
+        QTimer.singleShot(100, self._post_init)
 
-        # 更新其他需要手动调整的组件
-        style = ttk.Style()
-        bg_color = style.lookup('TFrame', 'background') or ('#2b2b2b' if self.is_dark_mode else '#f5f5f5')
-        self.params_canvas.config(bg=bg_color)
-        self.env_canvas.config(bg=bg_color)
-        self.software_canvas.config(bg=bg_color)
+    def _apply_win11_style(self):
+        """应用Win11风格"""
+        palette = self.palette()
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
 
-    def _create_widgets(self) -> None:
-        """创建高级设置页面的控件"""
-        self.advanced_notebook = ttk.Notebook(self)
-        self.advanced_notebook.pack(fill="both", expand=True, padx=20, pady=10)
+        bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
 
-        self.model_params_tab = ttk.Frame(self.advanced_notebook)
-        self.advanced_notebook.add(self.model_params_tab, text="模型参数设置")
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {bg_color.name()};
+                color: {Win11Colors.DARK_TEXT_PRIMARY.name() if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY.name()};
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }}
+        """)
 
-        self.env_maintenance_tab = ttk.Frame(self.advanced_notebook)
-        self.advanced_notebook.add(self.env_maintenance_tab, text="环境维护")
+    def _create_widgets(self):
+        """创建控件"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
 
-        self.software_settings_tab = ttk.Frame(self.advanced_notebook)
-        self.advanced_notebook.add(self.software_settings_tab, text="软件设置")
+        # 创建滚动区域
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        layout.addWidget(scroll_area)
 
-        self.advanced_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # 内容容器
+        content_widget = QWidget()
+        scroll_area.setWidget(content_widget)
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(20)
 
+        # 模型参数设置
+        model_params_group = ModernGroupBox("模型参数设置")
+        content_layout.addWidget(model_params_group)
+        self.model_params_layout = QVBoxLayout(model_params_group)
         self._create_model_params_content()
+
+        # 环境维护
+        env_maintenance_group = ModernGroupBox("环境维护")
+        content_layout.addWidget(env_maintenance_group)
+        self.env_maintenance_layout = QVBoxLayout(env_maintenance_group)
         self._create_env_maintenance_content()
+
+        # 软件设置
+        software_settings_group = ModernGroupBox("软件设置")
+        content_layout.addWidget(software_settings_group)
+        self.software_settings_layout = QVBoxLayout(software_settings_group)
         self._create_software_settings_content()
 
-    def _create_software_settings_content(self) -> None:
-        """创建软件设置标签页内容"""
-        main_frame = ttk.Frame(self.software_settings_tab)
-        main_frame.pack(fill="both", expand=True)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(0, weight=1)
 
-        style = ttk.Style()
-        bg_color = style.lookup('TFrame', 'background') or 'SystemButtonFace'
-        self.software_canvas = tk.Canvas(main_frame, bg=bg_color, highlightthickness=0)
-        self.software_scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.software_canvas.yview)
-        self.software_canvas.configure(yscrollcommand=self.software_scrollbar.set)
-        self.software_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.software_canvas.grid(row=0, column=0, sticky="nsew")
-        self.software_content_frame = ttk.Frame(self.software_canvas)
-        self.software_canvas_window = self.software_canvas.create_window(
-            (0, 0), window=self.software_content_frame, anchor="nw"
-        )
-
-        # --- Quick Mark Settings Panel ---
-        self.quick_mark_panel = CollapsiblePanel(
-            self.software_content_frame,
-            "快速标记设置",
-            subtitle="手动增减、更改快速标记",
-            icon="🏷️"
-        )
-        self.quick_mark_panel.pack(fill="x", expand=False, pady=(0, 1))
-        self._create_quick_mark_widgets(self.quick_mark_panel.content_padding)
-
-        # --- Theme Panel ---
-        self.theme_panel = CollapsiblePanel(
-            self.software_content_frame,
-            "深色模式",
-            subtitle="选择应用的主题模式",
-            icon="🎨"
-        )
-        self.theme_panel.pack(fill="x", expand=False, pady=(0, 1))
-        theme_frame = ttk.Frame(self.theme_panel.content_padding)
-        theme_frame.pack(fill="x", pady=5)
-
-        theme_combo = ttk.Combobox(
-            theme_frame,
-            textvariable=self.theme_var,
-            values=["浅色", "深色", "自动"],
-            state="readonly"
-        )
-        theme_combo.pack(fill="x", expand=True)
-        theme_combo.bind("<<ComboboxSelected>>", lambda event: self.controller.change_theme())
-
-        # --- Cache Management Panel ---
-        self.cache_panel = CollapsiblePanel(
-            self.software_content_frame,
-            "缓存管理",
-            subtitle="清除应用程序生成的临时文件",
-            icon="🗑️"
-        )
-        self.cache_panel.pack(fill="x", expand=False, pady=(0, 1))
-
-        cache_action_frame = ttk.Frame(self.cache_panel.content_padding)
-        cache_action_frame.pack(fill="x", pady=5)
-        cache_action_frame.columnconfigure(0, weight=1)
-
-        cache_info_label = ttk.Label(cache_action_frame, textvariable=self.cache_size_var)
-        cache_info_label.grid(row=0, column=0, sticky='w', pady=(0, 10))
-
-        buttons_container = ttk.Frame(cache_action_frame)
-        buttons_container.grid(row=1, column=0, sticky='e')
-
-        refresh_button = ttk.Button(
-            buttons_container,
-            text="刷新大小",
-            command=self.update_cache_size,
-            style="Secondary.TButton"
-        )
-        refresh_button.pack(side='left', padx=(0, 5))
-
-        clear_cache_button = ttk.Button(
-            buttons_container,
-            text="清除缓存",
-            command=self._clear_image_cache_with_refresh,
-            style="Action.TButton"
-        )
-        clear_cache_button.pack(side='left')
-
-        # --- 更新面板 ---
-        self.update_panel = CollapsiblePanel(
-            self.software_content_frame,
-            "软件更新",
-            subtitle="检查、更新和管理软件版本",
-            icon="🔄"
-        )
-        self.update_panel.pack(fill="x", expand=False, pady=(0, 1))
-
-        # --- 更新面板内容 ---
-        channel_frame = ttk.Frame(self.update_panel.content_padding)
-        channel_frame.pack(fill="x", pady=5)
-        ttk.Label(channel_frame, text="选择更新通道").pack(side="top", anchor="w", pady=(0, 5))
-
-        self.controller.update_channel_var = tk.StringVar(value="稳定版 (Release)")
-        channel_combo = ttk.Combobox(
-            channel_frame,
-            textvariable=self.controller.update_channel_var,
-            values=["稳定版 (Release)", "预览版 (Preview)"],
-            state="readonly"
-        )
-        channel_combo.pack(fill="x", expand=True)
-
-        update_action_frame = ttk.Frame(self.update_panel.content_padding)
-        update_action_frame.pack(fill="x", pady=(10, 5), expand=True)
-
-        self.update_status_label = ttk.Label(update_action_frame, text=f"当前版本: {APP_VERSION}")
-        self.update_status_label.pack(side="left", anchor='w')
-
-        self.check_update_button = ttk.Button(
-            update_action_frame,
-            text="检查更新",
-            command=self.controller.check_for_updates_from_ui,
-            style="Action.TButton"
-        )
-        self.check_update_button.pack(side="right")
-
-        self._configure_software_scrolling()
-        self.master.after(100, lambda: self.software_canvas.yview_moveto(0.0))
-
-    def update_cache_size(self):
-        """Calculates and updates the cache size display in a separate thread."""
-        self.cache_size_var.set("缓存大小: 正在计算...")
-        self.master.update_idletasks()
-
-        def get_dir_size(path):
-            total_size = 0
-            try:
-                for dirpath, dirnames, filenames in os.walk(path):
-                    for f in filenames:
-                        fp = os.path.join(dirpath, f)
-                        if not os.path.islink(fp):
-                            total_size += os.path.getsize(fp)
-            except FileNotFoundError:
-                return 0  # Path doesn't exist
-            return total_size
-
-        def size_thread():
-            cache_dir = os.path.join(self.controller.settings_manager.base_dir, "temp", "photo")
-            size_in_bytes = get_dir_size(cache_dir)
-
-            if size_in_bytes < 1024:
-                size_str = f"{size_in_bytes} Bytes"
-            elif size_in_bytes < 1024 ** 2:
-                size_str = f"{size_in_bytes / 1024:.2f} KB"
-            elif size_in_bytes < 1024 ** 3:
-                size_str = f"{size_in_bytes / 1024 ** 2:.2f} MB"
-            else:
-                size_str = f"{size_in_bytes / 1024 ** 3:.2f} GB"
-
-            if self.winfo_exists():
-                self.cache_size_var.set(f"缓存大小: {size_str}")
-
-        self.master.after(500, lambda: threading.Thread(target=size_thread, daemon=True).start())
-
-    def _clear_image_cache_with_refresh(self):
-        self.controller.clear_image_cache()
-        self.master.after(500, self.update_cache_size)
-
-    def _configure_software_scrolling(self):
-        """配置软件设置页面的滚动"""
-
-        def _update_scrollregion(event=None):
-            self.software_canvas.configure(scrollregion=self.software_canvas.bbox("all"))
-
-        def _configure_canvas(event):
-            canvas_width = event.width
-            if self.software_canvas.winfo_exists() and self.software_canvas_window:
-                self.software_canvas.itemconfigure(self.software_canvas_window, width=canvas_width)
-
-        def _on_mousewheel(event):
-            if platform.system() == "Windows":
-                self.software_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            else:
-                self.software_canvas.yview_scroll(int(event.delta), "units")
-
-        self.software_canvas.bind("<MouseWheel>", _on_mousewheel)
-        self.software_content_frame.bind("<Configure>", _update_scrollregion)
-        self.software_canvas.bind("<Configure>", _configure_canvas)
-
-    def _on_tab_changed(self, event):
-        current_tab_index = self.advanced_notebook.index(self.advanced_notebook.select())
-        if current_tab_index == 1:  # Env Maintenance
-            if hasattr(self, 'env_canvas'):
-                self.master.after(10, lambda: self.env_canvas.configure(scrollregion=self.env_canvas.bbox("all")))
-        elif current_tab_index == 2:  # Software Settings
-            if hasattr(self, 'software_canvas'):
-                self.master.after(10,
-                                  lambda: self.software_canvas.configure(scrollregion=self.software_canvas.bbox("all")))
-                self.update_cache_size()
-
-    def _create_model_params_content(self) -> None:
+    def _create_model_params_content(self):
         """创建模型参数设置内容"""
-        main_frame = ttk.Frame(self.model_params_tab)
-        main_frame.pack(fill="both", expand=True)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(0, weight=1)
+        # 主内容容器
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(12)
 
-        style = ttk.Style()
-        bg_color = style.lookup('TFrame', 'background') or 'SystemButtonFace'
-        self.params_canvas = tk.Canvas(main_frame, bg=bg_color, highlightthickness=0)
-
-        self.params_scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.params_canvas.yview)
-        self.params_canvas.configure(yscrollcommand=self.params_scrollbar.set)
-        self.params_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.params_canvas.grid(row=0, column=0, sticky="nsew")
-
-        self.params_content_frame = ttk.Frame(self.params_canvas)
-        self.params_content_frame.configure(style='TFrame')
-
-        self.params_canvas_window = self.params_canvas.create_window(
-            (0, 0),
-            window=self.params_content_frame,
-            anchor="nw"
-        )
-
+        # 检测阈值设置面板
         self.threshold_panel = CollapsiblePanel(
-            self.params_content_frame,
-            "检测阈值设置",
+            title="检测阈值设置",
             subtitle="调整目标检测的置信度和重叠度阈值",
             icon="🎯"
         )
-        self.threshold_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        iou_frame = ttk.Frame(self.threshold_panel.content_padding)
-        iou_frame.pack(fill="x", pady=5)
-        iou_label_frame = ttk.Frame(iou_frame)
-        iou_label_frame.pack(fill="x", pady=(0, 5))
-        ttk.Label(iou_label_frame, text="IOU阈值").pack(side="left")
-        self.iou_label = ttk.Label(iou_label_frame, text="0.30")
-        self.iou_label.pack(side="right")
-        iou_scale = ttk.Scale(
-            iou_frame,
-            from_=0.1,
-            to=0.9,
-            orient="horizontal",
-            variable=self.controller.iou_var,
-            command=self._update_iou_label
-        )
-        iou_scale.pack(fill="x")
+        threshold_widget = QWidget()
+        threshold_layout = QVBoxLayout(threshold_widget)
+        threshold_layout.setSpacing(15)
 
-        conf_frame = ttk.Frame(self.threshold_panel.content_padding)
-        conf_frame.pack(fill="x", pady=10)
-        conf_label_frame = ttk.Frame(conf_frame)
-        conf_label_frame.pack(fill="x", pady=(0, 5))
-        ttk.Label(conf_label_frame, text="置信度阈值").pack(side="left")
-        self.conf_label = ttk.Label(conf_label_frame, text="0.25")
-        self.conf_label.pack(side="right")
-        conf_scale = ttk.Scale(
-            conf_frame,
-            from_=0.05,
-            to=0.95,
-            orient="horizontal",
-            variable=self.controller.conf_var,
-            command=self._update_conf_label
-        )
-        conf_scale.pack(fill="x")
+        # IOU阈值
+        iou_frame = QFrame()
+        iou_layout = QVBoxLayout(iou_frame)
 
+        iou_label_frame = QFrame()
+        iou_label_layout = QHBoxLayout(iou_label_frame)
+        iou_label_layout.setContentsMargins(0, 0, 0, 0)
+
+        iou_title = QLabel("IOU阈值")
+        iou_title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.iou_label = QLabel("0.30")
+        self.iou_label.setFont(QFont("Segoe UI", 10))
+
+        iou_label_layout.addWidget(iou_title)
+        iou_label_layout.addStretch()
+        iou_label_layout.addWidget(self.iou_label)
+
+        self.iou_slider = ModernSlider()
+        self.iou_slider.setRange(10, 90)
+        self.iou_slider.setValue(int(self.iou_var * 100))
+        self.components_to_update.append(self.iou_slider)
+
+        iou_layout.addWidget(iou_label_frame)
+        iou_layout.addWidget(self.iou_slider)
+        threshold_layout.addWidget(iou_frame)
+
+        # 置信度阈值
+        conf_frame = QFrame()
+        conf_layout = QVBoxLayout(conf_frame)
+
+        conf_label_frame = QFrame()
+        conf_label_layout = QHBoxLayout(conf_label_frame)
+        conf_label_layout.setContentsMargins(0, 0, 0, 0)
+
+        conf_title = QLabel("置信度阈值")
+        conf_title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.conf_label = QLabel("0.25")
+        self.conf_label.setFont(QFont("Segoe UI", 10))
+
+        conf_label_layout.addWidget(conf_title)
+        conf_label_layout.addStretch()
+        conf_label_layout.addWidget(self.conf_label)
+
+        self.conf_slider = ModernSlider()
+        self.conf_slider.setRange(5, 95)
+        self.conf_slider.setValue(int(self.conf_var * 100))
+        self.components_to_update.append(self.conf_slider)
+
+        conf_layout.addWidget(conf_label_frame)
+        conf_layout.addWidget(self.conf_slider)
+        threshold_layout.addWidget(conf_frame)
+
+        self.threshold_panel.add_content_widget(threshold_widget)
+        content_layout.addWidget(self.threshold_panel)
+
+        # 模型加速选项面板
         self.accel_panel = CollapsiblePanel(
-            self.params_content_frame,
-            "模型加速选项",
+            title="模型加速选项",
             subtitle="控制推理速度与精度的平衡",
             icon="⚡"
         )
-        self.accel_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        fp16_frame = ttk.Frame(self.accel_panel.content_padding)
-        fp16_frame.pack(fill="x", pady=5)
-        fp16_check = ttk.Checkbutton(
-            fp16_frame,
-            text="使用FP16加速 (需要支持CUDA)",
-            variable=self.controller.use_fp16_var,
-            state="normal" if self.controller.cuda_available else "disabled"
-        )
-        fp16_check.pack(anchor="w")
-        if not self.controller.cuda_available:
-            cuda_warning = ttk.Label(
-                fp16_frame,
-                text="未检测到CUDA，FP16加速已禁用",
-                foreground="red"
-            )
-            cuda_warning.pack(anchor="w", pady=(5, 0))
+        accel_widget = QWidget()
+        accel_layout = QVBoxLayout(accel_widget)
 
+        # 替换为开关行
+        self.fp16_switch_row = SwitchRow("使用FP16加速 (需要支持CUDA)", checked=self.use_fp16_var)
+        self.fp16_switch_row.switch().setEnabled(
+            self.controller.cuda_available if hasattr(self.controller, 'cuda_available') else False)
+        self.fp16_switch_row.toggled.connect(self._on_setting_changed)
+        self.components_to_update.append(self.fp16_switch_row)
+        accel_layout.addWidget(self.fp16_switch_row)
+
+        if not (hasattr(self.controller, 'cuda_available') and self.controller.cuda_available):
+            cuda_warning = QLabel("未检测到CUDA，FP16加速已禁用")
+            cuda_warning.setStyleSheet("color: #e74c3c; font-size: 12px;")
+            accel_layout.addWidget(cuda_warning)
+
+        self.accel_panel.add_content_widget(accel_widget)
+        content_layout.addWidget(self.accel_panel)
+
+        # 高级检测选项面板
         self.advanced_detect_panel = CollapsiblePanel(
-            self.params_content_frame,
-            "高级检测选项",
+            title="高级检测选项",
             subtitle="配置增强检测功能和特殊选项",
             icon="🔍"
         )
-        self.advanced_detect_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        augment_frame = ttk.Frame(self.advanced_detect_panel.content_padding)
-        augment_frame.pack(fill="x", pady=5)
-        augment_check = ttk.Checkbutton(
-            augment_frame,
-            text="使用数据增强 (Test-Time Augmentation)",
-            variable=self.controller.use_augment_var
-        )
-        augment_check.pack(anchor="w")
+        advanced_widget = QWidget()
+        advanced_layout = QVBoxLayout(advanced_widget)
 
-        agnostic_frame = ttk.Frame(self.advanced_detect_panel.content_padding)
-        agnostic_frame.pack(fill="x", pady=5)
-        agnostic_check = ttk.Checkbutton(
-            agnostic_frame,
-            text="使用类别无关NMS (Class-Agnostic NMS)",
-            variable=self.controller.use_agnostic_nms_var
-        )
-        agnostic_check.pack(anchor="w")
+        # 替换为开关行
+        self.augment_switch_row = SwitchRow("使用数据增强 (Test-Time Augmentation)", checked=self.use_augment_var)
+        self.augment_switch_row.toggled.connect(self._on_setting_changed)
+        self.components_to_update.append(self.augment_switch_row)
+        advanced_layout.addWidget(self.augment_switch_row)
 
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=10)
-        separator = ttk.Separator(bottom_frame, orient="horizontal")
-        separator.pack(fill="x", pady=10)
-        button_frame = ttk.Frame(bottom_frame)
-        button_frame.pack(fill="x", padx=10)
-        help_button = ttk.Button(
-            button_frame,
-            text="参数说明",
-            command=self.controller.show_params_help,
-            width=14
-        )
-        help_button.pack(side="left", padx=5)
-        reset_button = ttk.Button(
-            button_frame,
-            text="重置为默认值",
-            command=self._reset_model_params,
-            width=14
-        )
-        reset_button.pack(side="right", padx=5)
+        self.agnostic_switch_row = SwitchRow("使用类别无关NMS (Class-Agnostic NMS)", checked=self.use_agnostic_nms_var)
+        self.agnostic_switch_row.toggled.connect(self._on_setting_changed)
+        self.components_to_update.append(self.agnostic_switch_row)
+        advanced_layout.addWidget(self.agnostic_switch_row)
 
-        for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel]:
-            panel.bind_toggle_callback(self._on_panel_toggle)
-        self._configure_params_scrolling()
-        self.master.after(100, lambda: self.params_canvas.yview_moveto(0.0))
+        self.advanced_detect_panel.add_content_widget(advanced_widget)
+        content_layout.addWidget(self.advanced_detect_panel)
 
-    def _create_env_maintenance_content(self) -> None:
+        # 底部按钮
+        content_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        button_frame = QFrame()
+        button_layout = QHBoxLayout(button_frame)
+
+        help_button = RoundedButton("参数说明")
+        help_button.setMinimumWidth(120)
+        help_button.clicked.connect(self.params_help_requested.emit)
+
+        reset_button = RoundedButton("重置为默认值")
+        reset_button.setMinimumWidth(120)
+        reset_button.clicked.connect(self._reset_model_params)
+
+        button_layout.addWidget(help_button)
+        button_layout.addStretch()
+        button_layout.addWidget(reset_button)
+
+        content_layout.addWidget(button_frame)
+        self.model_params_layout.addWidget(content_widget)
+
+
+    def _create_env_maintenance_content(self):
         """创建环境维护标签页内容"""
-        for widget in self.env_maintenance_tab.winfo_children():
-            widget.destroy()
+        # 主内容容器
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(12)
 
-        self.env_scrollable = ttk.Frame(self.env_maintenance_tab)
-        self.env_scrollable.pack(fill="both", expand=True)
-
-        style = ttk.Style()
-        bg_color = style.lookup('TFrame', 'background') or 'SystemButtonFace'
-        self.env_canvas = tk.Canvas(self.env_scrollable, bg=bg_color, highlightthickness=0)
-
-        self.env_canvas.pack(side="left", fill="both", expand=True)
-        self.env_scrollbar = ttk.Scrollbar(self.env_scrollable, orient="vertical", command=self.env_canvas.yview)
-        self.env_scrollbar.pack(side="right", fill="y")
-        self.env_canvas.configure(yscrollcommand=self.env_scrollbar.set)
-        self.env_content_frame = ttk.Frame(self.env_canvas)
-        self.env_canvas_window = self.env_canvas.create_window(
-            (0, 0),
-            window=self.env_content_frame,
-            anchor="nw"
-        )
-
+        # PyTorch安装面板
         self.pytorch_panel = CollapsiblePanel(
-            self.env_content_frame,
-            "安装 PyTorch",
+            title="安装 PyTorch",
             subtitle="安装或修复 PyTorch",
             icon="📦"
         )
-        self.pytorch_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        version_frame = ttk.Frame(self.pytorch_panel.content_padding)
-        version_frame.pack(fill="x", pady=5)
-        ttk.Label(version_frame, text="选择版本").pack(side="top", anchor="w", pady=(0, 5))
-        self.pytorch_version_var = tk.StringVar()
+        pytorch_widget = QWidget()
+        pytorch_layout = QVBoxLayout(pytorch_widget)
+        pytorch_layout.setSpacing(15)
+
+        # 版本选择
+        version_label = QLabel("选择版本")
+        version_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        pytorch_layout.addWidget(version_label)
+
+        self.pytorch_version_combo = ModernComboBox()
         versions = [
+            "2.8.0 (CUDA 12.9)",
+            "2.8.0 (CUDA 12.8)",
+            "2.8.0 (CUDA 12.6)",
+            "2.8.0 (CPU Only)",
             "2.7.1 (CUDA 12.8)",
             "2.7.1 (CUDA 12.6)",
             "2.7.1 (CUDA 11.8)",
             "2.7.1 (CPU Only)",
         ]
-        style.configure("Dropdown.TCombobox", padding=(10, 5))
-        version_combo = ttk.Combobox(
-            version_frame,
-            textvariable=self.pytorch_version_var,
-            values=versions,
-            state="readonly",
-            style="Dropdown.TCombobox"
-        )
-        version_combo.pack(fill="x", expand=True)
-        version_combo.current(0)
+        self.pytorch_version_combo.addItems(versions)
+        self.pytorch_version_combo.setCurrentText(self.pytorch_version_var)
+        self.components_to_update.append(self.pytorch_version_combo)
+        pytorch_layout.addWidget(self.pytorch_version_combo)
 
-        options_frame = ttk.Frame(self.pytorch_panel.content_padding)
-        options_frame.pack(fill="x", pady=10)
-        ttk.Label(
-            options_frame,
-            text="将先卸载现有的torch、torchvision、torchaudio模块再重新安装",
-            foreground="#666666",
-            font=("Segoe UI", 8)
-        ).pack(anchor="w", padx=(0, 0))
+        # 说明文本
+        warning_label = QLabel("将先卸载现有的torch、torchvision、torchaudio模块再重新安装")
+        warning_label.setStyleSheet("color: #666666; font-size: 12px;")
+        warning_label.setWordWrap(True)
+        pytorch_layout.addWidget(warning_label)
 
-        bottom_frame = ttk.Frame(self.pytorch_panel.content_padding)
-        bottom_frame.pack(fill="x", pady=(10, 0))
-        self.pytorch_status_var = tk.StringVar(value="")
-        ttk.Label(bottom_frame, textvariable=self.pytorch_status_var).pack(side="left")
-        self.install_button = ttk.Button(
-            bottom_frame,
-            text="安装",
-            command=self._install_pytorch,
-            style="Action.TButton"
-        )
-        style.configure("Action.TButton", font=("Segoe UI", 9))
-        self.install_button.pack(side="right")
+        # 状态和安装按钮
+        pytorch_bottom_frame = QFrame()
+        pytorch_bottom_layout = QHBoxLayout(pytorch_bottom_frame)
 
+        self.pytorch_status_label = QLabel(self.pytorch_status_var)
+        self.pytorch_status_label.setFont(QFont("Segoe UI", 10))
+
+        self.install_pytorch_button = RoundedButton("安装")
+        self.install_pytorch_button.setMinimumWidth(80)
+        self.install_pytorch_button.clicked.connect(self._install_pytorch)
+
+        pytorch_bottom_layout.addWidget(self.pytorch_status_label)
+        pytorch_bottom_layout.addStretch()
+        pytorch_bottom_layout.addWidget(self.install_pytorch_button)
+
+        pytorch_layout.addWidget(pytorch_bottom_frame)
+
+        self.pytorch_panel.add_content_widget(pytorch_widget)
+        content_layout.addWidget(self.pytorch_panel)
+
+        # 模型管理面板
         self.model_panel = CollapsiblePanel(
-            self.env_content_frame,
-            "模型管理",
+            title="模型管理",
             subtitle="管理用于识别的模型",
             icon="🔧"
         )
-        self.model_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        model_selection_frame = ttk.Frame(self.model_panel.content_padding)
-        model_selection_frame.pack(fill="x", pady=5)
-        ttk.Label(model_selection_frame, text="当前使用的模型").pack(anchor="w", pady=(0, 5))
-        model_name = os.path.basename(self.controller.image_processor.model_path) if hasattr(
-            self.controller.image_processor, 'model_path') and self.controller.image_processor.model_path else "未知"
-        self.current_model_var = tk.StringVar(value=model_name)
-        style.configure("ReadOnly.TEntry", fieldbackground="#f0f0f0" if not self.is_dark_mode else "#3a3a3a")
-        current_model_entry = ttk.Entry(
-            model_selection_frame,
-            textvariable=self.current_model_var,
-            state="readonly",
-            style="ReadOnly.TEntry"
-        )
-        current_model_entry.pack(fill="x", expand=True, pady=(0, 10))
-        ttk.Label(model_selection_frame, text="选择可用模型").pack(anchor="w", pady=(0, 5))
-        #self.model_selection_var = tk.StringVar()
-        self.model_combobox = ttk.Combobox(
-            model_selection_frame,
-            textvariable=self.controller.model_var,
-            state="readonly",
-            style="Dropdown.TCombobox"
-        )
-        self.model_combobox.pack(fill="x", expand=True)
-        model_buttons_frame = ttk.Frame(self.model_panel.content_padding)
-        model_buttons_frame.pack(fill="x", pady=10)
-        self.model_status_var = tk.StringVar(value="")
-        ttk.Label(model_buttons_frame, textvariable=self.model_status_var).pack(side="left")
-        refresh_btn = ttk.Button(
-            model_buttons_frame,
-            text="刷新列表",
-            command=self._refresh_model_list,
-            style="Secondary.TButton"
-        )
-        style.configure("Secondary.TButton", font=("Segoe UI", 9))
-        refresh_btn.pack(side="right", padx=(0, 5))
-        apply_btn = ttk.Button(
-            model_buttons_frame,
-            text="应用模型",
-            command=self._apply_selected_model,
-            style="Action.TButton"
-        )
-        apply_btn.pack(side="right")
+        model_widget = QWidget()
+        model_layout = QVBoxLayout(model_widget)
+        model_layout.setSpacing(15)
 
+        # 选择模型
+        select_model_label = QLabel("选择可用模型")
+        select_model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        model_layout.addWidget(select_model_label)
+
+        self.model_combo = ModernComboBox()
+        self.components_to_update.append(self.model_combo)
+        model_layout.addWidget(self.model_combo)
+
+        # 状态和按钮
+        model_bottom_frame = QFrame()
+        model_bottom_layout = QHBoxLayout(model_bottom_frame)
+
+        self.model_status_label = QLabel(self.model_status_var)
+        self.model_status_label.setFont(QFont("Segoe UI", 10))
+
+        refresh_model_button = RoundedButton("刷新列表")
+        refresh_model_button.setMinimumWidth(80)
+        refresh_model_button.clicked.connect(self._refresh_model_list)
+
+        model_bottom_layout.addWidget(self.model_status_label)
+        model_bottom_layout.addStretch()
+        model_bottom_layout.addWidget(refresh_model_button)
+
+        model_layout.addWidget(model_bottom_frame)
+
+        self.model_panel.add_content_widget(model_widget)
+        content_layout.addWidget(self.model_panel)
+
+        # Python包管理面板
         self.python_panel = CollapsiblePanel(
-            self.env_content_frame,
-            "重装单个 Python 组件",
+            title="重装单个 Python 组件",
             subtitle="重新安装单个 Pip 软件包",
             icon="🐍"
         )
-        self.python_panel.pack(fill="x", expand=False, pady=(0, 1))
 
-        package_frame = ttk.Frame(self.python_panel.content_padding)
-        package_frame.pack(fill="x", pady=5)
-        ttk.Label(package_frame, text="输入包名称").pack(anchor="w", pady=(0, 5))
-        self.package_var = tk.StringVar()
-        ttk.Entry(package_frame, textvariable=self.package_var).pack(fill="x", expand=True)
+        python_widget = QWidget()
+        python_layout = QVBoxLayout(python_widget)
+        python_layout.setSpacing(15)
 
-        version_constraint_frame = ttk.Frame(self.python_panel.content_padding)
-        version_constraint_frame.pack(fill="x", pady=10)
-        ttk.Label(version_constraint_frame, text="版本约束 (可选)").pack(anchor="w", pady=(0, 5))
-        self.version_constraint_var = tk.StringVar()
-        ttk.Entry(version_constraint_frame, textvariable=self.version_constraint_var).pack(fill="x", expand=True)
-        ttk.Label(
-            version_constraint_frame,
-            text="示例: ==1.0.0, >=2.0.0, <3.0.0",
-            font=("Segoe UI", 8),
-            foreground="#888888"
-        ).pack(anchor="w", pady=(2, 0))
+        # 包名称
+        package_label = QLabel("输入包名称")
+        package_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        python_layout.addWidget(package_label)
 
-        package_buttons_frame = ttk.Frame(self.python_panel.content_padding)
-        package_buttons_frame.pack(fill="x", pady=(10, 0))
-        self.package_status_var = tk.StringVar(value="")
-        ttk.Label(package_buttons_frame, textvariable=self.package_status_var).pack(side="left")
-        self.install_package_btn = ttk.Button(
-            package_buttons_frame,
-            text="安装",
-            command=self._install_python_package,
-            style="Action.TButton"
+        self.package_edit = ModernLineEdit("例如: numpy")
+        self.components_to_update.append(self.package_edit)
+        python_layout.addWidget(self.package_edit)
+
+        # 版本约束
+        version_constraint_label = QLabel("版本约束 (可选)")
+        version_constraint_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        python_layout.addWidget(version_constraint_label)
+
+        self.version_constraint_edit = ModernLineEdit("例如: >=1.0.0")
+        self.components_to_update.append(self.version_constraint_edit)
+        python_layout.addWidget(self.version_constraint_edit)
+
+        version_example = QLabel("示例: ==1.0.0, >=2.0.0, <3.0.0")
+        version_example.setStyleSheet("color: #888888; font-size: 12px;")
+        python_layout.addWidget(version_example)
+
+        # 状态和安装按钮
+        python_bottom_frame = QFrame()
+        python_bottom_layout = QHBoxLayout(python_bottom_frame)
+
+        self.package_status_label = QLabel(self.package_status_var)
+        self.package_status_label.setFont(QFont("Segoe UI", 10))
+
+        self.install_package_button = RoundedButton("安装")
+        self.install_package_button.setMinimumWidth(80)
+        self.install_package_button.clicked.connect(self._install_python_package)
+
+        python_bottom_layout.addWidget(self.package_status_label)
+        python_bottom_layout.addStretch()
+        python_bottom_layout.addWidget(self.install_package_button)
+
+        python_layout.addWidget(python_bottom_frame)
+
+        self.python_panel.add_content_widget(python_widget)
+        content_layout.addWidget(self.python_panel)
+
+        content_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        self.env_maintenance_layout.addWidget(content_widget)
+
+    def _create_software_settings_content(self):
+        """创建软件设置标签页内容"""
+        # 主内容容器
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(12)
+
+        # 快速标记设置面板
+        self.quick_mark_panel = CollapsiblePanel(
+            title="快速标记设置",
+            subtitle="手动增减、更改快速标记",
+            icon="🏷️"
         )
-        self.install_package_btn.pack(side="right")
 
-        self._refresh_model_list()
+        quick_mark_widget = QWidget()
+        quick_mark_layout = QVBoxLayout(quick_mark_widget)
+
+        # 自动排序开关
+        self.auto_sort_switch_row = SwitchRow("自动排序", checked=self.auto_sort_var)
+        self.auto_sort_switch_row.toggled.connect(self._on_auto_sort_changed)  # 确保这一行存在
+        self.components_to_update.append(self.auto_sort_switch_row)
+        quick_mark_layout.addWidget(self.auto_sort_switch_row)
+
+        # 清空排序数据按钮 - 新的一行，靠右对齐
+        reset_mark_button_frame = QFrame()
+        reset_mark_button_layout = QHBoxLayout(reset_mark_button_frame)
+        reset_mark_button_layout.setContentsMargins(0, 4, 0, 8)  # 上边距小一些，下边距大一些
+
+        reset_mark_button = RoundedButton("清空排序数据")
+        reset_mark_button.setMinimumWidth(120)
+        reset_mark_button.clicked.connect(self._reset_quick_mark_data)
+
+        reset_mark_button_layout.addStretch()  # 添加弹性空间，将按钮推到右边
+        reset_mark_button_layout.addWidget(reset_mark_button)
+
+        quick_mark_layout.addWidget(reset_mark_button_frame)
+
+        # 物种列表标题
+        species_header_frame = QFrame()
+        species_header_layout = QHBoxLayout(species_header_frame)
+
+        order_header = QLabel("排列序号")
+        order_header.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        order_header.setFixedWidth(80)
+
+        name_header = QLabel("物种名称")
+        name_header.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+
+        species_header_layout.addWidget(order_header)
+        species_header_layout.addWidget(name_header, 1)
+        species_header_layout.addWidget(QLabel("操作"))  # 为删除按钮预留空间
+
+        quick_mark_layout.addWidget(species_header_frame)
+
+        # 物种列表容器
+        self.species_list_frame = QFrame()
+        self.species_list_layout = QVBoxLayout(self.species_list_frame)
+        self.species_list_layout.setContentsMargins(0, 0, 0, 0)
+        quick_mark_layout.addWidget(self.species_list_frame)
+
+        # 底部按钮区域（新增和保存按钮）
+        quick_mark_buttons_frame = QFrame()
+        quick_mark_buttons_layout = QHBoxLayout(quick_mark_buttons_frame)
+
+        add_species_button = RoundedButton("新增")
+        add_species_button.setMinimumWidth(80)
+        add_species_button.clicked.connect(self._add_new_quick_mark_row)
+
+        save_species_button = RoundedButton("保存更改")
+        save_species_button.setMinimumWidth(100)
+        save_species_button.clicked.connect(self.save_quick_mark_settings)
+
+        quick_mark_buttons_layout.addStretch()
+        quick_mark_buttons_layout.addWidget(add_species_button)
+        quick_mark_buttons_layout.addWidget(save_species_button)
+
+        quick_mark_layout.addWidget(quick_mark_buttons_frame)
+
+        self.quick_mark_panel.add_content_widget(quick_mark_widget)
+        content_layout.addWidget(self.quick_mark_panel)
+
+        # 主题设置面板
+        self.theme_panel = CollapsiblePanel(
+            title="深色模式",
+            subtitle="选择应用的主题模式",
+            icon="🎨"
+        )
+
+        theme_widget = QWidget()
+        theme_layout = QVBoxLayout(theme_widget)
+
+        self.theme_combo = ModernComboBox()
+        self.theme_combo.addItems(["浅色", "深色", "自动"])
+        self.theme_combo.setCurrentText(self.theme_var)
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        self.components_to_update.append(self.theme_combo)
+        theme_layout.addWidget(self.theme_combo)
+
+        self.theme_panel.add_content_widget(theme_widget)
+        content_layout.addWidget(self.theme_panel)
+
+        # 缓存管理面板
+        self.cache_panel = CollapsiblePanel(
+            title="缓存管理",
+            subtitle="清除应用程序生成的临时文件",
+            icon="🗑️"
+        )
+
+        cache_widget = QWidget()
+        cache_layout = QVBoxLayout(cache_widget)
+
+        self.cache_size_label = QLabel(self.cache_size_var)
+        self.cache_size_label.setFont(QFont("Segoe UI", 10))
+        cache_layout.addWidget(self.cache_size_label)
+
+        cache_buttons_frame = QFrame()
+        cache_buttons_layout = QHBoxLayout(cache_buttons_frame)
+
+        refresh_cache_button = RoundedButton("刷新大小")
+        refresh_cache_button.setMinimumWidth(80)
+        refresh_cache_button.clicked.connect(self.update_cache_size)
+
+        clear_cache_button = RoundedButton("清除缓存")
+        clear_cache_button.setMinimumWidth(80)
+        clear_cache_button.clicked.connect(self._clear_image_cache_with_refresh)
+
+        cache_buttons_layout.addStretch()
+        cache_buttons_layout.addWidget(refresh_cache_button)
+        cache_buttons_layout.addWidget(clear_cache_button)
+
+        cache_layout.addWidget(cache_buttons_frame)
+
+        self.cache_panel.add_content_widget(cache_widget)
+        content_layout.addWidget(self.cache_panel)
+
+        # 软件更新面板
+        self.update_panel = CollapsiblePanel(
+            title="软件更新",
+            subtitle="检查、更新和管理软件版本",
+            icon="🔄"
+        )
+
+        update_widget = QWidget()
+        update_layout = QVBoxLayout(update_widget)
+        update_layout.setSpacing(15)
+
+        # 更新通道选择
+        channel_label = QLabel("选择更新通道")
+        channel_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        update_layout.addWidget(channel_label)
+
+        self.update_channel_combo = ModernComboBox()
+        self.update_channel_combo.addItems(["稳定版 (Release)", "预览版 (Preview)"])
+        # 确保设置初始值
+        self.update_channel_combo.setCurrentText(self.update_channel_var)
+        self.components_to_update.append(self.update_channel_combo)
+        update_layout.addWidget(self.update_channel_combo)
+
+        # 状态和检查按钮
+        update_bottom_frame = QFrame()
+        update_bottom_layout = QHBoxLayout(update_bottom_frame)
+
+        self.update_status_label = QLabel(f"当前版本: {APP_VERSION}")
+        self.update_status_label.setFont(QFont("Segoe UI", 10))
+
+        self.check_update_button = RoundedButton("检查更新")
+        self.check_update_button.setMinimumWidth(100)
+        self.check_update_button.clicked.connect(self.update_check_requested.emit)
+
+        update_bottom_layout.addWidget(self.update_status_label)
+        update_bottom_layout.addStretch()
+        update_bottom_layout.addWidget(self.check_update_button)
+
+        update_layout.addWidget(update_bottom_frame)
+
+        self.update_panel.add_content_widget(update_widget)
+        content_layout.addWidget(self.update_panel)
+
+        content_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        self.software_settings_layout.addWidget(content_widget)
+
+    def _setup_connections(self):
+        """设置信号连接"""
+        # 滑块连接 - 确保同时连接标签更新和设置保存
+        self.iou_slider.valueChanged.connect(self._update_iou_label)
+        self.conf_slider.valueChanged.connect(self._update_conf_label)
+        self.auto_sort_switch_row.toggled.connect(self._on_auto_sort_changed)
+
+        # 确保滑块变化时立即触发设置保存
+        self.iou_slider.valueChanged.connect(self._on_setting_changed)
+        self.conf_slider.valueChanged.connect(self._on_setting_changed)
+
+        # 复选框连接
+        self.fp16_switch_row.toggled.connect(self._on_setting_changed)
+        self.augment_switch_row.toggled.connect(self._on_setting_changed)
+        self.agnostic_switch_row.toggled.connect(self._on_setting_changed)
+        self.auto_sort_switch_row.toggled.connect(self._on_auto_sort_changed)
+
+        # 下拉框连接
+        self.pytorch_version_combo.currentTextChanged.connect(self._on_pytorch_version_changed)
+        self.update_channel_combo.currentTextChanged.connect(self._on_update_channel_changed)
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
+
+        # 输入框连接
+        self.package_edit.textChanged.connect(self._on_package_changed)
+        self.version_constraint_edit.textChanged.connect(self._on_version_constraint_changed)
+
+        self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
+
+    def _on_model_selection_changed(self, model_name):
+        """处理模型选择变化。"""
+        if not model_name:
+            return
+
+        current_model = ""
+        if hasattr(self.controller, 'image_processor') and hasattr(self.controller.image_processor, 'model_path'):
+            if self.controller.image_processor.model_path:
+                current_model = os.path.basename(self.controller.image_processor.model_path)
+
+        if model_name == current_model:
+            logger.info(f"模型 {model_name} 已经在使用中")
+            self.model_status_label.setText(f"当前使用: {model_name}")
+            return
+
+        model_path = resource_path(os.path.join("res", model_name))
+        if not os.path.exists(model_path):
+            logger.error(f"模型文件不存在: {model_path}")
+            self.model_status_label.setText("模型文件不存在")
+            return
+
+        self.model_status_label.setText("正在加载...")
+        if hasattr(self.controller, 'start_page'):
+            self.controller.start_page.set_processing_enabled(False)
+
+        # 使用QThread和Worker模式
+        self.thread = QThread()
+        self.worker = ModelLoadWorker(self.controller, model_path, model_name)
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.on_model_loaded)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.thread.start()
+
+    def on_model_loaded(self, model_name, error_string):
+        """处理模型加载完成的结果。"""
+        if error_string:
+            self.model_status_label.setText(f"加载失败: {error_string}")
+        else:
+            self.model_status_label.setText(f"已应用: {model_name}")
+            self.model_combo.setToolTip(f"当前使用的模型: {model_name}")
+            self._on_setting_changed()  # 加载成功后保存设置
+            logger.info(f"模型自动加载成功: {model_name}")
+
+        if hasattr(self.controller, 'start_page'):
+            self.controller.start_page.set_processing_enabled(True)
+
+    def _save_settings_immediately(self):
+        """立即保存设置到JSON文件"""
+        try:
+            # 发出设置变更信号
+            self.settings_changed.emit()
+
+            # 直接调用设置管理器保存设置
+            if hasattr(self.controller, 'settings_manager'):
+                current_settings = self.get_settings()
+                self.controller.settings_manager.save_settings(current_settings)
+                logger.info("设置已立即保存到JSON文件")
+
+            # 如果controller有save_settings方法，也调用它
+            if hasattr(self.controller, 'save_settings'):
+                self.controller.save_settings()
+
+        except Exception as e:
+            logger.error(f"立即保存设置失败: {e}")
+
+    def _post_init(self):
+        """后期初始化"""
         self._check_pytorch_status()
-        self._configure_env_scrolling()
-        self.master.after(100, lambda: self.env_canvas.yview_moveto(0.0))
-
-    def _configure_params_scrolling(self):
-        def _update_scrollregion(event=None):
-            self.params_canvas.configure(scrollregion=self.params_canvas.bbox("all"))
-
-        def _configure_canvas(event):
-            canvas_width = event.width
-            if self.params_canvas.winfo_exists() and self.params_canvas_window:
-                self.params_canvas.itemconfigure(self.params_canvas_window, width=canvas_width)
-
-        def _on_mousewheel(event):
-            view_pos = self.params_canvas.yview()
-            if platform.system() == "Windows":
-                delta = -1 if event.delta > 0 else 1
-            else:
-                if hasattr(event, 'num'):
-                    delta = -1 if event.num == 4 else 1
-                else:
-                    return
-
-            if delta < 0 and view_pos[0] < 0.1:
-                self.params_canvas.yview_moveto(0)
-            else:
-                self.params_canvas.yview_scroll(delta, "units")
-
-            if self.params_canvas.yview()[0] < 0.001:
-                self.params_canvas.yview_moveto(0)
-            return "break"
-
-        self.params_canvas.bind("<MouseWheel>", _on_mousewheel)
-        self.params_canvas.bind("<Button-4>", _on_mousewheel)
-        self.params_canvas.bind("<Button-5>", _on_mousewheel)
-        self.params_content_frame.bind("<Configure>", _update_scrollregion)
-        self.params_canvas.bind("<Configure>", _configure_canvas)
-
-    def _configure_env_scrolling(self):
-        def _update_scrollregion(event=None):
-            self.env_canvas.configure(scrollregion=self.env_canvas.bbox("all"))
-
-        def _configure_canvas(event):
-            canvas_width = event.width
-            if self.env_canvas.winfo_exists() and self.env_canvas_window:
-                self.env_canvas.itemconfigure(self.env_canvas_window, width=canvas_width)
-
-        def _on_mousewheel(event):
-            view_pos = self.env_canvas.yview()
-            if platform.system() == "Windows":
-                delta = -1 if event.delta > 0 else 1
-            else:
-                if hasattr(event, 'num'):
-                    delta = -1 if event.num == 4 else 1
-                else:
-                    return
-
-            if delta < 0 and view_pos[0] < 0.1:
-                self.env_canvas.yview_moveto(0)
-            else:
-                self.env_canvas.yview_scroll(delta, "units")
-            if self.env_canvas.yview()[0] < 0.001:
-                self.env_canvas.yview_moveto(0)
-            return "break"
-
-        self.env_canvas.bind("<MouseWheel>", _on_mousewheel)
-        self.env_canvas.bind("<Button-4>", _on_mousewheel)
-        self.env_canvas.bind("<Button-5>", _on_mousewheel)
-        self.env_content_frame.bind("<Configure>", _update_scrollregion)
-        self.env_canvas.bind("<Configure>", _configure_canvas)
-
-    def _on_panel_toggle(self, panel, is_expanded):
-        current_pos = self.params_canvas.yview()
-        was_at_top = current_pos[0] <= 0.001
-        self.params_content_frame.update_idletasks()
-        self.params_canvas.configure(scrollregion=self.params_canvas.bbox("all"))
-        if was_at_top:
-            self.params_canvas.yview_moveto(0.0)
-        self.master.after(50, self._force_check_params_top)
-
-    def _force_check_params_top(self):
-        current_pos = self.params_canvas.yview()
-        if 0 < current_pos[0] < 0.01:
-            self.params_canvas.yview_moveto(0.0)
+        self._refresh_model_list()
+        self.load_quick_mark_settings()
+        QTimer.singleShot(100, self.update_cache_size)
 
     def _update_iou_label(self, value):
-        """更新IOU标签并设置保留两位小数的值"""
-        rounded_value = round(float(value), 2)
-        self.controller.iou_var.set(rounded_value)
-        self.iou_label.config(text=f"{rounded_value:.2f}")
+        """更新IOU标签"""
+        rounded_value = round(float(value) / 100, 2)
+        self.iou_var = rounded_value
+        self.iou_label.setText(f"{rounded_value:.2f}")
+        self._on_setting_changed()
 
     def _update_conf_label(self, value):
-        """更新置信度标签并设置保留两位小数的值"""
-        rounded_value = round(float(value), 2)
-        self.controller.conf_var.set(rounded_value)
-        self.conf_label.config(text=f"{rounded_value:.2f}")
+        """更新置信度标签"""
+        rounded_value = round(float(value) / 100, 2)
+        self.conf_var = rounded_value
+        self.conf_label.setText(f"{rounded_value:.2f}")
+        self._on_setting_changed()
 
     def _reset_model_params(self):
-        self.controller.iou_var.set(0.3)
-        self._update_iou_label(0.3)
-        self.controller.conf_var.set(0.25)
-        self._update_conf_label(0.25)
-        self.controller.use_fp16_var.set(self.controller.cuda_available)
-        self.controller.use_augment_var.set(True)
-        self.controller.use_agnostic_nms_var.set(True)
-        # self.controller.status_bar.show_message("已重置所有参数到默认值", 3000)
+        """重置模型参数"""
+        self.iou_var = 0.3
+        self.conf_var = 0.25
+        self.use_fp16_var = self.controller.cuda_available if hasattr(self.controller, 'cuda_available') else False
+        self.use_augment_var = True
+        self.use_agnostic_nms_var = True
 
-    def _check_pytorch_status(self) -> None:
+        self.iou_slider.setValue(int(self.iou_var * 100))
+        self.conf_slider.setValue(int(self.conf_var * 100))
+        # 替换为开关行的设置方法
+        self.fp16_switch_row.setChecked(self.use_fp16_var)
+        self.augment_switch_row.setChecked(self.use_augment_var)
+        self.agnostic_switch_row.setChecked(self.use_agnostic_nms_var)
+
+        self._update_iou_label(int(self.iou_var * 100))
+        self._update_conf_label(int(self.conf_var * 100))
+
+        QMessageBox.information(self, "参数重置", "已重置所有参数到默认值")
+
+    def _check_pytorch_status(self):
         """检查PyTorch安装状态"""
         try:
             import torch
             version = torch.__version__
             device = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
-            self.pytorch_status_var.set(f"已安装 v{version} ({device})")
+            self.pytorch_status_var = f"已安装 v{version} ({device})"
+            self.pytorch_status_label.setText(self.pytorch_status_var)
         except ImportError:
-            self.pytorch_status_var.set("未安装")
+            self.pytorch_status_var = "未安装"
+            self.pytorch_status_label.setText(self.pytorch_status_var)
         except Exception as e:
-            self.pytorch_status_var.set(f"检查失败: {str(e)}")
+            self.pytorch_status_var = f"检查失败: {str(e)}"
+            self.pytorch_status_label.setText(self.pytorch_status_var)
 
-    def _install_pytorch(self) -> None:
+    def _install_pytorch(self):
         """安装PyTorch"""
-        version = self.pytorch_version_var.get()
+        version = self.pytorch_version_combo.currentText()
         if not version:
-            messagebox.showerror("错误", "请选择PyTorch版本", parent=self.master)
+            QMessageBox.critical(self, "错误", "请选择PyTorch版本")
             return
 
-        # 构建确认信息，明确告知用户将先卸载
         message = f"将安装 PyTorch {version}。\n\n此操作会强制卸载任何现有版本，是否继续？"
 
-        # 弹出确认对话框
-        if not messagebox.askyesno("确认安装", message, parent=self.master):
+        reply = QMessageBox.question(
+            self, "确认安装", message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         is_cuda = "CPU" not in version
@@ -723,42 +822,23 @@ class AdvancedPage(ttk.Frame):
         if pytorch_match:
             pytorch_version = pytorch_match.group(1)
         else:
-            messagebox.showerror("错误", "无法解析PyTorch版本", parent=self.master)
+            QMessageBox.critical(self, "错误", "无法解析PyTorch版本")
             return
 
-        self.install_button.configure(state="disabled")
-        self.pytorch_status_var.set("准备安装...")
-        self.master.update_idletasks()
+        self.install_pytorch_button.setEnabled(False)
+        self.pytorch_status_label.setText("准备安装...")
 
-        def install_thread():
-            try:
-                self._run_pytorch_install(pytorch_version, cuda_version)
-            except Exception as e:
-                self.master.after(0, lambda: self.pytorch_status_var.set(f"安装失败: {str(e)}"))
-                self.master.after(0, lambda: self.install_button.configure(state="normal"))
-
-        threading.Thread(target=install_thread, daemon=True).start()
-
-    def _get_python_command_prefix(self):
-        """获取用于调用pip的python.exe命令前缀"""
-        # --- 新增代码：动态获取python.exe路径 ---
-        program_root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        python_exe_path = os.path.join(program_root_dir, "toolkit", "python.exe")
-
-        if not os.path.exists(python_exe_path):
-            print(f"警告: 未在 {program_root_dir}\\toolkit 找到 python.exe, 将回退到默认python。")
-            # 在命令行中，直接用python可能无法找到正确的解释器，所以这里给出更明确的sys.executable
-            # 并用引号包裹以处理路径中的空格
-            return f'"{sys.executable}" -m pip'
-        else:
-            # 返回带引号的完整路径，准备在命令行中使用
-            return f'"{python_exe_path}" -m pip'
-        # --- 代码修改结束 ---
+        # 启动安装线程
+        threading.Thread(
+            target=self._run_pytorch_install,
+            args=(pytorch_version, cuda_version),
+            daemon=True
+        ).start()
 
     def _run_pytorch_install(self, pytorch_version, cuda_version=None):
-        """使用弹出命令行窗口安装PyTorch"""
+        """运行PyTorch安装"""
         try:
-            self.master.after(0, lambda: self.pytorch_status_var.set("正在启动安装..."))
+            QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("正在启动安装..."))
 
             pip_command_prefix = self._get_python_command_prefix()
 
@@ -769,8 +849,6 @@ class AdvancedPage(ttk.Frame):
             else:
                 install_cmd = f"{pip_command_prefix} install torch=={pytorch_version} torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu"
 
-            # --- 修改开始 ---
-            # 强制执行卸载命令
             command = (
                 f"echo 正在卸载现有PyTorch... && "
                 f"{pip_command_prefix} uninstall -y torch torchvision torchaudio && "
@@ -779,9 +857,154 @@ class AdvancedPage(ttk.Frame):
                 f"echo. && echo 安装完成！窗口将在5秒后自动关闭... && "
                 f"timeout /t 5"
             )
-            # --- 修改结束 ---
 
-            self.master.after(0, lambda: self.pytorch_status_var.set("安装已启动，请查看命令行窗口"))
+            QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("安装已启动，请查看命令行窗口"))
+
+            if platform.system() == "Windows":
+                subprocess.Popen(f"start cmd /C \"{command}\"", shell=True)
+            else:
+                # Unix系统处理
+                if platform.system() == "Darwin":
+                    mac_command = command.replace("timeout /t 5", "sleep 5")
+                    subprocess.Popen(["osascript", "-e", f'tell app "Terminal" to do script "{mac_command}"'])
+                else:
+                    linux_command = command.replace("timeout /t 5", "sleep 5")
+                    for terminal in ["gnome-terminal", "konsole", "xterm"]:
+                        try:
+                            if terminal == "gnome-terminal":
+                                subprocess.Popen([terminal, "--", "bash", "-c", f"{linux_command}"])
+                            elif terminal == "konsole":
+                                subprocess.Popen([terminal, "-e", f"bash -c '{linux_command}'"])
+                            elif terminal == "xterm":
+                                subprocess.Popen([terminal, "-e", f"bash -c '{linux_command}'"])
+                            break
+                        except FileNotFoundError:
+                            continue
+
+            QTimer.singleShot(2000, lambda: self.install_pytorch_button.setEnabled(True))
+            QTimer.singleShot(2000, lambda: QMessageBox.information(
+                self, "安装已启动",
+                "PyTorch安装已在命令行窗口中启动，\n"
+                "请查看命令行窗口了解安装进度，\n"
+                "安装完成后，重启程序以使更改生效。\n"
+                "命令执行完成后窗口将在5秒后自动关闭。"
+            ))
+
+            version_text = f"{pytorch_version} {'(CUDA ' + cuda_version + ')' if cuda_version else '(CPU)'}"
+            QTimer.singleShot(3000, lambda: self.pytorch_status_label.setText(f"已完成安装 PyTorch {version_text}"))
+
+        except Exception as e:
+            logger.error(f"安装PyTorch出错: {e}")
+            QTimer.singleShot(0, lambda: self.pytorch_status_label.setText(f"安装失败: {str(e)}"))
+            QTimer.singleShot(0, lambda: self.install_pytorch_button.setEnabled(True))
+            QTimer.singleShot(0, lambda: QMessageBox.critical(self, "安装错误", f"安装PyTorch失败：\n{str(e)}"))
+
+    def _get_python_command_prefix(self):
+        """获取用于调用pip的python.exe命令前缀"""
+        program_root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        python_exe_path = os.path.join(program_root_dir, "toolkit", "python.exe")
+
+        if not os.path.exists(python_exe_path):
+            print(f"警告: 未在 {program_root_dir}\\toolkit 找到 python.exe, 将回退到默认python。")
+            return f'"{sys.executable}" -m pip'
+        else:
+            return f'"{python_exe_path}" -m pip'
+
+    def _refresh_model_list(self):
+        """刷新可用模型列表"""
+        res_dir = resource_path("res")
+        try:
+            # 保存当前选择
+            current_selection = self.model_combo.currentText()
+            current_model_path = None
+            current_model = "未指定"
+
+            if hasattr(self.controller, 'image_processor') and hasattr(self.controller.image_processor, 'model_path'):
+                current_model_path = self.controller.image_processor.model_path
+                current_model = os.path.basename(current_model_path) if current_model_path else "未指定"
+
+            # 暂时断开信号连接，避免在刷新时触发自动加载
+            self.model_combo.currentTextChanged.disconnect()
+
+            self.model_combo.clear()
+            self.model_combo.setToolTip(f"当前使用的模型: {current_model}")
+
+            if os.path.exists(res_dir):
+                model_files = [f for f in os.listdir(res_dir) if f.lower().endswith('.pt')]
+                if model_files:
+                    model_files.sort()
+                    self.model_combo.addItems(model_files)
+
+                    # 尝试恢复之前的选择或当前正在使用的模型
+                    if current_model in model_files:
+                        self.model_combo.setCurrentText(current_model)
+                    elif current_selection and current_selection in model_files:
+                        self.model_combo.setCurrentText(current_selection)
+
+                    # 更新状态标签
+                    if current_model in model_files:
+                        self.model_status_label.setText(f"当前使用: {current_model}")
+                    else:
+                        self.model_status_label.setText(f"找到 {len(model_files)} 个模型文件")
+                else:
+                    self.model_status_label.setText("未找到任何模型文件")
+            else:
+                self.model_status_label.setText("模型目录不存在")
+
+            # 重新连接信号
+            self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
+
+        except Exception as e:
+            logger.error(f"刷新模型列表失败: {e}")
+            self.model_status_label.setText(f"刷新失败: {str(e)}")
+            # 确保重新连接信号
+            try:
+                self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
+            except:
+                pass
+
+    def _install_python_package(self):
+        """安装Python包"""
+        package = self.package_edit.text().strip()
+        if not package:
+            QMessageBox.critical(self, "错误", "请输入包名称")
+            return
+
+        version_constraint = self.version_constraint_edit.text().strip()
+        package_spec = f"{package}{version_constraint}" if version_constraint else package
+
+        reply = QMessageBox.question(
+            self, "确认安装", f"将安装 {package_spec}\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.package_status_label.setText("准备安装...")
+
+        threading.Thread(
+            target=self._run_pip_install,
+            args=(package_spec,),
+            daemon=True
+        ).start()
+
+    def _run_pip_install(self, package_spec):
+        """使用弹出命令行窗口安装Python包"""
+        try:
+            QTimer.singleShot(0, lambda: self.package_status_label.setText("正在启动安装..."))
+
+            pip_command_prefix = self._get_python_command_prefix()
+
+            install_cmd = f"{pip_command_prefix} install {package_spec}"
+            command = (
+                f"echo 正在安装 {package_spec}... && "
+                f"{install_cmd} && "
+                f"echo. && echo 安装完成！窗口将在5秒后自动关闭... && "
+                f"timeout /t 5"
+            )
+
+            QTimer.singleShot(0, lambda: self.package_status_label.setText("安装已启动，请查看命令行窗口"))
 
             if platform.system() == "Windows":
                 subprocess.Popen(f"start cmd /C \"{command}\"", shell=True)
@@ -803,383 +1026,513 @@ class AdvancedPage(ttk.Frame):
                         except FileNotFoundError:
                             continue
 
-            self.master.after(2000, lambda: self.install_button.configure(state="normal"))
-            self.master.after(2000, lambda: messagebox.showinfo("安装已启动",
-                                                                "PyTorch安装已在命令行窗口中启动，\n"
-                                                                "请查看命令行窗口了解安装进度，\n"
-                                                                "安装完成后，重启程序以使更改生效。\n"
-                                                                "命令执行完成后窗口将在5秒后自动关闭。"))
-
-            version_text = f"{pytorch_version} {'(CUDA ' + cuda_version + ')' if cuda_version else '(CPU)'}"
-            self.master.after(3000, lambda: self.pytorch_status_var.set(f"已完成安装 PyTorch {version_text}"))
-
-        except Exception as e:
-            logger.error(f"安装PyTorch出错: {e}")
-            self.master.after(0, lambda: self.pytorch_status_var.set(f"安装失败: {str(e)}"))
-            self.master.after(0, lambda: self.install_button.configure(state="normal"))
-            self.master.after(0, lambda: messagebox.showerror("安装错误", f"安装PyTorch失败：\n{str(e)}"))
-
-
-    def _install_python_package(self) -> None:
-        """安装Python包"""
-        package = self.package_var.get().strip()
-        if not package:
-            messagebox.showerror("错误", "请输入包名称")
-            return
-
-        version_constraint = self.version_constraint_var.get().strip()
-        package_spec = f"{package}{version_constraint}" if version_constraint else package
-
-        if not messagebox.askyesno("确认安装", f"将安装 {package_spec}\n\n是否继续？"):
-            return
-
-        self.package_status_var.set("准备安装...")
-        self.master.update_idletasks()
-
-        def install_thread():
-            try:
-                self._run_pip_install(package_spec)
-            except Exception as e:
-                logger.error(f"安装Python包出错: {e}")
-                self.master.after(0, lambda: self.package_status_var.set(f"安装失败: {str(e)}"))
-
-        threading.Thread(target=install_thread, daemon=True).start()
-
-    def _run_pip_install(self, package_spec):
-        """使用弹出命令行窗口安装Python包"""
-        try:
-            self.master.after(0, lambda: self.package_status_var.set("正在启动安装..."))
-
-            # --- 修改代码：获取命令前缀 ---
-            pip_command_prefix = self._get_python_command_prefix()
-
-            install_cmd = f"{pip_command_prefix} install {package_spec}"
-            command = (
-                f"echo 正在安装 {package_spec}... && "
-                f"{install_cmd} && "
-                f"echo. && echo 安装完成！窗口将在5秒后自动关闭... && "
-                f"timeout /t 5"
-            )
-
-            self.master.after(0, lambda: self.package_status_var.set("安装已启动，请查看命令行窗口"))
-
-            if platform.system() == "Windows":
-                subprocess.Popen(f"start cmd /C \"{command}\"", shell=True)
-            else:
-                if platform.system() == "Darwin":
-                    mac_command = command.replace("timeout /t 5", "sleep 5")
-                    subprocess.Popen(["osascript", "-e", f'tell app "Terminal" to do script "{mac_command}"'])
-                else:
-                    linux_command = command.replace("timeout /t 5", "sleep 5")
-                    for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                        try:
-                            subprocess.Popen([terminal, "-e", f"bash -c '{linux_command}; read -n1'"])
-                            break
-                        except FileNotFoundError:
-                            continue
-
-            self.master.after(3000, lambda: self.package_status_var.set(f"已完成安装 {package_spec}"))
+            QTimer.singleShot(3000, lambda: self.package_status_label.setText(f"已完成安装 {package_spec}"))
 
         except Exception as e:
             logger.error(f"安装Python包出错: {e}")
-            self.master.after(0, lambda: self.package_status_var.set(f"安装失败: {str(e)}"))
-            self.master.after(0, lambda: messagebox.showerror("安装错误", f"安装Python包失败：\n{str(e)}"))
+            QTimer.singleShot(0, lambda: self.package_status_label.setText(f"安装失败: {str(e)}"))
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
+                self, "安装错误", f"安装Python包失败：\n{str(e)}"
+            ))
 
-    def _refresh_model_list(self):
-        """刷新可用模型列表。"""
-        res_dir = resource_path("res")
+    def update_cache_size(self):
+        """计算并更新缓存大小显示"""
+        # 立即显示"正在计算..."状态
+        self.cache_size_label.setText("缓存大小: 正在计算...")
+
+        # 使用QTimer延迟执行计算，让UI有时间更新显示
+        QTimer.singleShot(250, self._calculate_cache_size_async)
+
+    def _calculate_cache_size_async(self):
+        """异步计算缓存大小"""
+
+        # 创建缓存大小计算工作线程
+        class CacheSizeWorker(QObject):
+            finished = Signal(int, str, str)  # size, error_message, size_str
+
+            def __init__(self, controller):
+                super().__init__()
+                self.controller = controller
+
+            def run(self):
+                try:
+                    # 获取缓存目录
+                    if hasattr(self.controller, 'settings_manager'):
+                        cache_dir = os.path.join(self.controller.settings_manager.base_dir, "temp", "photo")
+                    else:
+                        cache_dir = os.path.join(os.path.expanduser("~"), ".neri", "temp", "photo")
+
+                    logger.info(f"计算缓存目录大小: {cache_dir}")
+
+                    # 检查目录是否存在
+                    if not os.path.exists(cache_dir):
+                        self.finished.emit(0, None, "0 Bytes (目录不存在)")
+                        return
+
+                    total_size = 0
+                    file_count = 0
+
+                    # 遍历目录计算大小
+                    for dirpath, dirnames, filenames in os.walk(cache_dir):
+                        for filename in filenames:
+                            file_path = os.path.join(dirpath, filename)
+                            try:
+                                if os.path.isfile(file_path) and not os.path.islink(file_path):
+                                    file_size = os.path.getsize(file_path)
+                                    total_size += file_size
+                                    file_count += 1
+                            except (OSError, IOError) as e:
+                                logger.warning(f"无法获取文件大小 {file_path}: {e}")
+                                continue
+
+                    # 格式化文件大小
+                    if total_size < 1024:
+                        size_str = f"{total_size} Bytes"
+                    elif total_size < 1024 ** 2:
+                        size_str = f"{total_size / 1024:.2f} KB"
+                    elif total_size < 1024 ** 3:
+                        size_str = f"{total_size / 1024 ** 2:.2f} MB"
+                    else:
+                        size_str = f"{total_size / 1024 ** 3:.2f} GB"
+
+                    logger.info(f"缓存大小: {size_str} ({file_count} 个文件)")
+                    self.finished.emit(total_size, None, size_str)
+
+                except Exception as e:
+                    logger.error(f"计算缓存大小失败: {e}")
+                    self.finished.emit(0, str(e), f"计算失败 ({str(e)})")
+
+        # 创建工作线程
+        self.cache_thread = QThread()
+        self.cache_worker = CacheSizeWorker(self.controller)
+        self.cache_worker.moveToThread(self.cache_thread)
+
+        # 连接信号
+        self.cache_thread.started.connect(self.cache_worker.run)
+        self.cache_worker.finished.connect(self._on_cache_size_calculated)
+        self.cache_worker.finished.connect(self.cache_thread.quit)
+        self.cache_worker.finished.connect(self.cache_worker.deleteLater)
+        self.cache_thread.finished.connect(self.cache_thread.deleteLater)
+
+        # 启动线程
+        self.cache_thread.start()
+
+    def _on_cache_size_calculated(self, total_size, error_message, size_str):
+        """处理缓存大小计算结果"""
         try:
-            self.model_combobox["values"] = []  # 清空旧列表
-            if os.path.exists(res_dir):
-                # 查找所有.pt模型文件
-                model_files = [f for f in os.listdir(res_dir) if f.lower().endswith('.pt')]
-                if model_files:
-                    model_files.sort()
-                    self.model_combobox["values"] = model_files
-                    self.model_status_var.set(f"找到 {len(model_files)} 个模型文件")
-                else:
-                    self.model_status_var.set("未找到任何模型文件")
+            if error_message:
+                self.cache_size_label.setText(f"缓存大小: {size_str}")
             else:
-                self.model_status_var.set("模型目录不存在")
+                self.cache_size_label.setText(f"缓存大小: {size_str}")
+
+            logger.info(f"缓存大小更新完成: {size_str}")
+
         except Exception as e:
-            logger.error(f"刷新模型列表失败: {e}")
-            self.model_status_var.set(f"刷新失败: {str(e)}")
+            logger.error(f"更新缓存大小显示失败: {e}")
+            self.cache_size_label.setText("缓存大小: 更新失败")
 
-    def _apply_selected_model(self):
-        """应用用户在下拉框中选择的模型"""
-        model_name = self.controller.model_var.get()
-        if not model_name:
-            messagebox.showinfo("提示", "请先选择一个模型", parent=self.master)
-            return
-
-        model_path = resource_path(os.path.join("res", model_name))
-        if not os.path.exists(model_path):
-            messagebox.showerror("错误", f"模型文件不存在: {model_path}", parent=self.master)
-            return
-
-        # 获取当前正在使用的模型的文件名
-        current_model = os.path.basename(self.controller.image_processor.model_path) if hasattr(
-            self.controller.image_processor, 'model_path') and self.controller.image_processor.model_path else None
-
-        # 如果选择的模型与当前模型相同，则不执行任何操作
-        if model_name == current_model:
-            messagebox.showinfo("提示", f"模型 {model_name} 已经加载", parent=self.master)
-            return
-
-        # 弹出确认框
-        if not messagebox.askyesno("确认", f"确定要切换到模型 {model_name} 吗？", parent=self.master):
-            return
-
-        self.model_status_var.set("正在加载...")
-        self.master.update_idletasks()
-
-        # 在后台线程中加载模型，防止UI卡顿
-        threading.Thread(target=self._load_model_thread, args=(model_path, model_name), daemon=True).start()
-
-    def _load_model_thread(self, model_path, model_name):
-        """在后台线程中执行模型加载"""
-        try:
-            # 调用image_processor中的加载函数
-            self.controller.image_processor.load_model(model_path)
-
-            # 使用master.after确保UI更新在主线程中执行
-            self.master.after(0, lambda: self.current_model_var.set(model_name))
-            self.master.after(0, lambda: self.model_status_var.set("已加载"))
-
-            # 保存新的模型选择到settings.json
-            self.master.after(0, self.controller._save_current_settings)
-
-            self.master.after(0,
-                              lambda: messagebox.showinfo("成功", f"模型 {model_name} 已成功加载", parent=self.master))
-        except Exception as e:
-            logger.error(f"加载模型失败: {e}")
-            self.master.after(0, lambda: self.model_status_var.set(f"加载失败: {str(e)}"))
-            self.master.after(0, lambda: messagebox.showerror("错误", f"加载模型失败: {e}", parent=self.master))
-
-    def _on_tab_changed(self, event):
-        current_tab_index = self.advanced_notebook.index(self.advanced_notebook.select())
-        if current_tab_index == 1:  # Env Maintenance
-            if hasattr(self, 'env_canvas'):
-                self.master.after(10, lambda: self.env_canvas.configure(scrollregion=self.env_canvas.bbox("all")))
-        elif current_tab_index == 2:  # Software Settings
-            if hasattr(self, 'software_canvas'):
-                self.master.after(10,
-                                  lambda: self.software_canvas.configure(scrollregion=self.software_canvas.bbox("all")))
-                self.update_cache_size()
-
-    def _create_quick_mark_widgets(self, parent):
-        """创建快速标记设置的控件"""
-        self.quick_mark_edit_frame = ttk.Frame(parent)
-        self.quick_mark_edit_frame.pack(fill="x", pady=5, padx=5)
-        self.quick_mark_edit_frame.columnconfigure(1, weight=1)
-
-        # Auto sort switch and reset button
-        auto_sort_frame = ttk.Frame(self.quick_mark_edit_frame)
-        auto_sort_frame.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
-        self.auto_sort_var = tk.BooleanVar()
-        auto_sort_check = ttk.Checkbutton(auto_sort_frame, text="自动排序", variable=self.auto_sort_var,
-                                          command=self.toggle_auto_sort)
-        auto_sort_check.pack(side="left", padx=(0, 10))
-
-        # 新增“清空排序数据”按钮
-        reset_button = ttk.Button(auto_sort_frame, text="清空排序数据", command=self._reset_quick_mark_data)
-        reset_button.pack(side="left")
-
-
-        # Frame for the list of species
-        self.species_list_frame = ttk.Frame(self.quick_mark_edit_frame)
-        self.species_list_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=(0, 10))
-        self.species_list_frame.columnconfigure(1, weight=1) # ให้คอลัมน์ชื่อสปีชีส์ขยายได้
-
-
-        # Header
-        ttk.Label(self.species_list_frame, text="排列序号", font=NORMAL_FONT).grid(row=0, column=0, sticky="w", pady=(0, 5), padx=(5,0))
-        ttk.Label(self.species_list_frame, text="物种名称", font=NORMAL_FONT).grid(row=0, column=1, sticky="w", pady=(0, 5), padx=(5,0))
-
-        self.load_quick_mark_settings()
-
-        # Buttons
-        button_frame = ttk.Frame(self.quick_mark_edit_frame)
-        button_frame.grid(row=2, column=0, columnspan=4, sticky="e", pady=5)
-
-        add_button = ttk.Button(button_frame, text="新增", command=self._add_new_quick_mark_row)
-        add_button.pack(side="left", padx=(0, 5))
-
-        save_button = ttk.Button(button_frame, text="保存更改", command=self.save_quick_mark_settings,
-                                 style="Action.TButton")
-        save_button.pack(side="left")
-
-    def _reset_quick_mark_data(self):
-        """清空快速标记排序数据并恢复默认设置"""
-        if messagebox.askyesno("确认操作", "此操作将重置所有快速标记的排序和计数，并恢复为默认物种列表。\n确定要继续吗？", parent=self):
-            # 调用settings_manager中的重置方法
-            self.controller.settings_manager.reset_quick_mark_to_default()
-            # 重新加载UI显示
-            self.load_quick_mark_settings()
-            # 刷新预览页面的按钮
-            if hasattr(self.controller, 'preview_page'):
-                self.controller.preview_page._load_species_buttons()
-                self.controller.preview_page._load_validation_species_buttons()
-            messagebox.showinfo("成功", "快速标记数据已重置。", parent=self)
-
-    def toggle_auto_sort(self):
-        """Toggles the auto sort setting and saves it."""
-        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
-        quick_marks_data["auto"] = self.auto_sort_var.get()
-        self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
-        self.load_quick_mark_settings()
-
-    def update_auto_sorted_list(self):
-        """
-        根据使用次数对物种进行排序，并更新 quick_mark.json 文件中的 'list_auto'。
-        此方法在启用自动排序时调用。
-        """
-        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
-        # 提取物种和它们的计数值
-        species_counts = {k: v for k, v in quick_marks_data.items() if k not in ["list", "list_auto", "auto"]}
-
-        # 按计数值降序排序
-        sorted_species = sorted(species_counts.items(), key=lambda item: item[1], reverse=True)
-
-        # 决定自动排序列表应包含多少个物种（基于手动列表的长度）
-        num_to_take = len(quick_marks_data.get("list", []))
-
-        # 生成新的自动排序列表
-        list_auto = [species for species, count in sorted_species[:num_to_take]]
-
-        # 将新的自动排序列表保存回文件
-        quick_marks_data["list_auto"] = list_auto
-        self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
-        return list_auto
+    def _clear_image_cache_with_refresh(self):
+        """清除图像缓存并刷新大小"""
+        self.cache_clear_requested.emit()
+        QTimer.singleShot(500, self.update_cache_size)
 
     def load_quick_mark_settings(self):
         """加载快速标记设置并显示在UI中"""
-        for widget in self.species_list_frame.winfo_children():
-            if widget.grid_info()['row'] > 0:
-                widget.destroy()
+        # 清空现有控件
+        while self.species_list_layout.count():
+            child = self.species_list_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
 
         self.quick_marks_entries = {}
-        quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
-        self.auto_sort_var.set(quick_marks_data.get("auto", False))
+
+        if hasattr(self.controller, 'settings_manager'):
+            quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+        else:
+            quick_marks_data = {"list": [], "auto": False}
+
+            # 临时阻塞信号，防止在程序设置开关状态时意外触发 _on_auto_sort_changed 方法
+            self.auto_sort_switch_row.blockSignals(True)
+            self.auto_sort_switch_row.setChecked(quick_marks_data.get("auto", False))
+            self.auto_sort_switch_row.blockSignals(False)
 
         species_list_to_display = []
-        if self.auto_sort_var.get():
-            # 调用新的方法来处理自动排序逻辑
+        if self.auto_sort_switch_row.isChecked():
             species_list_to_display = self.update_auto_sorted_list()
         else:
             species_list_to_display = quick_marks_data.get("list", [])
 
         if species_list_to_display:
-            row_index = 1
             for i, species in enumerate(species_list_to_display):
-                species_name_var = tk.StringVar(value=species)
+                self._create_species_row(i + 1, species)
 
-                order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
-                order_entry.insert(0, str(i + 1))
-                order_entry.config(state='readonly')
-                order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
+    def _create_species_row(self, order, species_name):
+        """创建物种行"""
+        row_frame = QFrame()
+        row_layout = QHBoxLayout(row_frame)
+        row_layout.setContentsMargins(0, 2, 0, 2)
 
-                species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
-                species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
+        # 排序号
+        order_edit = ModernLineEdit()
+        order_edit.setText(str(order))
+        order_edit.setReadOnly(True)
+        order_edit.setFixedWidth(80)
+        row_layout.addWidget(order_edit)
 
-                delete_button = ttk.Button(self.species_list_frame, text="删除",
-                                           command=lambda s=species: self._delete_quick_mark(s))
-                delete_button.grid(row=row_index, column=2, padx=(5, 0), pady=2)
+        # 物种名称
+        species_edit = ModernLineEdit()
+        species_edit.setText(species_name)
+        self.components_to_update.append(species_edit)
+        row_layout.addWidget(species_edit, 1)
 
-                self.quick_marks_entries[species] = (species_name_var, str(i + 1))
-                row_index += 1
+        # 删除按钮
+        delete_button = RoundedButton("删除")
+        delete_button.setMinimumWidth(60)
+        delete_button.clicked.connect(lambda: self._delete_species_row(species_name))
+        row_layout.addWidget(delete_button)
 
-    def _delete_quick_mark(self, species_to_delete):
-        """删除一个快速标记条目"""
-        current_marks = self.controller.settings_manager.load_quick_mark_species()
-        if species_to_delete in current_marks.get("list", []):
-            current_marks["list"].remove(species_to_delete)
-            self.controller.settings_manager.save_quick_mark_species(current_marks)
-            self.load_quick_mark_settings()
+        self.species_list_layout.addWidget(row_frame)
+        self.quick_marks_entries[species_name] = (species_edit, str(order))
 
     def _add_new_quick_mark_row(self):
-        """新增一行用于添加新的快速标记"""
-        row_index = self.species_list_frame.grid_size()[1]
+        """新增物种行"""
+        if hasattr(self.controller, 'settings_manager'):
+            quick_marks = self.controller.settings_manager.load_quick_mark_species()
+        else:
+            quick_marks = {"list": [], "auto": False}
 
-        quick_marks = self.controller.settings_manager.load_quick_mark_species()
-
-        if self.auto_sort_var.get():
+        # 修改这一行：从 auto_sort_checkbox 改为 auto_sort_switch_row
+        if self.auto_sort_switch_row.isChecked():
             display_list = quick_marks.get("list_auto", [])
         else:
             display_list = quick_marks.get("list", [])
 
         new_order = len(display_list) + 1
+        temp_key = f"new_species_{new_order}"
 
-        species_name_var = tk.StringVar()
+        self._create_species_row(new_order, "")
+        # 获取最后一个添加的行中的物种编辑框
+        last_row = self.species_list_layout.itemAt(self.species_list_layout.count() - 1).widget()
+        species_edit = last_row.findChild(ModernLineEdit)
+        if species_edit and not species_edit.isReadOnly():  # 确保不是排序号编辑框
+            self.quick_marks_entries[temp_key] = (species_edit, str(new_order))
 
-        order_entry = ttk.Entry(self.species_list_frame, justify='center', width=5)
-        order_entry.insert(0, str(new_order))
-        order_entry.config(state='readonly')
-        order_entry.grid(row=row_index, column=0, sticky="w", pady=2, padx=(5, 0))
+    def _delete_species_row(self, species_name):
+        """删除物种行"""
+        if hasattr(self.controller, 'settings_manager'):
+            current_marks = self.controller.settings_manager.load_quick_mark_species()
+            if species_name in current_marks.get("list", []):
+                current_marks["list"].remove(species_name)
+                self.controller.settings_manager.save_quick_mark_species(current_marks)
+                self.load_quick_mark_settings()
 
-        species_entry = ttk.Entry(self.species_list_frame, textvariable=species_name_var)
-        species_entry.grid(row=row_index, column=1, sticky="ew", padx=(5, 0), pady=2)
-
-        temp_key = f"new_species_{row_index}"
-        self.quick_marks_entries[temp_key] = (species_name_var, str(new_order))
-
-    def add_or_modify_quick_mark(self):
-        """在UI上预览添加或修改的快速标记"""
-        species = self.species_name_entry.get().strip()
-        order_str = self.species_order_entry.get().strip()
-
-        if not species:
-            messagebox.showerror("错误", "物种名称不能为空。", parent=self)
-            return
-
-        try:
-            order = int(order_str)
-        except ValueError:
-            messagebox.showerror("错误", "排列序号必须是数字。", parent=self)
-            return
-
-        current_marks = self.controller.settings_manager.load_quick_mark_species()
-
-        if species in current_marks:
-             parts = current_marks[species].split(',')
-             parts[0] = str(order)
-             current_marks[species] = ','.join(parts)
+    def update_auto_sorted_list(self):
+        """根据使用次数对物种进行排序"""
+        if hasattr(self.controller, 'settings_manager'):
+            quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
         else:
-             current_marks[species] = f"{order},1"
+            return []
 
+        species_counts = {k: v for k, v in quick_marks_data.items() if k not in ["list", "list_auto", "auto"]}
+        sorted_species = sorted(species_counts.items(), key=lambda item: item[1], reverse=True)
+        num_to_take = len(quick_marks_data.get("list", []))
+        list_auto = [species for species, count in sorted_species[:num_to_take]]
 
-        self.controller.settings_manager.save_quick_mark_species(current_marks)
-        self.load_quick_mark_settings()
-
-        self.species_name_entry.delete(0, tk.END)
-        self.species_order_entry.delete(0, tk.END)
+        quick_marks_data["list_auto"] = list_auto
+        if hasattr(self.controller, 'settings_manager'):
+            self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+        return list_auto
 
     def save_quick_mark_settings(self):
-        """将UI中的快速标记设置保存到json文件"""
+        """保存快速标记设置"""
+        if not hasattr(self.controller, 'settings_manager'):
+            QMessageBox.critical(self, "错误", "设置管理器不可用")
+            return
+
         current_marks = self.controller.settings_manager.load_quick_mark_species()
-
         new_list = []
-        temp_list = []
 
-        for original_species, (name_var, order) in self.quick_marks_entries.items():
-            new_name = name_var.get().strip()
-            if new_name:
-                temp_list.append((int(order), new_name))
-
-        temp_list.sort()
-
-        for order, new_name in temp_list:
-            new_list.append(new_name)
-            if new_name not in current_marks:
-                current_marks[new_name] = 0
+        # 收集所有物种名称
+        for i in range(self.species_list_layout.count()):
+            row_widget = self.species_list_layout.itemAt(i).widget()
+            if row_widget:
+                species_edits = row_widget.findChildren(ModernLineEdit)
+                if len(species_edits) >= 2:
+                    species_edit = species_edits[1]
+                    species_name = species_edit.text().strip()
+                    if species_name:
+                        new_list.append(species_name)
+                        # 如果是新物种，则在文件中为其添加一个计数为0的条目
+                        if species_name not in current_marks:
+                            current_marks[species_name] = 0
 
         current_marks["list"] = new_list
-        current_marks["auto"] = self.auto_sort_var.get()
+        current_marks["auto"] = self.auto_sort_switch_row.isChecked()
 
         if self.controller.settings_manager.save_quick_mark_species(current_marks):
-            messagebox.showinfo("成功", "快速标记设置已保存。", parent=self)
-            self.load_quick_mark_settings()
-            if hasattr(self.controller, 'preview_page'):
-                self.controller.preview_page._load_species_buttons()
+            QMessageBox.information(self, "成功", "快速标记设置已保存")
+            self.load_quick_mark_settings()  # 重新加载以更新显示
         else:
-            messagebox.showerror("错误", "保存快速标记设置失败。", parent=self)
+            QMessageBox.critical(self, "错误", "保存快速标记设置失败")
+
+    def _reset_quick_mark_data(self):
+        """清空排序数据并恢复为默认值"""
+        reply = QMessageBox.question(
+            self, "确认清空",
+            "确定要将快速标记列表恢复为默认设置吗？\n\n此操作将清除所有物种的使用计数和自定义列表。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if hasattr(self.controller, 'settings_manager'):
+                # 定义默认的快速标记数据
+                default_marks = {
+                    "list": [
+                        "骆驼", "北山羊", "狗", "蒙古野驴", "鹅喉羚",
+                        "马", "中亚兔", "猞猁", "盘羊", "赤狐", "狼"
+                    ],
+                    "list_auto": [
+                        "骆驼", "北山羊", "狗", "蒙古野驴", "鹅喉羚",
+                        "马", "中亚兔", "猞猁", "盘羊", "赤狐", "狼"
+                    ],
+                    "auto": True,
+                    "骆驼": 0, "北山羊": 0, "狗": 0, "蒙古野驴": 0,
+                    "鹅喉羚": 0, "马": 0, "中亚兔": 0, "猞猁": 0,
+                    "盘羊": 0, "赤狐": 0, "狼": 0
+                }
+
+                # 使用默认数据覆盖现有文件
+                self.controller.settings_manager.save_quick_mark_species(default_marks)
+                QMessageBox.information(self, "成功", "快速标记设置已恢复为默认值。")
+                self.load_quick_mark_settings()  # 重新加载UI以显示默认值
+
+    # 事件处理函数
+    def _on_setting_changed(self):
+        """设置改变处理 - 立即保存"""
+        try:
+            # 获取当前设置
+            current_settings = self.get_settings()
+
+            # 发出设置变更信号
+            self.settings_changed.emit()
+
+            # 立即保存到JSON文件
+            if hasattr(self.controller, 'settings_manager'):
+                self.controller.settings_manager.save_settings(current_settings)
+                logger.debug("设置已实时保存")
+
+            # 如果controller有save_settings方法，也调用它
+            if hasattr(self.controller, 'save_settings'):
+                self.controller.save_settings()
+
+        except Exception as e:
+            logger.error(f"保存设置失败: {e}")
+
+    def _on_auto_sort_changed(self, checked):
+        """自动排序开关改变并立即保存"""
+        self.auto_sort_var = checked
+        if hasattr(self.controller, 'settings_manager'):
+            # 加载当前的快速标记设置
+            quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
+            # 更新 "auto" 的值
+            quick_marks_data["auto"] = checked
+            # 立即保存回 quick_mark.json 文件
+            self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+
+        # 重新加载列表以根据新的排序方式更新UI显示
+        self.load_quick_mark_settings()
+
+    def _on_theme_changed(self, theme_text):
+        """主题改变处理"""
+        self.theme_var = theme_text
+        self._on_setting_changed()
+        self.theme_changed.emit()
+
+    def _on_pytorch_version_changed(self, version):
+        """PyTorch版本改变"""
+        self.pytorch_version_var = version
+        self._on_setting_changed()
+
+    def _on_update_channel_changed(self, channel):
+        """更新通道改变"""
+        self.update_channel_var = channel
+        self._on_setting_changed()
+
+    def _on_package_changed(self, package):
+        """包名称改变"""
+        self.package_var = package
+        self._on_setting_changed()
+
+    def _on_version_constraint_changed(self, constraint):
+        """版本约束改变"""
+        self.version_constraint_var = constraint
+        self._on_setting_changed()
+
+    # 获取器和设置器方法
+    def get_use_fp16(self):
+        """获取是否使用FP16"""
+        return self.fp16_switch_row.isChecked()
+
+    def get_theme_selection(self):
+        """获取主题选择"""
+        return self.theme_combo.currentText()
+
+    def set_theme_selection(self, theme):
+        """设置主题选择"""
+        self.theme_combo.setCurrentText(theme)
+        self.theme_var = theme
+
+    def get_settings(self):
+        """获取页面设置"""
+        # 获取当前选择的模型 - 优先级顺序
+        selected_model = ""
+
+        # 1. 首先尝试从controller的model_var获取
+        if hasattr(self.controller, 'model_var') and self.controller.model_var:
+            selected_model = self.controller.model_var
+        # 2. 其次从下拉框获取当前选择
+        elif self.model_combo.currentText():
+            selected_model = self.model_combo.currentText()
+        # 3. 最后从image_processor的model_path获取
+        elif (hasattr(self.controller, 'image_processor') and
+              hasattr(self.controller.image_processor, 'model_path') and
+              self.controller.image_processor.model_path):
+            selected_model = os.path.basename(self.controller.image_processor.model_path)
+
+        return {
+            "iou_threshold": self.iou_var,
+            "conf_threshold": self.conf_var,
+            "use_fp16": self.get_use_fp16(),
+            "use_augment": self.augment_switch_row.isChecked(),
+            "use_agnostic_nms": self.agnostic_switch_row.isChecked(),
+            "theme": self.get_theme_selection(),
+            "auto_sort": self.auto_sort_switch_row.isChecked(),
+            "update_channel": self.update_channel_combo.currentText(),  # 直接从下拉框获取当前值
+            "pytorch_version": self.pytorch_version_combo.currentText(),  # 同样修复
+            "package": self.package_edit.text().strip(),  # 直接从输入框获取当前值
+            "version_constraint": self.version_constraint_edit.text().strip(),  # 直接从输入框获取当前值
+            "selected_model": selected_model,
+        }
+
+    def load_settings(self, settings):
+        """加载页面设置"""
+        # 加载模型参数
+        if "iou_threshold" in settings:
+            self.iou_var = settings["iou_threshold"]
+            self.iou_slider.setValue(int(self.iou_var * 100))
+            self._update_iou_label(int(self.iou_var * 100))
+
+        if "conf_threshold" in settings:
+            self.conf_var = settings["conf_threshold"]
+            self.conf_slider.setValue(int(self.conf_var * 100))
+            self._update_conf_label(int(self.conf_var * 100))
+
+        if "use_fp16" in settings:
+            self.use_fp16_var = settings["use_fp16"]
+            self.fp16_switch_row.setChecked(self.use_fp16_var)
+
+        if "use_augment" in settings:
+            self.use_augment_var = settings["use_augment"]
+            self.augment_switch_row.setChecked(self.use_augment_var)
+
+        if "use_agnostic_nms" in settings:
+            self.use_agnostic_nms_var = settings["use_agnostic_nms"]
+            self.agnostic_switch_row.setChecked(self.use_agnostic_nms_var)
+
+        # 加载主题设置
+        if "theme" in settings:
+            self.set_theme_selection(settings["theme"])
+
+        # 加载快速标记设置
+        if "auto_sort" in settings:
+            self.auto_sort_var = settings["auto_sort"]
+            self.auto_sort_switch_row.setChecked(self.auto_sort_var)
+
+        # 加载其他设置 - 修复更新通道设置
+        if "update_channel" in settings:
+            self.update_channel_var = settings["update_channel"]
+            # 确保同时更新下拉框的选择
+            self.update_channel_combo.setCurrentText(self.update_channel_var)
+
+        if "pytorch_version" in settings:
+            self.pytorch_version_var = settings["pytorch_version"]
+            self.pytorch_version_combo.setCurrentText(self.pytorch_version_var)
+
+        if "package" in settings:
+            self.package_var = settings["package"]
+            self.package_edit.setText(self.package_var)
+
+        if "version_constraint" in settings:
+            self.version_constraint_var = settings["version_constraint"]
+            self.version_constraint_edit.setText(self.version_constraint_var)
+
+        if "selected_model" in settings and settings["selected_model"]:
+            selected_model = settings["selected_model"]
+            # 使用定时器延迟设置，确保模型列表已经加载
+            QTimer.singleShot(200, lambda: self._set_selected_model(selected_model))
+
+    def _set_selected_model(self, model_name):
+        """设置选定的模型"""
+        try:
+            # 暂时断开信号连接
+            self.model_combo.currentTextChanged.disconnect()
+
+            # 查找并设置模型
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemText(i) == model_name:
+                    self.model_combo.setCurrentIndex(i)
+                    self.model_status_label.setText(f"已加载: {model_name}")
+                    break
+            else:
+                logger.warning(f"设置中的模型 {model_name} 在可用模型列表中未找到")
+
+            # 重新连接信号
+            self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
+
+        except Exception as e:
+            logger.error(f"设置选定模型失败: {e}")
+            # 确保重新连接信号
+            try:
+                self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
+            except:
+                pass
+
+    def update_theme(self):
+        """更新主题"""
+        # 重新应用主题
+        self._apply_win11_style()
+
+        # 更新所有自定义组件的主题
+        for component in self.components_to_update:
+            if hasattr(component, 'update_theme'):
+                component.update_theme()
+
+        # 更新所有可折叠面板
+        for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
+                      self.pytorch_panel, self.model_panel, self.python_panel,
+                      self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel]:
+            if hasattr(panel, 'update_theme'):
+                panel.update_theme()
+
+    def clear_validation_data(self):
+        """清除验证数据"""
+        # 这个方法可能被其他地方调用，提供空实现
+        pass
+
+    def resizeEvent(self, event):
+        """窗口大小改变事件"""
+        super().resizeEvent(event)
+        # 可以在这里处理窗口大小改变时的逻辑
+        pass
+
+    def showEvent(self, event):
+        """显示事件"""
+        super().showEvent(event)
+        # 页面显示时可能需要的初始化逻辑
+        pass
+
+    def hideEvent(self, event):
+        """隐藏事件"""
+        super().hideEvent(event)
+        # 页面隐藏时可能需要的清理逻辑
+        pass

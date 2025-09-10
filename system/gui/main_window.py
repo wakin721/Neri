@@ -1,5 +1,3 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 import os
 import sys
 import platform
@@ -9,12 +7,15 @@ import json
 import time
 from datetime import datetime
 import gc
-import sv_ttk
 import hashlib
 import shutil
-from PIL import Image, ImageTk
-import ctypes
-from ctypes import wintypes
+from PIL import Image
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QMessageBox, QFileDialog, QApplication, QStackedWidget
+)
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
+from PySide6.QtGui import QIcon, QPixmap, QPalette
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS
 from system.utils import resource_path
@@ -29,272 +30,306 @@ from system.update_checker import check_for_updates, get_latest_version_info, co
 from system.gui.sidebar import Sidebar
 from system.gui.start_page import StartPage
 from system.gui.preview_page import PreviewPage
+from system.gui.species_validation_page import SpeciesValidationPage
 from system.gui.advanced_page import AdvancedPage
 from system.gui.about_page import AboutPage
-from system.gui.ui_components import InfoBar
+from system.gui.ui_components import InfoBar, Win11Colors, ThemeManager
+
+if platform.system() == "Windows":
+    import ctypes
 
 logger = logging.getLogger(__name__)
 
 
-class ObjectDetectionGUI:
-    """主应用程序窗口"""
+class UpdateCheckThread(QThread):
+    """更新检查线程"""
+    update_found = Signal(str)  # 发现更新信号
+    check_complete = Signal(bool)  # 检查完成信号
 
-    def __init__(self, master: tk.Tk, settings_manager: SettingsManager, settings: dict, resume_processing: bool,
-                 cache_data: dict):
-        self.master = master
+    def __init__(self, channel='stable', silent=True):
+        super().__init__()
+        self.channel = channel
+        self.silent = silent
+
+    def run(self):
+        try:
+            latest_info = get_latest_version_info(self.channel)
+            if latest_info:
+                remote_version = latest_info['version']
+                if compare_versions(APP_VERSION, remote_version):
+                    self.update_found.emit(remote_version)
+            self.check_complete.emit(True)
+        except Exception as e:
+            logger.error(f"检查更新失败: {e}")
+            self.check_complete.emit(False)
+
+
+class ProcessingThread(QThread):
+    """图像处理线程"""
+    progress_updated = Signal(int, int, float, object)
+    file_processed = Signal(str, object, str)
+    processing_complete = Signal(bool)
+    status_message = Signal(str)
+    file_processing_result = Signal(str, dict)
+    current_file_changed = Signal(str, int, int)
+    current_file_preview = Signal(str, dict)
+
+    def __init__(self, controller, file_path, save_path, use_fp16, resume_from=0):
+        super().__init__()
+        self.controller = controller
+        self.file_path = file_path
+        self.save_path = save_path
+        self.use_fp16 = use_fp16
+        self.resume_from = resume_from
+        self.stop_flag = False
+
+    def stop(self):
+        """停止处理线程"""
+        self.stop_flag = True
+
+    def run(self):
+        start_time = time.time()
+        excel_data = [] if self.resume_from == 0 else self.controller.excel_data
+        processed_files = self.resume_from
+        stopped_manually = False
+        earliest_date = None
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+
+        try:
+            iou = self.controller.advanced_page.iou_var
+            conf = self.controller.advanced_page.conf_var
+            augment = self.controller.advanced_page.use_augment_var
+            agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
+
+            image_files = sorted([f for f in os.listdir(self.file_path)
+                                  if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)])
+            total_files = len(image_files)
+
+            if self.resume_from > 0:
+                image_files = image_files[self.resume_from:]
+                if excel_data:
+                    valid_dates = [item['拍摄日期对象'] for item in excel_data if item.get('拍摄日期对象')]
+                    if valid_dates:
+                        earliest_date = min(valid_dates)
+
+            for idx, filename in enumerate(image_files):
+                if self.stop_flag:
+                    stopped_manually = True
+                    break
+
+                current_index = processed_files + 1
+                img_path = os.path.join(self.file_path, filename)
+
+                # 发射当前处理文件变化信号
+                self.current_file_changed.emit(img_path, current_index, total_files)
+
+                self.status_message.emit(f"正在处理: {filename}")
+
+                elapsed_time = time.time() - start_time
+                speed = (processed_files - self.resume_from + 1) / elapsed_time if elapsed_time > 0 else 0
+                remaining_time = (total_files - (processed_files + 1)) / speed if speed > 0 else float('inf')
+
+                self.progress_updated.emit(processed_files + 1, total_files, speed, remaining_time)
+
+                try:
+                    image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
+                    species_info = self.controller.image_processor.detect_species(
+                        img_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
+                    )
+                    species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    detect_results = species_info.get('detect_results')
+
+                    if detect_results:
+                        self.controller.image_processor.save_detection_info_json(
+                            detect_results, filename, species_info, temp_photo_dir
+                        )
+                        # 发射文件处理完成信号
+                        self.file_processed.emit(img_path, detect_results, filename)
+
+                        # 发射当前文件预览信号，包含完整检测结果
+                        complete_detection_info = {
+                            **species_info,
+                            'detect_results': detect_results,
+                            'filename': filename
+                        }
+                        self.current_file_preview.emit(img_path, complete_detection_info)
+
+                    if 'detect_results' in species_info:
+                        del species_info['detect_results']
+                    image_info.update(species_info)
+                    excel_data.append(image_info)
+
+                except Exception as e:
+                    logger.error(f"处理文件 {filename} 失败: {e}")
+
+                processed_files += 1
+
+                if processed_files % 10 == 0:
+                    self._save_processing_cache(excel_data, processed_files, total_files)
+
+                # 清理内存
+                try:
+                    del img_path, image_info, img, species_info, detect_results
+                except NameError:
+                    pass
+                gc.collect()
+
+            if not stopped_manually:
+                self.progress_updated.emit(total_files, total_files, 0, "已完成")
+                self.controller.excel_data = excel_data
+                excel_data = DataProcessor.process_independent_detection(excel_data,
+                                                                         self.controller.confidence_settings)
+                if earliest_date:
+                    excel_data = DataProcessor.calculate_working_days(excel_data, earliest_date)
+                self._delete_processing_cache()
+                self.status_message.emit("处理完成！")
+                QTimer.singleShot(0, lambda: QMessageBox.information(None, "成功", "图像处理完成！"))
+
+            self.processing_complete.emit(not stopped_manually)
+
+        except Exception as e:
+            logger.error(f"处理过程中发生错误: {e}")
+            QTimer.singleShot(0, lambda: QMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
+            self.processing_complete.emit(False)
+        finally:
+            gc.collect()
+
+    def _save_processing_cache(self, excel_data, processed_files, total_files):
+        def make_serializable(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, dict):
+                return {k: make_serializable(v) for k, v in obj.items() if k != 'detect_results'}
+            if isinstance(obj, list):
+                return [make_serializable(i) for i in obj]
+            if hasattr(obj, '__dict__'):
+                return None
+            return obj
+
+        serializable_excel_data = make_serializable(excel_data)
+        cache_data = {
+            'file_path': self.file_path,
+            'save_path': self.save_path,
+            'use_fp16': self.use_fp16,
+            'processed_files': processed_files,
+            'total_files': total_files,
+            'excel_data': serializable_excel_data,
+        }
+        cache_file = os.path.join(self.controller.settings_manager.settings_dir, "cache.json")
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"保存缓存失败: {e}")
+
+    def _delete_processing_cache(self):
+        cache_file = os.path.join(self.controller.settings_manager.settings_dir, "cache.json")
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+
+
+class ObjectDetectionGUI(QMainWindow):
+    """主应用程序窗口 - PySide6版本"""
+
+    def __init__(self, settings_manager: SettingsManager, settings: dict, resume_processing: bool, cache_data: dict):
+        super().__init__()
         self.settings_manager = settings_manager
         self.settings = settings
         self.resume_processing = resume_processing
         self.cache_data = cache_data
         self.current_temp_photo_dir = None
         self.is_dark_mode = False
-        self.accent_color = "#dbbcc2"  # 默认使用浅色模式的颜色
-        import torch
-        self.cuda_available = torch.cuda.is_available()
+        self.accent_color = Win11Colors.LIGHT_ACCENT  # 默认使用浅色模式的颜色
+
+        # 检查CUDA可用性
+        try:
+            import torch
+            self.cuda_available = torch.cuda.is_available()
+        except ImportError:
+            self.cuda_available = False
+
         self.is_processing = False
-        self.processing_stop_flag = threading.Event()
+        self.processing_thread = None
         self.excel_data = []
         self.current_page = "settings"
-        self.update_channel_var = tk.StringVar(value="稳定版 (Release)")
-        self.model_var = tk.StringVar()
+        self.update_channel_var = "稳定版 (Release)"
+        self.model_var = ""
         self.confidence_settings = self.settings_manager.load_confidence_settings()
 
+        # 新增：用于存储最新进度信息
+        self.last_progress_value = 0
+        self.last_progress_total = 0
+        self.last_progress_speed = 0.0
+        self.last_progress_remaining_time = float('inf')
+        self.current_processing_file = None
+
+        # 主题检测和应用
         self._apply_system_theme()
         self._setup_window()
         self._initialize_model(settings)
-        self._setup_styles()
         self._create_ui_elements()
-        self._bind_events()
+        self._setup_connections()
 
+        # 加载设置
         if self.settings:
             self._load_settings_to_ui(self.settings)
         else:
-            # 如果没有找到配置文件，则立即用默认值创建一个
-            logging.info("未找到配置文件，正在使用默认值创建 'setting.json'。")
-            # 1. 从UI控件获取所有默认设置
-            default_settings = self._get_current_settings()
-            # 2. 保存这些默认设置到文件
-            self.settings_manager.save_settings(default_settings)
-            # 3. 将新创建的默认设置赋给当前实例，以确保程序后续部分能正常运行
-            self.settings = default_settings
-            # 4. (可选) 加载新创建的默认主题
-            if hasattr(self, 'advanced_page'):
-                self.change_theme()
+            self._create_default_settings()
 
-        self.master.after(100, self._set_title_bar_color)
-
-        # 确保UI完全加载后再执行启动检查
-        self._check_for_updates(silent=True)
-
-        if not self.image_processor.model:
-            messagebox.showerror("错误", "未找到有效的模型文件(.pt)。请在res目录中放入至少一个模型文件。")
-            if hasattr(self, 'start_page') and hasattr(self.start_page, 'start_stop_button'):
-                self.start_page.start_stop_button["state"] = "disabled"
-        if self.resume_processing and self.cache_data:
-            self.master.after(1000, self._resume_processing)
-        self.setup_theme_monitoring()
-        if hasattr(self, 'preview_page'):
-            self.preview_page._load_validation_data()
-
-    # --- 更新检查逻辑 ---
-
-    def _check_for_updates(self, silent=False):
-        """
-        在程序启动时，根据用户设置的通道静默检查更新。
-        这个方法现在是启动时检查的唯一入口。
-        """
-
-        def _startup_check_thread():
-            """后台线程，用于处理启动时的静默更新检查。"""
-            try:
-                channel_selection = self.update_channel_var.get()
-                channel = 'preview' if '预览版' in channel_selection else 'stable'
-                latest_info = get_latest_version_info(channel)
-
-                if not latest_info:
-                    return  # Silently fail
-
-                remote_version = latest_info['version']
-
-                if compare_versions(APP_VERSION, remote_version):
-                    if self.master.winfo_exists():
-                        # 调用主窗口的方法来更新侧边栏
-                        self.master.after(0, self.show_update_notification_on_sidebar)
-
-                # 非静默模式下弹窗提示 (will not trigger on startup)
-                if not silent and self.master.winfo_exists():
-                    update_message = f"新版本 ({remote_version}) 可用，是否前往高级设置进行更新？"
-                    _show_messagebox(self.master, "发现新版本", update_message, "info")
-
-            except Exception as e:
-                logger.error(f"启动时检查更新失败: {e}")
-                if not silent and self.master.winfo_exists():
-                    _show_messagebox(self.master, "更新错误", f"检查更新失败: {e}", "error")
-
-        self.master.after(2000, lambda: threading.Thread(target=_startup_check_thread, daemon=True).start())
-
-    def show_update_notification_on_sidebar(self):
-        """这是一个专门从后台线程安全调用UI更新的方法。"""
-        if hasattr(self, 'sidebar'):
-            self.sidebar.show_update_notification()
-
-    def check_for_updates_from_ui(self):
-        """从高级设置UI手动触发的更新检查。"""
-        channel_selection = self.update_channel_var.get()
-        channel = 'preview' if '预览版' in channel_selection else 'stable'
-
-        button = self.advanced_page.check_update_button
-        status_label = self.advanced_page.update_status_label
-
-        button.config(state="disabled")
-        status_label.config(text=f"正在检查 '{channel_selection}' ...")
-
-        threading.Thread(target=self._manual_update_check_thread, args=(channel, status_label, button),
-                         daemon=True).start()
-
-    def _manual_update_check_thread(self, channel, status_label, button):
-        """后台线程，用于处理手动点击“检查更新”的逻辑。"""
-        try:
-            latest_info = get_latest_version_info(channel)
-
-            if not latest_info:
-                if self.master.winfo_exists():
-                    self.master.after(0, lambda: status_label.config(text="检查失败，请重试。"))
-                    _show_messagebox(self.master, "更新错误", "无法获取远程版本信息。", "error")
-                return
-
-            remote_version = latest_info['version']
-
-            if compare_versions(APP_VERSION, remote_version):
-                if self.master.winfo_exists():
-                    # 调用主窗口的方法来更新侧边栏
-                    self.master.after(0, self.show_update_notification_on_sidebar)
-                    self.master.after(0, lambda: status_label.config(text=f"发现新版本: {remote_version}"))
-                    update_message = f"发现新版本: {remote_version}\n\n更新日志:\n{latest_info.get('notes', '无')}\n\n是否立即下载并安装？"
-                    if messagebox.askyesno("发现新版本", update_message, parent=self.master):
-                        start_download_thread(self.master, latest_info['url'])
-            else:
-                if self.master.winfo_exists():
-                    self.master.after(0, lambda: status_label.config(text=f"当前已是最新版本 ({APP_VERSION})"))
-                    _show_messagebox(self.master, "无更新", "您目前使用的是最新版本。", "info")
-
-        except Exception as e:
-            logger.error(f"UI检查更新失败: {e}")
-            if self.master.winfo_exists():
-                self.master.after(0, lambda: status_label.config(text="检查更新时出错。"))
-                _show_messagebox(self.master, "更新错误", f"检查更新时发生错误: {e}", "error")
-        finally:
-            if self.master.winfo_exists() and button.winfo_exists():
-                self.master.after(0, lambda: button.config(state="normal"))
-
-    def change_theme(self):
-        """根据用户选择更改应用程序主题。"""
-        selected_theme = self.advanced_page.theme_var.get()
-
-        if selected_theme == "自动":
-            self._apply_system_theme()
-        elif selected_theme == "深色":
-            sv_ttk.set_theme("dark")
-            self.is_dark_mode = True
-            self.accent_color = "#5d3a4f"
-        else:  # "浅色"
-            sv_ttk.set_theme("light")
-            self.is_dark_mode = False
-            self.accent_color = "#dbbcc2"
-
-        # 使用 "after" 来延迟UI更新，确保sv_ttk有时间应用主题
-        self.master.after(50, self._finalize_theme_change)
-
-    def _finalize_theme_change(self):
-        """在主题设置后完成UI更新。"""
-        self._setup_styles()
-        self._update_ui_theme()
-        self._set_title_bar_color()
-        self._save_current_settings()
+        # 设置定时器进行启动后的初始化
+        QTimer.singleShot(100, self._post_init)
 
     def _apply_system_theme(self):
+        """应用系统主题"""
         try:
             import darkdetect
             system_theme = darkdetect.theme().lower()
             if system_theme == 'dark':
-                sv_ttk.set_theme("dark")
                 self.is_dark_mode = True
-                self.accent_color = "#5d3a4f"
+                self.accent_color = Win11Colors.DARK_ACCENT
             else:
-                sv_ttk.set_theme("light")
                 self.is_dark_mode = False
-                self.accent_color = "#dbbcc2"
+                self.accent_color = Win11Colors.LIGHT_ACCENT
         except Exception as e:
-            sv_ttk.set_theme("light")
             self.is_dark_mode = False
-            self.accent_color = "#dbbcc2"
+            self.accent_color = Win11Colors.LIGHT_ACCENT
             logger.warning(f"无法检测系统主题: {e}")
 
-    def _detect_system_accent_color(self):
-        pass
-
-    def setup_theme_monitoring(self):
-        if platform.system() in ["Windows", "Darwin"]:
-            self._check_theme_change()
-
-    def _check_theme_change(self):
-        try:
-            if self.advanced_page.theme_var.get() == "自动":
-                import darkdetect
-                current_theme = darkdetect.theme().lower()
-                if (current_theme == 'dark' and not self.is_dark_mode) or \
-                        (current_theme == 'light' and self.is_dark_mode):
-                    self._apply_system_theme()
-                    # 延迟最终的样式和UI更新
-                    self.master.after(50, self._finalize_theme_change)
-        except Exception as e:
-            logger.warning(f"检查主题变化失败: {e}")
-        self.master.after(10000, self._check_theme_change)
-
-    def _update_ui_theme(self):
-        self.sidebar.update_theme()
-        if hasattr(self, 'start_page') and hasattr(self.start_page, 'update_theme'):
-            self.start_page.update_theme()
-        if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'update_theme'):
-            self.advanced_page.update_theme()
-        self._show_page(self.current_page)
-
-        if hasattr(self, 'about_page') and hasattr(self.about_page, 'update_theme'):
-            self.about_page.update_theme()
-        self._show_page(self.current_page)
+        # 应用Win11样式
+        ThemeManager.apply_win11_style(QApplication.instance())
 
     def _setup_window(self):
-        self.master.title(APP_TITLE)
-        width, height = 1100, 750
-        screen_width = self.master.winfo_screenwidth()
-        screen_height = self.master.winfo_screenheight()
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
-        self.master.geometry(f"{width}x{height}+{x}+{y}")
-        self.master.minsize(width, height)
+        """设置窗口"""
+        self.setWindowTitle(APP_TITLE)
+        self.setMinimumSize(1100, 750)
+        self.resize(1100, 750)
 
-        # --- 设置任务栏和窗口图标 ---
+        # 居中显示
+        screen = QApplication.primaryScreen().geometry()
+        window_rect = self.geometry()
+        x = (screen.width() - window_rect.width()) // 2
+        y = (screen.height() - window_rect.height()) // 2
+        self.move(x, y)
+
+        # 设置图标
         try:
             ico_path = resource_path("res/ico.ico")
-            # 使用更可靠的 iconphoto 方法
-            icon_image = Image.open(ico_path)
-            self.app_icon = ImageTk.PhotoImage(icon_image)
-            self.master.iconphoto(True, self.app_icon)
+            self.setWindowIcon(QIcon(ico_path))
+            # --- 为Windows设置任务栏图标 ---
+            if platform.system() == "Windows":
+                myappid = u'mycompany.myproduct.subproduct.version'  # 任意唯一的ID
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            # ---------------------------------
         except Exception as e:
             logger.warning(f"无法加载窗口图标: {e}")
-            # 如果新方法失败，尝试旧方法
-            try:
-                self.master.iconbitmap(ico_path)
-            except Exception as e2:
-                logger.warning(f"备用图标加载方法也失败: {e2}")
 
     def _initialize_model(self, settings: dict):
-        """根据设置初始化模型，优先加载已保存的模型。"""
+        """初始化模型"""
         saved_model_name = settings.get("selected_model") if settings else None
         model_path = None
         res_dir = resource_path("res")
 
-        # 1. 尝试从设置中加载模型
+        # 尝试从设置中加载模型
         if saved_model_name:
             potential_path = os.path.join(res_dir, saved_model_name)
             if os.path.exists(potential_path):
@@ -303,26 +338,25 @@ class ObjectDetectionGUI:
             else:
                 logger.warning(f"设置中保存的模型文件不存在: {saved_model_name}。将尝试加载默认模型。")
 
-        # 2. 如果设置中没有模型或文件不存在，则查找第一个可用的模型作为后备
+        # 如果设置中没有模型或文件不存在，则查找第一个可用的模型
         if not model_path:
-            model_path = self._find_model_file()  # 此方法会查找第一个.pt文件
+            model_path = self._find_model_file()
             if model_path:
                 logger.info(f"加载找到的第一个模型: {os.path.basename(model_path)}")
 
-        # 3. 初始化 ImageProcessor
+        # 初始化 ImageProcessor
         self.image_processor = ImageProcessor(model_path)
         if model_path:
             self.image_processor.model_path = model_path
-            # 更新 model_var，以便UI（如下拉框）能同步显示正确的模型名称
-            self.model_var.set(os.path.basename(model_path))
+            self.model_var = os.path.basename(model_path)
         else:
-            # 处理未找到任何模型文件的情况
             self.image_processor.model = None
             self.image_processor.model_path = None
-            self.model_var.set("")
+            self.model_var = ""
             logger.error("在 res 目录中未找到任何有效的模型文件 (.pt)。")
 
-    def _find_model_file(self) -> str or None:
+    def _find_model_file(self) -> str:
+        """查找模型文件"""
         try:
             res_dir = resource_path("res")
             if not os.path.exists(res_dir) or not os.path.isdir(res_dir):
@@ -336,327 +370,407 @@ class ObjectDetectionGUI:
             return None
 
     def _create_ui_elements(self):
-        self.master.columnconfigure(1, weight=1)
-        self.master.rowconfigure(0, weight=1)
+        """创建UI元素"""
+        # 创建中心部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
 
-        self.sidebar = Sidebar(self.master, self)
-        self.sidebar.grid(row=0, column=0, sticky="ns")
+        # 创建主布局
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        self.content_frame = ttk.Frame(self.master)
-        self.content_frame.grid(row=0, column=1, sticky="nsew")
-        self.content_frame.columnconfigure(0, weight=1)
-        self.content_frame.rowconfigure(0, weight=1)
+        # 创建分割器
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(splitter)
 
-        self.start_page = StartPage(self.content_frame, self)
-        self.advanced_page = AdvancedPage(self.content_frame, self)
-        self.preview_page = PreviewPage(self.content_frame, self)
-        self.about_page = AboutPage(self.content_frame, self)
+        # 创建侧边栏
+        self.sidebar = Sidebar(self)
+        splitter.addWidget(self.sidebar)
 
-        self.status_bar = InfoBar(self.master)
-        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        # 创建内容区域
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
+        # 创建页面堆栈
+        self.content_stack = QStackedWidget()
+        content_layout.addWidget(self.content_stack)
+
+        # 创建状态栏
+        self.status_bar = InfoBar()
+        content_layout.addWidget(self.status_bar)
+
+        splitter.addWidget(content_widget)
+
+        # 设置分割器比例
+        splitter.setStretchFactor(0, 0)  # 侧边栏不拉伸
+        splitter.setStretchFactor(1, 1)  # 内容区域拉伸
+
+        # 创建页面
+        self.start_page = StartPage(self)
+        self.preview_page = PreviewPage(self, self)
+        self.species_validation_page = SpeciesValidationPage(self)
+        self.advanced_page = AdvancedPage(self, self)
+        self.about_page = AboutPage(self)
+
+        # 添加页面到堆栈
+        self.content_stack.addWidget(self.start_page)
+        self.content_stack.addWidget(self.preview_page)
+        self.content_stack.addWidget(self.species_validation_page)
+        self.content_stack.addWidget(self.advanced_page)
+        self.content_stack.addWidget(self.about_page)
+
+        # 显示默认页面
         self._show_page("settings")
 
-        if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'model_combobox'):
-            self.advanced_page._refresh_model_list()
+    def _setup_connections(self):
+        """设置信号连接"""
+        # 侧边栏导航
+        self.sidebar.page_requested.connect(self._show_page)
 
-    def _setup_styles(self):
-        style = ttk.Style()
-        sidebar_bg = self.accent_color
+        # 开始页面
+        self.start_page.browse_file_path_requested.connect(self.browse_file_path)
+        self.start_page.browse_save_path_requested.connect(self.browse_save_path)
+        self.start_page.file_path_changed.connect(self._validate_and_update_file_path)
+        self.start_page.save_path_changed.connect(self._validate_and_update_save_path)
+        self.start_page.toggle_processing_requested.connect(self.toggle_processing_state)
+        self.start_page.settings_changed.connect(self._save_current_settings)
 
+        # 高级页面
+        if hasattr(self.advanced_page, 'settings_changed'):
+            self.advanced_page.settings_changed.connect(self._save_current_settings)
+        self.advanced_page.update_check_requested.connect(self.check_for_updates_from_ui)
+        self.advanced_page.theme_changed.connect(self.change_theme)
+        self.advanced_page.params_help_requested.connect(self.show_params_help)
+        self.advanced_page.cache_clear_requested.connect(self.clear_image_cache)
+        self.advanced_page.settings_changed.connect(self._save_current_settings)
+
+        # 预览页面
+        self.preview_page.settings_changed.connect(self._save_current_settings)
+
+        # 物种校验页面
+        self.species_validation_page.settings_changed.connect(self._save_current_settings)
+        self.species_validation_page.quick_marks_updated.connect(
+            self.advanced_page.load_quick_mark_settings)
+
+    def _post_init(self):
+        """后期初始化"""
+        # 检查模型
+        if not self.image_processor.model:
+            QMessageBox.critical(
+                self, "错误",
+                "未找到有效的模型文件(.pt)。请在res目录中放入至少一个模型文件。"
+            )
+            if hasattr(self.start_page, 'set_processing_enabled'):
+                self.start_page.set_processing_enabled(False)
+
+        # 设置主题监控
+        self.setup_theme_monitoring()
+
+        # 加载验证数据
+        if hasattr(self.preview_page, '_load_validation_data'):
+            self.preview_page._load_validation_data()
+
+        # 检查更新
+        self._check_for_updates(silent=True)
+
+        # 恢复处理
+        if self.resume_processing and self.cache_data:
+            QTimer.singleShot(1000, self._resume_processing)
+
+    def _create_default_settings(self):
+        """创建默认设置"""
+        logger.info("未找到配置文件，正在使用默认值创建 'setting.json'。")
+        default_settings = self._get_current_settings()
+        self.settings_manager.save_settings(default_settings)
+        self.settings = default_settings
+        self.change_theme()
+
+    def _check_for_updates(self, silent=False):
+        """检查更新"""
+
+        def on_update_found(version):
+            if hasattr(self.sidebar, 'show_update_notification'):
+                self.sidebar.show_update_notification()
+
+        def on_check_complete(success):
+            if not silent and not success:
+                QMessageBox.warning(self, "更新错误", "检查更新失败，请稍后重试。")
+
+        channel_selection = self.update_channel_var
+        channel = 'preview' if '预览版' in channel_selection else 'stable'
+
+        self.update_thread = UpdateCheckThread(channel, silent)
+        self.update_thread.update_found.connect(on_update_found)
+        self.update_thread.check_complete.connect(on_check_complete)
+        self.update_thread.start()
+
+    def check_for_updates_from_ui(self):
+        """从UI手动检查更新"""
+        channel_selection = self.update_channel_var
+        channel = 'preview' if '预览版' in channel_selection else 'stable'
+
+        def on_update_found(version):
+            if hasattr(self.sidebar, 'show_update_notification'):
+                self.sidebar.show_update_notification()
+            update_message = f"发现新版本: {version}\n\n是否立即下载并安装？"
+            reply = QMessageBox.question(
+                self, "发现新版本", update_message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # 这里需要实现下载逻辑
+                pass
+
+        def on_check_complete(success):
+            if success:
+                # 如果没有发现更新
+                QMessageBox.information(self, "无更新", "您目前使用的是最新版本。")
+            else:
+                QMessageBox.critical(self, "更新错误", "检查更新时发生错误。")
+
+        self.update_thread = UpdateCheckThread(channel, False)
+        self.update_thread.update_found.connect(on_update_found)
+        self.update_thread.check_complete.connect(on_check_complete)
+        self.update_thread.start()
+
+    def change_theme(self):
+        """更改主题"""
+        if hasattr(self.advanced_page, 'get_theme_selection'):
+            selected_theme = self.advanced_page.get_theme_selection()
+        else:
+            selected_theme = "自动"
+
+        if selected_theme == "自动":
+            self._apply_system_theme()
+        elif selected_theme == "深色":
+            self.is_dark_mode = True
+            self.accent_color = Win11Colors.DARK_ACCENT
+        else:  # "浅色"
+            self.is_dark_mode = False
+            self.accent_color = Win11Colors.LIGHT_ACCENT
+
+        # 应用主题
+        ThemeManager.apply_win11_style(QApplication.instance())
+        self._save_current_settings()
+
+    def setup_theme_monitoring(self):
+        """设置主题监控"""
+        if platform.system() in ["Windows", "Darwin"]:
+            self.theme_timer = QTimer()
+            self.theme_timer.timeout.connect(self._check_theme_change)
+            self.theme_timer.start(10000)  # 每10秒检查一次
+
+    def _check_theme_change(self):
+        """检查主题变化"""
         try:
-            hex_color = sidebar_bg.lstrip('#')
-            r, g, b = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-            brightness = (r * 299 + g * 587 + b * 114) / 1000
-            sidebar_fg = "#000000" if brightness > 128 else "#FFFFFF"
-        except:
-            sidebar_fg = "#FFFFFF"  # 如果颜色计算失败，默认为白色
-
-        sidebar_fg = "#FFFFFF"
-        highlight_color = "#FFFFFF"
-        self.sidebar_bg = sidebar_bg
-        self.sidebar_fg = sidebar_fg
-        self.highlight_color = highlight_color
-        try:
-            r, g, b = self.master.winfo_rgb(sidebar_bg)
-            r, g, b = r // 257, g // 257, b // 257
-            self.sidebar_hover_bg = f"#{min(255, r + 30):02x}{min(255, g + 30):02x}{min(255, b + 30):02x}"
-        except tk.TclError:
-            self.sidebar_hover_bg = sidebar_bg
-
-        style.configure("Sidebar.TFrame", background=sidebar_bg)
-        style.configure("Sidebar.TLabel", background=sidebar_bg, foreground=sidebar_fg)
-        style.configure("Sidebar.Version.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 8))
-        style.configure("Sidebar.Notification.TLabel", background=sidebar_bg, foreground="#FFFF00",
-                        font=("Segoe UI", 9, "bold"))
-        style.configure("Sidebar.Title.TLabel", background=sidebar_bg, foreground=sidebar_fg,
-                        font=("Segoe UI", 12, "bold"))
-
-        style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"), padding=(0, 10, 0, 10))
-        style.configure("Process.TButton", font=("Segoe UI", 11), padding=(10, 5))
-
-        style.map("Selected.TButton",
-                  background=[('!active', self.accent_color), ('active', self.accent_color)],
-                  foreground=[('!active', sidebar_fg), ('active', sidebar_fg)])
+            if hasattr(self.advanced_page, 'get_theme_selection') and \
+                    self.advanced_page.get_theme_selection() == "自动":
+                import darkdetect
+                current_theme = darkdetect.theme().lower()
+                if (current_theme == 'dark' and not self.is_dark_mode) or \
+                        (current_theme == 'light' and self.is_dark_mode):
+                    self._apply_system_theme()
+                    ThemeManager.apply_win11_style(QApplication.instance())
+        except Exception as e:
+            logger.warning(f"检查主题变化失败: {e}")
 
     def _show_page(self, page_id: str):
+        """显示页面"""
+        # 在处理时限制页面访问
+        if self.is_processing and page_id not in ["preview", "settings"]:
+            return
+
         self.sidebar.set_active_button(page_id)
-        self.start_page.pack_forget()
-        self.preview_page.pack_forget()
-        self.advanced_page.pack_forget()
-        self.about_page.pack_forget()
 
-        if page_id == "settings":
-            self.start_page.pack(fill="both", expand=True)
-            self.status_bar.status_label.config(text="就绪")
-        elif page_id == "preview":
-            self.preview_page.pack(fill="both", expand=True)
-            if hasattr(self, 'start_page'):
-                file_path = self.start_page.file_path_entry.get()
-                if file_path and os.path.isdir(file_path):
-                    if self.preview_page.file_listbox.size() == 0:
-                        self.preview_page.update_file_list(file_path)
+        # 设置当前页面索引
+        page_index = {
+            "settings": 0,
+            "preview": 1,
+            "species_validation": 2,
+            "advanced": 3,
+            "about": 4
+        }.get(page_id, 0)
 
-                    file_count = self.preview_page.file_listbox.size()
-                    self.status_bar.status_label.config(text=f"当前文件夹下有 {file_count} 个图像文件")
-
-                    if self.preview_page.file_listbox.size() > 0 and not self.preview_page.file_listbox.curselection():
-                        self.preview_page.file_listbox.selection_set(0)
-                        self.preview_page.on_file_selected(None)
-                else:
-                    self.status_bar.status_label.config(text="请在“开始”页面中设置有效的图像文件路径")
-        elif page_id == "advanced":
-            self.advanced_page.pack(fill="both", expand=True)
-            self.status_bar.status_label.config(text="就绪")
-        elif page_id == "about":
-            self.about_page.pack(fill="both", expand=True)
-            self.status_bar.status_label.config(text="就绪")
-
-        if page_id != "preview" and not self.is_processing:
-            self.status_bar.status_label.config(text="就绪")
-
+        self.content_stack.setCurrentIndex(page_index)
         self.current_page = page_id
 
-    def _bind_events(self):
-        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.start_page.file_path_entry.bind("<Return>", self._validate_and_update_file_path)
-        self.start_page.save_path_entry.bind("<Return>", self._validate_and_update_save_path)
-        self.preview_page.file_listbox.bind("<<ListboxSelect>>", self.preview_page.on_file_selected)
-        self.preview_page.image_label.bind("<Double-1>", self.preview_page.on_image_double_click)
-        self.preview_page.show_detection_var.trace("w", self.preview_page.toggle_detection_preview)
-        self.start_page.save_detect_image_var.trace("w", lambda *args: self._save_current_settings())
-        self.start_page.copy_img_var.trace("w", lambda *args: self._save_current_settings())
-        self.advanced_page.controller.use_fp16_var.trace("w", lambda *args: self._save_current_settings())
-        self.advanced_page.controller.iou_var.trace("w", lambda *args: self._save_current_settings())
-        self.advanced_page.controller.conf_var.trace("w", lambda *args: self._save_current_settings())
-        self.advanced_page.controller.use_augment_var.trace("w", lambda *args: self._save_current_settings())
-        self.advanced_page.controller.use_agnostic_nms_var.trace("w", lambda *args: self._save_current_settings())
-        self.update_channel_var.trace("w", lambda *args: self._save_current_settings())
-        self.preview_page.export_format_var.trace("w", lambda *args: self._save_current_settings())
-
-        self.master.bind("<Up>", self._navigate_image_up)
-        self.master.bind("<Down>", self._navigate_image_down)
-
-    def _save_current_settings(self):
-        if not self.settings_manager: return
-        settings = self._get_current_settings()
-        if self.settings_manager.save_settings(settings): logger.info("设置已保存")
-
-    def _get_current_settings(self):
-        settings = {"file_path": self.start_page.file_path_entry.get(),
-                    "save_path": self.start_page.save_path_entry.get(),
-                    "save_detect_image": self.start_page.save_detect_image_var.get(),
-                    "copy_img": self.start_page.copy_img_var.get(),
-                    "use_fp16": self.advanced_page.controller.use_fp16_var.get(),
-                    "iou": self.advanced_page.controller.iou_var.get(),
-                    "conf": self.advanced_page.controller.conf_var.get(),
-                    "use_augment": self.advanced_page.controller.use_augment_var.get(),
-                    "use_agnostic_nms": self.advanced_page.controller.use_agnostic_nms_var.get(),
-                    "update_channel": self.update_channel_var.get(),
-                    "theme": self.advanced_page.theme_var.get(),
-                    "selected_model": self.model_var.get()}
-
-        if hasattr(self, 'preview_page'):
-            settings["export_format"] = self.preview_page.export_format_var.get()
-
-        return settings
-
-    def _load_settings_to_ui(self, settings: dict):
-        if not settings:
-            return
-        try:
-            if "file_path" in settings and settings["file_path"] and os.path.exists(settings["file_path"]):
-                if hasattr(self, 'preview_page') and hasattr(self.preview_page, 'file_listbox'):
-                    self.preview_page.file_listbox.delete(0, tk.END)
-
-                self.start_page.file_path_entry.delete(0, tk.END)
-                self.start_page.file_path_entry.insert(0, settings["file_path"])
-                self.get_temp_photo_dir(update=True)
-                self.preview_page.update_file_list(settings["file_path"])
-            if "save_path" in settings and settings["save_path"]:
-                self.start_page.save_path_entry.delete(0, tk.END)
-                self.start_page.save_path_entry.insert(0, settings["save_path"])
-            self.start_page.save_detect_image_var.set(settings.get("save_detect_image", True))
-            self.start_page.copy_img_var.set(settings.get("copy_img", False))
-            self.advanced_page.controller.use_fp16_var.set(settings.get("use_fp16", False))
-            iou_value = settings.get("iou", 0.3)
-            conf_value = settings.get("conf", 0.25)
-            self.advanced_page.controller.iou_var.set(iou_value)
-            self.advanced_page.controller.conf_var.set(conf_value)
-            self.advanced_page._update_iou_label(iou_value)
-            self.advanced_page._update_conf_label(conf_value)
-            self.advanced_page.controller.use_augment_var.set(settings.get("use_augment", True))
-            self.advanced_page.controller.use_agnostic_nms_var.set(settings.get("use_agnostic_nms", True))
-            self.advanced_page._update_iou_label(settings.get("iou", 0.3))
-            self.advanced_page._update_conf_label(settings.get("conf", 0.25))
-            self.update_channel_var.set(settings.get("update_channel", "稳定版 (Release)"))
-
-
-            # Load theme
-            self.advanced_page.theme_var.set(settings.get("theme", "自动"))
-            self.change_theme()
-
-            if hasattr(self, 'preview_page'):
-                self.preview_page.export_format_var.set(settings.get("export_format", "CSV"))
-
-            '''# <<< 新增：加载并应用模型选择 >>>
-            saved_model = settings.get("selected_model", "")
-            available_models = self.advanced_page.model_combobox.cget('values')
-
-            # 检查保存的模型是否存在于可用模型列表中
-            if saved_model and saved_model in available_models:
-                self.model_var.set(saved_model)
-            elif available_models:
-                # 如果没有保存的模型或模型文件已不存在，则默认选择列表中的第一个
-                self.model_var.set(available_models[0])
-
-            # 手动调用模型更改处理函数，以确保后端ImageProcessor使用正确的模型
-            #self.advanced_page._change_model()
-            # <<< 新增结束 >>>'''
-
-        except Exception as e:
-            logger.error(f"加载设置到UI失败: {e}")
-
-    def on_closing(self):
-        if self.is_processing:
-            if not messagebox.askyesno("确认退出", "图像处理正在进行中，确定要退出吗？"): return
-            self.processing_stop_flag.set()
-        if hasattr(self, 'preview_page'): self.preview_page._save_validation_data()
-        self._save_current_settings()
-        self.master.destroy()
+        # 更新状态栏
+        if page_id == "settings":
+            if self.is_processing:
+                # 如果正在处理，则恢复状态栏的进度显示
+                self._on_progress_updated(
+                    self.last_progress_value,
+                    self.last_progress_total,
+                    self.last_progress_speed,
+                    self.last_progress_remaining_time
+                )
+            else:
+                self.status_bar.status_label.setText("就绪")
+        elif page_id == "preview":
+            if hasattr(self.start_page, 'get_file_path'):
+                file_path = self.start_page.get_file_path()
+                if file_path and os.path.isdir(file_path):
+                    if hasattr(self.preview_page, 'update_file_list'):
+                        self.preview_page.update_file_list(file_path)
+                    file_count = self.preview_page.get_file_count() if hasattr(self.preview_page,
+                                                                               'get_file_count') else 0
+                    self.status_bar.status_label.setText(f"当前文件夹下有 {file_count} 个图像文件")
+                else:
+                    self.status_bar.status_label.setText('请在"开始"页面中设置有效的图像文件路径')
+        elif page_id == "species_validation":
+            if not self.is_processing:
+                self.status_bar.status_label.setText("就绪")
+            # 确保物种校验页面的数据被加载
+            if hasattr(self.species_validation_page, '_load_species_data'):
+                # 使用QTimer延迟执行，确保页面完全显示后再加载数据
+                QTimer.singleShot(100, self.species_validation_page._load_species_data)
+            if hasattr(self.species_validation_page, '_load_species_buttons'):
+                QTimer.singleShot(150, self.species_validation_page._load_species_buttons)
+        elif page_id in ["advanced", "about"] and not self.is_processing:
+            self.status_bar.status_label.setText("就绪")
 
     def browse_file_path(self):
-        folder_selected = filedialog.askdirectory(title="选择图像文件所在文件夹")
+        """浏览文件路径"""
+        folder_selected = QFileDialog.getExistingDirectory(
+            self, "选择图像文件所在文件夹"
+        )
         if folder_selected:
-            self.start_page.file_path_entry.delete(0, tk.END)
-            self.start_page.file_path_entry.insert(0, folder_selected)
-            self._validate_and_update_file_path()
-        else:
-            # Handle user cancelling the dialog by clearing the path
-            self.start_page.file_path_entry.delete(0, tk.END)
-            self._validate_and_update_file_path()
+            if hasattr(self.start_page, 'set_file_path'):
+                self.start_page.set_file_path(folder_selected)
+            self._validate_and_update_file_path(folder_selected)
 
-    def _validate_and_update_file_path(self, event=None):
-        folder_selected = self.start_page.file_path_entry.get().strip()
+    def browse_save_path(self):
+        """浏览保存路径"""
+        folder_selected = QFileDialog.getExistingDirectory(
+            self, "选择结果保存文件夹"
+        )
+        if folder_selected:
+            if hasattr(self.start_page, 'set_save_path'):
+                self.start_page.set_save_path(folder_selected)
+            self._validate_and_update_save_path(folder_selected)
 
-        # Always clear previews first to handle path changes correctly
-        self.preview_page.clear_previews()
+    def _validate_and_update_file_path(self, folder_selected):
+        """验证和更新文件路径"""
+        if hasattr(self.preview_page, 'clear_preview'):
+            self.preview_page.clear_preview()
 
         if not folder_selected:
-            self.status_bar.status_label.config(text="文件路径已清除")
+            self.status_bar.status_label.setText("文件路径已清除")
             self._save_current_settings()
             return
 
         if os.path.isdir(folder_selected):
             self.get_temp_photo_dir(update=True)
-            self.preview_page.update_file_list(folder_selected)
-            file_count = self.preview_page.file_listbox.size()
-            self.status_bar.status_label.config(text=f"文件路径已设置，找到 {file_count} 个图像文件。")
+            if hasattr(self.preview_page, 'update_file_list'):
+                self.preview_page.update_file_list(folder_selected)
+            file_count = self.preview_page.get_file_count() if hasattr(self.preview_page, 'get_file_count') else 0
+            self.status_bar.status_label.setText(f"文件路径已设置，找到 {file_count} 个图像文件。")
             self._save_current_settings()
             if self.current_page == "preview":
                 self._show_page("preview")
         else:
-            messagebox.showerror("路径错误", f"提供的图像文件路径不存在或不是一个文件夹:\n'{folder_selected}'")
-            self.status_bar.status_label.config(text="无效的文件路径")
+            QMessageBox.critical(
+                self, "路径错误",
+                f"提供的图像文件路径不存在或不是一个文件夹:\n'{folder_selected}'"
+            )
+            self.status_bar.status_label.setText("无效的文件路径")
 
-    def browse_save_path(self):
-        folder_selected = filedialog.askdirectory(title="选择结果保存文件夹")
-        if folder_selected:
-            self.start_page.save_path_entry.delete(0, tk.END)
-            self.start_page.save_path_entry.insert(0, folder_selected)
-            self._validate_and_update_save_path()
+    def _validate_and_update_save_path(self, save_path):
+        """验证和更新保存路径"""
+        if not save_path:
+            return
 
-    def _validate_and_update_save_path(self, event=None):
-        save_path = self.start_page.save_path_entry.get().strip()
-        if not save_path: return
         if not os.path.isdir(save_path):
-            if messagebox.askyesno("确认创建路径", f"结果保存路径不存在，是否要创建它？\n\n{save_path}"):
+            reply = QMessageBox.question(
+                self, "确认创建路径",
+                f"结果保存路径不存在，是否要创建它？\n\n{save_path}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
                 try:
                     os.makedirs(save_path, exist_ok=True)
-                    self.start_page.save_path_entry.delete(0, tk.END)
-                    self.start_page.save_path_entry.insert(0, save_path)
-                    self.status_bar.status_label.config(text=f"结果保存路径已创建: {save_path}")
+                    if hasattr(self.start_page, 'set_save_path'):
+                        self.start_page.set_save_path(save_path)
+                    self.status_bar.status_label.setText(f"结果保存路径已创建: {save_path}")
                     self._save_current_settings()
                 except Exception as e:
-                    messagebox.showerror("路径错误", f"无法创建结果保存路径:\n{e}")
-                    self.status_bar.status_label.config(text="结果保存路径创建失败")
+                    QMessageBox.critical(self, "路径错误", f"无法创建结果保存路径:\n{e}")
+                    self.status_bar.status_label.setText("结果保存路径创建失败")
             else:
-                self.status_bar.status_label.config(text="操作已取消，请输入有效的结果保存路径。")
-                pass
+                self.status_bar.status_label.setText("操作已取消，请输入有效的结果保存路径。")
         else:
-            self.start_page.save_path_entry.delete(0, tk.END)
-            self.start_page.save_path_entry.insert(0, save_path)
-            self.status_bar.status_label.config(text=f"结果保存路径已设置: {save_path}")
+            if hasattr(self.start_page, 'set_save_path'):
+                self.start_page.set_save_path(save_path)
+            self.status_bar.status_label.setText(f"结果保存路径已设置: {save_path}")
             self._save_current_settings()
 
     def show_params_help(self):
+        """显示参数帮助"""
         help_text = """
-        **检测阈值设置**
-        - **IOU阈值:** 控制对象检测中非极大值抑制（NMS）的重叠阈值。较高的值会减少重叠框，但可能导致部分目标漏检。
-        - **置信度阈值:** 检测对象的最小置信度分数。较高的值只显示高置信度的检测结果，减少误检。
+**检测阈值设置**
+- **IOU阈值:** 控制对象检测中非极大值抑制（NMS）的重叠阈值。较高的值会减少重叠框，但可能导致部分目标漏检。
+- **置信度阈值:** 检测对象的最小置信度分数。较高的值只显示高置信度的检测结果，减少误检。
 
-        **模型加速选项**
-        - **使用FP16加速:** 使用半精度浮点数进行推理，可以加快速度但可能会略微降低精度。需要兼容的NVIDIA GPU。
+**模型加速选项**
+- **使用FP16加速:** 使用半精度浮点数进行推理，可以加快速度但可能会略微降低精度。需要兼容的NVIDIA GPU。
 
-        **高级检测选项**
-        - **使用数据增强:** 在测试时使用数据增强（TTA），通过对输入图像进行多种变换并综合结果，可能会提高准确性，但会显著降低处理速度。
-        - **使用类别无关NMS:** 在所有类别上一起执行NMS，对于检测多种相互重叠的物种可能有用。
-        """
-        messagebox.showinfo("参数说明", help_text, parent=self.master)
+**高级检测选项**
+- **使用数据增强:** 在测试时使用数据增强（TTA），通过对输入图像进行多种变换并综合结果，可能会提高准确性，但会显著降低处理速度。
+- **使用类别无关NMS:** 在所有类别上一起执行NMS，对于检测多种相互重叠的物种可能有用。
+    """
+        QMessageBox.information(self, "参数说明", help_text.strip())
 
     def get_temp_photo_dir(self, update=False):
-        source_path = self.start_page.file_path_entry.get()
-        if not source_path: return None
+        """获取临时图片目录"""
+        if hasattr(self.start_page, 'get_file_path'):
+            source_path = self.start_page.get_file_path()
+        else:
+            return None
+
+        if not source_path:
+            return None
+
         path_hash = hashlib.md5(source_path.encode()).hexdigest()
         base_dir = self.settings_manager.base_dir
         temp_dir = os.path.join(base_dir, "temp", "photo", path_hash)
+
         if update:
             self.current_temp_photo_dir = temp_dir
+
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
 
     def clear_image_cache(self):
+        """清除图像缓存"""
         cache_dir = os.path.join(self.settings_manager.base_dir, "temp", "photo")
-        if messagebox.askyesno("确认清除缓存",
-                               f"是否清空图片缓存？\n\n此操作将删除以下文件夹及其所有内容：\n{cache_dir}\n\n注意：这不会影响您的原始图片或已保存的结果。",
-                               parent=self.master):
+        reply = QMessageBox.question(
+            self, "确认清除缓存",
+            f"是否清空图片缓存？\n\n此操作将删除以下文件夹及其所有内容：\n{cache_dir}\n\n注意：这不会影响您的原始图片或已保存的结果。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
             if os.path.exists(cache_dir):
                 try:
                     shutil.rmtree(cache_dir)
                     os.makedirs(cache_dir, exist_ok=True)
-                    messagebox.showinfo("成功", "图片缓存已成功清除。", parent=self.master)
+                    QMessageBox.information(self, "成功", "图片缓存已成功清除。")
                 except Exception as e:
-                    messagebox.showerror("错误", f"清除缓存时发生错误：\n{e}", parent=self.master)
+                    QMessageBox.critical(self, "错误", f"清除缓存时发生错误：\n{e}")
             else:
-                messagebox.showinfo("提示", "缓存目录不存在，无需清除。", parent=self.master)
+                QMessageBox.information(self, "提示", "缓存目录不存在，无需清除。")
 
     def toggle_processing_state(self):
+        """切换处理状态"""
         if not self.is_processing:
             self.check_for_cache_and_process()
         else:
             self.stop_processing()
 
     def check_for_cache_and_process(self):
+        """检查缓存并处理"""
         cache_file = os.path.join(self.settings_manager.settings_dir, "cache.json")
         if os.path.exists(cache_file):
             try:
@@ -666,8 +780,12 @@ class ObjectDetectionGUI:
                     processed = cache_data.get('processed_files', 0)
                     total = cache_data.get('total_files', 0)
                     file_path = cache_data.get('file_path', '')
-                    if messagebox.askyesno("发现未完成任务",
-                                           f"检测到上次有未完成的任务，是否继续？\n已处理：{processed}/{total} at {file_path}"):
+                    reply = QMessageBox.question(
+                        self, "发现未完成任务",
+                        f"检测到上次有未完成的任务，是否继续？\n已处理：{processed}/{total} at {file_path}",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
                         self._load_cache_data_from_file(cache_data)
                         self.start_processing(resume_from=processed)
                         return
@@ -676,217 +794,235 @@ class ObjectDetectionGUI:
         self.start_processing()
 
     def start_processing(self, resume_from=0):
-        file_path = self.start_page.file_path_entry.get()
-        save_path = self.start_page.save_path_entry.get()
-        save_detect_image = self.start_page.save_detect_image_var.get()
-        copy_img = self.start_page.copy_img_var.get()
-        use_fp16 = self.advanced_page.controller.use_fp16_var.get()
+        """开始处理"""
+        # 获取处理参数
+        file_path = self.start_page.get_file_path() if hasattr(self.start_page, 'get_file_path') else ""
+        save_path = self.start_page.get_save_path() if hasattr(self.start_page, 'get_save_path') else ""
+        use_fp16 = self.advanced_page.get_use_fp16() if hasattr(self.advanced_page, 'get_use_fp16') else False
 
-        if not self._validate_inputs(file_path, save_path): return
-        if self.is_processing: return
+        if not self._validate_inputs(file_path, save_path):
+            return
 
-        selected_tab_id = self.preview_page.preview_notebook.select()
-        if selected_tab_id:
-            tab_text = self.preview_page.preview_notebook.tab(selected_tab_id, "text")
-            if tab_text == "检验校验(时间)" or tab_text == "检验校验(物种)":
-                self.preview_page.preview_notebook.select(self.preview_page.image_preview_tab)
+        if self.is_processing:
+            return
 
-        self._set_processing_state(True)
+        # 切换到预览页面
         self._show_page("preview")
+
         if resume_from == 0:
             self.excel_data = []
             self._clear_current_validation_file()
 
-        threading.Thread(
-            target=self._process_images_thread,
-            args=(file_path, save_path, save_detect_image, copy_img, use_fp16, resume_from),
-            daemon=True
-        ).start()
+        # 设置处理状态
+        self._set_processing_state(True)
+
+        # 创建并启动处理线程
+        self.processing_thread = ProcessingThread(
+            self, file_path, save_path, use_fp16, resume_from
+        )
+
+        # 连接信号
+        self.processing_thread.progress_updated.connect(self._on_progress_updated)
+        self.processing_thread.file_processed.connect(self._on_file_processed)
+        self.processing_thread.processing_complete.connect(self._on_processing_complete)
+        self.processing_thread.status_message.connect(self._on_status_message)
+        self.processing_thread.file_processing_result.connect(self._on_file_processing_result)
+        self.processing_thread.current_file_changed.connect(self._on_current_file_changed)
+        self.processing_thread.current_file_preview.connect(self._on_current_file_preview)
+
+        self.processing_thread.start()
+
+    def _on_current_file_changed(self, img_path, current_index, total_files):
+        """当前处理文件变化处理"""
+        filename = os.path.basename(img_path)
+        self.current_processing_file = filename  # 保存当前文件名
+
+        # 如果当前在预览页面，则同步显示
+        if self.current_page == "preview":
+            if hasattr(self.preview_page, 'sync_current_processing_file'):
+                self.preview_page.sync_current_processing_file(img_path, current_index, total_files)
+
+    def _on_current_file_preview(self, img_path, detection_info):
+        """当前文件预览处理"""
+        # 如果当前在预览页面，则显示检测结果
+        if self.current_page == "preview":
+            if hasattr(self.preview_page, 'sync_current_processing_result'):
+                self.preview_page.sync_current_processing_result(img_path, detection_info)
+
+    def _on_file_processing_result(self, img_path, detection_info):
+        """处理文件处理结果，同步到预览页面"""
+        if hasattr(self.preview_page, 'sync_processing_result'):
+            self.preview_page.sync_processing_result(img_path, detection_info)
 
     def stop_processing(self):
-        if messagebox.askyesno("停止确认", "确定要停止图像处理吗？\n处理进度将被保存，下次可以继续。"):
-            self.processing_stop_flag.set()
-            self.status_bar.status_label.config(text="正在停止处理...")
+        """停止处理"""
+        reply = QMessageBox.question(
+            self, "停止确认",
+            "确定要停止图像处理吗？\n处理进度将被保存，下次可以继续。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if hasattr(self, 'processing_thread') and self.processing_thread is not None:
+                if hasattr(self.processing_thread, 'stop'):
+                    self.processing_thread.stop()
+                elif hasattr(self.processing_thread, 'stop_flag'):
+                    self.processing_thread.stop_flag = True
+            self.status_bar.status_label.setText("正在停止处理...")
         else:
-            messagebox.showinfo("信息", "处理继续进行。")
-
-    def _process_images_thread(self, file_path, save_path, save_detect_image, copy_img, use_fp16,
-                               resume_from=0):
-        start_time = time.time()
-        excel_data = [] if resume_from == 0 else self.excel_data
-        processed_files = resume_from
-        stopped_manually = False
-        earliest_date = None
-        temp_photo_dir = self.get_temp_photo_dir()
-
-        try:
-            iou = self.advanced_page.controller.iou_var.get()
-            conf = self.advanced_page.controller.conf_var.get()
-            augment = self.advanced_page.controller.use_augment_var.get()
-            agnostic_nms = self.advanced_page.controller.use_agnostic_nms_var.get()
-            image_files = sorted([f for f in os.listdir(file_path) if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)])
-            total_files = len(image_files)
-            if resume_from > 0:
-                image_files = image_files[resume_from:]
-                if excel_data:
-                    valid_dates = [item['拍摄日期对象'] for item in excel_data if item.get('拍摄日期对象')]
-                    if valid_dates:
-                        earliest_date = min(valid_dates)
-
-            for idx, filename in enumerate(image_files):
-                if self.processing_stop_flag.is_set():
-                    stopped_manually = True
-                    break
-
-                if self.master.winfo_exists():
-                    self.master.after(0, lambda f=filename: self.status_bar.status_label.config(text=f"正在处理: {f}"))
-                try:
-                    listbox_idx = self.preview_page.file_listbox.get(0, "end").index(filename)
-                    if self.master.winfo_exists():
-                        self.master.after(0, lambda i=listbox_idx: (
-                            self.preview_page.file_listbox.selection_clear(0, "end"),
-                            self.preview_page.file_listbox.selection_set(i),
-                            self.preview_page.file_listbox.see(i)
-                        ))
-                except ValueError:
-                    pass
-
-                elapsed_time = time.time() - start_time
-                speed = (processed_files - resume_from + 1) / elapsed_time if elapsed_time > 0 else 0
-                remaining_time = (total_files - (processed_files + 1)) / speed if speed > 0 else float('inf')
-
-                if self.master.winfo_exists():
-                    self.master.after(0, lambda p=processed_files + 1, t=total_files, s=speed, r=remaining_time:
-                    self.start_page.progress_frame.update_progress(value=p, total=t, speed=s, remaining_time=r))
-
-                try:
-                    img_path = os.path.join(file_path, filename)
-                    image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
-                    species_info = self.image_processor.detect_species(img_path, bool(use_fp16), iou, conf, augment,
-                                                                       agnostic_nms)
-                    species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    detect_results = species_info.get('detect_results')
-                    if detect_results:
-                        #self.image_processor.save_detection_temp(detect_results, filename, temp_photo_dir)
-                        self.image_processor.save_detection_info_json(detect_results, filename, species_info,
-                                                                      temp_photo_dir)
-                        if self.master.winfo_exists():
-                            self.master.after(0, lambda p=img_path, d=detect_results, info=species_info.copy(): (
-                                self.preview_page.update_image_preview(p, show_detection=True, detection_results=d),
-                                self.preview_page.update_image_info(p, os.path.basename(p)),
-                                self.preview_page._update_detection_info(info)
-                            ))
-                    if save_detect_image: self.image_processor.save_detection_result(detect_results, filename,
-                                                                                     save_path)
-                    if copy_img and img: self._copy_image_by_species(img_path, save_path,
-                                                                     species_info['物种名称'].split(','))
-                    if 'detect_results' in species_info: del species_info['detect_results']
-                    image_info.update(species_info)
-                    excel_data.append(image_info)
-                except Exception as e:
-                    logger.error(f"处理文件 {filename} 失败: {e}")
-                processed_files += 1
-                if processed_files % 10 == 0: self._save_processing_cache(excel_data, file_path, save_path,
-                                                                          save_detect_image, True, copy_img,
-                                                                          use_fp16, processed_files, total_files,
-                                                                          iou, conf, augment, agnostic_nms)
-                try:
-                    del img_path, image_info, img, species_info, detect_results
-                except NameError:
-                    pass
-                gc.collect()
-
-            if not stopped_manually:
-                if self.master.winfo_exists():
-                    self.master.after(0, lambda: self.start_page.progress_frame.update_progress(value=total_files,
-                                                                                                total=total_files,
-                                                                                                speed=0,
-                                                                                                remaining_time="已完成"))
-                self.excel_data = excel_data
-                excel_data = DataProcessor.process_independent_detection(excel_data, self.confidence_settings)
-                if earliest_date: excel_data = DataProcessor.calculate_working_days(excel_data, earliest_date)
-                #if excel_data and output_excel: self._export_and_open_excel(excel_data, save_path)
-                self._delete_processing_cache()
-                if self.master.winfo_exists(): self.status_bar.status_label.config(text="处理完成！")
-                messagebox.showinfo("成功", "图像处理完成！")
-        except Exception as e:
-            logger.error(f"处理过程中发生错误: {e}")
-            messagebox.showerror("错误", f"处理过程中发生错误: {e}")
-        finally:
-            if self.master.winfo_exists():
-                self._set_processing_state(False)
-            gc.collect()
-
-    def _set_processing_state(self, is_processing: bool):
-        self.is_processing = is_processing
-        self.start_page.set_processing_state(is_processing)
-        self.sidebar.set_processing_state(is_processing)
-        if is_processing:
-            self.preview_page.show_detection_var.set(True)
-            self.processing_stop_flag.clear()
-        else:
-            if self.processing_stop_flag.is_set():
-                if self.master.winfo_exists(): self.status_bar.status_label.config(text="处理已停止")
-            elif self.master.winfo_exists() and self.status_bar.status_label.cget("text") != "处理完成！":
-                self.status_bar.status_label.config(text="就绪")
+            QMessageBox.information(self, "信息", "处理继续进行。")
 
     def _validate_inputs(self, file_path: str, save_path: str) -> bool:
         if not file_path or not os.path.isdir(file_path):
-            messagebox.showerror("错误", "请提供有效的源文件夹路径。")
+            QMessageBox.critical(self, "错误", "请提供有效的源文件夹路径。")
             return False
         if not save_path or not os.path.isdir(save_path):
-            messagebox.showerror("错误", "请提供有效的保存文件夹路径。")
+            QMessageBox.critical(self, "错误", "请提供有效的保存文件夹路径。")
             return False
         return True
 
-    def _copy_image_by_species(self, img_path: str, save_path: str, species_names: list):
-        for name in species_names:
-            if name:
-                to_path = os.path.join(save_path, name)
-                os.makedirs(to_path, exist_ok=True)
-                from shutil import copy
-                copy(img_path, to_path)
+    def _set_processing_state(self, is_processing: bool):
+        """设置处理状态"""
+        self.is_processing = is_processing
 
-    def _export_and_open_excel(self, excel_data, save_path):
-        from system.config import DEFAULT_EXCEL_FILENAME
-        output_file_path = os.path.join(save_path, DEFAULT_EXCEL_FILENAME)
-        if DataProcessor.export_to_excel(excel_data, output_file_path):
-            if messagebox.askyesno("成功", f"数据已导出到 {output_file_path}\n是否立即打开?"):
-                try:
-                    os.startfile(output_file_path)
-                except Exception as e:
-                    messagebox.showerror("错误", f"无法打开文件: {e}")
+        if hasattr(self.start_page, 'set_processing_state'):
+            self.start_page.set_processing_state(is_processing)
+        if hasattr(self.sidebar, 'set_processing_state'):
+            self.sidebar.set_processing_state(is_processing)
 
-    def _save_processing_cache(self, excel_data, file_path, save_path, save_detect_image, output_excel, copy_img,
-                               use_fp16, processed_files, total_files, iou, conf, use_augment, use_agnostic_nms):
-        def make_serializable(obj):
-            if isinstance(obj, datetime): return obj.isoformat()
-            if isinstance(obj, dict): return {k: make_serializable(v) for k, v in obj.items() if k != 'detect_results'}
-            if isinstance(obj, list): return [make_serializable(i) for i in obj]
-            if hasattr(obj, '__dict__'): return None
-            return obj
+        if is_processing:
+            if hasattr(self.preview_page, 'set_show_detection'):
+                self.preview_page.set_show_detection(True)
+        else:
+            if not is_processing and self.status_bar.status_label.text() != "处理完成！":
+                self.status_bar.status_label.setText("就绪")
 
-        serializable_excel_data = make_serializable(excel_data)
-        cache_data = {'file_path': file_path, 'save_path': save_path, 'save_detect_image': save_detect_image,
-                      'output_excel': output_excel, 'copy_img': copy_img, 'use_fp16': use_fp16,
-                      'processed_files': processed_files, 'total_files': total_files,
-                      'excel_data': serializable_excel_data,
-                      'iou': iou,
-                      'conf': conf,
-                      'use_augment': use_augment,
-                      'use_agnostic_nms': use_agnostic_nms}
-        cache_file = os.path.join(self.settings_manager.settings_dir, "cache.json")
+    def _on_progress_updated(self, value, total, speed, remaining_time):
+        """处理进度更新，直接更新状态栏"""
+        # 存储最新的进度信息
+        self.last_progress_value = value
+        self.last_progress_total = total
+        self.last_progress_speed = speed
+        self.last_progress_remaining_time = remaining_time
+
+        # 格式化剩余时间
+        if isinstance(remaining_time, (int, float)) and remaining_time > 0:
+            if remaining_time == float('inf') or remaining_time > 3600 * 24:
+                time_text = "计算中..."
+            elif remaining_time > 3600:
+                hours = int(remaining_time // 3600)
+                minutes = int((remaining_time % 3600) // 60)
+                time_text = f"{hours}h{minutes}m"
+            elif remaining_time > 60:
+                minutes = int(remaining_time // 60)
+                seconds = int(remaining_time % 60)
+                time_text = f"{minutes}m{seconds}s"
+            else:
+                time_text = f"{int(remaining_time)}s"
+        else:
+            time_text = "已完成" if value == total and total > 0 else "计算中..."
+
+        # 获取当前处理的文件名
+        current_file = getattr(self, 'current_processing_file', '...')
+
+        # 创建状态栏消息
+        status_message = (
+            f"处理中: {value}/{total} ({speed:.2f} 张/秒) | "
+            f"剩余: {time_text} | "
+            f"文件: {current_file}"
+        )
+        self.status_bar.status_label.setText(status_message)
+
+    def _on_file_processed(self, img_path, detection_results, filename):
+        """处理文件完成"""
+        if hasattr(self.preview_page, 'on_file_processed'):
+            self.preview_page.on_file_processed(img_path, detection_results, filename)
+
+    def _on_processing_complete(self, success):
+        """处理完成"""
+        self._set_processing_state(False)
+
+        # 如果当前在物种校验页面，刷新数据
+        if self.current_page == "species_validation" and success:
+            if hasattr(self.species_validation_page, '_load_species_data'):
+                QTimer.singleShot(500, self.species_validation_page._load_species_data)
+
+    def _on_status_message(self, message):
+        """状态消息 - 简化状态栏显示，仅处理非进度消息"""
+        # 进度信息由 _on_progress_updated 处理，这里只显示其他状态
+        if "正在处理:" not in message:
+            self.status_bar.status_label.setText(message)
+
+    def _save_current_settings(self):
+        """保存当前设置"""
+        if not self.settings_manager:
+            return
+        settings = self._get_current_settings()
+        if self.settings_manager.save_settings(settings):
+            logger.info("设置已保存")
+
+    def _get_current_settings(self):
+        """获取当前设置"""
+        settings = {}
+
+        # 从开始页面获取设置
+        if hasattr(self.start_page, 'get_settings'):
+            settings.update(self.start_page.get_settings())
+
+        # 从高级页面获取设置
+        if hasattr(self.advanced_page, 'get_settings'):
+            settings.update(self.advanced_page.get_settings())
+
+        # 从预览页面获取设置
+        if hasattr(self.preview_page, 'get_settings'):
+            settings.update(self.preview_page.get_settings())
+
+            # 从物种校验页面获取设置
+            if hasattr(self.species_validation_page, 'get_settings'):
+                settings.update(self.species_validation_page.get_settings())
+
+        # 添加其他设置，确保包含模型信息
+        settings.update({
+            "update_channel": self.update_channel_var,
+            "selected_model": getattr(self, 'model_var', ''),
+        })
+
+        # 如果model_var为空，尝试从image_processor获取
+        if not settings.get("selected_model") and hasattr(self, 'image_processor'):
+            if hasattr(self.image_processor, 'model_path') and self.image_processor.model_path:
+                settings["selected_model"] = os.path.basename(self.image_processor.model_path)
+
+        return settings
+
+    def _load_settings_to_ui(self, settings: dict):
+        """加载设置到UI"""
+        if not settings:
+            return
         try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"保存缓存失败: {e}")
+            # 加载到各个页面
+            if hasattr(self.start_page, 'load_settings'):
+                self.start_page.load_settings(settings)
+            if hasattr(self.advanced_page, 'load_settings'):
+                self.advanced_page.load_settings(settings)
+            if hasattr(self.preview_page, 'load_settings'):
+                self.preview_page.load_settings(settings)
+            if hasattr(self.species_validation_page, 'load_settings'):
+                self.species_validation_page.load_settings(settings)
 
-    def _delete_processing_cache(self):
-        cache_file = os.path.join(self.settings_manager.settings_dir, "cache.json")
-        if os.path.exists(cache_file): os.remove(cache_file)
+            # 加载其他设置
+            self.update_channel_var = settings.get("update_channel", "稳定版 (Release)")
+
+            # 加载主题
+            theme = settings.get("theme", "自动")
+            if hasattr(self.advanced_page, 'set_theme_selection'):
+                self.advanced_page.set_theme_selection(theme)
+            self.change_theme()
+
+        except Exception as e:
+            logger.error(f"加载设置到UI失败: {e}")
 
     def _load_cache_data_from_file(self, cache_data):
+        """从文件加载缓存数据"""
         self._load_settings_to_ui(cache_data)
         self.excel_data = cache_data.get('excel_data', [])
         for item in self.excel_data:
@@ -897,11 +1033,12 @@ class ObjectDetectionGUI:
                     item['拍摄日期对象'] = None
 
     def _resume_processing(self):
+        """恢复处理"""
         self._load_cache_data_from_file(self.cache_data)
         self.start_processing(resume_from=self.cache_data.get('processed_files', 0))
 
     def _clear_current_validation_file(self):
-        """删除当前所选文件夹的validation.json文件。"""
+        """清除当前验证文件"""
         temp_photo_dir = self.get_temp_photo_dir()
         if temp_photo_dir:
             validation_file_path = os.path.join(temp_photo_dir, "validation.json")
@@ -911,43 +1048,38 @@ class ObjectDetectionGUI:
                     logger.info(f"已清除旧的校验文件: {validation_file_path}")
                 except Exception as e:
                     logger.error(f"清除旧的校验文件失败: {e}")
-        # 同时清除内存中的数据
-        if hasattr(self, 'preview_page'):
-            self.preview_page.validation_data.clear()
 
-    def _navigate_image_up(self, event=None):
-        """处理向上箭头键事件，用于在预览页面切换图片。"""
-        if self.current_page == "preview":
-            self.preview_page.navigate_listbox('up')
-            return "break"  # 新增：阻止事件继续传播
+        # 清除内存中的数据
+        if hasattr(self.preview_page, 'clear_validation_data'):
+            self.preview_page.clear_validation_data()
 
-    def _navigate_image_down(self, event=None):
-        """处理向下箭头键事件，用于在预览页面切换图片。"""
-        if self.current_page == "preview":
-            self.preview_page.navigate_listbox('down')
-            return "break"  # 新增：阻止事件继续传播
+    def closeEvent(self, event):
+        """关闭事件"""
+        if self.is_processing:
+            reply = QMessageBox.question(
+                self, "确认退出",
+                "图像处理正在进行中，确定要退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
 
-    def _set_title_bar_color(self):
-        """根据当前主题设置标题栏颜色（仅限Windows）。"""
-        if platform.system() == "Windows":
-            try:
-                # 颜色格式需要是 BGR，而不是常规的 RGB
-                hex_color = self.accent_color.replace("#", "")
-                r = int(hex_color[0:2], 16)
-                g = int(hex_color[2:4], 16)
-                b = int(hex_color[4:6], 16)
-                color = (b << 16) | (g << 8) | r
+            # 检查处理线程是否存在且有stop方法
+            if hasattr(self, 'processing_thread') and self.processing_thread is not None:
+                if hasattr(self.processing_thread, 'stop'):
+                    self.processing_thread.stop()
+                else:
+                    # 如果没有stop方法，设置停止标志
+                    if hasattr(self.processing_thread, 'stop_flag'):
+                        self.processing_thread.stop_flag = True
 
-                # 获取窗口句柄
-                hwnd = ctypes.windll.user32.GetParent(self.master.winfo_id())
+        # 保存验证数据
+        if hasattr(self.preview_page, '_save_validation_data'):
+            self.preview_page._save_validation_data()
 
-                # DWMWA_CAPTION_COLOR = 35
-                DWMWA_CAPTION_COLOR = 35
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_CAPTION_COLOR,
-                    ctypes.byref(ctypes.c_int(color)),
-                    ctypes.sizeof(ctypes.c_int)
-                )
-            except Exception as e:
-                logger.warning(f"设置标题栏颜色失败: {e}")
+        # 保存设置
+        self._save_current_settings()
+
+        event.accept()
+
