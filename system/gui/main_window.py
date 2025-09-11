@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QMessageBox, QFileDialog, QApplication, QStackedWidget
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, Slot
 from PySide6.QtGui import QIcon, QPixmap, QPalette
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS
@@ -270,7 +270,7 @@ class ObjectDetectionGUI(QMainWindow):
         self._create_ui_elements()
         self._setup_connections()
 
-	# 在窗口初始化后设置标题栏颜色
+        # 在窗口初始化后设置标题栏颜色
         self._set_title_bar_color()
 
         # 加载设置
@@ -1089,11 +1089,11 @@ class ObjectDetectionGUI(QMainWindow):
             else:
                 # 浅色模式标题栏颜色
                 color_str = "#f6dce0"
-            
+
             color = QColor(color_str)
             # Windows API COLORREF is in 0x00BBGGRR format
             color_ref = color.blue() << 16 | color.green() << 8 | color.red()
-            
+
             hwnd = self.winId()
             if hwnd:
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1105,3 +1105,21 @@ class ObjectDetectionGUI(QMainWindow):
         except Exception as e:
             logger.warning(f"无法设置标题栏颜色: {e}")
 
+    @Slot(str, str)
+    def prompt_for_update(self, remote_version, download_url):
+        """弹窗询问用户是否更新，并在主线程中安全地启动下载。"""
+        if not download_url:
+            QMessageBox.critical(self, "更新错误", "找不到新版本的下载链接。")
+            return
+
+        update_message = f"发现新版本 ({remote_version})，是否立即下载并更新？"
+        reply = QMessageBox.question(self, "发现新版本", update_message,
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            # 用户点击“是”，开始下载
+            start_download_thread(self, download_url)
+
+    @Slot(str)
+    def set_status_bar_message(self, message: str):
+        """安全地设置状态栏消息（可从其他线程调用）"""
+        self.status_bar.status_label.setText(message)

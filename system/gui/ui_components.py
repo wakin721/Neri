@@ -1639,14 +1639,17 @@ class ModernSlider(QSlider):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 获取当前主题颜色
-        is_dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        # 获取当前主题颜色 - 修正：使用 QApplication 的全局 palette
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
         if is_dark:
             track_bg = Win11Colors.DARK_SURFACE
             progress_color = Win11Colors.DARK_ACCENT
             thumb_color = QColor(255, 255, 255)
             thumb_border = Win11Colors.DARK_BORDER
         else:
+            # 为浅色模式添加颜色定义
             track_bg = Win11Colors.LIGHT_SURFACE
             progress_color = Win11Colors.LIGHT_ACCENT
             thumb_color = QColor(255, 255, 255)

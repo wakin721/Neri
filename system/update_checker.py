@@ -11,7 +11,8 @@ import subprocess
 import threading
 import platform
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QProgressBar, QMessageBox
-from PySide6.QtCore import Qt, QThread, Signal, QMetaObject
+# Make sure Slot is imported
+from PySide6.QtCore import Qt, QThread, Signal, QMetaObject, Q_ARG, QObject, Slot
 from system.config import APP_VERSION
 
 # GitHub仓库信息
@@ -122,25 +123,40 @@ def check_for_updates(parent, silent=False, channel='preview'):
         if not latest_info:
             if not silent:
                 _show_messagebox(parent, "更新错误", "无法在远程仓库中找到版本信息。", "error")
+                QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
+                                         Q_ARG(str, "检查更新失败"))
             return
 
         remote_version = latest_info['version']
 
         if compare_versions(APP_VERSION, remote_version):
-            # 只有在找到更新时才与UI交互
             if parent:
-                # 安全地调用主窗口的方法来更新侧边栏
+                # 更新侧边栏和状态栏
                 QMetaObject.invokeMethod(parent, "show_update_notification_on_sidebar", Qt.QueuedConnection)
+                QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
+                                         Q_ARG(str, f"发现新版本：{remote_version}"))
 
-
-            # 非静默模式下弹窗提示
             if not silent and parent:
-                update_message = f"新版本 ({remote_version}) 可用，是否前往高级设置进行更新？"
-                _show_messagebox(parent, "发现新版本", update_message, "info")
+                download_url = latest_info.get('url')
+                # 弹窗提示更新
+                QMetaObject.invokeMethod(
+                    parent,
+                    "prompt_for_update",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, remote_version),
+                    Q_ARG(str, download_url)
+                )
+        else:
+            # 未发现新版本
+            if not silent and parent:
+                QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
+                                         Q_ARG(str, "已经是最新版本"))
 
     except Exception as e:
         if not silent and parent:
             _show_messagebox(parent, "更新错误", f"检查更新失败: {e}", "error")
+            QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
+                                     Q_ARG(str, "检查更新失败，请检查网络连接"))
 
 
 def start_download_thread(parent, download_url):
@@ -148,49 +164,49 @@ def start_download_thread(parent, download_url):
     if not download_url:
         _show_messagebox(parent, "错误", "下载链接无效！", "error")
         return
-    
+
     progress_dialog = UpdateProgressDialog(parent, download_url)
     progress_dialog.exec()
 
 
-class UpdateProgressDialog(QDialog):
-    def __init__(self, parent, download_url):
-        super().__init__(parent)
-        self.setWindowTitle("正在更新...")
-        self.setWindowIcon(parent.windowIcon())
-        self.setModal(True)
+class UpdateWorker(QObject):
+    """
+    更新工作线程，负责下载和解压文件，并通过信号与主线程通信。
+    """
+    status_changed = Signal(str)
+    progress_updated = Signal(int)
+    progress_max_set = Signal(int)
+    finished = Signal(bool, str)  # success/fail, message
+
+    def __init__(self, download_url):
+        super().__init__()
         self.download_url = download_url
+        self._is_running = True
 
-        self.layout = QVBoxLayout(self)
-        self.label = QLabel("正在连接到服务器...", self)
-        self.progress_bar = QProgressBar(self)
-        self.layout.addWidget(self.label)
-        self.layout.addWidget(self.progress_bar)
-
-        self.download_thread = threading.Thread(target=self.perform_download, daemon=True)
-        self.download_thread.start()
-
-    def perform_download(self):
-        """执行下载、解压、安装和重启的完整流程。"""
+    def run(self):
+        """执行下载、解压、安装的完整流程。"""
         try:
-            self.update_ui("正在从GitHub下载更新...")
+            self.status_changed.emit("正在从GitHub下载更新...")
             response = requests.get(self.download_url, stream=True, timeout=30)
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
-            self.progress_bar.setMaximum(total_size if total_size > 0 else 100)
+            self.progress_max_set.emit(total_size if total_size > 0 else 100)
 
             downloaded_size = 0
             file_buffer = io.BytesIO()
 
             for chunk in response.iter_content(chunk_size=8192):
+                if not self._is_running:
+                    self.finished.emit(False, "用户取消操作")
+                    return
                 if chunk:
                     file_buffer.write(chunk)
                     downloaded_size += len(chunk)
                     if total_size > 0:
-                        self.progress_bar.setValue(downloaded_size)
+                        self.progress_updated.emit(downloaded_size)
 
-            self.update_ui("下载完成，正在解压并安装...")
-            self.progress_bar.setRange(0, 0) # Indeterminate
+            self.status_changed.emit("下载完成，正在解压并安装...")
+            self.progress_max_set.emit(0)  # 进入不确定模式
 
             if getattr(sys, 'frozen', False):
                 app_root = os.path.dirname(sys.executable)
@@ -202,6 +218,9 @@ class UpdateProgressDialog(QDialog):
             with zipfile.ZipFile(file_buffer) as z:
                 root_folder_in_zip = z.namelist()[0]
                 for member in z.infolist():
+                    if not self._is_running:
+                        self.finished.emit(False, "用户取消操作")
+                        return
                     path_in_zip = member.filename.replace(root_folder_in_zip, '', 1)
                     if not path_in_zip or ".git" in path_in_zip: continue
                     target_path = os.path.join(app_root, path_in_zip)
@@ -212,22 +231,90 @@ class UpdateProgressDialog(QDialog):
                         os.makedirs(target_dir, exist_ok=True)
                         with z.open(member) as source, open(target_path, "wb") as target:
                             shutil.copyfileobj(source, target)
-            
-            self.close()
-            self.ask_restart()
 
+            self.finished.emit(True, "更新成功")
 
         except Exception as e:
-            self.close()
-            _show_messagebox(self.parent(), "更新失败", f"更新过程中发生错误: {e}", "error")
+            self.finished.emit(False, str(e))
 
-    def update_ui(self, text):
-        self.label.setText(text)
+    def stop(self):
+        self._is_running = False
+
+
+class UpdateProgressDialog(QDialog):
+    def __init__(self, parent, download_url):
+        super().__init__(parent)
+        self.setWindowTitle("正在更新...")
+        self.setWindowIcon(parent.windowIcon())
+        self.setModal(True)
+        self.finished_successfully = False
+
+        self.layout = QVBoxLayout(self)
+        self.label = QLabel("正在连接到服务器...", self)
+        self.progress_bar = QProgressBar(self)
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.progress_bar)
+
+        # 使用QThread来管理工作线程
+        self.thread = QThread(self)
+        self.worker = UpdateWorker(download_url)
+        self.worker.moveToThread(self.thread)
+
+        # 连接信号与槽
+        self.worker.status_changed.connect(self.label.setText)
+        # --- FIX STARTS HERE ---
+        # 连接到新的辅助槽，而不是直接连接到 setRange
+        self.worker.progress_max_set.connect(self.on_set_progress_range)
+        # --- FIX ENDS HERE ---
+        self.worker.progress_updated.connect(self.progress_bar.setValue, Qt.QueuedConnection)
+        self.worker.finished.connect(self.on_finished)
+        self.thread.started.connect(self.worker.run)
+
+        self.thread.start()
+
+    # --- FIX STARTS HERE ---
+    @Slot(int)
+    def on_set_progress_range(self, max_value):
+        """这个槽函数接收一个参数，并用它来正确调用setRange(min, max)"""
+        if max_value > 0:
+            # 设置正常的进度范围
+            self.progress_bar.setRange(0, max_value)
+        else:
+            # 设置为不确定模式（min=0, max=0）
+            self.progress_bar.setRange(0, 0)
+
+    # --- FIX ENDS HERE ---
+
+    def on_finished(self, success, message):
+        """处理工作线程完成的信号"""
+        self.thread.quit()
+        self.thread.wait()
+        self.close()
+
+        if success:
+            self.finished_successfully = True
+        else:
+            if "用户取消操作" not in message:
+                _show_messagebox(self.parent(), "更新失败", f"更新过程中发生错误: {message}", "error")
+
+    def exec(self):
+        """重写exec，在对话框关闭后执行重启逻辑"""
+        super().exec()
+        if self.finished_successfully:
+            self.ask_restart()
+
+    def closeEvent(self, event):
+        """关闭对话框时，尝试停止工作线程"""
+        if self.thread.isRunning():
+            self.worker.stop()
+            self.thread.quit()
+            self.thread.wait()
+        event.accept()
 
     def ask_restart(self):
         reply = QMessageBox.question(self.parent(), "更新成功",
-                                         "程序已成功更新！\n是否立即重启应用程序以应用更改？",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     "程序已成功更新！\n是否立即重启应用程序以应用更改？",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             try:
                 # 确定重启命令的参数
@@ -260,8 +347,8 @@ class UpdateProgressDialog(QDialog):
                                 continue
                         if not terminal_found:
                             _show_messagebox(self.parent(), "重启提示",
-                                                "无法自动打开新终端，请手动重启程序以应用更新。",
-                                                "info")
+                                             "无法自动打开新终端，请手动重启程序以应用更新。",
+                                             "info")
                 else:
                     # 对于开发环境（直接运行 .py 文件）
                     app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -293,7 +380,7 @@ class UpdateProgressDialog(QDialog):
                         # /WAIT 参数确保等待 checker.py 执行完毕
                         # 然后使用 pythonw.exe 启动 gui.py（无窗口）
                         cmd_sequence = f'start "Neri checker" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
-                        
+
                         # 使用 cmd /c 执行命令序列
                         subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
 
@@ -335,7 +422,8 @@ exit
                                 continue
                         if not terminal_found:
                             _show_messagebox(self.parent(), "重启提示",
-                                                "无法自动打开新终端，请手动重启程序以应用更新。", "info")
+                                             "无法自动打开新终端，请手动重启程序以应用更新。",
+                                             "info")
 
                 # 关闭当前的应用程序实例
                 self.parent().close()
