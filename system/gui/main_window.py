@@ -494,10 +494,6 @@ class ObjectDetectionGUI(QMainWindow):
     def _check_for_updates(self, silent=False):
         """检查更新"""
 
-        def on_update_found(version):
-            if hasattr(self.sidebar, 'show_update_notification'):
-                self.sidebar.show_update_notification()
-
         def on_check_complete(success):
             if not silent and not success:
                 QMessageBox.warning(self, "更新错误", "检查更新失败，请稍后重试。")
@@ -506,38 +502,29 @@ class ObjectDetectionGUI(QMainWindow):
         channel = 'preview' if '预览版' in channel_selection else 'stable'
 
         self.update_thread = UpdateCheckThread(channel, silent)
-        self.update_thread.update_found.connect(on_update_found)
         self.update_thread.check_complete.connect(on_check_complete)
         self.update_thread.start()
 
     def check_for_updates_from_ui(self):
         """从UI手动检查更新"""
-        channel_selection = self.update_channel_var
-        channel = 'preview' if '预览版' in channel_selection else 'stable'
+        try:
+            # 从高级设置页面直接获取最新的更新通道选择
+            channel_selection = self.advanced_page.update_channel_combo.currentText()
+            channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-        def on_update_found(version):
-            if hasattr(self.sidebar, 'show_update_notification'):
-                self.sidebar.show_update_notification()
-            update_message = f"发现新版本: {version}\n\n是否立即下载并安装？"
-            reply = QMessageBox.question(
-                self, "发现新版本", update_message,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            # 提示用户检查已经开始
+            self.status_bar.status_label.setText("正在检查更新，请稍候...")
+
+            # 使用线程来运行检查，避免UI阻塞
+            update_thread = threading.Thread(
+                target=check_for_updates,
+                args=(self, False, channel),  # self作为parent, silent设置为False
+                daemon=True
             )
-            if reply == QMessageBox.StandardButton.Yes:
-                # 这里需要实现下载逻辑
-                pass
-
-        def on_check_complete(success):
-            if success:
-                # 如果没有发现更新
-                QMessageBox.information(self, "无更新", "您目前使用的是最新版本。")
-            else:
-                QMessageBox.critical(self, "更新错误", "检查更新时发生错误。")
-
-        self.update_thread = UpdateCheckThread(channel, False)
-        self.update_thread.update_found.connect(on_update_found)
-        self.update_thread.check_complete.connect(on_check_complete)
-        self.update_thread.start()
+            update_thread.start()
+        except Exception as e:
+            logger.error(f"启动更新检查失败: {e}")
+            QMessageBox.critical(self, "错误", f"无法开始更新检查: {e}")
 
     def change_theme(self):
         """更改主题"""
