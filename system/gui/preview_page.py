@@ -24,7 +24,7 @@ from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
 from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS
 from system.utils import resource_path
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernSwitch
+from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow
 
 logger = logging.getLogger(__name__)
 
@@ -263,18 +263,18 @@ class PreviewPage(QWidget):
                     QSlider::handle:horizontal:hover {{
                         background: {slider_handle_hover_bg_color};
                     }}
-                    ModernSwitch {{
+                    SwitchRow {{
                         font-size: 14px;
                         color: {checkbox_text_color};
                     }}
-                    ModernSwitch::indicator {{
+                    SwitchRow::indicator {{
                         width: 18px;
                         height: 18px;
                         border: 2px solid {checkbox_indicator_border_color};
                         border-radius: 4px;
                         background-color: {checkbox_indicator_bg_color};
                     }}
-                    ModernSwitch::indicator:checked {{
+                    SwitchRow::indicator:checked {{
                         background-color: {checkbox_indicator_checked_bg_color};
                         border-color: {checkbox_indicator_checked_bg_color};
                         image: url(checkmark.png);
@@ -379,8 +379,8 @@ class PreviewPage(QWidget):
         control_layout = QHBoxLayout(control_widget)
         control_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.show_detection_checkbox = ModernSwitch("显示检测结果")
-        self.show_detection_checkbox.stateChanged.connect(self.toggle_detection_preview)
+        self.show_detection_checkbox = SwitchRow("显示检测结果")
+        self.show_detection_checkbox.toggled.connect(self.toggle_detection_preview)
         control_layout.addWidget(self.show_detection_checkbox)
 
         # 置信度滑块
@@ -606,7 +606,7 @@ class PreviewPage(QWidget):
                 status_text += "\n🔄 正在检测中..."
             self.info_text.setPlainText(status_text)
 
-    def toggle_detection_preview(self, *args):
+    def toggle_detection_preview(self, checked):
         """切换检测结果预览显示"""
         if self.controller.is_processing:
             self.show_detection_checkbox.setChecked(True)
@@ -618,7 +618,7 @@ class PreviewPage(QWidget):
             self.show_detection_checkbox.setChecked(False)
             return
 
-        if self.show_detection_checkbox.isChecked():
+        if checked:
             # 显示带检测框的图像
             if self.current_preview_info:
                 # 使用现有的检测信息重新绘制图像

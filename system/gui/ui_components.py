@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
-    QRect, QSize, Signal, Property, QParallelAnimationGroup
+    QRect, QSize, Signal, Property, QParallelAnimationGroup, QPoint
 )
 from PySide6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics,
@@ -1586,176 +1586,183 @@ class PathInputWidget(QWidget):
 
 
 class ModernSlider(QSlider):
-    """现代化滑块组件 - Win11风格，圆形滑块"""
+    """现代化滑块组件 - WinUI 3 风格，带悬停和拖动动画"""
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
-        self.setMinimumHeight(40)  # 给滑块足够的空间
+        self.setMinimumHeight(40)
         self.setFixedHeight(40)
-        self._thumb_radius = 12  # 滑块半径
-        self._track_height = 6  # 轨道高度
+
+        # 状态变量
         self._is_dragging = False
+        self._is_hovering = False
+
+        # 尺寸定义
+        self._track_height = 4
+        self._thumb_radius = 10  # 外圈半径
+        self._thumb_border_width = 2
+
+        # 根据新要求调整内圈动画半径
+        self._inner_radius_default = 6  # 正常状态
+        self._inner_radius_hover = 8  # 悬停状态
+        self._inner_radius_pressed = 5  # 拖动状态
+
+        self._animated_inner_radius = self._inner_radius_default
+
         self._setup_style()
+        self._setup_animation()
+
+    @Property(float)
+    def innerRadius(self):
+        return self._animated_inner_radius
+
+    @innerRadius.setter
+    def innerRadius(self, value):
+        self._animated_inner_radius = value
+        self.update()
+
+    def _setup_animation(self):
+        """设置内圈半径动画"""
+        self._radius_animation = QPropertyAnimation(self, b"innerRadius")
+        # 统一使用更快的动画时长，让所有状态反馈都更“清脆”
+        self._radius_animation.setDuration(150)
+        # OutCubic 曲线（先快后慢）比 InOut 曲线更适合提供快速的交互反馈
+        self._radius_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def _setup_style(self):
         """设置基础样式 - 隐藏默认外观"""
-        self.setStyleSheet("""
-            QSlider {
-                background: transparent;
-                border: none;
-            }
-            QSlider::groove:horizontal {
-                background: transparent;
-                border: none;
-            }
-            QSlider::handle:horizontal {
-                background: transparent;
-                border: none;
-                width: 0px;
-                height: 0px;
-            }
-            QSlider::sub-page:horizontal,
-            QSlider::add-page:horizontal {
-                background: transparent;
-                border: none;
-            }
-        """)
+        # 隐藏原始的QSlider样式，以便完全自定义绘制
+        self.setStyleSheet("QSlider { background: transparent; border: none; }")
 
     def paintEvent(self, event):
         """自定义绘制"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 获取主题颜色
-        app = QApplication.instance()
-        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
-
+        # 获取当前主题颜色
+        is_dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
         if is_dark:
             track_bg = Win11Colors.DARK_SURFACE
-            track_border = Win11Colors.DARK_BORDER
             progress_color = Win11Colors.DARK_ACCENT
             thumb_color = QColor(255, 255, 255)
-            thumb_border = Win11Colors.DARK_ACCENT
-            shadow_color = QColor(0, 0, 0, 0)
+            thumb_border = Win11Colors.DARK_BORDER
         else:
             track_bg = Win11Colors.LIGHT_SURFACE
-            track_border = Win11Colors.LIGHT_BORDER
             progress_color = Win11Colors.LIGHT_ACCENT
             thumb_color = QColor(255, 255, 255)
-            thumb_border = Win11Colors.LIGHT_ACCENT
-            shadow_color = QColor(0, 0, 0, 0)
+            thumb_border = Win11Colors.LIGHT_BORDER
 
-        # 计算尺寸和位置
+        # --- 1. 绘制轨道 ---
         rect = self.rect()
+        track_margin = self._thumb_radius
         track_rect = QRect(
-            self._thumb_radius,
+            track_margin,
             (rect.height() - self._track_height) // 2,
-            rect.width() - 2 * self._thumb_radius,
+            rect.width() - 2 * track_margin,
             self._track_height
         )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(track_bg))
+        painter.drawRoundedRect(track_rect, self._track_height / 2, self._track_height / 2)
 
-        # 计算滑块位置
+        # --- 2. 绘制进度 ---
         if self.maximum() > self.minimum():
             ratio = (self.value() - self.minimum()) / (self.maximum() - self.minimum())
         else:
             ratio = 0
 
-        thumb_x = self._thumb_radius + ratio * (rect.width() - 2 * self._thumb_radius)
-        thumb_center = QRect(
-            int(thumb_x - self._thumb_radius),
-            (rect.height() - 2 * self._thumb_radius) // 2,
-            2 * self._thumb_radius,
-            2 * self._thumb_radius
-        )
-
-        # 绘制轨道背景
-        track_path = QPainterPath()
-        track_path.addRoundedRect(track_rect, self._track_height // 2, self._track_height // 2)
-        painter.fillPath(track_path, track_bg)
-
-        # 绘制轨道边框
-        painter.setPen(QPen(track_border, 1))
-        painter.drawPath(track_path)
-
-        # 绘制进度部分
         if ratio > 0:
+            progress_width = int(track_rect.width() * ratio)
             progress_rect = QRect(
-                track_rect.x(),
-                track_rect.y(),
-                int(track_rect.width() * ratio),
-                track_rect.height()
+                track_rect.x(), track_rect.y(),
+                progress_width, track_rect.height()
             )
-            progress_path = QPainterPath()
-            progress_path.addRoundedRect(progress_rect, self._track_height // 2, self._track_height // 2)
-            painter.fillPath(progress_path, progress_color)
+            painter.setBrush(QBrush(progress_color))
+            painter.drawRoundedRect(progress_rect, self._track_height / 2, self._track_height / 2)
 
-        # 绘制滑块阴影
-        if is_dark:
-            shadow_rect = QRect(
-                thumb_center.x() + 2,
-                thumb_center.y() + 2,
-                thumb_center.width(),
-                thumb_center.height()
-            )
-            shadow_path = QPainterPath()
-            shadow_path.addEllipse(shadow_rect)
-            painter.fillPath(shadow_path, shadow_color)
+        # --- 3. 绘制滑块 ---
+        thumb_x = track_margin + ratio * track_rect.width()
+        thumb_y = rect.height() / 2
+        thumb_center_point = QPoint(int(thumb_x), int(thumb_y))
 
-        # 绘制滑块边框
-        painter.setPen(QPen(thumb_border, 2))
+        # 绘制外圈（边框和背景）
+        painter.setPen(QPen(thumb_border, 1))
         painter.setBrush(QBrush(thumb_color))
-        painter.drawEllipse(thumb_center)
+        painter.drawEllipse(thumb_center_point, self._thumb_radius, self._thumb_radius)
 
-        # 如果正在拖拽或悬停，添加额外效果
-        if self._is_dragging or self.underMouse():
-            # 绘制外圈效果
-            outer_pen = QPen(thumb_border.lighter(150), 1)
-            outer_rect = QRect(
-                thumb_center.x() - 2,
-                thumb_center.y() - 2,
-                thumb_center.width() + 4,
-                thumb_center.height() + 4
-            )
-            painter.setPen(outer_pen)
-            painter.setBrush(QBrush(Qt.GlobalColor.transparent))
-            painter.drawEllipse(outer_rect)
+        # 绘制内圈（根据状态变化）
+        current_inner_radius = self._animated_inner_radius
+        if self._is_dragging:
+            current_inner_radius = self._inner_radius_pressed  # 拖动时，使用最小半径
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(progress_color))
+        painter.drawEllipse(thumb_center_point, current_inner_radius, current_inner_radius)
 
     def mousePressEvent(self, event):
         """鼠标按下事件"""
         if event.button() == Qt.MouseButton.LeftButton:
+            # 1. 标记拖动状态已开始
             self._is_dragging = True
-            self._update_value_from_position(event.position().x())
-            self.update()
-        super().mousePressEvent(event)
+
+            # 2. 触发“按下”动画，此时滑块的值和位置不发生改变
+            self._animate_radius_to(self._inner_radius_pressed)
+
+            # 3. 接受事件，阻止 QSlider 的默认点击行为（即立即跳转到点击位置）
+            event.accept()
+        else:
+            # 对于其他鼠标按钮，继续使用父类的默认行为
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         """鼠标移动事件"""
         if self._is_dragging:
             self._update_value_from_position(event.position().x())
-            self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         """鼠标释放事件"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = False
-            self.update()
+            # 检查鼠标是否仍在组件上，以决定恢复到悬停还是默认状态
+            if self.underMouse():
+                self._is_hovering = True
+                self._animate_radius_to(self._inner_radius_hover)
+            else:
+                self._is_hovering = False
+                self._animate_radius_to(self._inner_radius_default)
+            # update() 会在动画过程中被调用，这里不需要手动调用
         super().mouseReleaseEvent(event)
+
 
     def enterEvent(self, event):
         """鼠标进入事件"""
-        self.update()
-        super().enterEvent(event)
+        super().enterEvent(event) # 调用父类实现
+        self._is_hovering = True
+        # 仅当没有在拖动时，才触发悬停动画
+        if not self._is_dragging:
+            self._animate_radius_to(self._inner_radius_hover)
 
     def leaveEvent(self, event):
         """鼠标离开事件"""
-        self.update()
-        super().leaveEvent(event)
+        super().leaveEvent(event) # 调用父类实现
+        self._is_hovering = False
+        # 仅当没有在拖动时，才触发离开动画
+        if not self._is_dragging:
+            self._animate_radius_to(self._inner_radius_default)
+
+    def _animate_radius_to(self, target_radius):
+        """启动半径动画到目标值"""
+        if self._radius_animation.state() == QPropertyAnimation.State.Running:
+            self._radius_animation.stop()
+
+        self._radius_animation.setStartValue(self._animated_inner_radius)
+        self._radius_animation.setEndValue(target_radius)
+        self._radius_animation.start()
 
     def _update_value_from_position(self, x):
         """根据鼠标位置更新值"""
-        rect = self.rect()
-        track_width = rect.width() - 2 * self._thumb_radius
+        track_width = self.width() - 2 * self._thumb_radius
         relative_x = x - self._thumb_radius
 
         if track_width > 0:

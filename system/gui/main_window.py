@@ -989,7 +989,6 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 添加其他设置，确保包含模型信息
         settings.update({
-            "update_channel": self.update_channel_var,
             "selected_model": getattr(self, 'model_var', ''),
         })
 
@@ -1014,9 +1013,6 @@ class ObjectDetectionGUI(QMainWindow):
                 self.preview_page.load_settings(settings)
             if hasattr(self.species_validation_page, 'load_settings'):
                 self.species_validation_page.load_settings(settings)
-
-            # 加载其他设置
-            self.update_channel_var = settings.get("update_channel", "稳定版 (Release)")
 
             # 加载主题
             theme = settings.get("theme", "自动")
