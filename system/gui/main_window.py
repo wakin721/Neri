@@ -270,6 +270,9 @@ class ObjectDetectionGUI(QMainWindow):
         self._create_ui_elements()
         self._setup_connections()
 
+	# 在窗口初始化后设置标题栏颜色
+        self._set_title_bar_color()
+
         # 加载设置
         if self.settings:
             self._load_settings_to_ui(self.settings)
@@ -554,6 +557,8 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 应用主题
         ThemeManager.apply_win11_style(QApplication.instance())
+        # 在主题更改后设置标题栏颜色
+        self._set_title_bar_color()
         self._save_current_settings()
 
     def setup_theme_monitoring(self):
@@ -1083,4 +1088,37 @@ class ObjectDetectionGUI(QMainWindow):
         self._save_current_settings()
 
         event.accept()
+
+    def _set_title_bar_color(self):
+        """设置窗口标题栏颜色 (仅限Windows)"""
+        if platform.system() != "Windows":
+            return
+
+        try:
+            from PySide6.QtGui import QColor
+
+            # Constant for DWMWA_CAPTION_COLOR from Windows API
+            DWMWA_CAPTION_COLOR = 35
+
+            if self.is_dark_mode:
+                # 深色模式标题栏颜色
+                color_str = "#5d3a4f"
+            else:
+                # 浅色模式标题栏颜色
+                color_str = "#f6dce0"
+            
+            color = QColor(color_str)
+            # Windows API COLORREF is in 0x00BBGGRR format
+            color_ref = color.blue() << 16 | color.green() << 8 | color.red()
+            
+            hwnd = self.winId()
+            if hwnd:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    DWMWA_CAPTION_COLOR,
+                    ctypes.byref(ctypes.c_int(color_ref)),
+                    ctypes.sizeof(ctypes.c_int)
+                )
+        except Exception as e:
+            logger.warning(f"无法设置标题栏颜色: {e}")
 
