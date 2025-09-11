@@ -136,12 +136,12 @@ class ModernSwitch(QCheckBox):
             track_color_off = Win11Colors.DARK_BORDER
             track_color_on = Win11Colors.DARK_ACCENT
             thumb_color = QColor(255, 255, 255)
-            shadow_color = QColor(0, 0, 0, 60)
+            shadow_color = QColor(0, 0, 0, 0)
         else:
             track_color_off = Win11Colors.LIGHT_BORDER
             track_color_on = Win11Colors.LIGHT_ACCENT
             thumb_color = QColor(255, 255, 255)
-            shadow_color = QColor(0, 0, 0, 40)
+            shadow_color = QColor(0, 0, 0, 0)
 
         # 计算尺寸
         rect = self.rect()
