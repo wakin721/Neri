@@ -115,134 +115,154 @@ class DataProcessor:
     @staticmethod
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
                         file_format: str = 'excel') -> bool:
-        """将图像信息导出为Excel或CSV文件
-
-        Args:
-            image_info_list: 图像信息列表
-            output_path: 输出文件路径
-            confidence_settings: 物种置信度阈值设置
-            file_format: 文件格式 ('excel' 或 'csv')
-
-        Returns:
-            是否成功导出
-        """
+        """将图像信息导出为Excel或CSV文件 (增强了日志和数据清洗功能)"""
         if not image_info_list:
             logger.warning("没有数据可导出")
             return False
 
-        # 加载鸟类名录用于物种类型分类
-        bird_list_path = resource_path(os.path.join("res", "中国鸟类名录.xlsx"))
-        bird_names = set()
-        if os.path.exists(bird_list_path):
+        # --- 加载生物物种名录 ---
+        species_info_map = {}
+        species_list_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
+        if os.path.exists(species_list_path):
+            logger.info(f"正在从 {species_list_path} 加载物种名录...")
             try:
-                df_birds = pd.read_excel(bird_list_path)
-                # 假设物种名称在C列
-                if df_birds.shape[1] > 2:
-                    bird_names = set(df_birds.iloc[:, 2].dropna().astype(str).tolist())
+                df_species = pd.read_excel(species_list_path)
+                # 定义列名映射 (key: Excel中的列名, value: 我们希望的列名)
+                column_mapping = {
+                    'A': '学名', 'B': '中文名', 'H': '纲',
+                    'I': '目拉丁名', 'J': '目中文名', 'K': '科拉丁名',
+                    'L': '科中文名', 'M': '属拉丁名', 'N': '属中文名'
+                }
+
+                # 为了兼容性，我们检查实际存在的列名
+                # 如果Excel有标题行，例如 '物种中文名', 'Scientific Name'
+                # 这里需要用户根据实际情况调整key
+                # 以下代码假定Excel的列名就是 A, B, C... (或者第一行就是数据)
+                # 为了更稳定，我们直接按列的位置读取
+                df_species.columns = [chr(65 + i) for i in range(len(df_species.columns))]
+
+                for _, row in df_species.iterrows():
+                    # 获取并清洗中文名 (去除前后空格)
+                    chinese_name = row.get('B')
+                    if pd.notna(chinese_name) and str(chinese_name).strip():
+                        # 清洗所有字段的数据
+                        cleaned_name = str(chinese_name).strip()
+                        species_info_map[cleaned_name] = {
+                            '学名': str(row.get('A', '')).strip(),
+                            '纲': str(row.get('H', '')).strip(),
+                            '目名': str(row.get('J', '')).strip(),
+                            '目拉丁名': str(row.get('I', '')).strip(),
+                            '科名': str(row.get('L', '')).strip(),
+                            '科拉丁名': str(row.get('K', '')).strip(),
+                            '属名': str(row.get('N', '')).strip(),
+                            '属拉丁名': str(row.get('M', '')).strip()
+                        }
+
+                if species_info_map:
+                    logger.info(f"成功加载 {len(species_info_map)} 条物种信息。")
+                else:
+                    logger.warning("物种名录已加载，但未能提取任何物种信息，请检查Excel文件内容和格式。")
             except Exception as e:
-                logger.error(f"加载鸟类名录失败: {e}")
+                logger.error(f"加载或处理物种名录失败: {e}", exc_info=True)
+        else:
+            logger.warning(f"未找到物种名录文件: {species_list_path}，分类信息将为空。")
 
         personnel_names = {"人", "牧民", "人员"}
 
         try:
             # 在导出前根据置信度阈值更新数据
             for info in image_info_list:
+                # --- 为新列初始化 ---
+                info['学名'], info['目名'], info['目拉丁名'], info['科名'], info['科拉丁名'], info['属名'], info[
+                    '属拉丁名'] = [''] * 7
+
                 species_names_str = info.get('物种名称', '')
+
+                # 根据置信度过滤物种
                 if info.get('最低置信度') == '人工校验':
                     if species_names_str and species_names_str != '空':
                         species_list = [s.strip() for s in species_names_str.split(',')]
-                        type_list = []
-                        for species in species_list:
-                            if species in personnel_names:
-                                type_list.append("人员")
-                            elif species in bird_names:
-                                type_list.append("鸟")
-                            else:
-                                type_list.append("兽")
-                        # --- 修改开始 ---
-                        # 去重并排序后合并，实现您的需求
-                        unique_types = sorted(list(set(type_list)))
-                        info['物种类型'] = ','.join(unique_types)
-                        # --- 修改结束 ---
                     else:
-                        info['物种类型'] = ''
-                    continue
-
-                species_names_original = info.get('物种名称', '').split(',')
-                if not species_names_original or species_names_original == ['']:
-                    info['物种类型'] = ''
-                    continue
-
-                confidences = info.get('all_confidences', [])
-                classes = info.get('all_classes', [])
-                names_map = info.get('names_map', {})
-
-                if not confidences or not classes or not names_map:
-                    info['物种类型'] = ''
-                    continue
-
-                final_species_counts = Counter()
-                valid_confidences = []
-
-                for cls, conf in zip(classes, confidences):
-                    species_name = names_map.get(str(int(cls)))  # JSON keys are strings
-                    if species_name:
-                        # 优先使用物种特定阈值，否则使用全局阈值
-                        threshold = confidence_settings.get(species_name, confidence_settings.get("global", 0.25))
-                        if conf >= threshold:
-                            final_species_counts[species_name] += 1
-                            valid_confidences.append(conf)
-
-                type_list = []
-                if not final_species_counts:
-                    info['物种名称'] = '空'
-                    info['物种数量'] = '空'
-                    info['最低置信度'] = ''
-                    info['物种类型'] = ''
+                        species_list = []
                 else:
-                    filtered_species_list = list(final_species_counts.keys())
-                    for species in filtered_species_list:
+                    confidences = info.get('all_confidences', [])
+                    classes = info.get('all_classes', [])
+                    names_map = info.get('names_map', {})
+                    final_species_counts = Counter()
+                    valid_confidences = []
+
+                    if confidences and classes and names_map:
+                        for cls, conf in zip(classes, confidences):
+                            species_name = names_map.get(str(int(cls)))
+                            if species_name:
+                                threshold = confidence_settings.get(species_name,
+                                                                    confidence_settings.get("global", 0.25))
+                                if conf >= threshold:
+                                    final_species_counts[species_name] += 1
+                                    valid_confidences.append(conf)
+
+                    species_list = list(final_species_counts.keys())
+                    if not species_list:
+                        info['物种名称'], info['物种数量'], info['最低置信度'], info['物种类型'] = '空', '空', '', ''
+                    else:
+                        info['物种名称'] = ','.join(species_list)
+                        info['物种数量'] = ','.join(map(str, final_species_counts.values()))
+                        info['最低置信度'] = f"{min(valid_confidences):.3f}" if valid_confidences else ''
+
+                # --- 开始填充分类信息 ---
+                if species_list:
+                    type_list = []
+                    sci_info_lists = {k: [] for k in
+                                      ['学名', '纲', '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名']}
+
+                    for species in species_list:
                         if species in personnel_names:
                             type_list.append("人员")
-                        elif species in bird_names:
-                            type_list.append("鸟")
+                        elif species in species_info_map:  # 核心匹配逻辑
+                            s_info = species_info_map[species]
+                            if s_info.get('纲') == '鸟纲':
+                                type_list.append("鸟")
+                            elif s_info.get('纲') == '哺乳纲':
+                                type_list.append("兽")
+
+                            for key in sci_info_lists.keys():
+                                if key != '纲': sci_info_lists[key].append(s_info.get(key, ''))
                         else:
-                            type_list.append("兽")
-                    # --- 修改开始 ---
-                    # 去重并排序后合并，实现您的需求
-                    unique_types = sorted(list(set(type_list)))
-                    info['物种类型'] = ','.join(unique_types)
-                    # --- 修改结束 ---
+                            # 如果物种不在名录中，记录警告并填充空值
+                            if species not in personnel_names:
+                                logger.warning(f"物种名称 '{species}' 无法在名录中找到匹配项。")
+                            for key in sci_info_lists.keys():
+                                if key != '纲': sci_info_lists[key].append('')
 
-                    info['物种名称'] = ','.join(filtered_species_list)
-                    info['物种数量'] = ','.join(map(str, final_species_counts.values()))
-                    if valid_confidences:
-                        info['最低置信度'] = f"{min(valid_confidences):.3f}"
-                    else:
-                        info['最低置信度'] = ''
+                    info['物种类型'] = ','.join(sorted(list(set(type_list))))
+                    info['学名'] = ','.join(sci_info_lists['学名'])
+                    info['目名'] = ','.join(sci_info_lists['目名'])
+                    info['目拉丁名'] = ','.join(sci_info_lists['目拉丁名'])
+                    info['科名'] = ','.join(sci_info_lists['科名'])
+                    info['科拉丁名'] = ','.join(sci_info_lists['科拉丁名'])
+                    info['属名'] = ','.join(sci_info_lists['属名'])
+                    info['属拉丁名'] = ','.join(sci_info_lists['属拉丁名'])
+                else:
+                    info['物种类型'] = ''
 
-            # 使用pandas创建DataFrame更高效
+            # --- 导出到文件 ---
             df = pd.DataFrame(image_info_list)
-
-            # 选择需要的列并按顺序排列
             columns = ['文件名', '格式', '拍摄日期', '拍摄时间', '工作天数',
-                       '物种名称', '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
-
-            # 确保所有列都存在，不存在的列填充空值
+                       '物种名称', '学名',
+                       '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名',
+                       '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
+            
             for col in columns:
-                if col not in df.columns:
-                    df[col] = ''
-
-            # 只保留需要的列并排序
+                if col not in df.columns: df[col] = ''
             df = df[columns]
 
-            # 根据选择的格式导出文件
             if file_format.lower() == 'excel':
                 df.to_excel(output_path, sheet_name="物种检测信息", index=False)
             elif file_format.lower() == 'csv':
-                df.to_csv(output_path, index=False, encoding='utf-8-sig')  # 使用 utf-8-sig 以便 Excel 正确显示中文
+                df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
+            logger.info(f"文件已成功导出到: {output_path}")
             return True
         except Exception as e:
-            logger.error(f"导出文件失败: {e}")
+            logger.error(f"导出文件失败: {e}", exc_info=True)
             return False
