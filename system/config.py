@@ -3,8 +3,8 @@
 """
 
 # 应用信息常量
-APP_TITLE = "Neri v2.0.3"
-APP_VERSION = "2.0.3-beta"
+APP_TITLE = "Neri v2.0.4"
+APP_VERSION = "2.0.4-beta"
 DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
 
 # 文件支持相关常量
@@ -18,5 +18,6 @@ BUTTON_WIDTH = 14
 LARGE_FONT = ('Segoe UI', 11)
 NORMAL_FONT = ('Segoe UI', 10)
 SMALL_FONT = ('Segoe UI', 9)
+
 
 
