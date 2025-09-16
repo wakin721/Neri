@@ -46,6 +46,7 @@ class CorrectionDialog(QDialog):
             QLabel {
                 color: #5d3a4f;
                 font-size: 14px;
+                background-color: #dbbcc2;
             }
             QLineEdit {
                 padding: 8px;
@@ -192,6 +193,16 @@ class CorrectionDialog(QDialog):
 
         self.result = (species_name, species_count_str, remark)
         self.accept()
+
+class NoArrowKeyListWidget(QListWidget):
+    """一个将上下方向键事件传递给父控件的QListWidget子类"""
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Up or event.key() == Qt.Key.Key_Down:
+            # 忽略事件，让它冒泡到父控件进行处理
+            event.ignore()
+        else:
+            # 对于其他按键，保持默认行为
+            super().keyPressEvent(event)
 
 class SpeciesValidationPage(QWidget):
     """物种校验页面"""
@@ -628,7 +639,7 @@ class SpeciesValidationPage(QWidget):
         # 物种列表
         species_list_group = ModernGroupBox("物种列表")
         species_list_layout = QVBoxLayout(species_list_group)
-        self.species_listbox = QListWidget()
+        self.species_listbox = NoArrowKeyListWidget()
         self.species_listbox.itemClicked.connect(self._on_species_selected)
         species_list_layout.addWidget(self.species_listbox)
         left_layout.addWidget(species_list_group)
@@ -2007,3 +2018,19 @@ class SpeciesValidationPage(QWidget):
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(100, select_image_item)
                 return
+
+    def keyPressEvent(self, event):
+        """重写键盘事件，以实现全局上下键选择照片"""
+        current_row = self.species_photo_listbox.currentRow()
+
+        if event.key() == Qt.Key.Key_Up:
+            if current_row > 0:
+                self.species_photo_listbox.setCurrentRow(current_row - 1)
+            event.accept()
+        elif event.key() == Qt.Key.Key_Down:
+            if current_row < self.species_photo_listbox.count() - 1:
+                self.species_photo_listbox.setCurrentRow(current_row + 1)
+            event.accept()
+        else:
+            # 对于其他按键，调用父类的默认实现
+            super().keyPressEvent(event)
