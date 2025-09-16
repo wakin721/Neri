@@ -1500,9 +1500,13 @@ class SpeciesValidationPage(QWidget):
         if earliest_date:
             processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
 
-        # 传递选择的文件格式
+        # 从高级设置页面获取用户选择的导出列
+        columns_to_export = self.controller.advanced_page.get_selected_export_columns()
+
+        # 将选择的列和文件格式一起传递给导出函数
         success = DataProcessor.export_to_excel(processed_data, output_path, confidence_settings,
-                                                file_format=file_format)
+                                                file_format=file_format,
+                                                columns_to_export=columns_to_export)
 
         if success:
             reply = QMessageBox.question(self, "成功", f"数据已成功导出到:\n{output_path}\n\n是否立即打开文件？",

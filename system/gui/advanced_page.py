@@ -540,6 +540,44 @@ class AdvancedPage(QWidget):
         self.quick_mark_panel.add_content_widget(quick_mark_widget)
         content_layout.addWidget(self.quick_mark_panel)
 
+        # 导出设置面板
+        self.export_settings_panel = CollapsiblePanel(
+            title="导出设置",
+            subtitle="自定义导出表格中的列",
+            icon="📤"
+        )
+        export_widget = QWidget()
+        # 使用网格布局以更好地对齐多列复选框
+        export_layout = QGridLayout(export_widget)
+        export_layout.setSpacing(10)
+
+        # 创建“全选”复选框
+        self.select_all_checkbox = QCheckBox("全选/全不选")
+        self.select_all_checkbox.setChecked(True)  # 默认全选
+        self.select_all_checkbox.stateChanged.connect(self._toggle_all_columns)
+        # 将其放置在网格布局的第一行，并让它跨越所有列
+        export_layout.addWidget(self.select_all_checkbox, 0, 0, 1, -1)
+
+        self.all_export_columns = [
+                '文件名', '格式', '拍摄日期', '拍摄时间', '工作天数',
+                '物种名称', '学名', '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名',
+                '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
+
+        self.export_checkboxes = {}
+        columns_per_row = 3  # 每行显示3个选项
+
+        for i, col_name in enumerate(self.all_export_columns):
+            checkbox = QCheckBox(col_name)
+            checkbox.setChecked(True)  # 默认全部选中
+            checkbox.stateChanged.connect(self._update_select_all_state)
+            self.export_checkboxes[col_name] = checkbox
+            row = i // columns_per_row + 1
+            col = i % columns_per_row
+            export_layout.addWidget(checkbox, row, col)
+
+        self.export_settings_panel.add_content_widget(export_widget)
+        content_layout.addWidget(self.export_settings_panel)
+
         # 主题设置面板
         self.theme_panel = CollapsiblePanel(
             title="深色模式",
@@ -1412,6 +1450,7 @@ class AdvancedPage(QWidget):
             "package": self.package_edit.text().strip(),  # 直接从输入框获取当前值
             "version_constraint": self.version_constraint_edit.text().strip(),  # 直接从输入框获取当前值
             "selected_model": selected_model,
+            "export_columns": [name for name, cb in self.export_checkboxes.items() if cb.isChecked()],
         }
 
     def load_settings(self, settings):
@@ -1471,6 +1510,18 @@ class AdvancedPage(QWidget):
             # 使用定时器延迟设置，确保模型列表已经加载
             QTimer.singleShot(200, lambda: self._set_selected_model(selected_model))
 
+        if "export_columns" in settings:
+            selected_columns = settings["export_columns"]
+            for name, cb in self.export_checkboxes.items():
+                # 根据配置文件中的列表来设置复选框的选中状态
+                if name in selected_columns:
+                    cb.setChecked(True)
+                else:
+                    cb.setChecked(False)
+
+            # 加载后，根据单个复选框的状态更新“全选”框的状态
+            self._update_select_all_state()
+
     def _set_selected_model(self, model_name):
         """设置选定的模型"""
         try:
@@ -1510,7 +1561,8 @@ class AdvancedPage(QWidget):
         # 更新所有可折叠面板
         for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
                       self.pytorch_panel, self.model_panel, self.python_panel,
-                      self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel]:
+                      self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel,
+                      self.export_settings_panel]:
             if hasattr(panel, 'update_theme'):
                 panel.update_theme()
 
@@ -1536,3 +1588,47 @@ class AdvancedPage(QWidget):
         super().hideEvent(event)
         # 页面隐藏时可能需要的清理逻辑
         pass
+
+    def get_selected_export_columns(self):
+        """获取用户选择的要导出的列名列表"""
+        if not hasattr(self, 'export_checkboxes'):
+            return self.all_export_columns  # 如果UI未完全初始化，返回所有列
+        return [name for name, cb in self.export_checkboxes.items() if cb.isChecked()]
+
+    def _toggle_all_columns(self, state):
+        """
+        响应“全选/全不选”复选框的点击事件。
+        """
+        # 临时断开单个复选框的信号连接，防止循环触发
+        for checkbox in self.export_checkboxes.values():
+            checkbox.blockSignals(True)
+
+        # 设置所有单个复选框的状态
+        is_checked = (state == Qt.CheckState.Checked.value)
+        for checkbox in self.export_checkboxes.values():
+            checkbox.setChecked(is_checked)
+
+        # 恢复信号连接
+        for checkbox in self.export_checkboxes.values():
+            checkbox.blockSignals(False)
+
+        # 手动触发一次设置保存
+        self._on_setting_changed()
+
+    def _update_select_all_state(self):
+        """
+        当单个导出列复选框状态改变时，更新“全选/全不选”复选框的状态。
+        """
+        # 检查是否所有复选框都被选中
+        all_checked = all(cb.isChecked() for cb in self.export_checkboxes.values())
+
+        # 临时断开“全选”复选框的信号连接，防止它反过来调用 _toggle_all_columns
+        self.select_all_checkbox.blockSignals(True)
+
+        self.select_all_checkbox.setChecked(all_checked)
+
+        # 恢复信号连接
+        self.select_all_checkbox.blockSignals(False)
+
+        # 触发设置保存
+        self._on_setting_changed()
