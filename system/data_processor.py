@@ -114,7 +114,7 @@ class DataProcessor:
 
     @staticmethod
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
-                        file_format: str = 'excel') -> bool:
+                        file_format: str = 'excel', columns_to_export: Optional[List[str]] = None) -> bool:
         """将图像信息导出为Excel或CSV文件 (增强了日志和数据清洗功能)"""
         if not image_info_list:
             logger.warning("没有数据可导出")
@@ -247,13 +247,23 @@ class DataProcessor:
 
             # --- 导出到文件 ---
             df = pd.DataFrame(image_info_list)
-            columns = ['文件名', '格式', '拍摄日期', '拍摄时间', '工作天数',
-                       '物种名称', '学名',
-                       '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名',
-                       '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
-            
+
+            # 默认的完整列顺序
+            default_columns = ['文件名', '格式', '拍摄日期', '拍摄时间', '工作天数',
+                               '物种名称', '学名',
+                               '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名',
+                               '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
+
+            # 如果用户传入了要导出的列列表，则使用该列表；否则，使用默认的完整列表
+            columns = columns_to_export if columns_to_export is not None and len(
+                columns_to_export) > 0 else default_columns
+
+            # 确保所有需要的列都存在于DataFrame中，不存在则填充为空字符串
             for col in columns:
-                if col not in df.columns: df[col] = ''
+                if col not in df.columns:
+                    df[col] = ''
+
+            # 仅选择用户指定的列进行导出
             df = df[columns]
 
             if file_format.lower() == 'excel':
