@@ -104,12 +104,35 @@ class AdvancedPage(QWidget):
         is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
 
         bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
+        text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
+        border_color = Win11Colors.DARK_BORDER if is_dark else Win11Colors.LIGHT_BORDER
+        # 根据当前主题选择合适的强调色作为复选框的背景色
+        checked_bg_color = Win11Colors.DARK_ACCENT if is_dark else Win11Colors.LIGHT_ACCENT
 
         self.setStyleSheet(f"""
             QWidget {{
                 background-color: {bg_color.name()};
-                color: {Win11Colors.DARK_TEXT_PRIMARY.name() if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY.name()};
+                color: {text_color.name()};
                 font-family: 'Segoe UI', Arial, sans-serif;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                background-color: transparent;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {checked_bg_color.name()};
+                border: 1px solid {checked_bg_color.name()};
+                image: url(none);
+            }}
+            QCheckBox::indicator:checked::after {{
+                content: '✔';
+                color: white;
+                display: block;
+                text-align: center;
+                line-height: 16px; /* 垂直居中 */
             }}
         """)
 
