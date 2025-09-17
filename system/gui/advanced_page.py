@@ -1207,7 +1207,7 @@ class AdvancedPage(QWidget):
                 self._create_species_row(i + 1, species)
 
     def _create_species_row(self, order, species_name):
-        """创建物种行"""
+        """创建物种行（修改后）"""
         row_frame = QFrame()
         row_layout = QHBoxLayout(row_frame)
         row_layout.setContentsMargins(0, 2, 0, 2)
@@ -1228,43 +1228,38 @@ class AdvancedPage(QWidget):
         # 删除按钮
         delete_button = RoundedButton("删除")
         delete_button.setMinimumWidth(60)
-        delete_button.clicked.connect(lambda: self._delete_species_row(species_name))
+        # 修改连接：让按钮直接引用它所在的行(row_frame)，以便删除
+        delete_button.clicked.connect(lambda: self._delete_species_row(row_frame))
         row_layout.addWidget(delete_button)
 
         self.species_list_layout.addWidget(row_frame)
-        self.quick_marks_entries[species_name] = (species_edit, str(order))
+        # 注意：quick_marks_entries的逻辑在保存时处理，这里不再需要对新行进行特殊处理
+        if species_name: # 只为已存在的物种添加条目
+            self.quick_marks_entries[species_name] = (species_edit, str(order))
 
     def _add_new_quick_mark_row(self):
-        """新增物种行"""
-        if hasattr(self.controller, 'settings_manager'):
-            quick_marks = self.controller.settings_manager.load_quick_mark_species()
-        else:
-            quick_marks = {"list": [], "auto": False}
-
-        # 修改这一行：从 auto_sort_checkbox 改为 auto_sort_switch_row
-        if self.auto_sort_switch_row.isChecked():
-            display_list = quick_marks.get("list_auto", [])
-        else:
-            display_list = quick_marks.get("list", [])
-
-        new_order = len(display_list) + 1
-        temp_key = f"new_species_{new_order}"
-
+        """新增物种行（修改后）"""
+        # 根据当前UI中的行数计算新序号，确保序号总是递增的
+        new_order = self.species_list_layout.count() + 1
         self._create_species_row(new_order, "")
-        # 获取最后一个添加的行中的物种编辑框
-        last_row = self.species_list_layout.itemAt(self.species_list_layout.count() - 1).widget()
-        species_edit = last_row.findChild(ModernLineEdit)
-        if species_edit and not species_edit.isReadOnly():  # 确保不是排序号编辑框
-            self.quick_marks_entries[temp_key] = (species_edit, str(new_order))
 
-    def _delete_species_row(self, species_name):
-        """删除物种行"""
-        if hasattr(self.controller, 'settings_manager'):
-            current_marks = self.controller.settings_manager.load_quick_mark_species()
-            if species_name in current_marks.get("list", []):
-                current_marks["list"].remove(species_name)
-                self.controller.settings_manager.save_quick_mark_species(current_marks)
-                self.load_quick_mark_settings()
+    def _delete_species_row(self, row_widget):
+        """删除物种行（修改后）"""
+        # 从布局中移除并删除该行控件
+        self.species_list_layout.removeWidget(row_widget)
+        row_widget.deleteLater()
+
+        # 延迟执行，确保控件删除后，再重新为所有剩余行排序
+        QTimer.singleShot(0, self._update_quick_mark_order)
+
+    def _update_quick_mark_order(self):
+        """更新所有快速标记行的显示序号"""
+        for i in range(self.species_list_layout.count()):
+            row_widget = self.species_list_layout.itemAt(i).widget()
+            if row_widget:
+                # 找到序号输入框（通常是第一个 ModernLineEdit）
+                order_edit = row_widget.findChildren(ModernLineEdit)[0]
+                order_edit.setText(str(i + 1))
 
     def update_auto_sorted_list(self):
         """根据使用次数对物种进行排序"""
