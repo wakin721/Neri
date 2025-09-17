@@ -18,7 +18,8 @@ import sys
 
 from system.gui.ui_components import (
     CollapsiblePanel, Win11Colors, RoundedButton,
-    ModernSlider, ModernComboBox, SwitchRow, ModernLineEdit, ModernGroupBox
+    ModernSlider, ModernComboBox, SwitchRow,
+    ModernLineEdit, ModernGroupBox, ModernCheckBox
 )
 from system.utils import resource_path
 from system.config import APP_VERSION, NORMAL_FONT
@@ -105,34 +106,12 @@ class AdvancedPage(QWidget):
 
         bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
         text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
-        border_color = Win11Colors.DARK_BORDER if is_dark else Win11Colors.LIGHT_BORDER
-        # 根据当前主题选择合适的强调色作为复选框的背景色
-        checked_bg_color = Win11Colors.DARK_ACCENT if is_dark else Win11Colors.LIGHT_ACCENT
 
         self.setStyleSheet(f"""
             QWidget {{
                 background-color: {bg_color.name()};
                 color: {text_color.name()};
                 font-family: 'Segoe UI', Arial, sans-serif;
-            }}
-            QCheckBox::indicator {{
-                width: 16px;
-                height: 16px;
-                border: 1px solid {border_color.name()};
-                border-radius: 4px;
-                background-color: transparent;
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {checked_bg_color.name()};
-                border: 1px solid {checked_bg_color.name()};
-                image: url(none);
-            }}
-            QCheckBox::indicator:checked::after {{
-                content: '✔';
-                color: white;
-                display: block;
-                text-align: center;
-                line-height: 16px; /* 垂直居中 */
             }}
         """)
 
@@ -575,7 +554,7 @@ class AdvancedPage(QWidget):
         export_layout.setSpacing(10)
 
         # 创建“全选”复选框
-        self.select_all_checkbox = QCheckBox("全选/全不选")
+        self.select_all_checkbox = ModernCheckBox("全选/全不选")
         self.select_all_checkbox.setChecked(True)  # 默认全选
         self.select_all_checkbox.stateChanged.connect(self._toggle_all_columns)
         # 将其放置在网格布局的第一行，并让它跨越所有列
@@ -590,7 +569,7 @@ class AdvancedPage(QWidget):
         columns_per_row = 3  # 每行显示3个选项
 
         for i, col_name in enumerate(self.all_export_columns):
-            checkbox = QCheckBox(col_name)
+            checkbox = ModernCheckBox(col_name)
             checkbox.setChecked(True)  # 默认全部选中
             checkbox.stateChanged.connect(self._update_select_all_state)
             self.export_checkboxes[col_name] = checkbox

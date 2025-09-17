@@ -1840,3 +1840,201 @@ class ModernComboBox(QComboBox):
     def update_theme(self):
         """更新主题"""
         self._setup_style()
+
+
+class ModernCheckBox(QCheckBox):
+    """现代化复选框 - WinUI 3 风格"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(28)
+
+        self._bg_color = QColor("transparent")
+        self._check_opacity = 0.0  # 0.0 to 1.0
+
+        # 动画属性
+        self._animation_duration = 180
+        self._bg_color_anim = QPropertyAnimation(self, b"backgroundColor")
+        self._check_opacity_anim = QPropertyAnimation(self, b"checkOpacity")
+
+        self._bg_color = QColor("transparent")
+        self._check_opacity = 0.0  # 0.0 to 1.0
+
+        self._setup_animations()
+        self._update_stylesheet()
+
+        self.stateChanged.connect(self._animate_state_change)
+
+    def _setup_animations(self):
+        """设置动画"""
+        # 背景颜色动画
+        self._bg_color_anim.setDuration(self._animation_duration)
+        self._bg_color_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # 勾选标记透明度动画
+        self._check_opacity_anim.setDuration(self._animation_duration)
+        self._check_opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    @Property(QColor)
+    def backgroundColor(self):
+        return self._bg_color
+
+    @backgroundColor.setter
+    def backgroundColor(self, color):
+        self._bg_color = color
+        self.update()
+
+    @Property(float)
+    def checkOpacity(self):
+        return self._check_opacity
+
+    @checkOpacity.setter
+    def checkOpacity(self, opacity):
+        self._check_opacity = opacity
+        self.update()
+
+    def _update_stylesheet(self):
+        """更新样式 - 隐藏默认指示器"""
+        self.setStyleSheet("""
+            QCheckBox {
+                spacing: 8px; /* 文本和复选框之间的间距 */
+                background: transparent;
+            }
+            QCheckBox::indicator {
+                width: 0px;
+                height: 0px;
+            }
+        """)
+
+    def _get_theme_colors(self):
+        """获取当前主题的颜色"""
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            return {
+                "border": Win11Colors.DARK_BORDER,
+                "hover_bg": QColor(255, 255, 255, 15),
+                "checked_bg": Win11Colors.DARK_ACCENT,
+                "checked_hover_bg": Win11Colors.DARK_ACCENT.lighter(120),
+                "text": Win11Colors.DARK_TEXT_PRIMARY,
+                "checkmark": QColor(255, 255, 255)
+            }
+        else:
+            return {
+                "border": Win11Colors.LIGHT_BORDER,
+                "hover_bg": QColor(0, 0, 0, 10),
+                "checked_bg": Win11Colors.LIGHT_ACCENT,
+                "checked_hover_bg": Win11Colors.LIGHT_ACCENT.darker(105),
+                "text": Win11Colors.LIGHT_TEXT_PRIMARY,
+                "checkmark": QColor(255, 255, 255)
+            }
+
+    def _animate_state_change(self, state):
+        """根据状态启动动画"""
+        colors = self._get_theme_colors()
+
+        if state == Qt.CheckState.Checked.value:
+            # 勾选动画
+            self._bg_color_anim.setStartValue(self.backgroundColor)
+            self._bg_color_anim.setEndValue(colors["checked_bg"])
+            self._check_opacity_anim.setStartValue(self._check_opacity)
+            self._check_opacity_anim.setEndValue(1.0)
+        else:
+            # 取消勾选动画
+            self._bg_color_anim.setStartValue(self.backgroundColor)
+            # 目标颜色取决于是否悬停
+            target_bg = colors["hover_bg"] if self.underMouse() else QColor("transparent")
+            self._bg_color_anim.setEndValue(target_bg)
+            self._check_opacity_anim.setStartValue(self._check_opacity)
+            self._check_opacity_anim.setEndValue(0.0)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(self._bg_color_anim)
+        group.addAnimation(self._check_opacity_anim)
+        group.start()
+
+    def setChecked(self, checked):
+        """设置选中状态，跳过动画"""
+        super().setChecked(checked)
+        colors = self._get_theme_colors()
+        if checked:
+            self._bg_color = colors["checked_bg"]
+            self._check_opacity = 1.0
+        else:
+            self._bg_color = QColor("transparent")
+            self._check_opacity = 0.0
+        self.update()
+
+    def paintEvent(self, event):
+        """自定义绘制事件"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        colors = self._get_theme_colors()
+
+        # --- 绘制复选框 ---
+        rect = self.rect()
+        box_size = 20
+        box_y = (rect.height() - box_size) // 2
+        box_rect = QRect(0, box_y, box_size, box_size)
+        box_radius = 4
+
+        # 绘制背景
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self.backgroundColor))
+        painter.drawRoundedRect(box_rect, box_radius, box_radius)
+
+        # 绘制边框
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        pen = QPen(colors["border"], 2)
+        painter.setPen(pen)
+        painter.drawRoundedRect(box_rect.adjusted(1, 1, -1, -1), box_radius, box_radius)
+
+        # --- 绘制勾选标记 ---
+        if self._check_opacity > 0:
+            painter.setOpacity(self._check_opacity)
+            check_pen = QPen(colors["checkmark"], 2)
+            check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(check_pen)
+
+            # 定义勾选路径
+            path = QPainterPath()
+            path.moveTo(box_rect.x() + 5, box_rect.y() + 10)
+            path.lineTo(box_rect.x() + 9, box_rect.y() + 14)
+            path.lineTo(box_rect.x() + 15, box_rect.y() + 6)
+            painter.drawPath(path)
+
+        painter.setOpacity(1.0) # 重置透明度
+
+        # --- 绘制文本 ---
+        text_rect = rect.adjusted(box_size + 8, 0, 0, 0)
+        font = self.font()
+        font.setPointSize(10)
+        painter.setFont(font)
+        painter.setPen(QPen(colors["text"]))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, self.text())
+
+
+    def enterEvent(self, event):
+        """鼠标进入事件"""
+        super().enterEvent(event)
+        if not self.isChecked():
+            colors = self._get_theme_colors()
+            self._bg_color_anim.setStartValue(self.backgroundColor)
+            self._bg_color_anim.setEndValue(colors["hover_bg"])
+            self._bg_color_anim.start()
+
+    def leaveEvent(self, event):
+        """鼠标离开事件"""
+        super().leaveEvent(event)
+        if not self.isChecked():
+            self._bg_color_anim.setStartValue(self.backgroundColor)
+            self._bg_color_anim.setEndValue(QColor("transparent"))
+            self._bg_color_anim.start()
+
+    def update_theme(self):
+        """更新主题"""
+        self.setChecked(self.isChecked()) # 更新颜色
