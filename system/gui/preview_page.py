@@ -315,6 +315,11 @@ class PreviewPage(QWidget):
 
         self._create_widgets()
 
+        # 用于处理窗口大小调整的计时器
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._redraw_image_on_resize)
+
     def _create_widgets(self):
         """创建预览页面的所有控件"""
         # 主布局
@@ -512,60 +517,32 @@ class PreviewPage(QWidget):
     def update_image_preview(self, file_path: str, show_detection: bool = False, detection_results=None,
                              is_temp_result: bool = False):
         """更新图像预览，支持显示检测结果"""
-        # 清除之前的图像引用，通过设置为None而不是删除属性来避免AttributeError
-        self.image_label.pixmap = None
-
         try:
+            # 始终从文件路径加载图像，以确保 self.original_image 是最新的
+            self.original_image = Image.open(file_path)
+            self.current_image_path = file_path # 确保当前路径被更新
+
+            image_to_show = self.original_image
+
             if is_temp_result:
-                # 直接从文件路径加载临时结果图像
-                img = Image.open(file_path)
+                # 临时结果直接显示
+                image_to_show = Image.open(file_path)
             elif show_detection and detection_results:
-                # 显示带检测框的结果图像
-                result_img = detection_results[0].plot()
-                img = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
-            else:
-                # 显示原始图像
-                img = Image.open(file_path)
+                # 如果需要显示检测结果，则在原图上绘制
+                result_img_array = detection_results[0].plot()
+                image_to_show = Image.fromarray(cv2.cvtColor(result_img_array, cv2.COLOR_BGR2RGB))
 
-            # 保存原始图像引用
-            self.original_image = img
-
-            # 获取标签的实际尺寸
-            label_size = self.image_label.size()
-            max_width = max(label_size.width(), 400)  # 最小宽度400
-            max_height = max(label_size.height(), 300)  # 最小高度300
-
-            # 调整图像大小以适应标签
-            resized_img = self._resize_image_to_fit(img, max_width, max_height)
-
-            # 转换为 QPixmap 并设置到标签
-            # PIL Image -> QPixmap 转换
-            img_array = np.array(resized_img)
-            if len(img_array.shape) == 3:  # RGB图像
-                height, width, channel = img_array.shape
-                bytes_per_line = 3 * width
-                q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            else:  # 灰度图像
-                height, width = img_array.shape
-                bytes_per_line = width
-                q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
-
-            pixmap = QPixmap.fromImage(q_image)
-            self.image_label.setPixmap(pixmap)
-            self.image_label.setScaledContents(False)  # 保持原始比例
-            self.image_label.setAlignment(Qt.AlignCenter)
-
-            # 保存 pixmap 引用以防止垃圾回收
-            self.image_label.pixmap = pixmap
+            # 使用统一的辅助函数来设置和显示图片
+            self._update_pixmap_for_label(image_to_show)
 
         except Exception as e:
             logger.error(f"更新图像预览失败: {e}")
-            # 显示错误信息
             self.image_label.clear()
             self.image_label.setText("无法加载图像")
             self.image_label.setStyleSheet(self._get_placeholder_style())
+            # 清理状态，防止后续操作出错
             self.original_image = None
-            # 同样，在这里也设置为None
+            self.current_image_path = None
             self.image_label.pixmap = None
 
     def update_image_info(self, file_path: str, file_name: str, is_processing: bool = False):
@@ -1130,3 +1107,52 @@ class PreviewPage(QWidget):
     def clear_validation_data(self):
         """清除验证数据 - 兼容性方法"""
         pass
+
+    def resizeEvent(self, event):
+        """处理窗口大小变化事件，在调整大小时自动缩放图片。"""
+        super().resizeEvent(event)
+        if hasattr(self, 'original_image') and self.original_image:
+            # 延迟100毫秒后执行重绘，避免在快速拖动窗口时过于频繁地刷新，优化性能
+            self._resize_timer.start(100)
+
+    def _redraw_image_on_resize(self):
+        """根据新的窗口大小重绘当前显示的图片。"""
+        if not hasattr(self, 'original_image') or not self.original_image:
+            return
+
+        if self.show_detection_checkbox.isChecked() and self.current_preview_info:
+            # 如果当前显示的是检测结果，则调用已有的绘制函数，它会自动适应新的标签大小
+            self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
+        else:
+            # 否则，只更新原始图片的预览
+            self._update_pixmap_for_label(self.original_image)
+
+    def _update_pixmap_for_label(self, img_to_display):
+        """
+        一个辅助函数，用于将给定的PIL图像调整大小以适应image_label，并设置其Pixmap。
+        """
+        if not img_to_display:
+            return
+
+        label_size = self.image_label.size()
+        max_width = max(label_size.width(), 1)
+        max_height = max(label_size.height(), 1)
+
+        resized_img = self._resize_image_to_fit(img_to_display, max_width, max_height)
+
+        try:
+            # 将PIL图像转换为QPixmap
+            if resized_img.mode != 'RGB':
+                resized_img = resized_img.convert('RGB')
+
+            img_array = np.array(resized_img)
+            height, width, channel = img_array.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+
+            self.image_label.setPixmap(pixmap)
+            # 保持引用以避免pixmap被垃圾回收
+            self.image_label.pixmap = pixmap
+        except Exception as e:
+            logger.error(f"将图像设置为标签时出错: {e}")

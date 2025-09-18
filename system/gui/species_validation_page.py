@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QApplication, QDialog, QLineEdit, QFormLayout,
     QScrollArea
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QPalette
 import os
 import json
@@ -248,6 +248,11 @@ class SpeciesValidationPage(QWidget):
         # 监听自动排序开关状态变化
         if hasattr(self.controller, 'advanced_page') and hasattr(self.controller.advanced_page, 'auto_sort_switch_row'):
             self.controller.advanced_page.auto_sort_switch_row.toggled.connect(self._on_auto_sort_changed)
+
+        # 用于处理窗口大小调整的计时器
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._redraw_image_on_resize)
 
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
@@ -2038,3 +2043,24 @@ class SpeciesValidationPage(QWidget):
         else:
             # 对于其他按键，调用父类的默认实现
             super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        """处理窗口大小变化事件，自动缩放显示的图片。"""
+        super().resizeEvent(event)
+        # 确保已经加载了图片才触发重绘
+        if hasattr(self, 'species_validation_original_image') and self.species_validation_original_image:
+            # 延迟50毫秒执行，避免在快速拖动时过于频繁地刷新
+            self._resize_timer.start(50)
+
+    def _redraw_image_on_resize(self):
+        """根据新的窗口大小重绘当前显示的图片。"""
+        # 再次确认原始图像存在
+        if not hasattr(self, 'species_validation_original_image') or self.species_validation_original_image is None:
+            return
+
+        # 直接调用现有的绘图函数，它会使用更新后的标签尺寸重新绘制
+        self._display_image_with_detection_boxes(
+            self.species_validation_original_image,
+            self.current_species_info,
+            self.species_conf_var
+        )
