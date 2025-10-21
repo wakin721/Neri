@@ -388,44 +388,174 @@ class ModernFrame(QFrame):
 
 
 class InfoBar(QFrame):
-    """信息栏 - 自定义主题色版本"""
+    """信息栏 - 自定义主题色版本，支持 tqdm 风格进度条"""
 
-    def __init__(self, parent: QWidget = None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
 
     def _setup_ui(self):
         """设置UI"""
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(16)
 
+        # 状态标签
         self.status_label = QLabel("就绪")
         self.status_label.setFont(QFont("Segoe UI", 9))
         layout.addWidget(self.status_label)
+
+        # 添加弹性空间
         layout.addStretch()
 
+        # Tqdm 风格进度条容器（初始隐藏）
+        self.progress_container = QWidget()
+        self.progress_container.hide()
+        progress_layout = QHBoxLayout(self.progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(8)
+
+        # 进度描述标签
+        self.progress_desc_label = QLabel("处理进度:")
+        self.progress_desc_label.setFont(QFont("Segoe UI", 9))
+        progress_layout.addWidget(self.progress_desc_label)
+
+        # 进度百分比标签
+        self.progress_percent_label = QLabel("0.00%")  # 修改：默认显示两位小数
+        self.progress_percent_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.progress_percent_label.setMinimumWidth(50)  # 修改：增加宽度以容纳小数
+        progress_layout.addWidget(self.progress_percent_label)
+
+        # 进度条 - 修改：使用更高精度
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(10000)  # 修改：使用10000以支持0.01%精度
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setMinimumWidth(200)
+        progress_layout.addWidget(self.progress_bar)
+
+        # 进度详情标签（n/total [elapsed<remaining, speed]）
+        self.progress_detail_label = QLabel("0/0 [00:00<00:00, 0.00张/秒]")
+        self.progress_detail_label.setFont(QFont("Consolas", 9))
+        self.progress_detail_label.setMinimumWidth(250)
+        progress_layout.addWidget(self.progress_detail_label)
+
+        layout.addWidget(self.progress_container)
+
         # 应用自定义主题样式
+        self._apply_style()
+
+    def _apply_style(self):
+        """应用样式"""
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             bg_color = Win11Colors.DARK_SURFACE
             text_color = Win11Colors.DARK_TEXT_SECONDARY
-            # 移除 border_color 相关代码
+            accent_color = Win11Colors.DARK_ACCENT
+            border_color = Win11Colors.DARK_BORDER
         else:
             bg_color = Win11Colors.LIGHT_SURFACE
             text_color = Win11Colors.LIGHT_TEXT_SECONDARY
-            # 移除 border_color 相关代码
+            accent_color = Win11Colors.LIGHT_ACCENT
+            border_color = Win11Colors.LIGHT_BORDER
 
-        # 修改样式设置，删除 border-top 属性
         self.setStyleSheet(f"""
             QFrame {{
                 background-color: {bg_color.name()};
             }}
             QLabel {{
                 color: {text_color.name()};
+                background-color: {bg_color.name()};
+            }}
+            QProgressBar {{
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                background-color: {bg_color.lighter(110).name()};
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background-color: {accent_color.name()};
+                border-radius: 3px;
+            }}
+            QWidget {{
+                background-color: {bg_color.name()};
             }}
         """)
+
+    def show_progress(self):
+        """显示进度条"""
+        self.progress_container.show()
+
+    def hide_progress(self):
+        """隐藏进度条"""
+        self.progress_container.hide()
+
+    def update_progress(self, current: int, total: int, elapsed_seconds: float,
+                        remaining_seconds: float, speed: float):
+        """
+        更新 tqdm 风格的进度条
+
+        Args:
+            current: 当前处理数量
+            total: 总数量
+            elapsed_seconds: 已用时间(秒)
+            remaining_seconds: 剩余时间(秒)
+            speed: 处理速度(张/秒)
+        """
+        # 计算百分比 - 保留两位小数
+        if total > 0:
+            percentage = (current / total * 100)
+        else:
+            percentage = 0
+
+        # 更新进度条 - 使用10000作为最大值，实现0.01%的精度
+        self.progress_bar.setMaximum(10000)
+        progress_value = int(percentage * 100)  # 50.25% -> 5025
+        self.progress_bar.setValue(progress_value)
+
+        # 百分比标签显示两位小数
+        self.progress_percent_label.setText(f"{percentage:.2f}%")
+
+        # 格式化时间 - 修改这里
+        elapsed_str = self._format_time(elapsed_seconds)
+
+        # 判断是否需要显示"计算中..."
+        if remaining_seconds <= 0 or remaining_seconds == float('inf') or speed <= 0 or current < 2:
+            remaining_str = "计算中..."
+        else:
+            remaining_str = self._format_time(remaining_seconds)
+
+        # 判断速度是否有效
+        if speed <= 0 or current < 2:
+            speed_str = "计算中..."
+        else:
+            speed_str = f"{speed:.2f}张/秒"
+
+        # 更新详情标签
+        detail_text = f"{current}/{total} [{elapsed_str}<{remaining_str}, {speed_str}]"
+        self.progress_detail_label.setText(detail_text)
+
+    def _format_time(self, seconds: float) -> str:
+        """格式化时间为 HH:MM:SS 或 MM:SS"""
+        if seconds == float('inf') or seconds < 0:
+            return "计算中..."
+
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
+
+    def update_theme(self):
+        """更新主题"""
+        self._apply_style()
 
 
 class SpeedProgressBar(QFrame):

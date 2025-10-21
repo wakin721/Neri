@@ -44,7 +44,7 @@ class ImageProcessor:
 
     def detect_species(self, img_path: str, use_fp16: bool = False, iou: float = 0.3,
                        conf: float = 0.25, augment: bool = True,
-                       agnostic_nms: bool = True, timeout: float = 10.0) -> Dict[str, Any]:
+                       agnostic_nms: bool = True, timeout: float = 20.0) -> Dict[str, Any]:
         """检测图像中的物种并应用翻译"""
         try:
             import torch

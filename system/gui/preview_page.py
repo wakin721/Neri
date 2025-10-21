@@ -85,6 +85,82 @@ class DetectionWorker(QThread):
             self.detection_failed.emit(str(e))
 
 
+class ImageLoaderThread(QThread):
+    """用于在后台加载图像和元数据的工作线程（安全取消版）"""
+    image_loaded = Signal(object, str, dict)  # (pixmap, file_path, image_info)
+    loading_failed = Signal(str, str)         # (file_path, error_message)
+
+    def __init__(self, file_path, display_size, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.display_size = display_size
+        self._is_cancelled = False
+
+    def cancel(self):
+        """请求线程停止"""
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            if not self.file_path or not os.path.exists(self.file_path):
+                self.loading_failed.emit(self.file_path, "文件路径无效")
+                return
+
+            # --- 线程取消点 1 ---
+            if self._is_cancelled: return
+
+            from PIL import Image
+            import numpy as np
+            from PySide6.QtGui import QImage, QPixmap
+            from system.metadata_extractor import ImageMetadataExtractor
+
+            # 1. 加载图像 (这是一个潜在的耗时I/O操作)
+            img = Image.open(self.file_path)
+            img.load() # 确保图像数据已完全加载到内存
+
+            # --- 线程取消点 2 ---
+            if self._is_cancelled: return
+
+            # 2. 提取元数据
+            file_name = os.path.basename(self.file_path)
+            image_info, _ = ImageMetadataExtractor.extract_metadata(self.file_path, file_name)
+
+            # --- 线程取消点 3 ---
+            if self._is_cancelled: return
+
+            # 3. 调整图像大小并转换为QPixmap (这是耗时的CPU操作)
+            max_width = max(self.display_size.width(), 400)
+            max_height = max(self.display_size.height(), 300)
+
+            w, h = img.size
+            scale = min(max_width / w, max_height / h) if w > 0 and h > 0 else 1
+            if scale < 1:
+                new_width = max(1, int(w * scale))
+                new_height = max(1, int(h * scale))
+                resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            else:
+                resized_img = img
+
+            if resized_img.mode != 'RGB':
+                resized_img = resized_img.convert('RGB')
+
+            img_array = np.array(resized_img)
+            height, width, channel = img_array.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+
+            # --- 线程取消点 4 ---
+            if self._is_cancelled: return
+
+            # 4. 发送完成信号
+            self.image_loaded.emit(pixmap, self.file_path, image_info)
+
+        except Exception as e:
+            if not self._is_cancelled:
+                self.loading_failed.emit(self.file_path, str(e))
+
+
 class PreviewPage(QWidget):
     """图像预览页面"""
     settings_changed = Signal()
@@ -93,8 +169,10 @@ class PreviewPage(QWidget):
         super().__init__(parent)
         self.controller = controller
         self.original_image = None
-        self.current_image_path = None
+        self.loaded_image_path = None
+        self.requested_image_path = None
         self.current_detection_results = None
+        self.image_loader_thread = None
 
         self.current_preview_info = {}
         self.active_keybinds = []
@@ -111,6 +189,17 @@ class PreviewPage(QWidget):
         global_conf = self.controller.confidence_settings.get("global", 0.25)
         self.preview_conf_var = global_conf
 
+        self._create_widgets()
+        self._apply_theme()
+
+        # 用于处理窗口大小调整的计时器
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._redraw_image_on_resize)
+
+
+    def _apply_theme(self):
+        """应用当前的主题样式"""
         palette = self.palette()
         is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
 
@@ -185,140 +274,133 @@ class PreviewPage(QWidget):
 
         # 设置 Win11 风格
         self.setStyleSheet(f"""
-                    QWidget {{
-                        background-color: {bg_color};
-                        color: {text_color};
-                        font-family: 'Segoe UI', Arial, sans-serif;
-                    }}
-                    QListWidget {{
-                        background-color: {list_widget_bg_color};
-                        border: 1px solid {list_widget_border_color};
-                        border-radius: 6px;
-                        selection-background-color: {list_widget_selection_bg_color};
-                        selection-color: {list_widget_selection_text_color};
-                        font-size: 14px;
-                        padding: 4px;
-                    }}
-                    QListWidget::item {{
-                        padding: 6px;
-                        border-radius: 4px;
-                        margin: 1px;
-                    }}
-                    QListWidget::item:hover {{
-                        background-color: {list_widget_item_hover_bg_color};
-                    }}
-                    QListWidget::item:selected {{
-                        background-color: {list_widget_selection_bg_color};
-                        color: {list_widget_selection_text_color};
-                    }}
-                    ModernGroupBox {{
-                        font-weight: 600;
-                        font-size: 14px;
-                        color: {group_box_text_color};
-                        border: 2px solid {group_box_border_color};
-                        border-radius: 8px;
-                        margin-top: 10px;
-                        padding-top: 10px;
-                    }}
-                    ModernGroupBox::title {{
-                        subcontrol-origin: margin;
-                        left: 10px;
-                        padding: 0 8px 0 8px;
-                        background-color: {group_box_bg_color};
-                    }}
-                    QPushButton {{
-                        background-color: {button_bg_color};
-                        color: {button_text_color};
-                        border: none;
-                        padding: 8px 16px;
-                        border-radius: 6px;
-                        font-size: 14px;
-                        font-weight: 500;
-                        min-width: 80px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {button_hover_bg_color};
-                    }}
-                    QPushButton:pressed {{
-                        background-color: {button_pressed_bg_color};
-                    }}
-                    QPushButton:disabled {{
-                        background-color: {button_disabled_bg_color};
-                        color: {button_disabled_text_color};
-                    }}
-                    QSlider::groove:horizontal {{
-                        border: 1px solid {slider_groove_border_color};
-                        height: 6px;
-                        background: {slider_groove_bg_color};
-                        border-radius: 3px;
-                    }}
-                    QSlider::handle:horizontal {{
-                        background: {slider_handle_bg_color};
-                        border: 1px solid {slider_handle_bg_color};
-                        width: 16px;
-                        height: 16px;
-                        border-radius: 8px;
-                        margin: -6px 0;
-                    }}
-                    QSlider::handle:horizontal:hover {{
-                        background: {slider_handle_hover_bg_color};
-                    }}
-                    SwitchRow {{
-                        font-size: 14px;
-                        color: {checkbox_text_color};
-                    }}
-                    SwitchRow::indicator {{
-                        width: 18px;
-                        height: 18px;
-                        border: 2px solid {checkbox_indicator_border_color};
-                        border-radius: 4px;
-                        background-color: {checkbox_indicator_bg_color};
-                    }}
-                    SwitchRow::indicator:checked {{
-                        background-color: {checkbox_indicator_checked_bg_color};
-                        border-color: {checkbox_indicator_checked_bg_color};
-                        image: url(checkmark.png);
-                    }}
-                    QComboBox {{
-                        border: 2px solid {combo_box_border_color};
-                        border-radius: 6px;
-                        padding: 6px 12px;
-                        background-color: {combo_box_bg_color};
-                        min-width: 100px;
-                        font-size: 14px;
-                    }}
-                    QComboBox:focus {{
-                        border-color: {combo_box_focus_border_color};
-                    }}
-                    QComboBox::drop-down {{
-                        border: none;
-                        width: 20px;
-                    }}
-                    QComboBox::down-arrow {{
-                        image: url(down_arrow.png);
-                        width: 12px;
-                        height: 12px;
-                    }}
-                    QTextEdit {{
-                        background-color: {text_edit_bg_color};
-                        border: 1px solid {text_edit_border_color};
-                        border-radius: 6px;
-                        padding: 8px;
-                        font-size: 14px;
-                        line-height: 1.4;
-                    }}
-                    QLabel {{
-                        color: {label_text_color};
-                        font-size: 14px;
-                    }}
-                """)
-
-        self._create_widgets()
-
-        # 用于处理窗口大小调整的计时器
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(self._redraw_image_on_resize)
+                        QWidget {{
+                            background-color: {bg_color};
+                            color: {text_color};
+                            font-family: 'Segoe UI', Arial, sans-serif;
+                        }}
+                        QListWidget {{
+                            background-color: {list_widget_bg_color};
+                            border: 1px solid {list_widget_border_color};
+                            border-radius: 6px;
+                            selection-background-color: {list_widget_selection_bg_color};
+                            selection-color: {list_widget_selection_text_color};
+                            font-size: 14px;
+                            padding: 4px;
+                        }}
+                        QListWidget::item {{
+                            padding: 6px;
+                            border-radius: 4px;
+                            margin: 1px;
+                        }}
+                        QListWidget::item:hover {{
+                            background-color: {list_widget_item_hover_bg_color};
+                        }}
+                        QListWidget::item:selected {{
+                            background-color: {list_widget_selection_bg_color};
+                            color: {list_widget_selection_text_color};
+                        }}
+                        ModernGroupBox {{
+                            font-weight: 600;
+                            font-size: 14px;
+                            color: {group_box_text_color};
+                            border: 2px solid {group_box_border_color};
+                            border-radius: 8px;
+                            margin-top: 10px;
+                            padding-top: 10px;
+                        }}
+                        ModernGroupBox::title {{
+                            subcontrol-origin: margin;
+                            left: 10px;
+                            padding: 0 8px 0 8px;
+                            background-color: {group_box_bg_color};
+                        }}
+                        QPushButton {{
+                            background-color: {button_bg_color};
+                            color: {button_text_color};
+                            border: none;
+                            padding: 8px 16px;
+                            border-radius: 6px;
+                            font-size: 14px;
+                            font-weight: 500;
+                            min-width: 80px;
+                        }}
+                        QPushButton:hover {{
+                            background-color: {button_hover_bg_color};
+                        }}
+                        QPushButton:pressed {{
+                            background-color: {button_pressed_bg_color};
+                        }}
+                        QPushButton:disabled {{
+                            background-color: {button_disabled_bg_color};
+                            color: {button_disabled_text_color};
+                        }}
+                        QSlider::groove:horizontal {{
+                            border: 1px solid {slider_groove_border_color};
+                            height: 6px;
+                            background: {slider_groove_bg_color};
+                            border-radius: 3px;
+                        }}
+                        QSlider::handle:horizontal {{
+                            background: {slider_handle_bg_color};
+                            border: 1px solid {slider_handle_bg_color};
+                            width: 16px;
+                            height: 16px;
+                            border-radius: 8px;
+                            margin: -6px 0;
+                        }}
+                        QSlider::handle:horizontal:hover {{
+                            background: {slider_handle_hover_bg_color};
+                        }}
+                        SwitchRow {{
+                            font-size: 14px;
+                            color: {checkbox_text_color};
+                        }}
+                        SwitchRow::indicator {{
+                            width: 18px;
+                            height: 18px;
+                            border: 2px solid {checkbox_indicator_border_color};
+                            border-radius: 4px;
+                            background-color: {checkbox_indicator_bg_color};
+                        }}
+                        SwitchRow::indicator:checked {{
+                            background-color: {checkbox_indicator_checked_bg_color};
+                            border-color: {checkbox_indicator_checked_bg_color};
+                            image: url(checkmark.png);
+                        }}
+                        QComboBox {{
+                            border: 2px solid {combo_box_border_color};
+                            border-radius: 6px;
+                            padding: 6px 12px;
+                            background-color: {combo_box_bg_color};
+                            min-width: 100px;
+                            font-size: 14px;
+                        }}
+                        QComboBox:focus {{
+                            border-color: {combo_box_focus_border_color};
+                        }}
+                        QComboBox::drop-down {{
+                            border: none;
+                            width: 20px;
+                        }}
+                        QComboBox::down-arrow {{
+                            image: url(down_arrow.png);
+                            width: 12px;
+                            height: 12px;
+                        }}
+                        QTextEdit {{
+                            background-color: {text_edit_bg_color};
+                            border: 1px solid {text_edit_border_color};
+                            border-radius: 6px;
+                            padding: 8px;
+                            font-size: 14px;
+                            line-height: 1.4;
+                        }}
+                        QLabel {{
+                            color: {label_text_color};
+                            font-size: 14px;
+                        }}
+                    """)
 
     def _create_widgets(self):
         """创建预览页面的所有控件"""
@@ -472,47 +554,82 @@ class PreviewPage(QWidget):
             logger.error(f"更新文件列表失败: {e}")
 
     def on_file_selected(self):
-        """文件选择事件处理"""
+        """文件选择事件处理（修复版本 - 防止切换页面时崩溃）"""
         selected_items = self.file_listbox.selectedItems()
         if not selected_items:
             return
 
-        current_item = selected_items[0]
+        file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
 
+        if not file_path or file_path == self.requested_image_path:
+            return
+
+        self.requested_image_path = file_path
+
+        # === 关键修复1: 强制停止并清理之前的线程 ===
+        if self.image_loader_thread and self.image_loader_thread.isRunning():
+            self.image_loader_thread.cancel()
+            # 断开所有信号连接,防止已删除对象被访问
+            try:
+                self.image_loader_thread.image_loaded.disconnect()
+                self.image_loader_thread.loading_failed.disconnect()
+                self.image_loader_thread.finished.disconnect()
+            except:
+                pass
+            # 等待线程结束(最多等待100ms)
+            self.image_loader_thread.wait(100)
+            self.image_loader_thread = None
+        # ============================================
+
+        self.image_label.setText("正在加载图像...")
+        self.image_label.pixmap = None
+        self.info_text.setPlainText(f"正在加载: {os.path.basename(file_path)}")
+        self.current_preview_info = {}
+
+        # 启动新的加载线程
+        self.image_loader_thread = ImageLoaderThread(file_path, self.image_label.size())
+
+        # === 关键修复2: 使用 Lambda 包装信号槽,避免直接传递 self ===
+        self.image_loader_thread.image_loaded.connect(
+            lambda pixmap, fp, info: self._on_image_loaded_safe(pixmap, fp, info)
+        )
+        self.image_loader_thread.loading_failed.connect(
+            lambda fp, err: self._on_loading_failed_safe(fp, err)
+        )
+        # =======================================================
+
+        self.image_loader_thread.finished.connect(self.image_loader_thread.deleteLater)
+        self.image_loader_thread.finished.connect(self._on_thread_finished)
+
+        self.image_loader_thread.start()
+
+    def _on_image_loaded_safe(self, pixmap, file_path, image_info):
+        """安全的图像加载完成回调 - 添加对象有效性检查"""
+        # === 关键修复3: 检查对象是否仍然有效 ===
         try:
-            # 从用户数据中读取之前存储的完整文件路径
-            file_path = current_item.data(Qt.ItemDataRole.UserRole)
-            file_name = current_item.text()
+            if not self or not hasattr(self, 'image_label'):
+                return
+            if self.image_label is None or not self.image_label.isVisible():
+                return
+            # ==========================================
 
-            self.current_image_path = file_path
-            self.current_preview_info = {}
+            self._on_image_loaded(pixmap, file_path, image_info)
+        except RuntimeError as e:
+            logger.warning(f"图像加载回调时对象已删除: {e}")
 
-            temp_photo_dir = self.controller.get_temp_photo_dir()
-            if temp_photo_dir:
-                base_name, _ = os.path.splitext(file_name)
-                json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+    def _on_loading_failed_safe(self, file_path, error_message):
+        """安全的加载失败回调 - 添加对象有效性检查"""
+        # === 关键修复4: 同样的保护 ===
+        try:
+            if not self or not hasattr(self, 'image_label'):
+                return
+            if self.image_label is None:
+                return
+            # ==================================
 
-                if os.path.exists(json_path):
-                    try:
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            self.current_preview_info = json.load(f)
-                    except Exception as e:
-                        logger.error(f"加载 {json_path} 文件失败: {e}")
-                        self.current_preview_info = {}
-
-            if file_path and os.path.exists(file_path):
-                if self.show_detection_checkbox.isChecked() and self.current_preview_info:
-                    self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
-                else:
-                    self.update_image_preview(file_path)
-
-                self.update_image_info(file_path, file_name)
-
-                if self.current_preview_info:
-                    self._update_detection_info(self.current_preview_info)
-
-        except Exception as e:
-            logger.error(f"选择文件时出错: {e}")
+            self._on_loading_failed(file_path, error_message)
+        except RuntimeError as e:
+            logger.warning(f"加载失败回调时对象已删除: {e}")
 
     def update_image_preview(self, file_path: str, show_detection: bool = False, detection_results=None,
                              is_temp_result: bool = False):
@@ -596,8 +713,15 @@ class PreviewPage(QWidget):
             return
 
         if checked:
+            # ===== 修改:添加原始图像检查 =====
+            if not self.original_image:
+                QMessageBox.warning(self, "提示", "图像尚未加载完成，请稍后再试。")
+                self.show_detection_checkbox.setChecked(False)
+                return
+            # =================================
+
             # 显示带检测框的图像
-            if self.current_preview_info:
+            if self.current_preview_info and self.current_preview_info.get("检测框"):
                 # 使用现有的检测信息重新绘制图像
                 self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
             else:
@@ -605,9 +729,10 @@ class PreviewPage(QWidget):
                 QMessageBox.information(self, "提示", "当前图像还没有检测结果，请先点击'检测当前图像'按钮。")
                 self.show_detection_checkbox.setChecked(False)
         else:
-            # 只显示不带检测框的原始图片
-            if self.current_image_path:
-                self.update_image_preview(self.current_image_path)
+            # ===== 修改:只显示不带检测框的原始图片 =====
+            if self.original_image:
+                self._update_pixmap_for_label(self.original_image)
+            # ==========================================
 
     def detect_current_image(self):
         """检测当前选中的图像"""
@@ -842,6 +967,12 @@ class PreviewPage(QWidget):
     def _redraw_preview_boxes_with_new_confidence(self, conf_threshold_str):
         """根据新的置信度阈值，在预览图像上重新绘制检测框"""
         try:
+            # ===== 新增:检查原始图像是否存在 =====
+            if not self.original_image:
+                logger.warning("原始图像未加载，无法绘制检测框")
+                return
+            # ====================================
+
             # 确保有有效的置信度值
             if isinstance(conf_threshold_str, int):
                 conf_threshold = conf_threshold_str / 100.0
@@ -1091,9 +1222,12 @@ class PreviewPage(QWidget):
             self.preview_conf_slider.setValue(int(self.preview_conf_var * 100))
 
     def update_theme(self):
-        """更新主题"""
+        """更新主题（已修复）"""
         # 重新应用样式
-        self.__init__(self.parent(), self.controller)
+        self._apply_theme()
+        # 更新图片标签的占位符样式
+        if not self.image_label.pixmap:
+            self.image_label.setStyleSheet(self._get_placeholder_style())
 
     def set_show_detection(self, show):
         """设置是否显示检测结果"""
@@ -1156,3 +1290,98 @@ class PreviewPage(QWidget):
             self.image_label.pixmap = pixmap
         except Exception as e:
             logger.error(f"将图像设置为标签时出错: {e}")
+
+    def select_file_by_name(self, filename: str):
+        """根据文件名在列表中以编程方式选中文件"""
+        for i in range(self.file_listbox.count()):
+            item = self.file_listbox.item(i)
+            if item and item.text() == filename:
+                self.file_listbox.setCurrentItem(item)
+                # 滚动到选中项确保其可见
+                self.file_listbox.scrollToItem(item)
+                return
+
+    def _on_image_loaded(self, pixmap, file_path, image_info):
+        """当图片成功加载后，在主线程中更新UI"""
+        # 关键修复:仅当加载完成的图片是用户最新请求的那一张时,才更新界面
+        if file_path != self.requested_image_path:
+            return
+
+        # 更新已加载的路径状态
+        self.loaded_image_path = file_path
+
+        # 加载并保存原始图像
+        try:
+            self.original_image = Image.open(file_path)
+            self.current_image_path = file_path
+        except Exception as e:
+            logger.error(f"加载原始图像失败: {e}")
+            self.original_image = None
+            self.current_image_path = None
+
+        # 更新图像
+        self.image_label.setPixmap(pixmap)
+        self.image_label.setScaledContents(False)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.pixmap = pixmap
+
+        # ===== 修改:更新信息显示，直接从原始图像获取尺寸 =====
+        self.info_text.clear()
+        info1 = f"文件名: {image_info.get('文件名', '')}    格式: {image_info.get('格式', '')}"
+        info2 = f"拍摄日期: {image_info.get('拍摄日期', '未知')} {image_info.get('拍摄时间', '')}    "
+
+        try:
+            # 直接从原始图像获取实际尺寸
+            if self.original_image:
+                img_width, img_height = self.original_image.size
+                file_size_kb = os.path.getsize(file_path) / 1024
+                info2 += f"尺寸: {img_width}x{img_height}px    文件大小: {file_size_kb:.1f} KB"
+            else:
+                # 如果原始图像加载失败，尝试从image_info获取
+                width = image_info.get('宽度', image_info.get('width', '未知'))
+                height = image_info.get('高度', image_info.get('height', '未知'))
+                file_size_kb = os.path.getsize(file_path) / 1024
+                info2 += f"尺寸: {width}x{height}px    文件大小: {file_size_kb:.1f} KB"
+        except Exception as e:
+            logger.error(f"获取图像信息失败: {e}")
+            info2 += "尺寸: 未知"
+
+        self.info_text.setPlainText(info1 + "\n" + info2)
+        # =====================================================
+
+        # 检查并加载已有的检测结果
+        self.current_preview_info = {}  # 重置检测信息
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        if temp_photo_dir:
+            base_name, _ = os.path.splitext(os.path.basename(file_path))
+            json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        self.current_preview_info = json.load(f)
+                    self._update_detection_info(self.current_preview_info)
+                    # 如果已勾选显示检测结果,则绘制检测框
+                    if self.show_detection_checkbox.isChecked():
+                        self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
+                except Exception as e:
+                    logger.error(f"加载 {json_path} 文件失败: {e}")
+
+    def _on_loading_failed(self, file_path, error_message):
+        """当图片加载失败时显示错误信息"""
+        # 关键修复：仅当加载失败的图片是用户最新请求的那一张时，才显示错误
+        if file_path != self.requested_image_path:
+            return
+
+        self.image_label.setText(f"无法加载图像:\n{error_message}")
+        self.image_label.setStyleSheet(self._get_placeholder_style())
+        self.loaded_image_path = None  # 加载失败，重置状态
+        logger.error(f"图像加载失败: {error_message}")
+
+    def _on_thread_finished(self):
+        """当加载线程结束后,清理其在主页面中的引用（增强版）"""
+        # === 关键修复5: 延迟清理引用,确保所有信号处理完毕 ===
+        QTimer.singleShot(50, self._clear_thread_reference)
+
+    def _clear_thread_reference(self):
+        """延迟清理线程引用"""
+        self.image_loader_thread = None

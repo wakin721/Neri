@@ -882,7 +882,7 @@ class Sidebar(QWidget):
     def set_processing_state(self, is_processing):
         """设置处理状态"""
         for page_id, button in self.nav_buttons.items():
-            if page_id in ["preview", "settings"]:
+            if page_id in ["settings"]:
                 button.setEnabled(True)
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
             else:

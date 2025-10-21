@@ -75,11 +75,110 @@ class StartPage(QWidget):
         # 路径设置组
         self._create_paths_group(layout)
 
-        # 添加弹性空间
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        # 添加控制台组件（初始隐藏）
+        self._create_console_widget(layout)
+
+        # 添加较小的弹性空间（当控制台隐藏时使用）
+        # 当控制台显示时，它会占据可用空间
+        self.spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        layout.addItem(self.spacer)
 
         # 底部控制区域
         self._create_bottom_controls(layout)
+
+    def _create_console_widget(self, parent_layout):
+        """创建控制台组件"""
+        from PySide6.QtWidgets import QTextEdit
+
+        # 控制台容器
+        self.console_container = ModernGroupBox("处理控制台")
+        self.console_container.hide()  # 初始隐藏
+
+        console_layout = QVBoxLayout()
+        console_layout.setContentsMargins(16, 16, 16, 16)
+        console_layout.setSpacing(12)
+
+        # 文本输出区域
+        self.console_output = QTextEdit()
+        self.console_output.setReadOnly(True)
+        # 移除固定高度限制，让它能够自适应
+        self.console_output.setMinimumHeight(200)
+        # 移除 setMaximumHeight，让控制台可以扩展
+
+        # 设置尺寸策略为可扩展
+        self.console_output.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
+        # 设置控制台样式
+        palette = self.palette()
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD
+            text_color = Win11Colors.DARK_TEXT_PRIMARY
+            border_color = Win11Colors.DARK_BORDER
+        else:
+            bg_color = Win11Colors.LIGHT_CARD
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY
+            border_color = Win11Colors.LIGHT_BORDER
+
+        self.console_output.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {bg_color.name()};
+                color: {text_color.name()};
+                border: 1px solid {border_color.name()};
+                border-radius: 6px;
+                padding: 8px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+            }}
+        """)
+
+        console_layout.addWidget(self.console_output)
+
+        self.console_container.setLayout(console_layout)
+
+        # 设置控制台容器的尺寸策略，允许垂直扩展
+        self.console_container.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding
+        )
+
+        parent_layout.addWidget(self.console_container)
+
+    def show_console(self):
+        """显示控制台"""
+        self.console_container.show()
+        self.console_output.clear()
+        # 当显示控制台时，减少弹性空间
+        if hasattr(self, 'spacer'):
+            self.layout().removeItem(self.spacer)
+            self.spacer = QSpacerItem(20, 10, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            # 在底部控制区域之前插入弹性空间
+            self.layout().insertItem(self.layout().count() - 1, self.spacer)
+
+    def hide_console(self):
+        """隐藏控制台"""
+        self.console_container.hide()
+        # 当隐藏控制台时，恢复弹性空间
+        if hasattr(self, 'spacer'):
+            self.layout().removeItem(self.spacer)
+            self.spacer = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+            # 在底部控制区域之前插入弹性空间
+            self.layout().insertItem(self.layout().count() - 1, self.spacer)
+
+    def append_console_log(self, message: str, color: str = None):
+        """添加控制台日志"""
+        if color:
+            self.console_output.append(f'<span style="color: {color};">{message}</span>')
+        else:
+            self.console_output.append(message)
+
+        # 自动滚动到底部
+        scrollbar = self.console_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _create_paths_group(self, parent_layout):
         """创建路径设置组"""

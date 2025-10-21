@@ -66,15 +66,21 @@ class UpdateCheckThread(QThread):
 
 class ProcessingThread(QThread):
     """图像处理线程"""
-    progress_updated = Signal(int, int, float, object)
+    progress_updated = Signal(int, int, float, float, float)  # current, total, elapsed, remaining, speed
     file_processed = Signal(str, object, str)
     processing_complete = Signal(bool)
     status_message = Signal(str)
     file_processing_result = Signal(str, dict)
     current_file_changed = Signal(str, int, int)
     current_file_preview = Signal(str, dict)
+    console_log = Signal(str, str)  # 控制台日志信号 (message, color)
 
-    def __init__(self, controller, file_path, save_path, use_fp16, resume_from=0):
+    def __init__(self,
+                 controller,
+                 file_path,
+                 save_path,
+                 use_fp16,
+                 resume_from=0):
         super().__init__()
         self.controller = controller
         self.file_path = file_path
@@ -88,6 +94,8 @@ class ProcessingThread(QThread):
         self.stop_flag = True
 
     def run(self):
+        import time
+
         start_time = time.time()
         excel_data = [] if self.resume_from == 0 else self.controller.excel_data
         processed_files = self.resume_from
@@ -105,16 +113,31 @@ class ProcessingThread(QThread):
                                   if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)])
             total_files = len(image_files)
 
+            # 输出开始信息
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.console_log.emit(f"[INFO] {current_time} 开始处理 {total_files} 个图像文件", "#00ff00")
+            self.console_log.emit(f"[INFO] {current_time} 源路径: {self.file_path}", "#aaaaaa")
+            self.console_log.emit(f"[INFO] {current_time} 保存路径: {self.save_path}", "#aaaaaa")
+            self.console_log.emit(
+                f"[INFO] {current_time} 参数配置: IOU={iou}, CONF={conf}, FP16={self.use_fp16}, AUGMENT={augment}, AGNOSTIC_NMS={agnostic_nms}",
+                "#aaaaaa")
+            self.console_log.emit("-" * 100, None)
+
             if self.resume_from > 0:
                 image_files = image_files[self.resume_from:]
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.console_log.emit(f"[INFO] {current_time} 从第 {self.resume_from + 1} 个文件继续处理", "#ffff00")
                 if excel_data:
                     valid_dates = [item['拍摄日期对象'] for item in excel_data if item.get('拍摄日期对象')]
                     if valid_dates:
                         earliest_date = min(valid_dates)
 
+            # 不再使用 tqdm，直接遍历文件
             for idx, filename in enumerate(image_files):
                 if self.stop_flag:
                     stopped_manually = True
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.console_log.emit(f"[WARN] {current_time} 处理已被用户手动停止", "#ff0000")
                     break
 
                 current_index = processed_files + 1
@@ -123,49 +146,173 @@ class ProcessingThread(QThread):
                 # 发射当前处理文件变化信号
                 self.current_file_changed.emit(img_path, current_index, total_files)
 
-                self.status_message.emit(f"正在处理: {filename}")
-
                 elapsed_time = time.time() - start_time
-                speed = (processed_files - self.resume_from + 1) / elapsed_time if elapsed_time > 0 else 0
-                remaining_time = (total_files - (processed_files + 1)) / speed if speed > 0 else float('inf')
+                #只有处理了至少2个文件后才计算速度
+                if processed_files - self.resume_from >= 2 and elapsed_time > 0:
+                    speed = (processed_files - self.resume_from) / elapsed_time
+                    remaining_time = (total_files - current_index) / speed if speed > 0 else float('inf')
+                else:
+                    speed = 0
+                    remaining_time = float('inf')
 
-                self.progress_updated.emit(processed_files + 1, total_files, speed, remaining_time)
+                # 发送进度更新（包含 elapsed_time 和 remaining_time）
+                self.progress_updated.emit(current_index, total_files, elapsed_time, remaining_time, speed)
 
                 try:
+                    # 提取元数据
                     image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
+
+                    # 安全获取图像尺寸
+                    img_height, img_width = 0, 0
+                    if img is not None:
+                        if hasattr(img, 'shape') and len(img.shape) >= 2:
+                            img_height, img_width = img.shape[:2]
+                        else:
+                            try:
+                                with Image.open(img_path) as pil_img:
+                                    img_width, img_height = pil_img.size
+                            except Exception as e:
+                                logger.warning(f"无法获取图像尺寸 {filename}: {e}")
+
+                    if img_height == 0 or img_width == 0:
+                        raise ValueError(f"无法获取有效的图像尺寸")
+
+                    # 执行物种检测
+                    detection_start = time.time()
                     species_info = self.controller.image_processor.detect_species(
                         img_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
                     )
+                    detection_time = (time.time() - detection_start) * 1000
+
                     species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    # 获取检测结果
                     detect_results = species_info.get('detect_results')
 
-                    if detect_results:
+                    # 获取速度信息
+                    speed_info = {}
+                    preprocess_time = 0
+                    inference_time = 0
+                    postprocess_time = 0
+
+                    if detect_results and len(detect_results) > 0:
+                        # 从 YOLO Results 对象中获取 speed 信息
+                        first_result = detect_results[0]
+                        if hasattr(first_result, 'speed') and isinstance(first_result.speed, dict):
+                            speed_info = first_result.speed
+                            preprocess_time = speed_info.get('preprocess', 0)
+                            inference_time = speed_info.get('inference', 0)
+                            postprocess_time = speed_info.get('postprocess', 0)
+
+                    # 获取当前时间
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    # 构建检测结果信息
+                    if detect_results and len(detect_results) > 0:
+                        # 获取翻译字典
+                        translation_dict = self.controller.image_processor.translation_dict
+
+                        # 统计每个物种的数量（使用翻译后的名称）
+                        species_counts = {}
+                        for result in detect_results:
+                            if hasattr(result, 'boxes') and result.boxes is not None:
+                                for box in result.boxes:
+                                    cls_id = int(box.cls.item())
+                                    # 获取英文名称
+                                    english_name = result.names.get(cls_id, 'Unknown')
+                                    # 翻译为中文（如果有）
+                                    translated_name = translation_dict.get(english_name, english_name)
+                                    species_counts[translated_name] = species_counts.get(translated_name, 0) + 1
+
+                        # 构建检测摘要
+                        if species_counts:
+                            detection_summary = ', '.join([f"{count}x{name}" for name, count in species_counts.items()])
+
+                            # 输出统一格式的日志
+                            log_message = (
+                                f"[INFO] {current_time} {img_path} | "
+                                f"尺寸:{img_height}x{img_width} | "
+                                f"检测结果:[{detection_summary}] | "
+                                f"检测耗时:{detection_time:.1f}ms"
+                            )
+                            self.console_log.emit(log_message, "#00ff00")
+
+                            # 如果有速度信息，输出详细速度
+                            if any([preprocess_time, inference_time, postprocess_time]):
+                                speed_log = (
+                                    f"[INFO] {current_time} 处理详情: "
+                                    f"预处理:{preprocess_time:.1f}ms | "
+                                    f"推理:{inference_time:.1f}ms | "
+                                    f"后处理:{postprocess_time:.1f}ms"
+                                )
+                                self.console_log.emit(speed_log, "#888888")
+                        else:
+                            # 有检测结果对象但没有检测到物种
+                            log_message = (
+                                f"[INFO] {current_time} {img_path} | "
+                                f"尺寸:{img_height}x{img_width} | "
+                                f"检测结果:[无目标] | "
+                                f"检测耗时:{detection_time:.1f}ms"
+                            )
+                            self.console_log.emit(log_message, "#ffaa00")
+
+                        # 保存检测信息
                         self.controller.image_processor.save_detection_info_json(
                             detect_results, filename, species_info, temp_photo_dir
                         )
-                        # 发射文件处理完成信号
                         self.file_processed.emit(img_path, detect_results, filename)
 
-                        # 发射当前文件预览信号，包含完整检测结果
                         complete_detection_info = {
                             **species_info,
                             'detect_results': detect_results,
                             'filename': filename
                         }
                         self.current_file_preview.emit(img_path, complete_detection_info)
+                    else:
+                        # 无检测结果
+                        log_message = (
+                            f"[INFO] {current_time} {img_path} | "
+                            f"尺寸:{img_height}x{img_width} | "
+                            f"检测结果:[无目标] | "
+                            f"检测耗时:{detection_time:.1f}ms"
+                        )
+                        self.console_log.emit(log_message, "#ffaa00")
 
+                    # 从 species_info 中删除 detect_results，避免重复
                     if 'detect_results' in species_info:
                         del species_info['detect_results']
+
                     image_info.update(species_info)
                     excel_data.append(image_info)
 
                 except Exception as e:
-                    logger.error(f"处理文件 {filename} 失败: {e}")
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    error_message = (
+                        f"[WARN] {current_time} {img_path} | "
+                        f"处理失败 | "
+                        f"错误信息:{str(e)}"
+                    )
+                    logger.error(f"处理文件 {filename} 失败: {e}", exc_info=True)
+                    self.console_log.emit(error_message, "#ff0000")
+
+                    # 即使出错也要记录基本信息
+                    try:
+                        image_info = {
+                            '文件名': filename,
+                            '错误': str(e)
+                        }
+                        excel_data.append(image_info)
+                    except:
+                        pass
 
                 processed_files += 1
 
+                # 每处理10个文件保存一次缓存
                 if processed_files % 10 == 0:
                     self._save_processing_cache(excel_data, processed_files, total_files)
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.console_log.emit(f"[INFO] {current_time} 已保存进度缓存 ({processed_files}/{total_files})",
+                                          "#888888")
 
                 # 清理内存
                 try:
@@ -175,7 +322,18 @@ class ProcessingThread(QThread):
                 gc.collect()
 
             if not stopped_manually:
-                self.progress_updated.emit(total_files, total_files, 0, "已完成")
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.console_log.emit("-" * 100, None)
+                total_time = time.time() - start_time
+                avg_speed = total_files / total_time if total_time > 0 else 0
+                self.console_log.emit(
+                    f"[INFO] {current_time} 所有文件处理完成! | "
+                    f"总计:{total_files}张 | "
+                    f"总耗时:{total_time:.2f}秒 | "
+                    f"平均速度:{avg_speed:.2f}张/秒",
+                    "#00ff00"
+                )
+                self.progress_updated.emit(total_files, total_files, total_time, 0, avg_speed)
                 self.controller.excel_data = excel_data
                 excel_data = DataProcessor.process_independent_detection(excel_data,
                                                                          self.controller.confidence_settings)
@@ -188,44 +346,51 @@ class ProcessingThread(QThread):
             self.processing_complete.emit(not stopped_manually)
 
         except Exception as e:
-            logger.error(f"处理过程中发生错误: {e}")
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.error(f"处理过程中发生错误: {e}", exc_info=True)
+            self.console_log.emit(f"[WARN] {current_time} 处理过程发生严重错误: {str(e)}", "#ff0000")
             QTimer.singleShot(0, lambda: QMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
             self.processing_complete.emit(False)
         finally:
             gc.collect()
 
     def _save_processing_cache(self, excel_data, processed_files, total_files):
-        def make_serializable(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            if isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items() if k != 'detect_results'}
-            if isinstance(obj, list):
-                return [make_serializable(i) for i in obj]
-            if hasattr(obj, '__dict__'):
-                return None
-            return obj
-
-        serializable_excel_data = make_serializable(excel_data)
-        cache_data = {
-            'file_path': self.file_path,
-            'save_path': self.save_path,
-            'use_fp16': self.use_fp16,
-            'processed_files': processed_files,
-            'total_files': total_files,
-            'excel_data': serializable_excel_data,
-        }
-        cache_file = os.path.join(self.controller.settings_manager.settings_dir, "cache.json")
+        """保存处理缓存"""
         try:
+            cache_dir = self.controller.settings_manager.settings_dir
+            cache_file = os.path.join(cache_dir, "cache.json")
+
+            cache_data = {
+                'processed_files': processed_files,
+                'total_files': total_files,
+                'file_path': self.file_path,
+                'save_path': self.save_path,
+                'excel_data': excel_data,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            # 转换日期对象为字符串
+            for item in cache_data.get('excel_data', []):
+                if '拍摄日期对象' in item and isinstance(item['拍摄日期对象'], datetime):
+                    item['拍摄日期对象'] = item['拍摄日期对象'].isoformat()
+
             with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=4)
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"处理缓存已保存: {processed_files}/{total_files}")
         except Exception as e:
-            logger.error(f"保存缓存失败: {e}")
+            logger.error(f"保存处理缓存失败: {e}")
 
     def _delete_processing_cache(self):
-        cache_file = os.path.join(self.controller.settings_manager.settings_dir, "cache.json")
-        if os.path.exists(cache_file):
-            os.remove(cache_file)
+        """删除处理缓存"""
+        try:
+            cache_dir = self.controller.settings_manager.settings_dir
+            cache_file = os.path.join(cache_dir, "cache.json")
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+                logger.info("处理缓存已删除")
+        except Exception as e:
+            logger.error(f"删除处理缓存失败: {e}")
 
 
 class ObjectDetectionGUI(QMainWindow):
@@ -261,7 +426,12 @@ class ObjectDetectionGUI(QMainWindow):
         self.last_progress_total = 0
         self.last_progress_speed = 0.0
         self.last_progress_remaining_time = float('inf')
+        self.last_progress_elapsed_time = 0.0
         self.current_processing_file = None
+
+        self.last_preview_image = None
+        self.last_validation_species = None
+        self.last_validation_image = None
 
         # 主题检测和应用
         self._apply_system_theme()
@@ -570,9 +740,33 @@ class ObjectDetectionGUI(QMainWindow):
             logger.warning(f"检查主题变化失败: {e}")
 
     def _show_page(self, page_id: str):
-        """显示页面"""
+        """显示页面（修复版本）"""
+        if self.current_page == "preview" and page_id != "preview":
+            if hasattr(self.preview_page, 'image_loader_thread'):
+                if self.preview_page.image_loader_thread and self.preview_page.image_loader_thread.isRunning():
+                    self.preview_page.image_loader_thread.cancel()
+                    try:
+                        self.preview_page.image_loader_thread.image_loaded.disconnect()
+                        self.preview_page.image_loader_thread.loading_failed.disconnect()
+                    except:
+                        pass
+                    self.preview_page.image_loader_thread.wait(100)
+                    self.preview_page.image_loader_thread = None
+
+        # 在切换页面前,保存当前页面的选择
+        if self.current_page == "preview":
+            if self.preview_page.file_listbox.currentItem():
+                self.last_preview_image = self.preview_page.file_listbox.currentItem().text()
+        elif self.current_page == "species_validation":
+            if self.species_validation_page.species_listbox.currentItem():
+                # 从 "物种 (数量)" 的格式中提取物种名
+                self.last_validation_species = \
+                    self.species_validation_page.species_listbox.currentItem().text().split(' (')[0]
+            if self.species_validation_page.species_photo_listbox.currentItem():
+                self.last_validation_image = self.species_validation_page.species_photo_listbox.currentItem().text()
+
         # 在处理时限制页面访问
-        if self.is_processing and page_id not in ["preview", "settings"]:
+        if self.is_processing and page_id not in ["settings"]:
             return
 
         self.sidebar.set_active_button(page_id)
@@ -589,15 +783,18 @@ class ObjectDetectionGUI(QMainWindow):
         self.content_stack.setCurrentIndex(page_index)
         self.current_page = page_id
 
-        # 更新状态栏
+        # 更新状态栏并恢复选择
         if page_id == "settings":
             if self.is_processing:
                 # 如果正在处理，则恢复状态栏的进度显示
+                # 计算已用时间
+                elapsed_time = 0  # 如果需要精确时间，需要在类中添加 start_time 属性
                 self._on_progress_updated(
                     self.last_progress_value,
                     self.last_progress_total,
-                    self.last_progress_speed,
-                    self.last_progress_remaining_time
+                    elapsed_time,  # 添加 elapsed_time 参数
+                    self.last_progress_remaining_time,
+                    self.last_progress_speed
                 )
             else:
                 self.status_bar.status_label.setText("就绪")
@@ -610,6 +807,11 @@ class ObjectDetectionGUI(QMainWindow):
                     file_count = self.preview_page.get_file_count() if hasattr(self.preview_page,
                                                                                'get_file_count') else 0
                     self.status_bar.status_label.setText(f"当前文件夹下有 {file_count} 个图像文件")
+
+                    # 恢复预览页面的选择
+                    if self.last_preview_image:
+                        # 使用QTimer确保列表加载完毕后再选择
+                        QTimer.singleShot(100, lambda: self.preview_page.select_file_by_name(self.last_preview_image))
                 else:
                     self.status_bar.status_label.setText('请在"开始"页面中设置有效的图像文件路径')
         elif page_id == "species_validation":
@@ -621,6 +823,13 @@ class ObjectDetectionGUI(QMainWindow):
                 QTimer.singleShot(100, self.species_validation_page._load_species_data)
             if hasattr(self.species_validation_page, '_load_species_buttons'):
                 QTimer.singleShot(150, self.species_validation_page._load_species_buttons)
+
+            # 恢复物种校验页面的选择
+            if self.last_validation_species and self.last_validation_image:
+                # 使用更长的延迟以确保物种和照片列表都已加载
+                QTimer.singleShot(250, lambda: self.species_validation_page.select_species_and_image(
+                    self.last_validation_species, self.last_validation_image))
+
         elif page_id in ["advanced", "about"] and not self.is_processing:
             self.status_bar.status_label.setText("就绪")
 
@@ -799,8 +1008,9 @@ class ObjectDetectionGUI(QMainWindow):
         if self.is_processing:
             return
 
-        # 切换到预览页面
-        self._show_page("preview")
+        # 显示控制台
+        if hasattr(self.start_page, 'show_console'):
+            self.start_page.show_console()
 
         if resume_from == 0:
             self.excel_data = []
@@ -809,12 +1019,11 @@ class ObjectDetectionGUI(QMainWindow):
         # 设置处理状态
         self._set_processing_state(True)
 
-        # 创建并启动处理线程
         self.processing_thread = ProcessingThread(
             self, file_path, save_path, use_fp16, resume_from
         )
 
-        # 连接信号
+        # 连接信号 - 确保使用正确的签名
         self.processing_thread.progress_updated.connect(self._on_progress_updated)
         self.processing_thread.file_processed.connect(self._on_file_processed)
         self.processing_thread.processing_complete.connect(self._on_processing_complete)
@@ -822,8 +1031,61 @@ class ObjectDetectionGUI(QMainWindow):
         self.processing_thread.file_processing_result.connect(self._on_file_processing_result)
         self.processing_thread.current_file_changed.connect(self._on_current_file_changed)
         self.processing_thread.current_file_preview.connect(self._on_current_file_preview)
+        self.processing_thread.console_log.connect(self._on_console_log)
 
         self.processing_thread.start()
+
+    def _on_console_log(self, message: str, color: str = None):
+        """处理控制台日志"""
+        if hasattr(self.start_page, 'append_console_log'):
+            self.start_page.append_console_log(message, color)
+
+    def _set_processing_state(self, is_processing: bool):
+        """设置处理状态"""
+        self.is_processing = is_processing
+
+        if hasattr(self.start_page, 'set_processing_state'):
+            self.start_page.set_processing_state(is_processing)
+        if hasattr(self.sidebar, 'set_processing_state'):
+            self.sidebar.set_processing_state(is_processing)
+
+        if is_processing:
+            # 显示进度条
+            self.status_bar.show_progress()
+            # 隐藏或更新状态标签
+            self.status_bar.status_label.setText("正在处理...")
+            if hasattr(self.preview_page, 'set_show_detection'):
+                self.preview_page.set_show_detection(True)
+        else:
+            # 隐藏进度条
+            self.status_bar.hide_progress()
+            if self.status_bar.status_label.text() != "处理完成!":
+                self.status_bar.status_label.setText("就绪")
+
+    def _on_progress_updated(self, current, total, elapsed_time, remaining_time, speed):
+        """处理进度更新"""
+        # 存储最新的进度信息
+        self.last_progress_value = current
+        self.last_progress_total = total
+        self.last_progress_speed = speed
+        self.last_progress_remaining_time = remaining_time
+        self.last_progress_elapsed_time = elapsed_time
+
+        # 更新状态栏的 tqdm 风格进度条
+        self.status_bar.update_progress(current, total, elapsed_time, remaining_time, speed)
+
+    def _on_processing_complete(self, success):
+        """处理完成"""
+        self._set_processing_state(False)
+
+        # 隐藏控制台（延迟3秒）
+        if hasattr(self.start_page, 'hide_console'):
+            QTimer.singleShot(3000, self.start_page.hide_console)
+
+        # 如果当前在物种校验页面，刷新数据
+        if self.current_page == "species_validation" and success:
+            if hasattr(self.species_validation_page, '_load_species_data'):
+                QTimer.singleShot(500, self.species_validation_page._load_species_data)
 
     def _on_current_file_changed(self, img_path, current_index, total_files):
         """当前处理文件变化处理"""
@@ -869,62 +1131,7 @@ class ObjectDetectionGUI(QMainWindow):
         if not file_path or not os.path.isdir(file_path):
             QMessageBox.critical(self, "错误", "请提供有效的源文件夹路径。")
             return False
-        if not save_path or not os.path.isdir(save_path):
-            QMessageBox.critical(self, "错误", "请提供有效的保存文件夹路径。")
-            return False
         return True
-
-    def _set_processing_state(self, is_processing: bool):
-        """设置处理状态"""
-        self.is_processing = is_processing
-
-        if hasattr(self.start_page, 'set_processing_state'):
-            self.start_page.set_processing_state(is_processing)
-        if hasattr(self.sidebar, 'set_processing_state'):
-            self.sidebar.set_processing_state(is_processing)
-
-        if is_processing:
-            if hasattr(self.preview_page, 'set_show_detection'):
-                self.preview_page.set_show_detection(True)
-        else:
-            if not is_processing and self.status_bar.status_label.text() != "处理完成！":
-                self.status_bar.status_label.setText("就绪")
-
-    def _on_progress_updated(self, value, total, speed, remaining_time):
-        """处理进度更新，直接更新状态栏"""
-        # 存储最新的进度信息
-        self.last_progress_value = value
-        self.last_progress_total = total
-        self.last_progress_speed = speed
-        self.last_progress_remaining_time = remaining_time
-
-        # 格式化剩余时间
-        if isinstance(remaining_time, (int, float)) and remaining_time > 0:
-            if remaining_time == float('inf') or remaining_time > 3600 * 24:
-                time_text = "计算中..."
-            elif remaining_time > 3600:
-                hours = int(remaining_time // 3600)
-                minutes = int((remaining_time % 3600) // 60)
-                time_text = f"{hours}h{minutes}m"
-            elif remaining_time > 60:
-                minutes = int(remaining_time // 60)
-                seconds = int(remaining_time % 60)
-                time_text = f"{minutes}m{seconds}s"
-            else:
-                time_text = f"{int(remaining_time)}s"
-        else:
-            time_text = "已完成" if value == total and total > 0 else "计算中..."
-
-        # 获取当前处理的文件名
-        current_file = getattr(self, 'current_processing_file', '...')
-
-        # 创建状态栏消息
-        status_message = (
-            f"处理中: {value}/{total} ({speed:.2f} 张/秒) | "
-            f"剩余: {time_text} | "
-            f"文件: {current_file}"
-        )
-        self.status_bar.status_label.setText(status_message)
 
     def _on_file_processed(self, img_path, detection_results, filename):
         """处理文件完成"""
@@ -941,9 +1148,8 @@ class ObjectDetectionGUI(QMainWindow):
                 QTimer.singleShot(500, self.species_validation_page._load_species_data)
 
     def _on_status_message(self, message):
-        """状态消息 - 简化状态栏显示，仅处理非进度消息"""
-        # 进度信息由 _on_progress_updated 处理，这里只显示其他状态
-        if "正在处理:" not in message:
+        """状态消息 - 只处理非进度相关的消息"""
+        if "正在处理:" not in message and "处理中:" not in message:
             self.status_bar.status_label.setText(message)
 
     def _save_current_settings(self):

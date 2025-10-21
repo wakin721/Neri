@@ -254,6 +254,7 @@ class SpeciesValidationPage(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._redraw_image_on_resize)
 
+
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
         self._load_species_buttons()
@@ -2045,12 +2046,18 @@ class SpeciesValidationPage(QWidget):
             super().keyPressEvent(event)
 
     def resizeEvent(self, event):
-        """处理窗口大小变化事件，自动缩放显示的图片。"""
+        """处理窗口大小变化事件,自动缩放显示的图片"""
         super().resizeEvent(event)
-        # 确保已经加载了图片才触发重绘
-        if hasattr(self, 'species_validation_original_image') and self.species_validation_original_image:
-            # 延迟50毫秒执行，避免在快速拖动时过于频繁地刷新
-            self._resize_timer.start(50)
+        # === 关键修复6: 防止在对象销毁时触发 ===
+        try:
+            if not self or not hasattr(self, 'species_validation_original_image'):
+                return
+            # ==============================================
+
+            if hasattr(self, 'species_validation_original_image') and self.species_validation_original_image:
+                self._resize_timer.start(50)
+        except RuntimeError:
+            pass  # 对象已被删除,忽略错误
 
     def _redraw_image_on_resize(self):
         """根据新的窗口大小重绘当前显示的图片。"""
@@ -2064,3 +2071,28 @@ class SpeciesValidationPage(QWidget):
             self.current_species_info,
             self.species_conf_var
         )
+
+    def select_species_and_image(self, species_name: str, image_filename: str):
+        """以编程方式选中指定的物种和图像"""
+        # 1. 选中物种
+        for i in range(self.species_listbox.count()):
+            item = self.species_listbox.item(i)
+            # 检查物种名称是否匹配 (忽略后面的数量)
+            if item and item.text().startswith(species_name + " ("):
+                self.species_listbox.setCurrentItem(item)
+                # 滚动以确保可见
+                self.species_listbox.scrollToItem(item)
+
+                # 2. 定义一个内部函数来选中照片
+                def select_image_item():
+                    for j in range(self.species_photo_listbox.count()):
+                        photo_item = self.species_photo_listbox.item(j)
+                        if photo_item and photo_item.text() == image_filename:
+                            self.species_photo_listbox.setCurrentItem(photo_item)
+                            self.species_photo_listbox.scrollToItem(photo_item)
+                            break
+
+                # 3. 使用QTimer延迟执行照片选择，以确保照片列表已更新
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(100, select_image_item)
+                return
