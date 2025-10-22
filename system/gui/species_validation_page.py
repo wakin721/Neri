@@ -1951,7 +1951,7 @@ class SpeciesValidationPage(QWidget):
                     color = species_colors[species_name]
 
                     # 绘制检测框
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=15)
 
                     # 准备标签文本
                     label_text = f"{species_name} ({confidence:.2f})"
@@ -2071,28 +2071,3 @@ class SpeciesValidationPage(QWidget):
             self.current_species_info,
             self.species_conf_var
         )
-
-    def select_species_and_image(self, species_name: str, image_filename: str):
-        """以编程方式选中指定的物种和图像"""
-        # 1. 选中物种
-        for i in range(self.species_listbox.count()):
-            item = self.species_listbox.item(i)
-            # 检查物种名称是否匹配 (忽略后面的数量)
-            if item and item.text().startswith(species_name + " ("):
-                self.species_listbox.setCurrentItem(item)
-                # 滚动以确保可见
-                self.species_listbox.scrollToItem(item)
-
-                # 2. 定义一个内部函数来选中照片
-                def select_image_item():
-                    for j in range(self.species_photo_listbox.count()):
-                        photo_item = self.species_photo_listbox.item(j)
-                        if photo_item and photo_item.text() == image_filename:
-                            self.species_photo_listbox.setCurrentItem(photo_item)
-                            self.species_photo_listbox.scrollToItem(photo_item)
-                            break
-
-                # 3. 使用QTimer延迟执行照片选择，以确保照片列表已更新
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(100, select_image_item)
-                return
