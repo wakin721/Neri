@@ -535,6 +535,16 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _setup_window(self):
         """设置窗口"""
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                # 使用更简单规范的格式
+                myappid = f'wakin721.{APP_TITLE.replace(" ", "")}.{APP_VERSION.replace(".", "")}'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                logger.info(f"已设置 AppUserModelID: {myappid}")
+            except Exception as e:
+                logger.warning(f"设置 AppUserModelID 失败: {e}")
+
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(1100, 750)
         self.resize(1100, 750)
@@ -549,13 +559,13 @@ class ObjectDetectionGUI(QMainWindow):
         # 设置图标
         try:
             ico_path = resource_path("res/ico.ico")
-            self.setWindowIcon(QIcon(ico_path))
-            # --- 为Windows设置任务栏图标 ---
-            if platform.system() == "Windows":
-                # 使用APP_TITLE和APP_VERSION创建一个更独特的ID
-                myappid = f'mycompany.{APP_TITLE}.{APP_VERSION}'
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            # ---------------------------------
+            icon = QIcon(ico_path)
+            self.setWindowIcon(icon)
+
+            # 同时设置应用程序级别的图标
+            QApplication.instance().setWindowIcon(icon)
+
+            logger.info(f"图标已加载: {ico_path}")
         except Exception as e:
             logger.warning(f"无法加载窗口图标: {e}")
 
