@@ -88,10 +88,32 @@ class ProcessingThread(QThread):
         self.use_fp16 = use_fp16
         self.resume_from = resume_from
         self.stop_flag = False
+        # 添加用于保存进度的变量
+        self.current_excel_data = []
+        self.current_processed_files = 0
+        self.current_total_files = 0
 
     def stop(self):
-        """停止处理线程"""
+        """停止处理线程并保存进度"""
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.console_log.emit(f"[INFO] {current_time} 正在停止处理并保存进度...", "#ffff00")
+        QThread.msleep(10)
+
         self.stop_flag = True
+
+        # 保存当前进度
+        if self.current_processed_files > 0:
+            self._save_processing_cache(
+                self.current_excel_data,
+                self.current_processed_files,
+                self.current_total_files
+            )
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.console_log.emit(
+                f"[INFO] {current_time} 进度已保存: {self.current_processed_files}/{self.current_total_files}",
+                "#00ff00"
+            )
+            QThread.msleep(10)
 
     def run(self):
         import time
@@ -113,20 +135,35 @@ class ProcessingThread(QThread):
                                   if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)])
             total_files = len(image_files)
 
-            # 输出开始信息
+            # 初始化进度变量
+            self.current_total_files = total_files
+            self.current_excel_data = excel_data
+            self.current_processed_files = processed_files
+
+            # 输出开始信息 - 立即输出
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.console_log.emit(f"[INFO] {current_time} 开始处理 {total_files} 个图像文件", "#00ff00")
+            QThread.msleep(10)
+
             self.console_log.emit(f"[INFO] {current_time} 源路径: {self.file_path}", "#aaaaaa")
+            QThread.msleep(10)
+
             self.console_log.emit(f"[INFO] {current_time} 保存路径: {self.save_path}", "#aaaaaa")
+            QThread.msleep(10)
+
             self.console_log.emit(
                 f"[INFO] {current_time} 参数配置: IOU={iou}, CONF={conf}, FP16={self.use_fp16}, AUGMENT={augment}, AGNOSTIC_NMS={agnostic_nms}",
                 "#aaaaaa")
+            QThread.msleep(10)
+
             self.console_log.emit("-" * 100, None)
+            QThread.msleep(10)
 
             if self.resume_from > 0:
                 image_files = image_files[self.resume_from:]
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.console_log.emit(f"[INFO] {current_time} 从第 {self.resume_from + 1} 个文件继续处理", "#ffff00")
+                QThread.msleep(10)
                 if excel_data:
                     valid_dates = [item['拍摄日期对象'] for item in excel_data if item.get('拍摄日期对象')]
                     if valid_dates:
@@ -138,6 +175,16 @@ class ProcessingThread(QThread):
                     stopped_manually = True
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(f"[WARN] {current_time} 处理已被用户手动停止", "#ff0000")
+                    QThread.msleep(10)
+
+                    # 确保最后一次保存进度
+                    self._save_processing_cache(excel_data, processed_files, total_files)
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.console_log.emit(
+                        f"[INFO] {current_time} 最终进度已保存: {processed_files}/{total_files}",
+                        "#00ff00"
+                    )
+                    QThread.msleep(10)
                     break
 
                 current_index = processed_files + 1
@@ -147,7 +194,7 @@ class ProcessingThread(QThread):
                 self.current_file_changed.emit(img_path, current_index, total_files)
 
                 elapsed_time = time.time() - start_time
-                #只有处理了至少2个文件后才计算速度
+                # 只有处理了至少2个文件后才计算速度
                 if processed_files - self.resume_from >= 2 and elapsed_time > 0:
                     speed = (processed_files - self.resume_from) / elapsed_time
                     remaining_time = (total_files - current_index) / speed if speed > 0 else float('inf')
@@ -207,7 +254,7 @@ class ProcessingThread(QThread):
                     # 获取当前时间
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # 构建检测结果信息
+                    # 构建检测结果信息并立即输出
                     if detect_results and len(detect_results) > 0:
                         # 获取翻译字典
                         translation_dict = self.controller.image_processor.translation_dict
@@ -228,7 +275,7 @@ class ProcessingThread(QThread):
                         if species_counts:
                             detection_summary = ', '.join([f"{count}x{name}" for name, count in species_counts.items()])
 
-                            # 输出统一格式的日志
+                            # 输出统一格式的日志 - 立即输出
                             log_message = (
                                 f"[INFO] {current_time} {img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
@@ -236,8 +283,9 @@ class ProcessingThread(QThread):
                                 f"检测耗时:{detection_time:.1f}ms"
                             )
                             self.console_log.emit(log_message, "#00ff00")
+                            QThread.msleep(5)
 
-                            # 如果有速度信息，输出详细速度
+                            # 如果有速度信息，输出详细速度 - 立即输出
                             if any([preprocess_time, inference_time, postprocess_time]):
                                 speed_log = (
                                     f"[INFO] {current_time} 处理详情: "
@@ -246,8 +294,9 @@ class ProcessingThread(QThread):
                                     f"后处理:{postprocess_time:.1f}ms"
                                 )
                                 self.console_log.emit(speed_log, "#888888")
+                                QThread.msleep(5)
                         else:
-                            # 有检测结果对象但没有检测到物种
+                            # 有检测结果对象但没有检测到物种 - 立即输出
                             log_message = (
                                 f"[INFO] {current_time} {img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
@@ -255,6 +304,7 @@ class ProcessingThread(QThread):
                                 f"检测耗时:{detection_time:.1f}ms"
                             )
                             self.console_log.emit(log_message, "#ffaa00")
+                            QThread.msleep(5)
 
                         # 保存检测信息
                         self.controller.image_processor.save_detection_info_json(
@@ -269,7 +319,7 @@ class ProcessingThread(QThread):
                         }
                         self.current_file_preview.emit(img_path, complete_detection_info)
                     else:
-                        # 无检测结果
+                        # 无检测结果 - 立即输出
                         log_message = (
                             f"[INFO] {current_time} {img_path} | "
                             f"尺寸:{img_height}x{img_width} | "
@@ -277,6 +327,7 @@ class ProcessingThread(QThread):
                             f"检测耗时:{detection_time:.1f}ms"
                         )
                         self.console_log.emit(log_message, "#ffaa00")
+                        QThread.msleep(5)
 
                     # 从 species_info 中删除 detect_results，避免重复
                     if 'detect_results' in species_info:
@@ -294,6 +345,7 @@ class ProcessingThread(QThread):
                     )
                     logger.error(f"处理文件 {filename} 失败: {e}", exc_info=True)
                     self.console_log.emit(error_message, "#ff0000")
+                    QThread.msleep(5)
 
                     # 即使出错也要记录基本信息
                     try:
@@ -307,12 +359,17 @@ class ProcessingThread(QThread):
 
                 processed_files += 1
 
+                # 更新进度变量（用于停止时保存）
+                self.current_processed_files = processed_files
+                self.current_excel_data = excel_data
+
                 # 每处理10个文件保存一次缓存
                 if processed_files % 10 == 0:
                     self._save_processing_cache(excel_data, processed_files, total_files)
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(f"[INFO] {current_time} 已保存进度缓存 ({processed_files}/{total_files})",
                                           "#888888")
+                    QThread.msleep(5)
 
                 # 清理内存
                 try:
@@ -324,6 +381,8 @@ class ProcessingThread(QThread):
             if not stopped_manually:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.console_log.emit("-" * 100, None)
+                QThread.msleep(10)
+
                 total_time = time.time() - start_time
                 avg_speed = total_files / total_time if total_time > 0 else 0
                 self.console_log.emit(
@@ -333,6 +392,8 @@ class ProcessingThread(QThread):
                     f"平均速度:{avg_speed:.2f}张/秒",
                     "#00ff00"
                 )
+                QThread.msleep(10)
+
                 self.progress_updated.emit(total_files, total_files, total_time, 0, avg_speed)
                 self.controller.excel_data = excel_data
                 excel_data = DataProcessor.process_independent_detection(excel_data,
@@ -349,6 +410,7 @@ class ProcessingThread(QThread):
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.error(f"处理过程中发生错误: {e}", exc_info=True)
             self.console_log.emit(f"[WARN] {current_time} 处理过程发生严重错误: {str(e)}", "#ff0000")
+            QThread.msleep(10)
             QTimer.singleShot(0, lambda: QMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
             self.processing_complete.emit(False)
         finally:
@@ -1119,11 +1181,18 @@ class ObjectDetectionGUI(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             if hasattr(self, 'processing_thread') and self.processing_thread is not None:
+                self.status_bar.status_label.setText("正在停止处理并保存进度...")
+
+                # 调用线程的 stop 方法，它会保存进度
                 if hasattr(self.processing_thread, 'stop'):
                     self.processing_thread.stop()
                 elif hasattr(self.processing_thread, 'stop_flag'):
                     self.processing_thread.stop_flag = True
-            self.status_bar.status_label.setText("正在停止处理...")
+
+                # 等待线程完成（最多等待5秒）
+                if self.processing_thread.isRunning():
+                    self.processing_thread.wait(5000)
+
         else:
             QMessageBox.information(self, "信息", "处理继续进行。")
 

@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem
+    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QPalette, QIcon, QPixmap, QPainter, QColor
@@ -175,6 +175,10 @@ class StartPage(QWidget):
             self.console_output.append(f'<span style="color: {color};">{message}</span>')
         else:
             self.console_output.append(message)
+
+        # 强制刷新显示
+        self.console_output.repaint()
+        QApplication.processEvents()  # 立即处理事件
 
         # 自动滚动到底部
         scrollbar = self.console_output.verticalScrollBar()
