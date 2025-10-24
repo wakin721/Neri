@@ -141,14 +141,31 @@ class ProcessingThread(QThread):
             self.current_processed_files = processed_files
 
             # 输出开始信息 - 立即输出
+            self.console_log.emit("=" * 118, None)
+            QThread.msleep(10)
+
+            # 居中显示绿色的 START
+            start_text = "START"
+            padding = 31
+            centered_start = "＊" * padding + start_text + "＊" * padding
+            self.console_log.emit(centered_start, "#00ff00")
+            QThread.msleep(10)
+
+            self.console_log.emit("=" * 118, None)
+            QThread.msleep(10)
+
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.console_log.emit(f"[INFO] {current_time} 开始处理 {total_files} 个图像文件", "#00ff00")
             QThread.msleep(10)
 
-            self.console_log.emit(f"[INFO] {current_time} 源路径: {self.file_path}", "#aaaaaa")
+            # 统一路径格式为反斜杠 - 使用 os.path.normpath
+            display_file_path = os.path.normpath(self.file_path)
+            display_save_path = os.path.normpath(self.save_path)
+
+            self.console_log.emit(f"[INFO] {current_time} 源路径: {display_file_path}", "#aaaaaa")
             QThread.msleep(10)
 
-            self.console_log.emit(f"[INFO] {current_time} 保存路径: {self.save_path}", "#aaaaaa")
+            self.console_log.emit(f"[INFO] {current_time} 保存路径: {display_save_path}", "#aaaaaa")
             QThread.msleep(10)
 
             self.console_log.emit(
@@ -156,7 +173,7 @@ class ProcessingThread(QThread):
                 "#aaaaaa")
             QThread.msleep(10)
 
-            self.console_log.emit("-" * 100, None)
+            self.console_log.emit("=" * 118, None)
             QThread.msleep(10)
 
             if self.resume_from > 0:
@@ -254,6 +271,9 @@ class ProcessingThread(QThread):
                     # 获取当前时间
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                    # 统一路径格式为反斜杠 - 使用 os.path.normpath
+                    display_img_path = os.path.normpath(img_path)
+
                     # 构建检测结果信息并立即输出
                     if detect_results and len(detect_results) > 0:
                         # 获取翻译字典
@@ -277,7 +297,7 @@ class ProcessingThread(QThread):
 
                             # 输出统一格式的日志 - 立即输出
                             log_message = (
-                                f"[INFO] {current_time} {img_path} | "
+                                f"[INFO] {current_time} {display_img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
                                 f"检测结果:[{detection_summary}] | "
                                 f"检测耗时:{detection_time:.1f}ms"
@@ -298,7 +318,7 @@ class ProcessingThread(QThread):
                         else:
                             # 有检测结果对象但没有检测到物种 - 立即输出
                             log_message = (
-                                f"[INFO] {current_time} {img_path} | "
+                                f"[INFO] {current_time} {display_img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
                                 f"检测结果:[无目标] | "
                                 f"检测耗时:{detection_time:.1f}ms"
@@ -321,7 +341,7 @@ class ProcessingThread(QThread):
                     else:
                         # 无检测结果 - 立即输出
                         log_message = (
-                            f"[INFO] {current_time} {img_path} | "
+                            f"[INFO] {current_time} {display_img_path} | "
                             f"尺寸:{img_height}x{img_width} | "
                             f"检测结果:[无目标] | "
                             f"检测耗时:{detection_time:.1f}ms"
@@ -338,8 +358,10 @@ class ProcessingThread(QThread):
 
                 except Exception as e:
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    # 统一路径格式为反斜杠 - 使用 os.path.normpath
+                    display_img_path = os.path.normpath(img_path)
                     error_message = (
-                        f"[WARN] {current_time} {img_path} | "
+                        f"[WARN] {current_time} {display_img_path} | "
                         f"处理失败 | "
                         f"错误信息:{str(e)}"
                     )
@@ -380,14 +402,17 @@ class ProcessingThread(QThread):
 
             if not stopped_manually:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.console_log.emit("-" * 100, None)
+                self.console_log.emit("=" * 118, None)
                 QThread.msleep(10)
 
                 total_time = time.time() - start_time
-                avg_speed = total_files / total_time if total_time > 0 else 0
+                # 修改：使用实际处理的文件数量计算平均速度
+                actual_processed = processed_files - self.resume_from
+                avg_speed = actual_processed / total_time if total_time > 0 else 0
                 self.console_log.emit(
                     f"[INFO] {current_time} 所有文件处理完成! | "
                     f"总计:{total_files}张 | "
+                    f"本次处理:{actual_processed}张 | "
                     f"总耗时:{total_time:.2f}秒 | "
                     f"平均速度:{avg_speed:.2f}张/秒",
                     "#00ff00"
@@ -396,6 +421,25 @@ class ProcessingThread(QThread):
 
                 self.progress_updated.emit(total_files, total_files, total_time, 0, avg_speed)
                 self.controller.excel_data = excel_data
+
+                # 添加日期格式统一处理
+                for item in excel_data:
+                    if '拍摄日期对象' in item:
+                        date_obj = item['拍摄日期对象']
+                        # 如果是字符串，尝试转换为datetime对象
+                        if isinstance(date_obj, str):
+                            try:
+                                item['拍摄日期对象'] = datetime.fromisoformat(date_obj)
+                            except (ValueError, AttributeError):
+                                try:
+                                    # 尝试其他常见格式
+                                    item['拍摄日期对象'] = datetime.strptime(date_obj, "%Y-%m-%d %H:%M:%S")
+                                except (ValueError, AttributeError):
+                                    item['拍摄日期对象'] = None
+                        # 如果不是datetime对象也不是字符串，设为None
+                        elif not isinstance(date_obj, datetime):
+                            item['拍摄日期对象'] = None
+
                 excel_data = DataProcessor.process_independent_detection(excel_data,
                                                                          self.controller.confidence_settings)
                 if earliest_date:
@@ -535,16 +579,6 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _setup_window(self):
         """设置窗口"""
-        if platform.system() == "Windows":
-            try:
-                import ctypes
-                # 使用更简单规范的格式
-                myappid = f'wakin721.{APP_TITLE.replace(" ", "")}.{APP_VERSION.replace(".", "")}'
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-                logger.info(f"已设置 AppUserModelID: {myappid}")
-            except Exception as e:
-                logger.warning(f"设置 AppUserModelID 失败: {e}")
-
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(1100, 750)
         self.resize(1100, 750)
@@ -559,13 +593,13 @@ class ObjectDetectionGUI(QMainWindow):
         # 设置图标
         try:
             ico_path = resource_path("res/ico.ico")
-            icon = QIcon(ico_path)
-            self.setWindowIcon(icon)
-
-            # 同时设置应用程序级别的图标
-            QApplication.instance().setWindowIcon(icon)
-
-            logger.info(f"图标已加载: {ico_path}")
+            self.setWindowIcon(QIcon(ico_path))
+            # --- 为Windows设置任务栏图标 ---
+            if platform.system() == "Windows":
+                # 使用APP_TITLE和APP_VERSION创建一个更独特的ID
+                myappid = f'mycompany.{APP_TITLE}.{APP_VERSION}'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            # ---------------------------------
         except Exception as e:
             logger.warning(f"无法加载窗口图标: {e}")
 
@@ -1080,13 +1114,17 @@ class ObjectDetectionGUI(QMainWindow):
         if self.is_processing:
             return
 
-        # 显示控制台
+        # 显示控制台（但不清空）
         if hasattr(self.start_page, 'show_console'):
             self.start_page.show_console()
 
+        # 只在非恢复模式下清空数据
         if resume_from == 0:
             self.excel_data = []
             self._clear_current_validation_file()
+            # 可选：如果你希望在新任务开始时清空控制台，可以在这里添加
+            # if hasattr(self.start_page, 'console_output'):
+            #     self.start_page.console_output.clear()
 
         # 设置处理状态
         self._set_processing_state(True)

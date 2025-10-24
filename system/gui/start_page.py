@@ -151,7 +151,6 @@ class StartPage(QWidget):
     def show_console(self):
         """显示控制台"""
         self.console_container.show()
-        self.console_output.clear()
         # 当显示控制台时，减少弹性空间
         if hasattr(self, 'spacer'):
             self.layout().removeItem(self.spacer)

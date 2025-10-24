@@ -1189,12 +1189,16 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = True
             self._save_validation_data()
             self._move_to_next_image()
+            # 将焦点设置回照片列表
+            self.species_photo_listbox.setFocus()
             return
         if species_name == "空" and count == "空":
             self._update_json_file(file_name, new_species="空", new_count="空")
             self.validation_data[file_name] = False
             self._save_validation_data()
             self._move_to_next_image()
+            # 将焦点设置回照片列表
+            self.species_photo_listbox.setFocus()
             return
 
         # 处理物种按钮点击
@@ -1202,10 +1206,11 @@ class SpeciesValidationPage(QWidget):
             self._species_marked = species_name
             self._increment_quick_mark_count(species_name)
             # 如果自动排序开启，则刷新按钮列表
-            if hasattr(self.controller, 'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+            if hasattr(self.controller,
+                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
                 self.controller.advanced_page.update_auto_sorted_list()
                 self._load_species_buttons()
-                self.quick_marks_updated.emit() #  <-- 添加这一行
+                self.quick_marks_updated.emit()
 
             new_count_str = None
             # 如果数量已经选择，则使用它
@@ -1229,6 +1234,9 @@ class SpeciesValidationPage(QWidget):
             if self._count_marked is not None:
                 self._move_to_next_image()
 
+            # 将焦点设置回照片列表
+            self.species_photo_listbox.setFocus()
+
     def _mark_other_species(self):
         """处理"其他"按钮的逻辑，弹出对话框"""
         selected_items = self.species_photo_listbox.selectedItems()
@@ -1247,12 +1255,16 @@ class SpeciesValidationPage(QWidget):
             self._increment_quick_mark_count(species_name)
 
             # 如果自动排序开启，则刷新按钮列表
-            if hasattr(self.controller, 'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+            if hasattr(self.controller,
+                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
                 self.controller.advanced_page.update_auto_sorted_list()
                 self._load_species_buttons()
-                self.quick_marks_updated.emit() #  <-- 添加这一行
+                self.quick_marks_updated.emit()
 
             self._move_to_next_image()
+
+        # 无论对话框结果如何，都将焦点设置回照片列表
+        self.species_photo_listbox.setFocus()
 
     def _load_species_buttons(self):
         """根据自动排序设置，加载快速标记物种按钮"""
@@ -1342,6 +1354,8 @@ class SpeciesValidationPage(QWidget):
             if ok:
                 final_count = result
             else:
+                # 取消时也要将焦点设置回照片列表
+                self.species_photo_listbox.setFocus()
                 return
 
         # 取消上一个数量按钮的选中状态
@@ -1385,6 +1399,9 @@ class SpeciesValidationPage(QWidget):
         # 如果物种也已选择，则移动到下一张图片
         if self._species_marked is not None:
             self._move_to_next_image()
+
+        # 将焦点设置回照片列表
+        self.species_photo_listbox.setFocus()
 
     def _on_confidence_slider_changed(self, value):
         """处理置信度滑块值的变化"""
@@ -1951,7 +1968,7 @@ class SpeciesValidationPage(QWidget):
                     color = species_colors[species_name]
 
                     # 绘制检测框
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=15)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
                     # 准备标签文本
                     label_text = f"{species_name} ({confidence:.2f})"
@@ -2071,3 +2088,28 @@ class SpeciesValidationPage(QWidget):
             self.current_species_info,
             self.species_conf_var
         )
+
+    def select_species_and_image(self, species_name: str, image_filename: str):
+        """以编程方式选中指定的物种和图像"""
+        # 1. 选中物种
+        for i in range(self.species_listbox.count()):
+            item = self.species_listbox.item(i)
+            # 检查物种名称是否匹配 (忽略后面的数量)
+            if item and item.text().startswith(species_name + " ("):
+                self.species_listbox.setCurrentItem(item)
+                # 滚动以确保可见
+                self.species_listbox.scrollToItem(item)
+
+                # 2. 定义一个内部函数来选中照片
+                def select_image_item():
+                    for j in range(self.species_photo_listbox.count()):
+                        photo_item = self.species_photo_listbox.item(j)
+                        if photo_item and photo_item.text() == image_filename:
+                            self.species_photo_listbox.setCurrentItem(photo_item)
+                            self.species_photo_listbox.scrollToItem(photo_item)
+                            break
+
+                # 3. 使用QTimer延迟执行照片选择，以确保照片列表已更新
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(100, select_image_item)
+                return

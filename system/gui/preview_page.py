@@ -910,7 +910,7 @@ class PreviewPage(QWidget):
                 color = self._get_color_for_species(species_name)
 
                 # 绘制检测框
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=15)
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
                 # 准备标签文本
                 label_text = f"{species_name} ({confidence:.2f})"
