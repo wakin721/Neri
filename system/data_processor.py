@@ -134,11 +134,6 @@ class DataProcessor:
                     'L': '科中文名', 'M': '属拉丁名', 'N': '属中文名'
                 }
 
-                # 为了兼容性，我们检查实际存在的列名
-                # 如果Excel有标题行，例如 '物种中文名', 'Scientific Name'
-                # 这里需要用户根据实际情况调整key
-                # 以下代码假定Excel的列名就是 A, B, C... (或者第一行就是数据)
-                # 为了更稳定，我们直接按列的位置读取
                 df_species.columns = [chr(65 + i) for i in range(len(df_species.columns))]
 
                 for _, row in df_species.iterrows():
@@ -224,6 +219,8 @@ class DataProcessor:
                                 type_list.append("鸟")
                             elif s_info.get('纲') == '哺乳纲':
                                 type_list.append("兽")
+                            elif s_info.get('纲') == '家畜':
+                                type_list.append("家畜")
 
                             for key in sci_info_lists.keys():
                                 if key != '纲': sci_info_lists[key].append(s_info.get(key, ''))
