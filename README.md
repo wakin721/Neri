@@ -98,6 +98,8 @@
   ### 使用CUDA加速
 
   建议（但非强制）你的 Windows 系统配备 NVIDIA GPU，因为这样能使用更高精度的模型，且更加快速。
+
+  在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch，若安装失败，可尝试手动安装。
   
   如何查看CUDA版本并且安装CUDA支持的Pytorch？
   
