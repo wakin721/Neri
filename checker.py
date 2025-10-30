@@ -10,7 +10,7 @@ python_exe_path = f"{base_path}\\toolkit\\python.exe"
 
 
 def get_cuda_version():
-    """通过nvidia-smi获取CUDA版本。"""
+    """通过nvidia-smi获取NVIDIA显卡型号和CUDA版本。"""
     try:
         result = subprocess.run(
             ["nvidia-smi"],
@@ -22,6 +22,12 @@ def get_cuda_version():
         )
 
         if result.returncode == 0:
+            # 提取显卡型号
+            gpu_match = re.search(r'NVIDIA\s+(.+?)\s+(?:On|Off)\s+\|', result.stdout)
+            if gpu_match:
+                gpu_model = gpu_match.group(1).strip()
+                print(f"检测到NVIDIA显卡型号为: {gpu_model}")
+            
             # 从nvidia-smi输出中提取CUDA版本
             # 查找类似 "CUDA Version: 12.1" 的文本
             match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
@@ -40,7 +46,6 @@ def get_cuda_version():
     except Exception as e:
         print(f"检测CUDA版本时出错: {e}")
         return None
-
 
 def get_pytorch_install_command(cuda_version):
     """根据CUDA版本返回对应的PyTorch安装命令。"""
