@@ -12,6 +12,8 @@
   "Wolf": "狼",
   "Unknown_bird": "未知鸟",
   "human":"人",
+  "Sus_scrofa":"野猪",
   "Capreolus_pygargus":"狍",
-  "Sus_scrofa":"野猪"
+  "Domestic_goat":"家羊",
+  "cow":"家牛"
 }
