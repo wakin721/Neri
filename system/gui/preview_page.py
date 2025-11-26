@@ -87,7 +87,7 @@ class DetectionWorker(QThread):
 
 class ImageLoaderThread(QThread):
     """用于在后台加载图像和元数据的工作线程（安全取消版）"""
-    image_loaded = Signal(object, str, dict)  # (pixmap, file_path, image_info)
+    image_loaded = Signal(object, str, dict)  # (q_image, file_path, image_info)
     loading_failed = Signal(str, str)         # (file_path, error_message)
 
     def __init__(self, file_path, display_size, parent=None):
@@ -147,14 +147,15 @@ class ImageLoaderThread(QThread):
             img_array = np.array(resized_img)
             height, width, channel = img_array.shape
             bytes_per_line = 3 * width
+
             q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_image)
+            q_image_copy = q_image.copy()
 
             # --- 线程取消点 4 ---
             if self._is_cancelled: return
 
             # 4. 发送完成信号
-            self.image_loaded.emit(pixmap, self.file_path, image_info)
+            self.image_loaded.emit(q_image_copy, self.file_path, image_info)
 
         except Exception as e:
             if not self._is_cancelled:
@@ -188,6 +189,15 @@ class PreviewPage(QWidget):
 
         global_conf = self.controller.confidence_settings.get("global", 0.25)
         self.preview_conf_var = global_conf
+
+        # === 新增：防抖动定时器 ===
+        self.selection_timer = QTimer(self)
+        self.selection_timer.setSingleShot(True)
+        self.selection_timer.setInterval(200)  # 200毫秒延迟
+        self.selection_timer.timeout.connect(self._load_image_deferred)
+
+        # === 新增：防止线程被垃圾回收的列表 ===
+        self._stopping_threads = []
 
         self._create_widgets()
         self._apply_theme()
@@ -554,66 +564,20 @@ class PreviewPage(QWidget):
             logger.error(f"更新文件列表失败: {e}")
 
     def on_file_selected(self):
-        """文件选择事件处理（修复版本 - 防止切换页面时崩溃）"""
-        selected_items = self.file_listbox.selectedItems()
-        if not selected_items:
-            return
+        """文件选择事件处理（防抖动版）"""
+        # 停止之前的计时，重新开始
+        self.selection_timer.stop()
+        self.selection_timer.start()
 
-        file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
-
-        if not file_path or file_path == self.requested_image_path:
-            return
-
-        self.requested_image_path = file_path
-
-        # === 关键修复1: 强制停止并清理之前的线程 ===
-        if self.image_loader_thread and self.image_loader_thread.isRunning():
-            self.image_loader_thread.cancel()
-            # 断开所有信号连接,防止已删除对象被访问
-            try:
-                self.image_loader_thread.image_loaded.disconnect()
-                self.image_loader_thread.loading_failed.disconnect()
-                self.image_loader_thread.finished.disconnect()
-            except:
-                pass
-            # 等待线程结束(最多等待100ms)
-            self.image_loader_thread.wait(100)
-            self.image_loader_thread = None
-        # ============================================
-
-        self.image_label.setText("正在加载图像...")
-        self.image_label.pixmap = None
-        self.info_text.setPlainText(f"正在加载: {os.path.basename(file_path)}")
-        self.current_preview_info = {}
-
-        # 启动新的加载线程
-        self.image_loader_thread = ImageLoaderThread(file_path, self.image_label.size())
-
-        # === 关键修复2: 使用 Lambda 包装信号槽,避免直接传递 self ===
-        self.image_loader_thread.image_loaded.connect(
-            lambda pixmap, fp, info: self._on_image_loaded_safe(pixmap, fp, info)
-        )
-        self.image_loader_thread.loading_failed.connect(
-            lambda fp, err: self._on_loading_failed_safe(fp, err)
-        )
-        # =======================================================
-
-        self.image_loader_thread.finished.connect(self.image_loader_thread.deleteLater)
-        self.image_loader_thread.finished.connect(self._on_thread_finished)
-
-        self.image_loader_thread.start()
-
-    def _on_image_loaded_safe(self, pixmap, file_path, image_info):
-        """安全的图像加载完成回调 - 添加对象有效性检查"""
-        # === 关键修复3: 检查对象是否仍然有效 ===
+    def _on_image_loaded_safe(self, q_image, file_path, image_info):
+        """安全的图像加载完成回调"""
         try:
             if not self or not hasattr(self, 'image_label'):
                 return
             if self.image_label is None or not self.image_label.isVisible():
                 return
-            # ==========================================
 
-            self._on_image_loaded(pixmap, file_path, image_info)
+            self._on_image_loaded(q_image, file_path, image_info)
         except RuntimeError as e:
             logger.warning(f"图像加载回调时对象已删除: {e}")
 
@@ -1301,13 +1265,11 @@ class PreviewPage(QWidget):
                 self.file_listbox.scrollToItem(item)
                 return
 
-    def _on_image_loaded(self, pixmap, file_path, image_info):
+    def _on_image_loaded(self, q_image, file_path, image_info):
         """当图片成功加载后，在主线程中更新UI"""
-        # 关键修复:仅当加载完成的图片是用户最新请求的那一张时,才更新界面
         if file_path != self.requested_image_path:
             return
 
-        # 更新已加载的路径状态
         self.loaded_image_path = file_path
 
         # 加载并保存原始图像
@@ -1319,6 +1281,7 @@ class PreviewPage(QWidget):
             self.original_image = None
             self.current_image_path = None
 
+        pixmap = QPixmap.fromImage(q_image)
         # 更新图像
         self.image_label.setPixmap(pixmap)
         self.image_label.setScaledContents(False)
@@ -1378,10 +1341,75 @@ class PreviewPage(QWidget):
         logger.error(f"图像加载失败: {error_message}")
 
     def _on_thread_finished(self):
-        """当加载线程结束后,清理其在主页面中的引用（增强版）"""
-        # === 关键修复5: 延迟清理引用,确保所有信号处理完毕 ===
-        QTimer.singleShot(50, self._clear_thread_reference)
+        """当前活跃线程结束后的清理"""
+        # 避免把新启动的线程引用给清除了
+        sender = self.sender()
+        if sender == self.image_loader_thread:
+            self.image_loader_thread = None
 
     def _clear_thread_reference(self):
         """延迟清理线程引用"""
         self.image_loader_thread = None
+
+    def _load_image_deferred(self):
+        """延迟执行的图像加载逻辑"""
+        selected_items = self.file_listbox.selectedItems()
+        if not selected_items:
+            return
+
+        file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+
+        # 如果路径没变，或者是正在显示的图片，则忽略
+        if not file_path or file_path == self.requested_image_path:
+            return
+
+        self.requested_image_path = file_path
+
+        # === 关键修改：安全的线程清理逻辑 ===
+        if self.image_loader_thread and self.image_loader_thread.isRunning():
+            # 1. 标记取消
+            self.image_loader_thread.cancel()
+
+            # 2. 断开信号，防止旧结果刷新UI
+            try:
+                self.image_loader_thread.image_loaded.disconnect()
+                self.image_loader_thread.loading_failed.disconnect()
+            except:
+                pass
+
+            # 3. 将旧线程加入"保活列表"，防止被Python GC回收导致闪退
+            self._stopping_threads.append(self.image_loader_thread)
+
+            # 4. 当线程真正结束时，从列表中移除并清理
+            # 使用默认参数 capture 闭包中的 thread 对象
+            self.image_loader_thread.finished.connect(
+                lambda t=self.image_loader_thread: self._cleanup_stopped_thread(t)
+            )
+
+            self.image_loader_thread = None
+        # ============================================
+
+        self.image_label.setText("正在加载图像...")
+        self.image_label.pixmap = None
+        self.info_text.setPlainText(f"正在加载: {os.path.basename(file_path)}")
+        self.current_preview_info = {}
+
+        # 启动新的加载线程
+        self.image_loader_thread = ImageLoaderThread(file_path, self.image_label.size())
+
+        self.image_loader_thread.image_loaded.connect(
+            lambda pixmap, fp, info: self._on_image_loaded_safe(pixmap, fp, info)
+        )
+        self.image_loader_thread.loading_failed.connect(
+            lambda fp, err: self._on_loading_failed_safe(fp, err)
+        )
+
+        # 线程正常结束时的清理
+        self.image_loader_thread.finished.connect(self._on_thread_finished)
+        self.image_loader_thread.start()
+
+    def _cleanup_stopped_thread(self, thread):
+        """清理已停止的线程"""
+        if thread in self._stopping_threads:
+            self._stopping_threads.remove(thread)
+        thread.deleteLater()
