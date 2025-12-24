@@ -352,7 +352,7 @@ class AdvancedPage(QWidget):
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(12)
 
-        # 跳帧处理面板
+        # --- 1. 跳帧处理面板 ---
         self.frame_skip_panel = CollapsiblePanel(
             title="跳帧处理",
             subtitle="设置视频检测时的跳帧间隔 (vid_stride)",
@@ -380,7 +380,7 @@ class AdvancedPage(QWidget):
         stride_label_layout.addStretch()
         stride_label_layout.addWidget(self.stride_label)
 
-        # 创建滑块，范围设为 1-30
+        # 创建滑块
         self.stride_slider = ModernSlider()
         self.stride_slider.setRange(1, 30)
         self.stride_slider.setValue(self.vid_stride_var)
@@ -405,8 +405,9 @@ class AdvancedPage(QWidget):
         self.frame_skip_panel.add_content_widget(skip_widget)
         content_layout.addWidget(self.frame_skip_panel)
 
-        self.video_settings_layout.addWidget(content_widget)
+        # --- 注意：原代码第394行的 addWidget 移到了本函数最后 ---
 
+        # --- 2. 检测过滤面板 ---
         self.frame_ratio_panel = CollapsiblePanel(
             title="检测过滤",
             subtitle="设置检测到的最低帧数比例",
@@ -434,7 +435,7 @@ class AdvancedPage(QWidget):
         ratio_label_layout.addStretch()
         ratio_label_layout.addWidget(self.ratio_label)
 
-        # 创建滑块，范围 0-30 (%)
+        # 创建滑块
         self.ratio_slider = ModernSlider()
         self.ratio_slider.setRange(0, 30)
         self.ratio_slider.setValue(int(self.min_frame_ratio_var * 100))
@@ -459,6 +460,9 @@ class AdvancedPage(QWidget):
         ratio_layout.addWidget(ratio_frame)
         self.frame_ratio_panel.add_content_widget(ratio_widget)
         content_layout.addWidget(self.frame_ratio_panel)
+
+        content_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        self.video_settings_layout.addWidget(content_widget)
 
     def _update_stride_label(self, value):
         """更新跳帧标签"""
