@@ -931,32 +931,18 @@ class PreviewPage(QWidget):
             if hasattr(self.controller, 'advanced_page'):
                 min_ratio = self.controller.advanced_page.min_frame_ratio_var
 
-            # === 修改开始：获取当前播放进度，以便无缝切换 ===
+            # 获取当前播放进度，以便无缝切换
             start_frame = 0
             if self.video_thread:
                 # 获取当前播放到的帧索引
                 start_frame = self.video_thread.current_frame_index
-            # ============================================
 
             # 刷新文本 (确保检测结果统计与当前过滤比例一致)
             self._update_video_info_text(current_file, json_path, min_ratio)
 
-            if checked:
-                # 开启检测：检查 JSON 是否存在
-                if not os.path.exists(json_path):
-                    QMessageBox.warning(self, "提示", "未找到该视频的检测结果文件(JSON)。")
-                    # 如果找不到结果，强制取消勾选，并以无框模式播放
-                    self.show_detection_checkbox.setChecked(False)
-                    # 传递 start_frame 以保持进度
-                    self._start_video_detection_thread(current_file, json_path, draw_boxes=False, start_frame=start_frame)
-                    return
-
-                # 启动带框线程，传递 start_frame
-                self._start_video_detection_thread(current_file, json_path, draw_boxes=True, start_frame=start_frame)
-            else:
-                # 关闭检测：启动无框线程，传递 start_frame
-                # 即使没有 JSON 也没关系，VideoPlayerThread 会处理
-                self._start_video_detection_thread(current_file, json_path, draw_boxes=False, start_frame=start_frame)
+            # [修改] 无论 JSON 是否存在，都直接根据 checked 状态决定是否 draw_boxes
+            # 即使 JSON 不存在，VideoPlayerThread 内部也会安全处理（读取不到数据则不画框），
+            self._start_video_detection_thread(current_file, json_path, draw_boxes=checked, start_frame=start_frame)
 
             return  # 视频逻辑处理完毕，直接返回
 
@@ -1647,7 +1633,6 @@ class PreviewPage(QWidget):
 
         self.requested_image_path = file_path
 
-        # ==================== 新增修改开始 ====================
         # 1. 切换文件时，如果正在进行 OpenCV 视频检测，必须强制停止线程
         self._stop_video_detection_thread()
 
@@ -1655,7 +1640,17 @@ class PreviewPage(QWidget):
 
         # 清理旧图片加载线程逻辑
         if self.image_loader_thread and self.image_loader_thread.isRunning():
-            # ... (清理代码保持不变) ...
+            self.image_loader_thread.cancel()
+            try:
+                self.image_loader_thread.image_loaded.disconnect()
+                self.image_loader_thread.loading_failed.disconnect()
+            except:
+                pass
+            self._stopping_threads.append(self.image_loader_thread)
+            self.image_loader_thread.finished.connect(
+                lambda t=self.image_loader_thread: self._cleanup_stopped_thread(t)
+            )
+            self.image_loader_thread.wait(50)
             self.image_loader_thread = None
 
         if is_video:
@@ -1678,13 +1673,6 @@ class PreviewPage(QWidget):
 
             # 获取当前是否需要显示检测框
             show_boxes = self.show_detection_checkbox.isChecked()
-
-            # 如果要求显示框但没有 JSON，则自动关闭开关
-            if show_boxes and not os.path.exists(json_path):
-                self.show_detection_checkbox.blockSignals(True)
-                self.show_detection_checkbox.setChecked(False)
-                self.show_detection_checkbox.blockSignals(False)
-                show_boxes = False
 
             # 获取当前的过滤设置
             min_ratio = 0.0
