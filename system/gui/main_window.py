@@ -88,6 +88,7 @@ class ProcessingThread(QThread):
         self.use_fp16 = use_fp16
         self.resume_from = resume_from
         self.stop_flag = False
+        self.force_stop_flag = False
         # 添加用于保存进度的变量
         self.current_excel_data = []
         self.current_processed_files = 0
@@ -119,6 +120,9 @@ class ProcessingThread(QThread):
         import time
         import math
         import cv2  # 引入cv2用于获取视频帧数
+
+        class ForceStopError(Exception):
+            pass
 
         start_time = time.time()
         excel_data = [] if self.resume_from == 0 else self.controller.excel_data
@@ -233,18 +237,20 @@ class ProcessingThread(QThread):
 
             # 遍历处理文件
             for idx, filename in enumerate(files_to_process):
-                if self.stop_flag:
+                # 1. 检查停止标志 (循环开始处)
+                # 如果 stop_flag 被设置(第一次点击)，但没有强制停止(第二次点击)
+                # 说明用户希望"等待当前处理完毕后停止"。此时上一个文件已跑完，可以安全退出了。
+                if self.stop_flag and not self.force_stop_flag:
                     stopped_manually = True
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    self.console_log.emit(f"[WARN] {current_time} 处理已被用户手动停止", "#ff0000")
-                    QThread.msleep(10)
+                    self.console_log.emit(f"[INFO] {current_time} 当前文件处理完毕，正在停止...", "#ffff00")
+                    # 保存进度 (此时 processed_files_count 已包含刚完成的文件)
                     self._save_processing_cache(excel_data, processed_files_count, total_files_count)
-                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    self.console_log.emit(
-                        f"[INFO] {current_time} 最终进度已保存: {processed_files_count}/{total_files_count}",
-                        "#00ff00"
-                    )
-                    QThread.msleep(10)
+                    break
+
+                # 如果是强制停止，直接退出 (虽然通常会被异常捕获，这里做双重保险)
+                if self.force_stop_flag:
+                    stopped_manually = True
                     break
 
                 current_file_index_display = processed_files_count + 1
@@ -272,9 +278,12 @@ class ProcessingThread(QThread):
                             '检测时间': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
 
-                        # [修改] 定义视频状态回调函数，集成进度更新
+                        # 定义视频状态回调函数，集成进度更新
                         def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
-                            # 计算当前实际处理的帧数进度
+                            # 只有在"强制停止"时才抛出异常中断视频
+                            # 如果只是 stop_flag (第一次点击)，则忽略，让视频跑完
+                            if self.force_stop_flag:
+                                raise ForceStopError("用户强制停止")
                             # frame_idx 是当前绝对帧位置(或接近)，需将其转换为处理过的“单元”数
                             processed_frames_so_far = math.ceil(frame_idx / vid_stride)
 
@@ -369,6 +378,8 @@ class ProcessingThread(QThread):
 
                     else:
                         # === 图片处理逻辑 ===
+                        if self.force_stop_flag:
+                            raise ForceStopError("用户强制停止")
                         # 提取元数据
                         image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
 
@@ -463,6 +474,12 @@ class ProcessingThread(QThread):
 
                         self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time, remaining_time,
                                                    speed)
+
+                except ForceStopError:
+                    stopped_manually = True
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.console_log.emit(f"[WARN] {current_time} 检测到强制停止信号，正在中断后台处理...", "#ff0000")
+                    break  # 跳出文件循环
 
                 except Exception as e:
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1339,29 +1356,41 @@ class ObjectDetectionGUI(QMainWindow):
             self.preview_page.sync_processing_result(img_path, detection_info)
 
     def stop_processing(self):
-        """停止处理"""
-        reply = QMessageBox.question(
-            self, "停止确认",
-            "确定要停止图像处理吗？\n处理进度将被保存，下次可以继续。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
+        """停止处理 (第一次点击：等待当前完成；第二次点击：强制退出保存上一进度)"""
+        # 基础检查
+        if not hasattr(self, 'processing_thread') or self.processing_thread is None or not self.processing_thread.isRunning():
+            return
 
-        if reply == QMessageBox.StandardButton.Yes:
-            if hasattr(self, 'processing_thread') and self.processing_thread is not None:
-                self.status_bar.status_label.setText("正在停止处理并保存进度...")
+        # 获取当前状态
+        # 如果 stop_flag 为 True，说明用户之前已经点过一次，现在是第二次点击
+        is_already_stopping = self.processing_thread.stop_flag
 
-                # 调用线程的 stop 方法，它会保存进度
-                if hasattr(self.processing_thread, 'stop'):
-                    self.processing_thread.stop()
-                elif hasattr(self.processing_thread, 'stop_flag'):
-                    self.processing_thread.stop_flag = True
+        if not is_already_stopping:
+            # === 第一次点击 ===
+            reply = QMessageBox.question(
+                self, "停止确认",
+                "确定要停止吗？\n\n点击【是】将等待当前正在处理的图片/视频完成后再停止。\n(进度将包含当前文件)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
 
-                # 等待线程完成（最多等待5秒）
-                if self.processing_thread.isRunning():
-                    self.processing_thread.wait(5000)
+            if reply == QMessageBox.StandardButton.Yes:
+                self.status_bar.status_label.setText("正在停止... (等待当前文件处理完毕，再次点击可强制停止)")
+                self.processing_thread.stop_flag = True
+                if hasattr(self.processing_thread, 'console_log'):
+                    self.processing_thread.console_log.emit("[INFO] 已收到停止请求，将在当前文件完成后自动停止...", "#ffff00")
 
         else:
-            QMessageBox.information(self, "信息", "处理继续进行。")
+            # === 第二次点击 ===
+            reply = QMessageBox.question(
+                self, "强制停止",
+                "检测到已发出停止请求。\n\n是否【强制立即退出】？\n(注意：当前正在处理的文件进度将丢失，进度将回滚到上一个文件)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.status_bar.status_label.setText("正在强制停止并回滚进度...")
+                # 设置强制停止标志，这将触发 run 方法内部的 ForceStopError
+                self.processing_thread.force_stop_flag = True
 
     def _validate_inputs(self, file_path: str, save_path: str) -> bool:
         if not file_path or not os.path.isdir(file_path):

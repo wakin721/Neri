@@ -231,7 +231,7 @@ class ImageProcessor:
             for r in results:
                 frame_count += 1
 
-                # [修改] 计算当前实际对应的视频帧索引
+                # 计算当前实际对应的视频帧索引
                 # frame_count 是处理过的帧数，需要乘以 stride 还原为原始视频帧索引
                 current_real_frame_idx = (frame_count - 1) * vid_stride
 
@@ -251,10 +251,19 @@ class ImageProcessor:
 
                         h, w = r.orig_shape if hasattr(r, 'orig_shape') else (0, 0)
 
-                        # [修改] 回调中使用实际帧进度，以便进度条正确显示
+                        # 回调中使用实际帧进度，以便进度条正确显示
                         current_progress = min(current_real_frame_idx + 1, total_frames)
                         status_callback(current_progress, total_frames, w, h, frame_counts, speed_ms)
+
                     except Exception as e:
+                        # 检测是否为强制停止信号
+                        # 如果异常信息中包含"强制停止"（这是我们在 main_window 中抛出的），
+                        # 则不再视为错误，而是直接向上抛出异常，从而跳出 for r in results 循环，停止 YOLO 追踪。
+                        if "强制停止" in str(e):
+                            logger.info(f"响应用户停止信号，正在中断视频追踪: {e}")
+                            raise e  # 重新抛出异常，让外层的 ForceStopError 捕获逻辑生效
+
+                        # 只有非停止信号的异常才记录为错误
                         logger.error(f"视频状态回调出错: {e}")
 
                 if r.boxes is None or r.boxes.id is None:
