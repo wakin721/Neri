@@ -27,7 +27,6 @@ def move_pt_files():
     pt_files = glob.glob(os.path.join(res_path, "*.pt"))
 
     if not pt_files:
-        print("res文件夹下没有检测到.pt文件")
         return
 
     print(f"\n==============================================")
