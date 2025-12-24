@@ -3,16 +3,21 @@ from PySide6.QtWidgets import (
     QListWidget, QLabel, QTextEdit, QPushButton,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox,
     QMessageBox, QFileDialog, QInputDialog, QScrollArea,
-    QSizePolicy, QApplication
+    QSizePolicy, QApplication, QStackedLayout
 )
-from PySide6.QtCore import Qt, Signal, QThread, Signal, QTimer
-from PySide6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QIcon, QImage, QPalette
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QUrl, QSize, QEvent, QRectF, QPoint
+from PySide6.QtGui import (
+    QPixmap, QImage, QPainter, QColor, QFont, QAction, QKeySequence,
+    QIcon, QDesktopServices, QShortcut, QPalette, QPainterPath
+)
+from PySide6.QtSvg import QSvgRenderer
 import sys
 import os
 import json
 import logging
 import cv2
 import threading
+import time
 import re
 import numpy as np
 from datetime import datetime
@@ -22,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 # 原有的导入保持不变
 from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
-from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS
+from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS, get_species_color
 from system.utils import resource_path
 from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow
 
@@ -162,6 +167,215 @@ class ImageLoaderThread(QThread):
                 self.loading_failed.emit(self.file_path, str(e))
 
 
+class VideoPlayerThread(QThread):
+    """
+    Video player thread that reads video via OpenCV, converts to PIL to draw
+    detection boxes (for TTF font support), and emits QImage for display.
+    """
+    frame_ready = Signal(QPixmap)
+    playback_finished = Signal()
+    pause_state_changed = Signal(bool)
+
+    def __init__(self, video_path, json_path, conf_threshold, draw_boxes=True, min_frame_ratio=0.0, start_frame=0, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.json_path = json_path
+        self.conf_threshold = conf_threshold
+        self.draw_boxes = draw_boxes
+        self.min_frame_ratio = min_frame_ratio
+        self.start_frame = start_frame
+        self.running = False
+        self.paused = False
+        self.current_frame_index = 0
+
+        # === 初始化字体 ===
+        try:
+            self.font_path = resource_path(os.path.join("res", "AlibabaPuHuiTi-3-65-Medium.ttf"))
+            # 字体大小暂时设为 20，稍后在 run 中可根据视频尺寸调整
+            self.font = ImageFont.truetype(self.font_path, 20)
+            self.font_loaded = True
+        except Exception as e:
+            logger.warning(f"VideoThread: 字体加载失败 {e}")
+            self.font = ImageFont.load_default()
+            self.font_loaded = False
+
+    def toggle_pause(self):
+        """切换暂停/播放状态"""
+        self.paused = not self.paused
+        # --- 新增：发射信号通知状态改变 ---
+        self.pause_state_changed.emit(self.paused)
+
+    def run(self):
+        self.running = True
+        cap = cv2.VideoCapture(self.video_path)
+
+        if not cap.isOpened():
+            return
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        frame_delay = 1.0 / fps
+
+        if self.start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
+
+        # 根据视频尺寸调整字体大小
+        v_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        v_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        if self.font_loaded and v_h > 0:
+            target_size = max(16, int(0.02 * min(v_w, v_h)))
+            try:
+                self.font = ImageFont.truetype(self.font_path, target_size)
+            except:
+                pass
+
+        # Parse JSON
+        frames_data = self._parse_tracking_json()
+        stride = frames_data.get('stride', 1)
+        detections = frames_data.get('frames', {})
+
+        while self.running:
+            if self.paused:
+                time.sleep(0.1)
+                continue
+
+            start_time = time.time()
+
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            self.current_frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+            # 1. OpenCV BGR -> RGB
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # 2. 转换为 PIL Image
+            pil_img = Image.fromarray(rgb_frame)
+
+            # 3. 绘制检测框 (仅当 draw_boxes 为 True 时执行)
+            if self.draw_boxes:
+                current_frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                lookup_idx = current_frame_idx - (current_frame_idx % stride)
+
+                if lookup_idx in detections:
+                    self._draw_boxes_pil(pil_img, detections[lookup_idx])
+
+            # 4. PIL -> QImage
+            # 这里的 pil_img 已经是绘制好的了
+            img_data = pil_img.tobytes()
+            w, h = pil_img.size
+            bytes_per_line = 3 * w
+            qt_image = QImage(img_data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
+            self.frame_ready.emit(QPixmap.fromImage(qt_image))
+
+            process_time = time.time() - start_time
+            wait_time = max(0, frame_delay - process_time)
+            time.sleep(wait_time)
+
+        cap.release()
+        self.playback_finished.emit()
+
+    def _parse_tracking_json(self):
+        """Converts Track-ID based JSON to Frame-Index based dictionary with Filtering and Species Unification"""
+        parsed_frames = {'frames': {}, 'stride': 1}
+
+        if not self.json_path or not os.path.exists(self.json_path):
+            return parsed_frames
+
+        try:
+            with open(self.json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            parsed_frames['stride'] = data.get('vid_stride', 1)
+            total_frames = data.get('total_frames_processed', 0)
+
+            # === 过滤逻辑 ===
+            tracks = data.get('tracks', {})
+            min_frames_threshold = total_frames * self.min_frame_ratio
+
+            # Pivot data: Track -> Frame
+            for track_id, track_list in tracks.items():
+                # 1. 过滤掉帧数不足的目标
+                if len(track_list) < min_frames_threshold:
+                    continue
+
+                # === 2. 新增：计算该 Track 的最终物种（投票法） ===
+                # 统计该轨迹中出现次数最多的物种，消除单帧识别跳变
+                species_list = [p.get('species') for p in track_list if p.get('species')]
+
+                final_species = "Unknown"
+                if species_list:
+                    # Counter.most_common(1) 返回 [('物种名', 次数)]
+                    final_species = Counter(species_list).most_common(1)[0][0]
+                # ==========================================
+
+                for point in track_list:
+                    f_idx = point.get('frame_index')
+                    if f_idx is not None:
+                        if f_idx not in parsed_frames['frames']:
+                            parsed_frames['frames'][f_idx] = []
+
+                        point['track_id'] = track_id
+
+                        # === 3. 覆盖每一帧的物种为最终投票结果 ===
+                        point['species'] = final_species
+
+                        parsed_frames['frames'][f_idx].append(point)
+
+        except Exception as e:
+            logger.error(f"JSON Parse Error: {e}")
+
+        return parsed_frames
+
+    def _draw_boxes_pil(self, pil_img, boxes):
+        """使用 PIL 绘制，支持自定义字体"""
+        draw = ImageDraw.Draw(pil_img)
+
+        for box in boxes:
+            conf = box.get('confidence', 0)
+            if conf < self.conf_threshold:
+                continue
+
+            bbox = box.get('bbox')
+            if not bbox: continue
+            x1, y1, x2, y2 = map(int, bbox)
+
+            species = box.get('species', 'Unknown')
+            track_id = box.get('track_id', '?')
+
+            # 颜色
+            rgb_color = get_species_color(species, return_rgb=True)
+
+            # 绘制框
+            draw.rectangle([x1, y1, x2, y2], outline=rgb_color, width=3)
+
+            # 标签
+            label = f"{species} #{track_id} ({conf:.2f})"
+
+            try:
+                text_bbox = draw.textbbox((0, 0), label, font=self.font)
+                text_w = text_bbox[2] - text_bbox[0]
+                text_h = text_bbox[3] - text_bbox[1]
+            except:
+                text_w, text_h = draw.textsize(label, font=self.font)
+
+            # 绘制标签背景
+            label_y = max(text_h + 5, y1)
+            draw.rectangle(
+                [x1, label_y - text_h - 5, x1 + text_w + 10, label_y],
+                fill=rgb_color
+            )
+            # 绘制文字
+            draw.text((x1 + 5, label_y - text_h - 5), label, fill='white', font=self.font)
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+
 class PreviewPage(QWidget):
     """图像预览页面"""
     settings_changed = Signal()
@@ -198,6 +412,22 @@ class PreviewPage(QWidget):
 
         # === 新增：防止线程被垃圾回收的列表 ===
         self._stopping_threads = []
+
+        # === 新增：定义支持的视频格式 ===
+        self.SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')
+
+        # === 新增：视频播放器初始化 ===
+        self.video_thread = None
+        self._current_video_frame_pixmap = None
+        self._is_video_paused = False
+
+        self.settings_connected = False  # 新增标记
+        self._try_connect_settings_signal()  # 尝试连接
+
+        # 默认禁用，只有播放视频时才启用，防止干扰列表选择
+        self.play_pause_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self.play_pause_shortcut.activated.connect(self.toggle_video_playback)
+        self.play_pause_shortcut.setEnabled(False)
 
         self._create_widgets()
         self._apply_theme()
@@ -451,6 +681,7 @@ class PreviewPage(QWidget):
         image_layout = QVBoxLayout(image_group)
 
         self.image_label = QLabel("请从左侧列表选择图像")
+        self.image_label.installEventFilter(self)
         self.image_label.pixmap = None
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setMinimumSize(400, 300)
@@ -461,15 +692,15 @@ class PreviewPage(QWidget):
 
         # 图像信息区域
         info_group = ModernGroupBox("图像信息")
-        info_group.setFixedHeight(160)  # 设置固定高度
+        info_group.setFixedHeight(170)
         info_layout = QVBoxLayout(info_group)
 
         self.info_text = QTextEdit()
-        self.info_text.setFixedHeight(100)  # 增加文本框高度
+        self.info_text.setFixedHeight(110)
         self.info_text.setReadOnly(True)
         info_layout.addWidget(self.info_text)
 
-        right_layout.addWidget(info_group)  # 添加分组框，不设置拉伸因子
+        right_layout.addWidget(info_group)
 
         # 控制面板
         control_widget = QWidget()
@@ -505,6 +736,10 @@ class PreviewPage(QWidget):
     def clear_preview(self):
         """清除预览"""
         try:
+            self._stop_video_detection_thread()
+            self.play_pause_shortcut.setEnabled(False)
+            self.image_label.setVisible(True)
+
             self.file_listbox.clear()
             self.current_image_path = None
             self.current_detection_results = None
@@ -519,8 +754,7 @@ class PreviewPage(QWidget):
         try:
             self.image_label.clear()
             self.image_label.setText("无图像")
-            if hasattr(self, '_current_pixmap'):
-                self._current_pixmap = None
+
         except Exception as e:
             logger.warning(f"清除图像显示时出现警告: {e}")
 
@@ -550,16 +784,27 @@ class PreviewPage(QWidget):
             return
 
         try:
-            image_files = [f for f in os.listdir(directory) if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
-            image_files.sort()
+            all_files = os.listdir(directory)
+            all_files.sort()
 
-            for file in image_files:
-                from PySide6.QtWidgets import QListWidgetItem
-                item = QListWidgetItem(file)
-                full_path = os.path.join(directory, file)
-                # 将完整路径存储在列表项的用户数据中
-                item.setData(Qt.ItemDataRole.UserRole, full_path)
-                self.file_listbox.addItem(item)
+            for file in all_files:
+                lower_file = file.lower()
+                # 检查是否为支持的图片或视频
+                is_image = lower_file.endswith(SUPPORTED_IMAGE_EXTENSIONS)
+                is_video = lower_file.endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+
+                if is_image or is_video:
+                    from PySide6.QtWidgets import QListWidgetItem
+                    # 可以选择给视频文件加个不同的图标或标记
+                    display_text = f"📹 {file}" if is_video else file
+                    item = QListWidgetItem(display_text)
+
+                    full_path = os.path.join(directory, file)
+                    item.setData(Qt.ItemDataRole.UserRole, full_path)
+                    # 存储类型标记，方便后续判断
+                    item.setData(Qt.ItemDataRole.UserRole + 1, "video" if is_video else "image")
+
+                    self.file_listbox.addItem(item)
         except Exception as e:
             logger.error(f"更新文件列表失败: {e}")
 
@@ -665,38 +910,82 @@ class PreviewPage(QWidget):
             self.info_text.setPlainText(status_text)
 
     def toggle_detection_preview(self, checked):
-        """切换检测结果预览显示"""
-        if self.controller.is_processing:
-            self.show_detection_checkbox.setChecked(True)
-            return
+        """Toggle detection preview."""
 
-        # 获取当前选中的文件
-        selected_items = self.file_listbox.selectedItems()
-        if not selected_items:
-            self.show_detection_checkbox.setChecked(False)
-            return
+        # 1. Determine if we are handling a video
+        current_file = self.current_image_path
+        is_video = current_file and current_file.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
 
+        # 2. Setup JSON path logic
+        json_path = None
+        if current_file:
+            temp_dir = self.controller.get_temp_photo_dir()
+            base_name = os.path.splitext(os.path.basename(current_file))[0]
+            json_path = os.path.join(temp_dir, f"{base_name}.json")
+
+        if is_video:
+            # === Video Mode: 统一使用 OpenCV 线程 ===
+            # 无论 Checked 是 True 还是 False，都进入 OpenCV 模式
+            # 获取设置
+            min_ratio = 0.0
+            if hasattr(self.controller, 'advanced_page'):
+                min_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+            # === 修改开始：获取当前播放进度，以便无缝切换 ===
+            start_frame = 0
+            if self.video_thread:
+                # 获取当前播放到的帧索引
+                start_frame = self.video_thread.current_frame_index
+            # ============================================
+
+            # 刷新文本 (确保检测结果统计与当前过滤比例一致)
+            self._update_video_info_text(current_file, json_path, min_ratio)
+
+            if checked:
+                # 开启检测：检查 JSON 是否存在
+                if not os.path.exists(json_path):
+                    QMessageBox.warning(self, "提示", "未找到该视频的检测结果文件(JSON)。")
+                    # 如果找不到结果，强制取消勾选，并以无框模式播放
+                    self.show_detection_checkbox.setChecked(False)
+                    # 传递 start_frame 以保持进度
+                    self._start_video_detection_thread(current_file, json_path, draw_boxes=False, start_frame=start_frame)
+                    return
+
+                # 启动带框线程，传递 start_frame
+                self._start_video_detection_thread(current_file, json_path, draw_boxes=True, start_frame=start_frame)
+            else:
+                # 关闭检测：启动无框线程，传递 start_frame
+                # 即使没有 JSON 也没关系，VideoPlayerThread 会处理
+                self._start_video_detection_thread(current_file, json_path, draw_boxes=False, start_frame=start_frame)
+
+            return  # 视频逻辑处理完毕，直接返回
+
+        # === Image Mode: Existing Logic (图片逻辑保持不变) ===
         if checked:
-            # ===== 修改:添加原始图像检查 =====
-            if not self.original_image:
-                QMessageBox.warning(self, "提示", "图像尚未加载完成，请稍后再试。")
+            if not current_file:
                 self.show_detection_checkbox.setChecked(False)
                 return
-            # =================================
 
-            # 显示带检测框的图像
-            if self.current_preview_info and self.current_preview_info.get("检测框"):
-                # 使用现有的检测信息重新绘制图像
+            if not self.original_image:
+                QMessageBox.warning(self, "提示", "图像尚未加载完成。")
+                self.show_detection_checkbox.setChecked(False)
+                return
+
+            # Load JSON if not already loaded
+            if not self.current_preview_info and os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    self.current_preview_info = json.load(f)
+
+            if self.current_preview_info:
                 self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
             else:
-                # 没有检测信息时，显示提示并取消选中状态
-                QMessageBox.information(self, "提示", "当前图像还没有检测结果，请先点击'检测当前图像'按钮。")
+                QMessageBox.information(self, "提示", "当前图像还没有检测结果。")
                 self.show_detection_checkbox.setChecked(False)
+
         else:
-            # ===== 修改:只显示不带检测框的原始图片 =====
+            # Unchecked (Image)
             if self.original_image:
                 self._update_pixmap_for_label(self.original_image)
-            # ==========================================
 
     def detect_current_image(self):
         """检测当前选中的图像"""
@@ -871,7 +1160,7 @@ class PreviewPage(QWidget):
                     continue
 
                 # 获取物种颜色
-                color = self._get_color_for_species(species_name)
+                color = get_species_color(species_name, return_rgb=True)
 
                 # 绘制检测框
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
@@ -951,14 +1240,6 @@ class PreviewPage(QWidget):
             )
         except Exception as e:
             logger.error(f"重绘预览检测框失败: {e}")
-
-    def _get_color_for_species(self, species_name):
-        """为物种分配一个固定的颜色"""
-        if species_name not in self.species_color_map:
-            # 使用hash确保同一物种总能得到相同的颜色索引
-            color_index = hash(species_name) % len(self.color_palette)
-            self.species_color_map[species_name] = self.color_palette[color_index]
-        return self.species_color_map[species_name]
 
     def _on_preview_confidence_slider_changed(self, value):
         """处理预览页置信度滑块值的变化"""
@@ -1352,42 +1633,81 @@ class PreviewPage(QWidget):
         self.image_loader_thread = None
 
     def _load_image_deferred(self):
-        """延迟执行的图像加载逻辑"""
+        """延迟执行的文件加载逻辑（支持图片和视频）"""
         selected_items = self.file_listbox.selectedItems()
         if not selected_items:
             return
 
         file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
 
-        # 如果路径没变，或者是正在显示的图片，则忽略
-        if not file_path or file_path == self.requested_image_path:
+        if not file_path:
+            return
+        if file_path == self.requested_image_path:
             return
 
         self.requested_image_path = file_path
 
-        # === 关键修改：安全的线程清理逻辑 ===
+        # ==================== 新增修改开始 ====================
+        # 1. 切换文件时，如果正在进行 OpenCV 视频检测，必须强制停止线程
+        self._stop_video_detection_thread()
+
+        is_video = file_path.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+
+        # 清理旧图片加载线程逻辑
         if self.image_loader_thread and self.image_loader_thread.isRunning():
-            # 1. 标记取消
-            self.image_loader_thread.cancel()
-
-            # 2. 断开信号，防止旧结果刷新UI
-            try:
-                self.image_loader_thread.image_loaded.disconnect()
-                self.image_loader_thread.loading_failed.disconnect()
-            except:
-                pass
-
-            # 3. 将旧线程加入"保活列表"，防止被Python GC回收导致闪退
-            self._stopping_threads.append(self.image_loader_thread)
-
-            # 4. 当线程真正结束时，从列表中移除并清理
-            # 使用默认参数 capture 闭包中的 thread 对象
-            self.image_loader_thread.finished.connect(
-                lambda t=self.image_loader_thread: self._cleanup_stopped_thread(t)
-            )
-
+            # ... (清理代码保持不变) ...
             self.image_loader_thread = None
-        # ============================================
+
+        if is_video:
+            # === 视频模式 (修改版) ===
+            self.current_image_path = file_path
+
+            self.play_pause_shortcut.setEnabled(True)
+
+            # 统一 UI 状态：隐藏原生视频容器，显示 image_label (用于 OpenCV 绘制)
+            self.original_image = None
+
+            # 按钮状态
+            self.detect_button.setEnabled(False)
+            self.show_detection_checkbox.setEnabled(True)
+
+            # 准备路径
+            temp_dir = self.controller.get_temp_photo_dir()
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            json_path = os.path.join(temp_dir, f"{base_name}.json")
+
+            # 获取当前是否需要显示检测框
+            show_boxes = self.show_detection_checkbox.isChecked()
+
+            # 如果要求显示框但没有 JSON，则自动关闭开关
+            if show_boxes and not os.path.exists(json_path):
+                self.show_detection_checkbox.blockSignals(True)
+                self.show_detection_checkbox.setChecked(False)
+                self.show_detection_checkbox.blockSignals(False)
+                show_boxes = False
+
+            # 获取当前的过滤设置
+            min_ratio = 0.0
+            if hasattr(self.controller, 'advanced_page'):
+                min_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+            self._update_video_info_text(file_path, json_path, min_ratio)
+
+            # === 启动 OpenCV 线程 ===
+            self._start_video_detection_thread(file_path, json_path, draw_boxes=show_boxes)
+            return
+
+        # === 图片模式 ===
+
+        # 禁用空格快捷键（交还给列表用于选择）
+        self.play_pause_shortcut.setEnabled(False)
+
+        # 恢复图片相关设置
+        self.image_label.setVisible(True)
+
+        # 启用图片检测功能
+        self.detect_button.setEnabled(True)
+        self.show_detection_checkbox.setEnabled(True)
 
         self.image_label.setText("正在加载图像...")
         self.image_label.pixmap = None
@@ -1396,15 +1716,12 @@ class PreviewPage(QWidget):
 
         # 启动新的加载线程
         self.image_loader_thread = ImageLoaderThread(file_path, self.image_label.size())
-
         self.image_loader_thread.image_loaded.connect(
             lambda pixmap, fp, info: self._on_image_loaded_safe(pixmap, fp, info)
         )
         self.image_loader_thread.loading_failed.connect(
             lambda fp, err: self._on_loading_failed_safe(fp, err)
         )
-
-        # 线程正常结束时的清理
         self.image_loader_thread.finished.connect(self._on_thread_finished)
         self.image_loader_thread.start()
 
@@ -1413,3 +1730,332 @@ class PreviewPage(QWidget):
         if thread in self._stopping_threads:
             self._stopping_threads.remove(thread)
         thread.deleteLater()
+
+    def toggle_video_playback(self):
+        """切换视频播放/暂停状态（支持原生播放器和 OpenCV 检测回放）"""
+
+        # === 场景 1: OpenCV 检测结果回放模式 ===
+        if self.video_thread and self.video_thread.isRunning():
+            self.video_thread.toggle_pause()
+            # 这里可以扩展逻辑：例如显示/隐藏暂停图标
+            return
+
+    def eventFilter(self, source, event):
+        """事件过滤器：处理 image_label 上的点击事件"""
+        if source == self.image_label and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # 仅在视频检测线程运行时响应点击
+                if self.video_thread and self.video_thread.isRunning():
+                    self.toggle_video_playback()
+                    return True
+        return super().eventFilter(source, event)
+
+    def _start_video_detection_thread(self, video_path, json_path, draw_boxes=True, start_frame=0):
+        """Starts the OpenCV QThread for video"""
+        self._stop_video_detection_thread()
+        self._is_video_paused = False
+
+        conf = self.preview_conf_slider.value() / 100.0
+
+        # 获取过滤比例设置
+        min_ratio = 0.0
+        if hasattr(self.controller, 'advanced_page'):
+            min_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+        # 传递 start_frame 参数
+        self.video_thread = VideoPlayerThread(
+            video_path, json_path, conf,
+            draw_boxes=draw_boxes,
+            min_frame_ratio=min_ratio,
+            start_frame=start_frame  # <--- 传递起始帧
+        )
+
+        self.video_thread.frame_ready.connect(self._on_video_frame_ready)
+        self.video_thread.playback_finished.connect(self._on_video_finished)
+        self.video_thread.pause_state_changed.connect(self._on_video_pause_state_changed)
+
+        self.video_thread.start()
+
+        # Update Info Text (根据状态显示不同提示)
+        if draw_boxes:
+            self.info_text.append("▶ 正在回放检测结果 (OpenCV模式)")
+        else:
+            self.info_text.append("▶ 正在播放视频 (OpenCV模式)")
+
+    def _stop_video_detection_thread(self):
+        """安全停止 OpenCV 视频检测线程"""
+        if hasattr(self, 'video_thread') and self.video_thread and self.video_thread.isRunning():
+            self.video_thread.stop() # 假设你的 VideoPlayerThread 有 stop 方法设置 flag
+            self.video_thread.quit()
+            self.video_thread.wait() # 等待线程完全退出
+            self.video_thread.deleteLater()
+            self.video_thread = None
+
+    def _on_video_frame_ready(self, pixmap):
+        """接收线程传来的图像帧并在 QLabel 上显示"""
+        if not self.isVisible():
+            return
+
+        # 1. 始终更新缓存（保证后台数据是最新的）
+        self._current_video_frame_pixmap = pixmap
+
+        # === 新增：关键修复 ===
+        # 如果当前 UI 处于暂停状态，忽略后台传来的这一帧“迟到”的原始画面
+        # 防止它覆盖掉我们刚刚绘制了暂停图标的画面
+        if self._is_video_paused:
+            return
+
+        # 2. 正常显示
+        if self.image_label.size().isValid():
+            scaled_pixmap = pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+
+    def _on_video_finished(self):
+        """视频播放线程结束后的回调"""
+        # 当视频线程停止时（例如切换文件或出错），重置部分状态
+        # 如果需要，可以在这里让播放图标重新显示，或者做清理工作
+        pass
+
+    def _generate_white_icon_pixmap(self, icon_path, size):
+        """
+        生成一个白色的 SVG 图标 Pixmap。
+        原理：先渲染 SVG，然后利用 CompositionMode 填充白色。
+        """
+        if not os.path.exists(icon_path):
+            return None
+
+        # 1. 创建一个透明的画布
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        # 2. 渲染 SVG 到画布上
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        renderer = QSvgRenderer(icon_path)
+        renderer.render(painter, QRectF(0, 0, size, size))
+
+        # 3. 关键步骤：设置混合模式为 SourceIn
+        # 这会保留原图像的 Alpha 通道（形状），但用新的颜色替换 RGB
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), Qt.GlobalColor.white)
+
+        painter.end()
+        return pixmap
+
+    def _on_video_pause_state_changed(self, is_paused):
+        """处理视频回放的暂停/播放状态改变 (修复版)"""
+        self._is_video_paused = is_paused
+
+        # 如果是恢复播放，不需要做特殊处理，等待下一帧刷新即可
+        if not is_paused:
+            return
+
+        # 确保我们有当前的视频帧缓存
+        if not hasattr(self, '_current_video_frame_pixmap') or not self._current_video_frame_pixmap:
+            return
+
+        try:
+            # 1. 复制当前帧，避免修改原始缓存
+            paused_pixmap = self._current_video_frame_pixmap.copy()
+
+            # 2. 计算图标大小和位置
+            w = paused_pixmap.width()
+            h = paused_pixmap.height()
+
+            # 图标大小为短边的 20%，但不小于 64px
+            icon_size = max(64, int(min(w, h) * 0.2))
+
+            # 计算居中坐标
+            x = (w - icon_size) // 2
+            y = (h - icon_size) // 2
+
+            # 3. 开始绘制
+            painter = QPainter(paused_pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            # --- 绘制半透明黑色圆形背景 ---
+            # 背景比图标稍大一点
+            bg_radius = icon_size // 2 + 10
+            center_x = x + icon_size // 2
+            center_y = y + icon_size // 2
+
+            painter.setBrush(QColor(0, 0, 0, 100))  # 黑色，透明度 100/255
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPoint(center_x, center_y), bg_radius, bg_radius)
+
+            # --- 绘制白色图标 ---
+            icon_path = resource_path(os.path.join("res", "icon", "play.svg"))
+
+            # 使用辅助函数生成纯白色的图标
+            white_icon_pixmap = self._generate_white_icon_pixmap(icon_path, icon_size)
+
+            if white_icon_pixmap:
+                # 将处理好的白色图标贴上去
+                painter.drawPixmap(x, y, white_icon_pixmap)
+            else:
+                # 备用方案：如果 SVG 加载失败，画一个白色的三角形
+                painter.setBrush(QColor(255, 255, 255))
+                path = QPainterPath()
+                # 简单的播放三角形
+                path.moveTo(x + icon_size * 0.3, y + icon_size * 0.2)
+                path.lineTo(x + icon_size * 0.3, y + icon_size * 0.8)
+                path.lineTo(x + icon_size * 0.8, y + icon_size * 0.5)
+                path.closeSubpath()
+                painter.drawPath(path)
+
+            painter.end()
+
+            # 4. 显示最终图像
+            if self.image_label.size().isValid():
+                scaled_pixmap = paused_pixmap.scaled(
+                    self.image_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.image_label.setPixmap(scaled_pixmap)
+
+        except Exception as e:
+            logger.error(f"绘制暂停图标失败: {e}")
+
+    def _update_video_info_text(self, file_path, json_path, min_frame_ratio=0.0):
+        """生成详细的视频信息文本"""
+        try:
+            # 1. 获取视频基础信息 (Opencv + OS)
+            file_name = os.path.basename(file_path)
+            file_ext = os.path.splitext(file_name)[1].replace('.', '')
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            file_size_kb = file_size_mb * 1024
+
+            # 获取修改时间作为拍摄时间
+            mtime = os.path.getmtime(file_path)
+            date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+            width, height = 0, 0
+            cap = cv2.VideoCapture(file_path)
+            if cap.isOpened():
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+
+            # 第一部分：基础信息
+            info_text = (f"文件名: {file_name}    格式: {file_ext}\n"
+                         f"拍摄日期: {date_str}    尺寸: {width}x{height}px    文件大小: {file_size_kb:.1f} KB")
+
+            # 2. 处理检测结果
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                total_frames = data.get('total_frames_processed', 1)
+                tracks = data.get('tracks', {})
+                threshold = total_frames * min_frame_ratio
+
+                # 统计有效 Track
+                species_count = defaultdict(int)
+                min_confidence = 1.0
+                has_detections = False
+
+                for t_id, points in tracks.items():
+                    # 过滤掉帧数不足的目标
+                    if len(points) < threshold:
+                        continue
+
+                    has_detections = True
+
+                    s_list = [p.get('species') for p in points if p.get('species')]
+                    if s_list:
+                        sp = Counter(s_list).most_common(1)[0][0]
+                    else:
+                        sp = 'Unknown'
+
+                    species_count[sp] += 1
+
+                    # 更新最低置信度
+                    for p in points:
+                        conf = p.get('confidence', 1.0)
+                        if conf < min_confidence:
+                            min_confidence = conf
+
+                # 获取检测时间 (JSON文件修改时间)
+                json_mtime = os.path.getmtime(json_path)
+                detect_time = datetime.fromtimestamp(json_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                # 构建检测结果字符串
+                if has_detections:
+                    res_parts = []
+                    for sp, count in species_count.items():
+                        res_parts.append(f"{sp}: {count}只")
+
+                    res_str = " | ".join(res_parts)
+                    result_text = f"\n检测结果: | {res_str} | 最低置信度: {min_confidence:.3f} | 检测于: {detect_time}"
+                else:
+                    result_text = f"\n检测结果: 未检测到有效目标 (过滤比例 {min_frame_ratio:.0%})"
+
+                info_text += result_text
+            else:
+                info_text += "\n检测结果: 暂无数据"
+
+            self.info_text.setPlainText(info_text)
+
+        except Exception as e:
+            logger.error(f"生成视频信息失败: {e}")
+            self.info_text.setPlainText(f"正在播放视频: {os.path.basename(file_path)}\n(获取详细信息失败)")
+
+    def _try_connect_settings_signal(self):
+        """尝试连接高级设置页面的信号"""
+        if not self.settings_connected and hasattr(self.controller, 'advanced_page'):
+            try:
+                self.controller.advanced_page.settings_changed.connect(self._on_global_settings_changed)
+                self.settings_connected = True
+            except Exception as e:
+                logger.warning(f"Failed to connect settings signal: {e}")
+
+    def showEvent(self, event):
+        """显示事件"""
+        super().showEvent(event)
+        self._try_connect_settings_signal()  # 确保信号已连接
+
+    def _on_global_settings_changed(self):
+        """响应全局设置变化"""
+        # 仅在视频模式且开启检测显示时处理
+        if not (self.current_image_path and
+                self.current_image_path.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS) and
+                self.show_detection_checkbox.isChecked()):
+            return
+
+        # 获取最新的 min_frame_ratio
+        new_ratio = 0.0
+        if hasattr(self.controller, 'advanced_page'):
+            new_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+        # 优化：检查过滤比例是否真的发生了变化（避免调节其他设置时导致视频重载）
+        if self.video_thread:
+            current_ratio = self.video_thread.min_frame_ratio
+            if abs(current_ratio - new_ratio) < 1e-6:
+                return
+
+        # 获取当前播放位置，以便无缝衔接
+        start_frame = 0
+        if self.video_thread and self.video_thread.isRunning():
+            start_frame = self.video_thread.current_frame_index
+
+        # 准备路径
+        temp_dir = self.controller.get_temp_photo_dir()
+        base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+        json_path = os.path.join(temp_dir, f"{base_name}.json")
+
+        # 更新信息栏 (显示新的过滤统计结果)
+        self._update_video_info_text(self.current_image_path, json_path, new_ratio)
+
+        # 重启视频线程 (带上 start_frame 实现无缝切换)
+        self._start_video_detection_thread(
+            self.current_image_path,
+            json_path,
+            draw_boxes=True,
+            start_frame=start_frame
+        )

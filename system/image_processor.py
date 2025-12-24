@@ -3,16 +3,19 @@
 import os
 import logging
 import concurrent.futures
-from typing import Dict, Any, Optional, List
-from collections import Counter
+from typing import Dict, Any, Optional, List, Union
+from collections import Counter, defaultdict
 from ultralytics import YOLO
 import json
+import torch
 from system.utils import resource_path
+import cv2
 
 logger = logging.getLogger(__name__)
 
+
 class ImageProcessor:
-    """处理图像、检测物种的核心类"""
+    """处理图像、检测物种及视频追踪的核心类"""
 
     def __init__(self, model_path: str):
         """初始化图像处理器"""
@@ -42,19 +45,23 @@ class ImageProcessor:
             logger.error(f"加载或解析翻译文件失败: {e}")
             return {}
 
+    def _check_cuda(self, use_fp16: bool) -> bool:
+        """检查CUDA可用性并决定是否使用FP16"""
+        try:
+            cuda_available = torch.cuda.is_available()
+            if not cuda_available:
+                return False
+            return use_fp16
+        except ImportError:
+            return False
+        except Exception:
+            return False
+
     def detect_species(self, img_path: str, use_fp16: bool = False, iou: float = 0.3,
                        conf: float = 0.25, augment: bool = True,
                        agnostic_nms: bool = True, timeout: float = 20.0) -> Dict[str, Any]:
         """检测图像中的物种并应用翻译"""
-        try:
-            import torch
-            cuda_available = torch.cuda.is_available()
-            if not cuda_available:
-                use_fp16 = False
-        except ImportError:
-            use_fp16 = False
-        except Exception:
-            use_fp16 = False
+        use_fp16 = self._check_cuda(use_fp16)
 
         species_names = ""
         species_counts = ""
@@ -84,7 +91,6 @@ class ImageProcessor:
                 detect_results = results
 
                 for r in results:
-                    # 如果没有检测到任何物体，则跳过
                     if r.boxes is None or len(r.boxes) == 0:
                         continue
 
@@ -98,27 +104,21 @@ class ImageProcessor:
                         if min_confidence is None or current_min_confidence < min_confidence:
                             min_confidence = "%.3f" % current_min_confidence
 
-                    # --- 翻译和合并逻辑 ---
                     detected_species_counts = {}
                     for element, count in counts.items():
-                        # 获取检测到的原始英文名
                         english_name = species_dict.get(int(element), "unknown")
-                        # 从翻译字典中查找中文名，如果找不到则使用原始英文名
                         translated_name = self.translation_dict.get(english_name, english_name)
 
-                        # 按翻译后的中文名累加数量
                         if translated_name in detected_species_counts:
                             detected_species_counts[translated_name] += count
                         else:
                             detected_species_counts[translated_name] = count
 
-                    # 将最终结果格式化为逗号分隔的字符串
                     species_list = list(detected_species_counts.keys())
                     counts_list = list(map(str, detected_species_counts.values()))
 
                     species_names = ",".join(species_list)
                     species_counts = ",".join(counts_list)
-                    # --- 翻译逻辑结束 ---
 
                 return True
             except Exception as e:
@@ -140,6 +140,173 @@ class ImageProcessor:
             'detect_results': detect_results,
             '最低置信度': min_confidence
         }
+
+    # ==========================================
+    # 新增视频检测方法
+    # ==========================================
+    def detect_video_species(self, video_source: str, output_dir: str,
+                             use_fp16: bool = False, iou: float = 0.3,
+                             conf: float = 0.25, augment: bool = True,
+                             agnostic_nms: bool = True,
+                             status_callback: Optional[Any] = None,
+                             vid_stride: int = 1,
+                             temp_video_dir: Optional[str] = None) -> Dict[str, Any]:
+        """
+        对视频进行物种检测和追踪。
+        """
+        if hasattr(self, 'model_path') and self.model_path:
+            try:
+                logger.info(f"正在重置模型以清理追踪器状态: {self.model_path}")
+                # 重新加载模型实例，彻底清空追踪器历史
+                self.model = self._load_model(self.model_path)
+            except Exception as e:
+                logger.warning(f"重置模型状态失败，将尝试使用当前模型继续: {e}")
+
+        if not self.model:
+            logger.error("模型未加载，无法处理视频")
+            return {'error': 'Model not loaded'}
+
+        use_fp16 = self._check_cuda(use_fp16)
+
+        # 获取视频总帧数
+        total_frames = 0
+        try:
+            cap = cv2.VideoCapture(video_source)
+            if cap.isOpened():
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+        except Exception as e:
+            logger.warning(f"无法获取视频总帧数: {e}")
+
+        # 1. 获取Tracker配置文件路径
+        tracker_config = resource_path(os.path.join("res", "model", "tracker.yaml"))
+        if not os.path.exists(tracker_config):
+            logger.warning(f"Tracker配置文件未找到: {tracker_config}，将使用默认追踪器")
+            tracker_config = "botsort.yaml"  # Ultralytics 默认值
+
+        # 2. 准备路径
+        # [修改] 仅标准化 output_dir 路径，但不立即创建文件夹，避免生成空的 video_results
+        output_dir = os.path.normpath(output_dir)
+
+        # [修改] 移除之前的 project_path 和 run_name 计算，不再让 YOLO 输出到该目录
+        # project_path = os.path.dirname(output_dir)
+        # run_name = os.path.basename(output_dir)
+
+        video_name = os.path.splitext(os.path.basename(video_source))[0]
+        if "http" in video_source:
+            video_name = "stream_result"
+
+        # 3. 运行追踪 (Stream=True 以减少内存占用)
+        logger.info(f"开始视频追踪: {video_source} (跳帧: {vid_stride})")
+
+        # [新增] 使用系统临时目录作为 YOLO 的运行目录，防止在用户目录下生成 runs 文件夹
+        import tempfile
+        temp_run_project = os.path.join(tempfile.gettempdir(), "neri_yolo_logs")
+
+        try:
+            # save=False 禁止生成视频文件
+            results = self.model.track(
+                source=video_source,
+                tracker=tracker_config,
+                augment=augment,
+                agnostic_nms=agnostic_nms,
+                imgsz=1024,
+                half=use_fp16,
+                iou=iou,
+                conf=conf,
+                persist=True,  # 视频追踪必须开启 persist
+                save=False,  # [修改] 显式禁止保存视频
+                project=temp_run_project,  # [修改] 重定向到临时目录
+                name="track_log",  # [修改] 临时任务名
+                exist_ok=True,
+                stream=True,
+                vid_stride=vid_stride  # 传入跳帧参数
+            )
+
+            # 4. 数据聚合结构
+            tracks_data = defaultdict(list)
+            frame_count = 0
+
+            # 5. 逐帧处理结果
+            for r in results:
+                frame_count += 1
+
+                # [修改] 计算当前实际对应的视频帧索引
+                # frame_count 是处理过的帧数，需要乘以 stride 还原为原始视频帧索引
+                current_real_frame_idx = (frame_count - 1) * vid_stride
+
+                # 处理回调状态
+                if status_callback:
+                    try:
+                        frame_counts = Counter()
+                        if r.boxes and r.boxes.cls is not None:
+                            for cls_id in r.boxes.cls.int().tolist():
+                                name = r.names[cls_id]
+                                trans_name = self.translation_dict.get(name, name)
+                                frame_counts[trans_name] += 1
+
+                        speed_ms = 0.0
+                        if hasattr(r, 'speed') and isinstance(r.speed, dict):
+                            speed_ms = sum(r.speed.values())
+
+                        h, w = r.orig_shape if hasattr(r, 'orig_shape') else (0, 0)
+
+                        # [修改] 回调中使用实际帧进度，以便进度条正确显示
+                        current_progress = min(current_real_frame_idx + 1, total_frames)
+                        status_callback(current_progress, total_frames, w, h, frame_counts, speed_ms)
+                    except Exception as e:
+                        logger.error(f"视频状态回调出错: {e}")
+
+                if r.boxes is None or r.boxes.id is None:
+                    continue
+
+                # 获取转为列表的数据
+                ids = r.boxes.id.int().cpu().tolist()
+                classes = r.boxes.cls.int().cpu().tolist()
+                confs = r.boxes.conf.cpu().tolist()
+                boxes = r.boxes.xyxy.cpu().tolist()
+
+                for track_id, cls_id, conf_val, box_val in zip(ids, classes, confs, boxes):
+                    english_name = r.names[cls_id]
+                    translated_name = self.translation_dict.get(english_name, english_name)
+
+                    entry = {
+                        "frame_index": current_real_frame_idx,  # [修改] 使用还原后的实际帧索引
+                        "species": translated_name,
+                        "original_species": english_name,
+                        "confidence": float(conf_val),
+                        "bbox": [float(x) for x in box_val]
+                    }
+                    tracks_data[track_id].append(entry)
+
+            # 6. 保存JSON结果
+            # 只有在需要保存 JSON 时才创建目标文件夹
+            target_json_dir = temp_video_dir if temp_video_dir else output_dir
+            os.makedirs(target_json_dir, exist_ok=True)
+
+            json_output_path = os.path.join(target_json_dir, f"{video_name}.json")
+
+            final_json_data = {
+                "video_source": video_source,
+                "total_frames_processed": frame_count,
+                "vid_stride": vid_stride,
+                "tracker_config": tracker_config,
+                "tracks": dict(tracks_data)
+            }
+
+            with open(json_output_path, 'w', encoding='utf-8') as f:
+                json.dump(final_json_data, f, ensure_ascii=False, indent=4)
+
+            logger.info(f"视频处理完成，JSON已保存至: {json_output_path}")
+            return {
+                "json_path": json_output_path,
+                "frame_count": frame_count,
+                "status": "success"
+            }
+
+        except Exception as e:
+            logger.error(f"视频追踪失败: {e}")
+            return {"error": str(e), "status": "failed"}
 
     def save_detection_result(self, results: Any, image_name: str, save_path: str) -> None:
         """保存探测结果图片"""
@@ -167,9 +334,6 @@ class ImageProcessor:
             logger.error(f"获取物种名称失败: {e}")
         return "unknown"
 
-    # V V V V V V V V V V V V V V V V V V V V
-    # MODIFICATION: Accept dynamic temp_photo_dir
-    # V V V V V V V V V V V V V V V V V V V V
     def save_detection_temp(self, results: Any, image_name: str, temp_photo_dir: str) -> str:
         """保存探测结果图片到指定的临时目录"""
         if not results or not temp_photo_dir:
@@ -182,14 +346,14 @@ class ImageProcessor:
                 from PIL import Image
                 result_img = h.plot()
                 result_img = Image.fromarray(result_img[..., ::-1])
-                result_img.save(result_file, "JPEG", quality=95) # Directly save the image
+                result_img.save(result_file, "JPEG", quality=95)
                 return result_file
         except Exception as e:
             logger.error(f"保存临时检测结果图片失败: {e}")
             return ""
 
     def save_detection_info_json(self, results, image_name: str, species_info: dict, temp_photo_dir: str) -> str:
-        """保存探测结果信息到指定的临时目录"""
+        """保存探测结果信息到指定的临时目录 (用于单张图片)"""
         if not results or not temp_photo_dir:
             return ""
 

@@ -3,10 +3,104 @@ import os
 import subprocess
 import time
 import re
+import json
+import shutil
+import glob
 
 base_path = os.path.dirname(os.path.abspath(__file__))
 requirements_path = os.path.join(base_path, "requirements.txt")
 python_exe_path = f"{base_path}\\toolkit\\python.exe"
+
+
+def move_pt_files():
+    """检测res文件夹下的.pt文件并移动到res/model文件夹。"""
+    res_path = os.path.join(base_path, "res")
+    print(res_path)
+    model_path = os.path.join(res_path, "model")
+
+    # 检查res文件夹是否存在
+    if not os.path.exists(res_path):
+        print(f"res文件夹不存在:  {res_path}")
+        return
+
+    # 查找res文件夹下的所有.pt文件（不包括子文件夹）
+    pt_files = glob.glob(os.path.join(res_path, "*.pt"))
+
+    if not pt_files:
+        print("res文件夹下没有检测到.pt文件")
+        return
+
+    print(f"\n==============================================")
+    print(f"检测到 {len(pt_files)} 个.pt文件，正在移动到model文件夹...")
+    print(f"==============================================")
+
+    # 如果model文件夹不存在，则创建
+    if not os.path.exists(model_path):
+        try:
+            os.makedirs(model_path, exist_ok=True)
+            print(f"已创建model文件夹:  {model_path}")
+        except Exception as e:
+            print(f"无法创建model文件夹: {e}")
+            return
+
+    # 移动每个. pt文件
+    moved_count = 0
+    for pt_file in pt_files:
+        filename = os.path.basename(pt_file)
+        dest_path = os.path.join(model_path, filename)
+
+        try:
+            # 如果目标位置已存在同名文件，可以选择覆盖或跳过
+            if os.path.exists(dest_path):
+                print(f"目标文件已存在，将覆盖: {filename}")
+
+            shutil.move(pt_file, dest_path)
+            print(f"已移动: {filename} -> res/model/")
+            moved_count += 1
+        except Exception as e:
+            print(f"移动文件 {filename} 失败: {e}")
+
+    print(f"成功移动 {moved_count}/{len(pt_files)} 个.pt文件\n")
+
+
+def save_gpu_info(gpu_model, cuda_version):
+    # 定义 temp 目录和文件路径
+    temp_dir = os.path.join(base_path, "temp")
+    settings_path = os.path.join(temp_dir, "settings.json")
+
+    # 如果 temp 目录不存在，则创建
+    if not os.path.exists(temp_dir):
+        try:
+            os.makedirs(temp_dir, exist_ok=True)
+        except Exception as e:
+            print(f"无法创建temp目录: {e}")
+            return
+
+    data = {}
+
+    # 1. 尝试读取现有的 settings.json (保留旧设置)
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"读取 settings.json 失败，将创建新文件:  {e}")
+            # 如果读取失败，data 保持为空字典，准备覆盖
+
+    # 2. 更新或新增字段
+    data['gpu_model'] = gpu_model
+    data['cuda_version'] = cuda_version
+
+    # 可选：如果你想更新 pytorch_version 字段里的显示信息，可以取消下面这行的注释
+    # data['pytorch_version'] = f"自动检测 (CUDA {cuda_version})"
+
+    # 3. 写回文件
+    try:
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        print(f"显卡信息已更新至:  {settings_path}")
+    except Exception as e:
+        print(f"写入 settings.json 失败: {e}")
 
 
 def get_cuda_version():
@@ -23,18 +117,22 @@ def get_cuda_version():
 
         if result.returncode == 0:
             # 提取显卡型号
-            gpu_match = re.search(r'NVIDIA\s+(.+?)\s+(?:On|Off)\s+\|', result.stdout)
+            gpu_model = "Unknown NVIDIA GPU"
+            gpu_match = re.search(r'NVIDIA\s+(. +? )\s+(?:On|Off)\s+\|', result.stdout)
             if gpu_match:
                 gpu_model = gpu_match.group(1).strip()
                 print(f"检测到NVIDIA显卡型号为: {gpu_model}")
-            
+
             # 从nvidia-smi输出中提取CUDA版本
-            # 查找类似 "CUDA Version: 12.1" 的文本
             match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
             if match:
                 major, minor = match.groups()
                 cuda_version = f"{major}.{minor}"
-                print(f"检测到CUDA版本: {cuda_version}")
+                print(f"检测到CUDA版本:  {cuda_version}")
+
+                # [新增] 调用保存函数，将信息写入json
+                save_gpu_info(gpu_model, cuda_version)
+
                 return cuda_version
 
         print("未检测到NVIDIA GPU或CUDA")
@@ -46,6 +144,7 @@ def get_cuda_version():
     except Exception as e:
         print(f"检测CUDA版本时出错: {e}")
         return None
+
 
 def get_pytorch_install_command(cuda_version):
     """根据CUDA版本返回对应的PyTorch安装命令。"""
@@ -181,7 +280,7 @@ def check_dependencies():
     print("==============================================")
 
     if not os.path.exists(requirements_path):
-        print(f"错误：在{requirements_path}未找到 requirements.txt")
+        print(f"错误：在{requirements_path}未找到 requirements. txt")
         return False
 
     try:
@@ -241,7 +340,10 @@ def install_dependencies():
 
 
 if __name__ == "__main__":
-    # 首先安装PyTorch（根据CUDA版本）
+    # 首先检测并移动. pt模型文件
+    move_pt_files()
+
+    # 安装PyTorch（根据CUDA版本）
     if not is_pytorch_installed():
         if not install_pytorch():
             print("\nPyTorch安装失败。请检查以上错误。")

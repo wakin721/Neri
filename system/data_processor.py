@@ -40,16 +40,9 @@ class DataProcessor:
         return image_info_list
 
     @staticmethod
-    def process_independent_detection(image_info_list: List[Dict], confidence_settings: Dict[str, float]) -> List[Dict]:
-        """处理独立探测首只标记
-
-        Args:
-            image_info_list: 图像信息列表
-            confidence_settings: 物种置信度阈值设置
-
-        Returns:
-            更新后的图像信息列表
-        """
+    def process_independent_detection(image_info_list: List[Dict], confidence_settings: Dict[str, float],
+                                      min_frame_ratio: float = 0.0) -> List[Dict]:
+        """处理独立探测首只标记 """
         # 按拍摄日期排序
         sorted_images = sorted(
             [img for img in image_info_list if img.get('拍摄日期对象')],
@@ -59,11 +52,43 @@ class DataProcessor:
         species_last_detected = {}  # 记录每个物种的最后探测时间
 
         for img_info in sorted_images:
-            # --- 新增逻辑：根据置信度过滤当前图片的物种 ---
+            species_names = []
+
+            # === 修改：增加视频tracks处理逻辑 ===
             if img_info.get('最低置信度') == '人工校验':
                 # 对于人工校验过的数据，直接使用已有的物种名称
-                species_names = img_info.get('物种名称', '').split(',')
+                names_str = img_info.get('物种名称', '')
+                if names_str and names_str != '空':
+                    species_names = [s.strip() for s in names_str.split(',')]
+
+            elif 'tracks' in img_info:
+                # 视频文件处理
+                total_frames = img_info.get('total_frames_processed', 1)
+                tracks = img_info.get('tracks', {})
+                threshold = total_frames * min_frame_ratio
+
+                track_species_list = []
+                for t_id, points in tracks.items():
+                    if len(points) < threshold: continue
+
+                    # 收集该轨迹的有效投票
+                    votes = []
+                    for p in points:
+                        sp = p.get('species', 'Unknown')
+                        conf = p.get('confidence', 0)
+                        thresh = confidence_settings.get(sp, confidence_settings.get("global", 0.25))
+                        if conf >= thresh:
+                            votes.append(sp)
+
+                    if votes:
+                        # 选出该轨迹的最终物种
+                        most_common = Counter(votes).most_common(1)[0][0]
+                        track_species_list.append(most_common)
+
+                species_names = list(set(track_species_list)) if track_species_list else ['空']
+
             else:
+                # 图片文件处理 (保持原有逻辑)
                 confidences = img_info.get('all_confidences', [])
                 classes = img_info.get('all_classes', [])
                 names_map = img_info.get('names_map', {})
@@ -76,7 +101,6 @@ class DataProcessor:
                 for cls, conf in zip(classes, confidences):
                     species_name = names_map.get(str(int(cls)))
                     if species_name:
-                        # 优先使用物种特定阈值，否则使用全局阈值
                         threshold = confidence_settings.get(species_name, confidence_settings.get("global", 0.25))
                         if conf >= threshold:
                             final_species_counts[species_name] += 1
@@ -114,8 +138,9 @@ class DataProcessor:
 
     @staticmethod
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
-                        file_format: str = 'excel', columns_to_export: Optional[List[str]] = None) -> bool:
-        """将图像信息导出为Excel或CSV文件 (增强了日志和数据清洗功能)"""
+                        file_format: str = 'excel', columns_to_export: Optional[List[str]] = None,
+                        min_frame_ratio: float = 0.0) -> bool:
+        """将图像信息导出为Excel或CSV文件"""
         if not image_info_list:
             logger.warning("没有数据可导出")
             return False
@@ -173,13 +198,51 @@ class DataProcessor:
 
                 species_names_str = info.get('物种名称', '')
 
-                # 根据置信度过滤物种
                 if info.get('最低置信度') == '人工校验':
                     if species_names_str and species_names_str != '空':
                         species_list = [s.strip() for s in species_names_str.split(',')]
                     else:
                         species_list = []
+
+                elif 'tracks' in info:
+                    # === 视频文件处理：投票与过滤 ===
+                    total_frames = info.get('total_frames_processed', 1)
+                    tracks = info.get('tracks', {})
+                    threshold = total_frames * min_frame_ratio
+
+                    final_species_counts = Counter()
+                    valid_confidences = []
+
+                    for t_id, points in tracks.items():
+                        # 1. 帧数过滤
+                        if len(points) < threshold: continue
+
+                        # 2. 收集轨迹内的有效投票
+                        votes = []
+                        for p in points:
+                            sp = p.get('species', 'Unknown')
+                            conf = p.get('confidence', 0)
+                            thresh = confidence_settings.get(sp, confidence_settings.get("global", 0.25))
+
+                            if conf >= thresh:
+                                votes.append(sp)
+                                valid_confidences.append(conf)
+
+                        # 3. 轨迹投票
+                        if votes:
+                            most_common = Counter(votes).most_common(1)[0][0]
+                            final_species_counts[most_common] += 1
+
+                    species_list = sorted(list(final_species_counts.keys()))
+                    if not species_list:
+                        info['物种名称'], info['物种数量'], info['最低置信度'], info['物种类型'] = '空', '空', '', ''
+                    else:
+                        info['物种名称'] = ','.join(species_list)
+                        info['物种数量'] = ','.join([str(final_species_counts[s]) for s in species_list])
+                        info['最低置信度'] = f"{min(valid_confidences):.3f}" if valid_confidences else ''
+
                 else:
+                    # === 图片文件处理 (原有逻辑) ===
                     confidences = info.get('all_confidences', [])
                     classes = info.get('all_classes', [])
                     names_map = info.get('names_map', {})

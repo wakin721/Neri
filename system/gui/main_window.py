@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, Slot
 from PySide6.QtGui import QIcon, QPixmap, QPalette
 
-from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS
+from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.utils import resource_path
 from system.image_processor import ImageProcessor
 from system.metadata_extractor import ImageMetadataExtractor
@@ -117,10 +117,14 @@ class ProcessingThread(QThread):
 
     def run(self):
         import time
+        import math
+        import cv2  # 引入cv2用于获取视频帧数
 
         start_time = time.time()
         excel_data = [] if self.resume_from == 0 else self.controller.excel_data
-        processed_files = self.resume_from
+
+        # 记录已处理的文件数（用于索引文件列表）
+        processed_files_count = self.resume_from
         stopped_manually = False
         earliest_date = None
         temp_photo_dir = self.controller.get_temp_photo_dir()
@@ -130,17 +134,57 @@ class ProcessingThread(QThread):
             conf = self.controller.advanced_page.conf_var
             augment = self.controller.advanced_page.use_augment_var
             agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
+            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1) # 获取跳帧参数，默认为1
 
-            image_files = sorted([f for f in os.listdir(self.file_path)
-                                  if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)])
-            total_files = len(image_files)
+            from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
+            all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
+
+            # 获取文件夹下所有支持的文件
+            all_files_list = sorted([f for f in os.listdir(self.file_path)
+                                     if f.lower().endswith(all_extensions)])
+            total_files_count = len(all_files_list)
+
+            # =========================================================================
+            # [修改] 预计算总工作单元（统计视频帧数 + 图片数量）
+            # =========================================================================
+            self.console_log.emit("=" * 118, None)
+            self.console_log.emit(f"[INFO] 正在预扫描文件以计算总工作量(统计视频帧数)...", "#00ff00")
+            QThread.msleep(10)
+
+            total_work_units = 0  # 总工作量（帧数+图片数）
+            file_unit_map = {}  # 记录每个文件对应的工作量
+
+            for f in all_files_list:
+                f_path = os.path.join(self.file_path, f)
+                units = 1
+                if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
+                    try:
+                        cap = cv2.VideoCapture(f_path)
+                        if cap.isOpened():
+                            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            # 使用math.ceil向上取整计算实际需要处理的帧数 (考虑跳帧)
+                            units = math.ceil(frames / vid_stride) if frames > 0 else 1
+                        cap.release()
+                    except Exception:
+                        units = 1
+
+                file_unit_map[f] = units
+                total_work_units += units
+
+            # 计算断点续传前的已完成工作量
+            processed_work_units = 0
+            for i in range(self.resume_from):
+                processed_work_units += file_unit_map.get(all_files_list[i], 1)
+
+            # 记录本次会话开始时的已完成量，用于计算实时速度
+            start_work_units = processed_work_units
 
             # 初始化进度变量
-            self.current_total_files = total_files
+            self.current_total_files = total_files_count
             self.current_excel_data = excel_data
-            self.current_processed_files = processed_files
+            self.current_processed_files = processed_files_count
 
-            # 输出开始信息 - 立即输出
+            # 输出开始信息
             self.console_log.emit("=" * 118, None)
             QThread.msleep(10)
 
@@ -155,29 +199,28 @@ class ProcessingThread(QThread):
             QThread.msleep(10)
 
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.console_log.emit(f"[INFO] {current_time} 开始处理 {total_files} 个图像文件", "#00ff00")
+            # [修改] 日志显示总帧数/图数
+            self.console_log.emit(
+                f"[INFO] {current_time} 开始处理 {total_files_count} 个文件 (总计 {total_work_units} 帧/图)", "#00ff00")
             QThread.msleep(10)
 
-            # 统一路径格式为反斜杠 - 使用 os.path.normpath
             display_file_path = os.path.normpath(self.file_path)
             display_save_path = os.path.normpath(self.save_path)
 
             self.console_log.emit(f"[INFO] {current_time} 源路径: {display_file_path}", "#aaaaaa")
             QThread.msleep(10)
-
             self.console_log.emit(f"[INFO] {current_time} 保存路径: {display_save_path}", "#aaaaaa")
             QThread.msleep(10)
-
             self.console_log.emit(
-                f"[INFO] {current_time} 参数配置: IOU={iou}, CONF={conf}, FP16={self.use_fp16}, AUGMENT={augment}, AGNOSTIC_NMS={agnostic_nms}",
+                f"[INFO] {current_time} 参数配置: IOU={iou}, CONF={conf}, FP16={self.use_fp16}, AUGMENT={augment}, AGNOSTIC_NMS={agnostic_nms}, VID_STRIDE={vid_stride}",
                 "#aaaaaa")
             QThread.msleep(10)
-
             self.console_log.emit("=" * 118, None)
             QThread.msleep(10)
 
             if self.resume_from > 0:
-                image_files = image_files[self.resume_from:]
+                # 获取本次需要处理的文件列表
+                files_to_process = all_files_list[self.resume_from:]
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.console_log.emit(f"[INFO] {current_time} 从第 {self.resume_from + 1} 个文件继续处理", "#ffff00")
                 QThread.msleep(10)
@@ -185,117 +228,190 @@ class ProcessingThread(QThread):
                     valid_dates = [item['拍摄日期对象'] for item in excel_data if item.get('拍摄日期对象')]
                     if valid_dates:
                         earliest_date = min(valid_dates)
+            else:
+                files_to_process = all_files_list
 
-            # 不再使用 tqdm，直接遍历文件
-            for idx, filename in enumerate(image_files):
+            # 遍历处理文件
+            for idx, filename in enumerate(files_to_process):
                 if self.stop_flag:
                     stopped_manually = True
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(f"[WARN] {current_time} 处理已被用户手动停止", "#ff0000")
                     QThread.msleep(10)
-
-                    # 确保最后一次保存进度
-                    self._save_processing_cache(excel_data, processed_files, total_files)
+                    self._save_processing_cache(excel_data, processed_files_count, total_files_count)
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(
-                        f"[INFO] {current_time} 最终进度已保存: {processed_files}/{total_files}",
+                        f"[INFO] {current_time} 最终进度已保存: {processed_files_count}/{total_files_count}",
                         "#00ff00"
                     )
                     QThread.msleep(10)
                     break
 
-                current_index = processed_files + 1
+                current_file_index_display = processed_files_count + 1
                 img_path = os.path.join(self.file_path, filename)
+                is_video = filename.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)
 
                 # 发射当前处理文件变化信号
-                self.current_file_changed.emit(img_path, current_index, total_files)
-
-                elapsed_time = time.time() - start_time
-                # 只有处理了至少2个文件后才计算速度
-                if processed_files - self.resume_from >= 2 and elapsed_time > 0:
-                    speed = (processed_files - self.resume_from) / elapsed_time
-                    remaining_time = (total_files - current_index) / speed if speed > 0 else float('inf')
-                else:
-                    speed = 0
-                    remaining_time = float('inf')
-
-                # 发送进度更新（包含 elapsed_time 和 remaining_time）
-                self.progress_updated.emit(current_index, total_files, elapsed_time, remaining_time, speed)
+                self.current_file_changed.emit(img_path, current_file_index_display, total_files_count)
 
                 try:
-                    # 提取元数据
-                    image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
+                    if is_video:
+                        # === 视频处理逻辑 ===
+                        image_info = {
+                            '文件名': filename,
+                            '格式': filename.split('.')[-1].lower(),
+                            '拍摄日期': None,
+                            '拍摄时间': None,
+                            '拍摄日期对象': None,
+                            '工作天数': None,
+                            '物种名称': '',
+                            '物种数量': '',
+                            'detect_results': None,
+                            '最低置信度': None,
+                            '独立探测首只': '',
+                            '检测时间': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
 
-                    # 安全获取图像尺寸
-                    img_height, img_width = 0, 0
-                    if img is not None:
-                        if hasattr(img, 'shape') and len(img.shape) >= 2:
-                            img_height, img_width = img.shape[:2]
+                        # [修改] 定义视频状态回调函数，集成进度更新
+                        def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
+                            # 计算当前实际处理的帧数进度
+                            # frame_idx 是当前绝对帧位置(或接近)，需将其转换为处理过的“单元”数
+                            processed_frames_so_far = math.ceil(frame_idx / vid_stride)
+
+                            # 计算当前总进度：之前文件完成的单元 + 当前视频已处理帧数
+                            current_total_done = processed_work_units + processed_frames_so_far
+
+                            elapsed_time = time.time() - start_time
+
+                            # 计算速度 (基于本次会话已处理的单元数)
+                            session_units_done = current_total_done - start_work_units
+
+                            if session_units_done > 0 and elapsed_time > 0:
+                                speed = session_units_done / elapsed_time  # 单位：帧/秒
+                                remaining_time = (total_work_units - current_total_done) / speed
+                            else:
+                                speed = 0
+                                remaining_time = float('inf')
+
+                            # 发送进度更新
+                            self.progress_updated.emit(current_total_done, total_work_units, elapsed_time,
+                                                       remaining_time, speed)
+
+                            # 原始日志逻辑
+                            if counts:
+                                species_str = ", ".join([f"{c} {n}" for n, c in counts.items()])
+                            else:
+                                species_str = "无目标"
+
+                            display_path = img_path.replace('/', '\\')
+                            msg = (f"video {current_file_index_display}/{total_files_count} "
+                                   f"(frame {frame_idx}/{total_frames}) "
+                                   f"{display_path}: {w}x{h} "
+                                   f"{species_str}, {speed_ms:.1f}ms")
+                            self.console_log.emit(msg, None)
+
+                        video_output_dir = os.path.join(self.save_path, "video_results")
+                        detection_start = time.time()
+
+                        # 调用检测方法并传入回调
+                        video_result = self.controller.image_processor.detect_video_species(
+                            img_path,
+                            video_output_dir,
+                            bool(self.use_fp16),
+                            iou, conf, augment, agnostic_nms,
+                            status_callback=video_log_callback,
+                            vid_stride=vid_stride,  # 传入跳帧参数
+                            temp_video_dir=temp_photo_dir
+                        )
+
+                        detection_time = (time.time() - detection_start) * 1000
+
+                        if video_result.get('status') == 'success':
+                            # 解析视频结果
+                            json_path = video_result.get('json_path')
+                            if json_path and os.path.exists(json_path):
+                                try:
+                                    with open(json_path, 'r', encoding='utf-8') as f:
+                                        v_data = json.load(f)
+                                    tracks = v_data.get('tracks', {})
+                                    v_counts = {}
+                                    for t_list in tracks.values():
+                                        if t_list:
+                                            s_name = t_list[0].get('species', 'Unknown')
+                                            v_counts[s_name] = v_counts.get(s_name, 0) + 1
+
+                                    if v_counts:
+                                        image_info['物种名称'] = ','.join(v_counts.keys())
+                                        image_info['物种数量'] = ','.join(map(str, v_counts.values()))
+                                    else:
+                                        image_info['物种名称'] = '空'
+                                        image_info['物种数量'] = '空'
+                                except Exception as e:
+                                    logger.error(f"解析视频结果JSON失败: {e}")
                         else:
-                            try:
-                                with Image.open(img_path) as pil_img:
-                                    img_width, img_height = pil_img.size
-                            except Exception as e:
-                                logger.warning(f"无法获取图像尺寸 {filename}: {e}")
+                            image_info['错误'] = video_result.get('error', 'Video processing failed')
 
-                    if img_height == 0 or img_width == 0:
-                        raise ValueError(f"无法获取有效的图像尺寸")
+                        # 输出视频处理完成日志
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        display_img_path = os.path.normpath(img_path)
+                        log_message = (
+                            f"[INFO] {current_time} {display_img_path} [视频] | "
+                            f"检测结果:[{image_info.get('物种名称', '未知')}] | "
+                            f"耗时:{detection_time:.1f}ms"
+                        )
+                        self.console_log.emit(log_message, "#00ff00")
+                        QThread.msleep(5)
 
-                    # 执行物种检测
-                    detection_start = time.time()
-                    species_info = self.controller.image_processor.detect_species(
-                        img_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
-                    )
-                    detection_time = (time.time() - detection_start) * 1000
+                        excel_data.append(image_info)
 
-                    species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # [修改] 视频处理完成后，累加该视频的总帧数到已完成工作量
+                        processed_work_units += file_unit_map.get(filename, 1)
 
-                    # 获取检测结果
-                    detect_results = species_info.get('detect_results')
+                    else:
+                        # === 图片处理逻辑 ===
+                        # 提取元数据
+                        image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
 
-                    # 获取速度信息
-                    speed_info = {}
-                    preprocess_time = 0
-                    inference_time = 0
-                    postprocess_time = 0
+                        img_height, img_width = 0, 0
+                        if img is not None:
+                            if hasattr(img, 'shape') and len(img.shape) >= 2:
+                                img_height, img_width = img.shape[:2]
+                            else:
+                                try:
+                                    with Image.open(img_path) as pil_img:
+                                        img_width, img_height = pil_img.size
+                                except Exception as e:
+                                    logger.warning(f"无法获取图像尺寸 {filename}: {e}")
 
-                    if detect_results and len(detect_results) > 0:
-                        # 从 YOLO Results 对象中获取 speed 信息
-                        first_result = detect_results[0]
-                        if hasattr(first_result, 'speed') and isinstance(first_result.speed, dict):
-                            speed_info = first_result.speed
-                            preprocess_time = speed_info.get('preprocess', 0)
-                            inference_time = speed_info.get('inference', 0)
-                            postprocess_time = speed_info.get('postprocess', 0)
+                        if img_height == 0 or img_width == 0:
+                            raise ValueError(f"无法获取有效的图像尺寸")
 
-                    # 获取当前时间
-                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        detection_start = time.time()
+                        species_info = self.controller.image_processor.detect_species(
+                            img_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
+                        )
+                        detection_time = (time.time() - detection_start) * 1000
+                        species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # 统一路径格式为反斜杠 - 使用 os.path.normpath
-                    display_img_path = os.path.normpath(img_path)
+                        detect_results = species_info.get('detect_results')
 
-                    # 构建检测结果信息并立即输出
-                    if detect_results and len(detect_results) > 0:
-                        # 获取翻译字典
+                        # 获取翻译字典并统计
                         translation_dict = self.controller.image_processor.translation_dict
-
-                        # 统计每个物种的数量（使用翻译后的名称）
                         species_counts = {}
-                        for result in detect_results:
-                            if hasattr(result, 'boxes') and result.boxes is not None:
-                                for box in result.boxes:
-                                    cls_id = int(box.cls.item())
-                                    # 获取英文名称
-                                    english_name = result.names.get(cls_id, 'Unknown')
-                                    # 翻译为中文（如果有）
-                                    translated_name = translation_dict.get(english_name, english_name)
-                                    species_counts[translated_name] = species_counts.get(translated_name, 0) + 1
+                        if detect_results:
+                            for result in detect_results:
+                                if hasattr(result, 'boxes') and result.boxes is not None:
+                                    for box in result.boxes:
+                                        cls_id = int(box.cls.item())
+                                        english_name = result.names.get(cls_id, 'Unknown')
+                                        translated_name = translation_dict.get(english_name, english_name)
+                                        species_counts[translated_name] = species_counts.get(translated_name, 0) + 1
 
-                        # 构建检测摘要
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        display_img_path = os.path.normpath(img_path)
+
                         if species_counts:
                             detection_summary = ', '.join([f"{count}x{name}" for name, count in species_counts.items()])
-
-                            # 输出统一格式的日志 - 立即输出
                             log_message = (
                                 f"[INFO] {current_time} {display_img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
@@ -303,20 +419,7 @@ class ProcessingThread(QThread):
                                 f"检测耗时:{detection_time:.1f}ms"
                             )
                             self.console_log.emit(log_message, "#00ff00")
-                            QThread.msleep(5)
-
-                            # 如果有速度信息，输出详细速度 - 立即输出
-                            if any([preprocess_time, inference_time, postprocess_time]):
-                                speed_log = (
-                                    f"[INFO] {current_time} 处理详情: "
-                                    f"预处理:{preprocess_time:.1f}ms | "
-                                    f"推理:{inference_time:.1f}ms | "
-                                    f"后处理:{postprocess_time:.1f}ms"
-                                )
-                                self.console_log.emit(speed_log, "#888888")
-                                QThread.msleep(5)
                         else:
-                            # 有检测结果对象但没有检测到物种 - 立即输出
                             log_message = (
                                 f"[INFO] {current_time} {display_img_path} | "
                                 f"尺寸:{img_height}x{img_width} | "
@@ -324,9 +427,8 @@ class ProcessingThread(QThread):
                                 f"检测耗时:{detection_time:.1f}ms"
                             )
                             self.console_log.emit(log_message, "#ffaa00")
-                            QThread.msleep(5)
+                        QThread.msleep(5)
 
-                        # 保存检测信息
                         self.controller.image_processor.save_detection_info_json(
                             detect_results, filename, species_info, temp_photo_dir
                         )
@@ -338,27 +440,32 @@ class ProcessingThread(QThread):
                             'filename': filename
                         }
                         self.current_file_preview.emit(img_path, complete_detection_info)
-                    else:
-                        # 无检测结果 - 立即输出
-                        log_message = (
-                            f"[INFO] {current_time} {display_img_path} | "
-                            f"尺寸:{img_height}x{img_width} | "
-                            f"检测结果:[无目标] | "
-                            f"检测耗时:{detection_time:.1f}ms"
-                        )
-                        self.console_log.emit(log_message, "#ffaa00")
-                        QThread.msleep(5)
 
-                    # 从 species_info 中删除 detect_results，避免重复
-                    if 'detect_results' in species_info:
-                        del species_info['detect_results']
+                        if 'detect_results' in species_info:
+                            del species_info['detect_results']
 
-                    image_info.update(species_info)
-                    excel_data.append(image_info)
+                        image_info.update(species_info)
+                        excel_data.append(image_info)
+
+                        # [修改] 图片处理完成后，工作量 +1
+                        processed_work_units += 1
+
+                        # [修改] 更新进度条 (图片)
+                        elapsed_time = time.time() - start_time
+                        session_units_done = processed_work_units - start_work_units
+
+                        if session_units_done > 0 and elapsed_time > 0:
+                            speed = session_units_done / elapsed_time  # 图/秒
+                            remaining_time = (total_work_units - processed_work_units) / speed
+                        else:
+                            speed = 0
+                            remaining_time = float('inf')
+
+                        self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time, remaining_time,
+                                                   speed)
 
                 except Exception as e:
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    # 统一路径格式为反斜杠 - 使用 os.path.normpath
                     display_img_path = os.path.normpath(img_path)
                     error_message = (
                         f"[WARN] {current_time} {display_img_path} | "
@@ -369,31 +476,30 @@ class ProcessingThread(QThread):
                     self.console_log.emit(error_message, "#ff0000")
                     QThread.msleep(5)
 
-                    # 即使出错也要记录基本信息
                     try:
-                        image_info = {
-                            '文件名': filename,
-                            '错误': str(e)
-                        }
+                        image_info = {'文件名': filename, '错误': str(e)}
                         excel_data.append(image_info)
                     except:
                         pass
 
-                processed_files += 1
+                    # 出错时也要更新进度，防止卡死
+                    if is_video:
+                        processed_work_units += file_unit_map.get(filename, 1)
+                    else:
+                        processed_work_units += 1
 
-                # 更新进度变量（用于停止时保存）
-                self.current_processed_files = processed_files
+                processed_files_count += 1
+                self.current_processed_files = processed_files_count
                 self.current_excel_data = excel_data
 
-                # 每处理10个文件保存一次缓存
-                if processed_files % 10 == 0:
-                    self._save_processing_cache(excel_data, processed_files, total_files)
+                if processed_files_count % 10 == 0:
+                    self._save_processing_cache(excel_data, processed_files_count, total_files_count)
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    self.console_log.emit(f"[INFO] {current_time} 已保存进度缓存 ({processed_files}/{total_files})",
-                                          "#888888")
+                    self.console_log.emit(
+                        f"[INFO] {current_time} 已保存进度缓存 ({processed_files_count}/{total_files_count} 文件)",
+                        "#888888")
                     QThread.msleep(5)
 
-                # 清理内存
                 try:
                     del img_path, image_info, img, species_info, detect_results
                 except NameError:
@@ -406,37 +512,34 @@ class ProcessingThread(QThread):
                 QThread.msleep(10)
 
                 total_time = time.time() - start_time
-                # 修改：使用实际处理的文件数量计算平均速度
-                actual_processed = processed_files - self.resume_from
-                avg_speed = actual_processed / total_time if total_time > 0 else 0
+                # [修改] 使用工作单元（帧/图）来计算最终平均速度
+                actual_processed_units = processed_work_units - start_work_units
+                avg_speed = actual_processed_units / total_time if total_time > 0 else 0
+
                 self.console_log.emit(
                     f"[INFO] {current_time} 所有文件处理完成! | "
-                    f"总计:{total_files}张 | "
-                    f"本次处理:{actual_processed}张 | "
+                    f"总计:{total_files_count}个文件 ({total_work_units} 单元) | "
                     f"总耗时:{total_time:.2f}秒 | "
-                    f"平均速度:{avg_speed:.2f}张/秒",
+                    f"平均速度:{avg_speed:.2f} 帧(图)/秒",
                     "#00ff00"
                 )
                 QThread.msleep(10)
 
-                self.progress_updated.emit(total_files, total_files, total_time, 0, avg_speed)
+                self.progress_updated.emit(total_work_units, total_work_units, total_time, 0, avg_speed)
                 self.controller.excel_data = excel_data
 
-                # 添加日期格式统一处理
+                # 日期格式化与数据处理
                 for item in excel_data:
                     if '拍摄日期对象' in item:
                         date_obj = item['拍摄日期对象']
-                        # 如果是字符串，尝试转换为datetime对象
                         if isinstance(date_obj, str):
                             try:
                                 item['拍摄日期对象'] = datetime.fromisoformat(date_obj)
                             except (ValueError, AttributeError):
                                 try:
-                                    # 尝试其他常见格式
                                     item['拍摄日期对象'] = datetime.strptime(date_obj, "%Y-%m-%d %H:%M:%S")
                                 except (ValueError, AttributeError):
                                     item['拍摄日期对象'] = None
-                        # 如果不是datetime对象也不是字符串，设为None
                         elif not isinstance(date_obj, datetime):
                             item['拍摄日期对象'] = None
 
@@ -590,16 +693,32 @@ class ObjectDetectionGUI(QMainWindow):
         y = (screen.height() - window_rect.height()) // 2
         self.move(x, y)
 
-        # 设置图标
-        try:
-            ico_path = resource_path("res/ico.ico")
-            self.setWindowIcon(QIcon(ico_path))
-            # --- 为Windows设置任务栏图标 ---
-            if platform.system() == "Windows":
-                # 使用APP_TITLE和APP_VERSION创建一个更独特的ID
+        # --- 关键修改 1: 必须最先设置 AppID ---
+        # 这告诉 Windows 这是一个独立的程序，不应该和 python.exe 混在一起
+        if platform.system() == "Windows":
+            try:
+                # 如果修改代码后图标还不更新，尝试在下方字符串末尾加个 ".v2" 强制刷新 Windows 缓存
                 myappid = f'mycompany.{APP_TITLE}.{APP_VERSION}'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            # ---------------------------------
+            except Exception as e:
+                logger.warning(f"设置 AppID 失败: {e}")
+
+        # --- 关键修改 2: 同时设置 应用程序图标 和 窗口图标 ---
+        try:
+            ico_path = resource_path("res/ico.ico")
+
+            # 增加文件存在性检查，确保路径正确
+            if os.path.exists(ico_path):
+                icon = QIcon(ico_path)
+
+                # A. 设置主窗口图标 (界面左上角)
+                self.setWindowIcon(icon)
+
+                # B. ！！！设置应用程序全局图标 (任务栏图标)！！！
+                QApplication.instance().setWindowIcon(icon)
+            else:
+                logger.warning(f"图标文件未找到: {ico_path}")
+
         except Exception as e:
             logger.warning(f"无法加载窗口图标: {e}")
 
@@ -611,7 +730,7 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 尝试从设置中加载模型
         if saved_model_name:
-            potential_path = os.path.join(res_dir, saved_model_name)
+            potential_path = os.path.join(res_dir, "model", saved_model_name)
             if os.path.exists(potential_path):
                 model_path = potential_path
                 logger.info(f"从设置加载模型: {saved_model_name}")
@@ -633,18 +752,18 @@ class ObjectDetectionGUI(QMainWindow):
             self.image_processor.model = None
             self.image_processor.model_path = None
             self.model_var = ""
-            logger.error("在 res 目录中未找到任何有效的模型文件 (.pt)。")
+            logger.error("在 res/model 目录中未找到任何有效的模型文件 (.pt)。")
 
     def _find_model_file(self) -> str:
         """查找模型文件"""
         try:
-            res_dir = resource_path("res")
-            if not os.path.exists(res_dir) or not os.path.isdir(res_dir):
+            model_dir = os.path.join(resource_path("res") ,"model")
+            if not os.path.exists(model_dir) or not os.path.isdir(model_dir):
                 return None
-            model_files = [f for f in os.listdir(res_dir) if f.lower().endswith('.pt')]
+            model_files = [f for f in os.listdir(model_dir) if f.lower().endswith('.pt')]
             if not model_files:
                 return None
-            return os.path.join(res_dir, model_files[0])
+            return os.path.join(model_dir, model_files[0])
         except Exception as e:
             logger.error(f"查找模型文件时出错: {e}")
             return None
@@ -740,7 +859,7 @@ class ObjectDetectionGUI(QMainWindow):
         if not self.image_processor.model:
             QMessageBox.critical(
                 self, "错误",
-                "未找到有效的模型文件(.pt)。请在res目录中放入至少一个模型文件。"
+                "未找到有效的模型文件(.pt)。请在res/model目录中放入至少一个模型文件。"
             )
             if hasattr(self.start_page, 'set_processing_enabled'):
                 self.start_page.set_processing_enabled(False)

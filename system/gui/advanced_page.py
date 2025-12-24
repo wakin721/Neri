@@ -76,6 +76,8 @@ class AdvancedPage(QWidget):
         self.use_fp16_var = self.controller.cuda_available if hasattr(controller, 'cuda_available') else False
         self.use_augment_var = True
         self.use_agnostic_nms_var = True
+        self.vid_stride_var = 1  # 默认值为1 (处理每一帧)
+        self.min_frame_ratio_var = 0.0  # 默认 0%
         self.theme_var = "自动"
         self.cache_size_var = "正在计算..."
         self.update_channel_var = "稳定版 (Release)"
@@ -139,6 +141,12 @@ class AdvancedPage(QWidget):
         self.model_params_layout = QVBoxLayout(model_params_group)
         self._create_model_params_content()
 
+        # 视频检测设置
+        video_settings_group = ModernGroupBox("视频检测设置")
+        content_layout.addWidget(video_settings_group)
+        self.video_settings_layout = QVBoxLayout(video_settings_group)
+        self._create_video_settings_content()
+
         # 环境维护
         env_maintenance_group = ModernGroupBox("环境维护")
         content_layout.addWidget(env_maintenance_group)
@@ -159,6 +167,46 @@ class AdvancedPage(QWidget):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(12)
+
+        # 模型管理面板
+        self.model_panel = CollapsiblePanel(
+            title="模型管理",
+            subtitle="管理用于识别的模型",
+            icon="🔧"
+        )
+
+        model_widget = QWidget()
+        model_layout = QVBoxLayout(model_widget)
+        model_layout.setSpacing(15)
+
+        # 选择模型
+        select_model_label = QLabel("选择可用模型")
+        select_model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        model_layout.addWidget(select_model_label)
+
+        self.model_combo = ModernComboBox()
+        self.components_to_update.append(self.model_combo)
+        model_layout.addWidget(self.model_combo)
+
+        # 状态和按钮
+        model_bottom_frame = QFrame()
+        model_bottom_layout = QHBoxLayout(model_bottom_frame)
+
+        self.model_status_label = QLabel(self.model_status_var)
+        self.model_status_label.setFont(QFont("Segoe UI", 10))
+
+        refresh_model_button = RoundedButton("刷新列表")
+        refresh_model_button.setMinimumWidth(80)
+        refresh_model_button.clicked.connect(self._refresh_model_list)
+
+        model_bottom_layout.addWidget(self.model_status_label)
+        model_bottom_layout.addStretch()
+        model_bottom_layout.addWidget(refresh_model_button)
+
+        model_layout.addWidget(model_bottom_frame)
+
+        self.model_panel.add_content_widget(model_widget)
+        content_layout.addWidget(self.model_panel)
 
         # 检测阈值设置面板
         self.threshold_panel = CollapsiblePanel(
@@ -297,6 +345,130 @@ class AdvancedPage(QWidget):
         content_layout.addWidget(button_frame)
         self.model_params_layout.addWidget(content_widget)
 
+    def _create_video_settings_content(self):
+        """创建视频检测设置内容"""
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(12)
+
+        # 跳帧处理面板
+        self.frame_skip_panel = CollapsiblePanel(
+            title="跳帧处理",
+            subtitle="设置视频检测时的跳帧间隔 (vid_stride)",
+            icon="⏩"
+        )
+
+        skip_widget = QWidget()
+        skip_layout = QVBoxLayout(skip_widget)
+        skip_layout.setSpacing(15)
+
+        # 间隔设置
+        stride_frame = QFrame()
+        stride_layout = QVBoxLayout(stride_frame)
+
+        stride_label_frame = QFrame()
+        stride_label_layout = QHBoxLayout(stride_label_frame)
+        stride_label_layout.setContentsMargins(0, 0, 0, 0)
+
+        stride_title = QLabel("帧间隔 (Frame Stride)")
+        stride_title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.stride_label = QLabel(str(self.vid_stride_var))
+        self.stride_label.setFont(QFont("Segoe UI", 10))
+
+        stride_label_layout.addWidget(stride_title)
+        stride_label_layout.addStretch()
+        stride_label_layout.addWidget(self.stride_label)
+
+        # 创建滑块，范围设为 1-30
+        self.stride_slider = ModernSlider()
+        self.stride_slider.setRange(1, 30)
+        self.stride_slider.setValue(self.vid_stride_var)
+        self.components_to_update.append(self.stride_slider)
+
+        # 连接信号
+        self.stride_slider.valueChanged.connect(self._update_stride_label)
+        self.stride_slider.valueChanged.connect(self._on_setting_changed)
+
+        stride_layout.addWidget(stride_label_frame)
+        stride_layout.addWidget(self.stride_slider)
+
+        # 说明文本
+        stride_info = QLabel(
+            "值为 1 表示处理每一帧；值为 5 表示每 5 帧处理一次。增加此值可显著提高长视频的处理速度，但可能会降低时间精度。")
+        stride_info.setStyleSheet("color: #888888; font-size: 12px;")
+        stride_info.setWordWrap(True)
+        stride_layout.addWidget(stride_info)
+
+        skip_layout.addWidget(stride_frame)
+
+        self.frame_skip_panel.add_content_widget(skip_widget)
+        content_layout.addWidget(self.frame_skip_panel)
+
+        self.video_settings_layout.addWidget(content_widget)
+
+        self.frame_ratio_panel = CollapsiblePanel(
+            title="检测过滤",
+            subtitle="设置检测到的最低帧数比例",
+            icon="🛡️"
+        )
+
+        ratio_widget = QWidget()
+        ratio_layout = QVBoxLayout(ratio_widget)
+        ratio_layout.setSpacing(15)
+
+        # 比例设置
+        ratio_frame = QFrame()
+        ratio_frame_layout = QVBoxLayout(ratio_frame)
+
+        ratio_label_frame = QFrame()
+        ratio_label_layout = QHBoxLayout(ratio_label_frame)
+        ratio_label_layout.setContentsMargins(0, 0, 0, 0)
+
+        ratio_title = QLabel("最低帧数比例 (Minimum Frame Ratio)")
+        ratio_title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.ratio_label = QLabel(f"{int(self.min_frame_ratio_var * 100)}%")
+        self.ratio_label.setFont(QFont("Segoe UI", 10))
+
+        ratio_label_layout.addWidget(ratio_title)
+        ratio_label_layout.addStretch()
+        ratio_label_layout.addWidget(self.ratio_label)
+
+        # 创建滑块，范围 0-30 (%)
+        self.ratio_slider = ModernSlider()
+        self.ratio_slider.setRange(0, 30)
+        self.ratio_slider.setValue(int(self.min_frame_ratio_var * 100))
+        self.ratio_label.setText(f"{int(self.min_frame_ratio_var * 100)}%")
+        self.components_to_update.append(self.ratio_slider)
+
+        # 连接信号
+        self.ratio_slider.valueChanged.connect(self._update_ratio_label)
+        self.ratio_slider.valueChanged.connect(self._on_setting_changed)
+
+        ratio_frame_layout.addWidget(ratio_label_frame)
+        ratio_frame_layout.addWidget(self.ratio_slider)
+
+        # 说明文本
+        ratio_info = QLabel(
+            "如果某个目标（Track ID）在视频中出现的总帧数占视频总帧数的比例低于此值，"
+            "则该目标将被视为误检或无效目标，不会在结果中显示。")
+        ratio_info.setStyleSheet("color: #888888; font-size: 12px;")
+        ratio_info.setWordWrap(True)
+        ratio_frame_layout.addWidget(ratio_info)
+
+        ratio_layout.addWidget(ratio_frame)
+        self.frame_ratio_panel.add_content_widget(ratio_widget)
+        content_layout.addWidget(self.frame_ratio_panel)
+
+    def _update_stride_label(self, value):
+        """更新跳帧标签"""
+        self.vid_stride_var = value
+        self.stride_label.setText(str(value))
+
+    def _update_ratio_label(self, value):
+        """更新比例标签"""
+        self.min_frame_ratio_var = value / 100.0
+        self.ratio_label.setText(f"{value}%")
 
     def _create_env_maintenance_content(self):
         """创建环境维护标签页内容"""
@@ -324,10 +496,10 @@ class AdvancedPage(QWidget):
 
         self.pytorch_version_combo = ModernComboBox()
         versions = [
-            "2.9.0 (CUDA 13.0)",
-            "2.9.0 (CUDA 12.8)",
-            "2.9.0 (CUDA 12.6)",
-            "2.9.0 (CPU Only)",
+            "2.9.1 (CUDA 13.0)",
+            "2.9.1 (CUDA 12.8)",
+            "2.9.1 (CUDA 12.6)",
+            "2.9.1 (CPU Only)",
             "2.7.1 (CUDA 12.8)",
             "2.7.1 (CUDA 12.6)",
             "2.7.1 (CUDA 11.8)",
@@ -363,46 +535,6 @@ class AdvancedPage(QWidget):
 
         self.pytorch_panel.add_content_widget(pytorch_widget)
         content_layout.addWidget(self.pytorch_panel)
-
-        # 模型管理面板
-        self.model_panel = CollapsiblePanel(
-            title="模型管理",
-            subtitle="管理用于识别的模型",
-            icon="🔧"
-        )
-
-        model_widget = QWidget()
-        model_layout = QVBoxLayout(model_widget)
-        model_layout.setSpacing(15)
-
-        # 选择模型
-        select_model_label = QLabel("选择可用模型")
-        select_model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-        model_layout.addWidget(select_model_label)
-
-        self.model_combo = ModernComboBox()
-        self.components_to_update.append(self.model_combo)
-        model_layout.addWidget(self.model_combo)
-
-        # 状态和按钮
-        model_bottom_frame = QFrame()
-        model_bottom_layout = QHBoxLayout(model_bottom_frame)
-
-        self.model_status_label = QLabel(self.model_status_var)
-        self.model_status_label.setFont(QFont("Segoe UI", 10))
-
-        refresh_model_button = RoundedButton("刷新列表")
-        refresh_model_button.setMinimumWidth(80)
-        refresh_model_button.clicked.connect(self._refresh_model_list)
-
-        model_bottom_layout.addWidget(self.model_status_label)
-        model_bottom_layout.addStretch()
-        model_bottom_layout.addWidget(refresh_model_button)
-
-        model_layout.addWidget(model_bottom_frame)
-
-        self.model_panel.add_content_widget(model_widget)
-        content_layout.addWidget(self.model_panel)
 
         # Python包管理面板
         self.python_panel = CollapsiblePanel(
@@ -723,7 +855,7 @@ class AdvancedPage(QWidget):
             self.model_status_label.setText(f"当前使用: {model_name}")
             return
 
-        model_path = resource_path(os.path.join("res", model_name))
+        model_path = resource_path(os.path.join("res", "model", model_name))
         if not os.path.exists(model_path):
             logger.error(f"模型文件不存在: {model_path}")
             self.model_status_label.setText("模型文件不存在")
@@ -816,6 +948,10 @@ class AdvancedPage(QWidget):
 
         self._update_iou_label(int(self.iou_var * 100))
         self._update_conf_label(int(self.conf_var * 100))
+
+        self.min_frame_ratio_var = 0.0
+        self.ratio_slider.setValue(0)
+        self.ratio_label.setText("0%")
 
         QMessageBox.information(self, "参数重置", "已重置所有参数到默认值")
 
@@ -952,7 +1088,7 @@ class AdvancedPage(QWidget):
 
     def _refresh_model_list(self):
         """刷新可用模型列表"""
-        res_dir = resource_path("res")
+        model_dir = os.path.join(resource_path("res") ,"model")
         try:
             # 保存当前选择
             current_selection = self.model_combo.currentText()
@@ -969,8 +1105,8 @@ class AdvancedPage(QWidget):
             self.model_combo.clear()
             self.model_combo.setToolTip(f"当前使用的模型: {current_model}")
 
-            if os.path.exists(res_dir):
-                model_files = [f for f in os.listdir(res_dir) if f.lower().endswith('.pt')]
+            if os.path.exists(model_dir):
+                model_files = [f for f in os.listdir(model_dir) if f.lower().endswith('.pt')]
                 if model_files:
                     model_files.sort()
                     self.model_combo.addItems(model_files)
@@ -1440,6 +1576,8 @@ class AdvancedPage(QWidget):
             "use_fp16": self.get_use_fp16(),
             "use_augment": self.augment_switch_row.isChecked(),
             "use_agnostic_nms": self.agnostic_switch_row.isChecked(),
+            "vid_stride": self.vid_stride_var,
+            "min_frame_ratio": self.min_frame_ratio_var,
             "theme": self.get_theme_selection(),
             "auto_sort": self.auto_sort_switch_row.isChecked(),
             "update_channel": self.update_channel_combo.currentText(),  # 直接从下拉框获取当前值
@@ -1474,6 +1612,16 @@ class AdvancedPage(QWidget):
         if "use_agnostic_nms" in settings:
             self.use_agnostic_nms_var = settings["use_agnostic_nms"]
             self.agnostic_switch_row.setChecked(self.use_agnostic_nms_var)
+
+        if "vid_stride" in settings:
+            self.vid_stride_var = int(settings["vid_stride"])
+            self.stride_slider.setValue(self.vid_stride_var)
+            self.stride_label.setText(str(self.vid_stride_var))
+
+        if "min_frame_ratio" in settings:
+            self.min_frame_ratio_var = settings["min_frame_ratio"]
+            self.ratio_slider.setValue(int(self.min_frame_ratio_var * 100))
+            self.ratio_label.setText(f"{int(self.min_frame_ratio_var * 100)}%")
 
         # 加载主题设置
         if "theme" in settings:
@@ -1557,7 +1705,7 @@ class AdvancedPage(QWidget):
 
         # 更新所有可折叠面板
         for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
-                      self.pytorch_panel, self.model_panel, self.python_panel,
+                      self.frame_skip_panel, self.frame_ratio_panel, self.pytorch_panel, self.model_panel, self.python_panel,
                       self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel,
                       self.export_settings_panel]:
             if hasattr(panel, 'update_theme'):
