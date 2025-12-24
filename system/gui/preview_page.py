@@ -437,6 +437,8 @@ class PreviewPage(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._redraw_image_on_resize)
 
+        self.show_detection_checkbox.toggled.connect(lambda: self.settings_changed.emit())
+
 
     def _apply_theme(self):
         """应用当前的主题样式"""
@@ -1441,16 +1443,42 @@ class PreviewPage(QWidget):
             """
 
     def get_settings(self):
-        """获取设置"""
-        return {
-            "preview_conf": self.preview_conf_var,
+        """获取当前页面设置"""
+        # 保留原有逻辑，添加 show_detection 字段
+        settings = {
+            "preview_conf": self.preview_conf_slider.value(),
+            # 保存“显示检测结果”按钮的状态
+            "show_detection": self.show_detection_checkbox.isChecked()
         }
+        return settings
 
     def load_settings(self, settings):
-        """加载设置"""
+        """加载设置到UI (修正版)"""
+        if not settings:
+            return
+
         if "preview_conf" in settings:
             self.preview_conf_var = settings["preview_conf"]
+            # 更新滑块，这通常会触发信号自动更新Label，但为了保险手动更新一次
             self.preview_conf_slider.setValue(int(self.preview_conf_var * 100))
+
+            # 使用正确的属性名 preview_conf_label
+            if hasattr(self, 'preview_conf_label'):
+                self.preview_conf_label.setText(f"{self.preview_conf_var:.2f}")
+
+        # [新增] 加载“显示检测结果”按钮的状态
+        if "show_detection" in settings:
+            should_show = settings["show_detection"]
+
+            # 关键：使用 blockSignals(True) 防止在软件刚启动且无图片时，
+            # setChecked 触发 toggle_detection_preview 逻辑，导致按钮因无图片而被强制重置为 False。
+            self.show_detection_checkbox.blockSignals(True)
+            self.show_detection_checkbox.setChecked(should_show)
+            self.show_detection_checkbox.blockSignals(False)
+
+            # 如果当前恰好已有图片（例如热加载设置），则手动刷新一次显示状态
+            if getattr(self, 'current_image_path', None):
+                self.toggle_detection_preview(should_show)
 
     def update_theme(self):
         """更新主题（已修复）"""

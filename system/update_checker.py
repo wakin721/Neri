@@ -28,7 +28,6 @@ def get_icon_path():
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_dir, "res", "ico.ico")
 
-
 def parse_version(version_string):
     """
     解析版本字符串，返回用于比较的元组。
@@ -63,18 +62,15 @@ def parse_version(version_string):
         # Fallback for non-standard version strings
         return (0,)
 
-
 def compare_versions(current_version, remote_version):
     """比较两个版本，如果远程版本更新则返回True。"""
     current_tuple = parse_version(current_version)
     remote_tuple = parse_version(remote_version)
     return remote_tuple > current_tuple
 
-
 def get_latest_version_info(channel='stable'):
     """
     通过GitHub API获取最新的版本信息。
-    channel: 'stable' 获取最新的正式版, 'preview' 获取最新的版本(包括预发布版)。
     """
     api_url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases"
     headers = {"Accept": "application/vnd.github.v3+json"}
@@ -102,16 +98,21 @@ def get_latest_version_info(channel='stable'):
             return None
 
         tag_name = latest_release.get('tag_name', 'v0.0.0')
+
+        # [关键修复] 处理 body 为 None 的情况 (GitHub API 返回 null)
+        notes = latest_release.get('body')
+        if notes is None:
+            notes = '无更新说明。'
+
         return {
             'version': tag_name.lstrip('v'),
-            'notes': latest_release.get('body', '无更新说明。'),
+            'notes': notes,
             'url': latest_release.get('zipball_url')
         }
 
     except requests.RequestException as e:
         print(f"从GitHub获取版本信息失败: {e}")
         return None
-
 
 def check_for_updates(parent, silent=False, channel='preview'):
     """
@@ -129,25 +130,34 @@ def check_for_updates(parent, silent=False, channel='preview'):
 
         remote_version = latest_info['version']
 
+        # 如果发现新版本
         if compare_versions(APP_VERSION, remote_version):
             if parent:
-                # 更新侧边栏和状态栏
-                QMetaObject.invokeMethod(parent, "show_update_notification_on_sidebar", Qt.QueuedConnection)
+                # 仅更新状态栏提示（可选）
                 QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
                                          Q_ARG(str, f"发现新版本：{remote_version}"))
 
-            if not silent and parent:
+            # [关键逻辑] 发现新版本时，无论 silent 是 True 还是 False，都必须弹窗
+            # 只要 parent 存在，就触发更新提示
+            if parent:
                 download_url = latest_info.get('url')
-                # 弹窗提示更新
+                # 获取 release notes，并确保它是字符串
+                release_notes = latest_info.get('notes') or '无更新说明。'
+                release_notes = str(release_notes)
+
+                # [关键修复] 传递 3 个参数 (version, url, notes)
+                # 这里的参数类型必须与 main_window.py 中 Slot 的定义完全匹配
                 QMetaObject.invokeMethod(
                     parent,
                     "prompt_for_update",
                     Qt.QueuedConnection,
                     Q_ARG(str, remote_version),
-                    Q_ARG(str, download_url)
+                    Q_ARG(str, download_url),
+                    Q_ARG(str, release_notes)
                 )
         else:
             # 未发现新版本
+            # 只有在非静默模式下（手动检查）才提示“已经是最新”
             if not silent and parent:
                 QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
                                          Q_ARG(str, "已经是最新版本"))
@@ -157,7 +167,6 @@ def check_for_updates(parent, silent=False, channel='preview'):
             _show_messagebox(parent, "更新错误", f"检查更新失败: {e}", "error")
             QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
                                      Q_ARG(str, "检查更新失败，请检查网络连接"))
-
 
 def start_download_thread(parent, download_url):
     """启动下载更新的线程。"""

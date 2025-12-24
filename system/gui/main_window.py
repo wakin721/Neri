@@ -12,10 +12,11 @@ import shutil
 from PIL import Image
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QMessageBox, QFileDialog, QApplication, QStackedWidget
+    QMessageBox, QFileDialog, QApplication, QStackedWidget,
+    QDialog, QLabel, QTextBrowser, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, Slot
-from PySide6.QtGui import QIcon, QPixmap, QPalette
+from PySide6.QtGui import QIcon, QPixmap, QPalette, QTextDocument
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.utils import resource_path
@@ -39,29 +40,6 @@ if platform.system() == "Windows":
     import ctypes
 
 logger = logging.getLogger(__name__)
-
-
-class UpdateCheckThread(QThread):
-    """更新检查线程"""
-    update_found = Signal(str)  # 发现更新信号
-    check_complete = Signal(bool)  # 检查完成信号
-
-    def __init__(self, channel='stable', silent=True):
-        super().__init__()
-        self.channel = channel
-        self.silent = silent
-
-    def run(self):
-        try:
-            latest_info = get_latest_version_info(self.channel)
-            if latest_info:
-                remote_version = latest_info['version']
-                if compare_versions(APP_VERSION, remote_version):
-                    self.update_found.emit(remote_version)
-            self.check_complete.emit(True)
-        except Exception as e:
-            logger.error(f"检查更新失败: {e}")
-            self.check_complete.emit(False)
 
 
 class ProcessingThread(QThread):
@@ -905,17 +883,19 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _check_for_updates(self, silent=False):
         """检查更新"""
-
-        def on_check_complete(success):
-            if not silent and not success:
-                QMessageBox.warning(self, "更新错误", "检查更新失败，请稍后重试。")
+        # 使用 check_for_updates 函数替代原有的 UpdateCheckThread 类
+        # 这样可以保证启动检查和手动检查执行相同的逻辑（包括更新 UI 和弹窗）
 
         channel_selection = self.update_channel_var
         channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-        self.update_thread = UpdateCheckThread(channel, silent)
-        self.update_thread.check_complete.connect(on_check_complete)
-        self.update_thread.start()
+        # 使用线程来运行检查，避免阻塞 UI
+        update_thread = threading.Thread(
+            target=check_for_updates,
+            args=(self, silent, channel),  # 传入 self 作为 parent，silent 保持为 True (启动时)
+            daemon=True
+        )
+        update_thread.start()
 
     def check_for_updates_from_ui(self):
         """从UI手动检查更新"""
@@ -1576,18 +1556,60 @@ class ObjectDetectionGUI(QMainWindow):
         except Exception as e:
             logger.warning(f"无法设置标题栏颜色: {e}")
 
-    @Slot(str, str)
-    def prompt_for_update(self, remote_version, download_url):
+    @Slot(str, str, str)
+    def prompt_for_update(self, remote_version, download_url, release_notes):
         """弹窗询问用户是否更新，并在主线程中安全地启动下载。"""
         if not download_url:
             QMessageBox.critical(self, "更新错误", "找不到新版本的下载链接。")
             return
 
-        update_message = f"发现新版本 ({remote_version})，是否立即下载并更新？"
-        reply = QMessageBox.question(self, "发现新版本", update_message,
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            # 用户点击“是”，开始下载
+        # 创建自定义 Dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("发现新版本")
+        dialog.setMinimumWidth(450)  # 设置最小宽度
+
+        layout = QVBoxLayout(dialog)
+
+        # 1. 标题和版本号
+        title_label = QLabel(f"发现新版本 ({remote_version})")
+        font = title_label.font()
+        font.setBold(True)
+        font.setPointSize(11)
+        title_label.setFont(font)
+        layout.addWidget(title_label)
+
+        # 2. 询问文本
+        layout.addWidget(QLabel("是否立即下载并更新？"))
+        layout.addSpacing(10)
+
+        # 3. 更新内容标题
+        header_label = QLabel("=== 更新内容 ===")
+        # 设置粗体
+        header_font = header_label.font()
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        layout.addWidget(header_label)
+
+        # 4. 滚动文本区域 (支持 Markdown)
+        content_browser = QTextBrowser()
+        content_browser.setMarkdown(release_notes)
+        content_browser.setOpenExternalLinks(True)  # 允许点击链接
+        content_browser.setReadOnly(True)
+        # [关键] 设置固定高度，内容过多时自动出现滚动条
+        content_browser.setFixedHeight(200)
+        layout.addWidget(content_browser)
+
+        # 5. 按钮区域 (Yes/No)
+        button_box = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
+        # 设置按钮显示的文本为中文（可选，取决于系统语言，通常 StandardButton 会自动适配）
+        # 如果需要强制中文，可以手动添加按钮
+
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # 显示对话框并处理结果
+        if dialog.exec() == QDialog.Accepted:
             start_download_thread(self, download_url)
 
     @Slot(str)
