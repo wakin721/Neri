@@ -1566,7 +1566,7 @@ class ObjectDetectionGUI(QMainWindow):
         # 创建自定义 Dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("发现新版本")
-        dialog.setMinimumWidth(450)  # 设置最小宽度
+        dialog.setMinimumWidth(350)  # 设置最小宽度
 
         layout = QVBoxLayout(dialog)
 
@@ -1596,7 +1596,7 @@ class ObjectDetectionGUI(QMainWindow):
         content_browser.setOpenExternalLinks(True)  # 允许点击链接
         content_browser.setReadOnly(True)
         # [关键] 设置固定高度，内容过多时自动出现滚动条
-        content_browser.setFixedHeight(200)
+        content_browser.setFixedHeight(300)
         layout.addWidget(content_browser)
 
         # 5. 按钮区域 (Yes/No)
