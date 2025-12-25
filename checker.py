@@ -15,7 +15,6 @@ python_exe_path = f"{base_path}\\toolkit\\python.exe"
 def move_pt_files():
     """检测res文件夹下的.pt文件并移动到res/model文件夹。"""
     res_path = os.path.join(base_path, "res")
-    print(res_path)
     model_path = os.path.join(res_path, "model")
 
     # 检查res文件夹是否存在
