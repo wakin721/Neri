@@ -287,6 +287,8 @@ class VideoPlayerThread(QThread):
             ret, frame = cap.read()
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.paused = True
+                self.pause_state_changed.emit(True)
                 continue
 
             self.current_frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
