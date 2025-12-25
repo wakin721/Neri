@@ -866,8 +866,7 @@ class ObjectDetectionGUI(QMainWindow):
         if hasattr(self.preview_page, '_load_validation_data'):
             self.preview_page._load_validation_data()
 
-        # 检查更新
-        self._check_for_updates(silent=True)
+        QTimer.singleShot(2000, lambda: self._check_for_updates(silent=True))
 
         # 恢复处理
         if self.resume_processing and self.cache_data:
@@ -883,16 +882,21 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _check_for_updates(self, silent=False):
         """检查更新"""
-        # 使用 check_for_updates 函数替代原有的 UpdateCheckThread 类
-        # 这样可以保证启动检查和手动检查执行相同的逻辑（包括更新 UI 和弹窗）
+        # 优先尝试从高级页面的下拉框获取最新的通道选择
+        # 这样可以确保启动时如果加载了"预览版"配置，检查的是预览版通道而不是默认的稳定版
+        if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'update_channel_combo'):
+            channel_selection = self.advanced_page.update_channel_combo.currentText()
+        else:
+            channel_selection = self.update_channel_var
 
-        channel_selection = self.update_channel_var
         channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-        # 使用线程来运行检查，避免阻塞 UI
+        # 使用线程来运行检查，避免阻塞 UI启动
         update_thread = threading.Thread(
             target=check_for_updates,
-            args=(self, silent, channel),  # 传入 self 作为 parent，silent 保持为 True (启动时)
+            # 将 silent 参数传给检查函数，由它决定是否静默
+            # silent=True 时，只有发现新版本才会弹窗，无更新时不提示
+            args=(self, silent, channel),
             daemon=True
         )
         update_thread.start()
