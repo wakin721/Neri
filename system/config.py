@@ -4,8 +4,8 @@
 import zlib  # Add this import for stable hashing
 
 # 应用信息常量
-APP_TITLE = "Neri v2.2.1"
-APP_VERSION = "2.2.1-beta"
+APP_TITLE = "Neri v2.2.6"
+APP_VERSION = "2.2.6-beta"
 DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
 
 # 文件支持相关常量
@@ -51,5 +51,6 @@ def get_species_color(species_name, return_rgb=False):
         # Convert Hex to RGB Tuple
         hex_color = hex_color.lstrip('#')
         return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
 
     return hex_color
