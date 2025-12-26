@@ -784,17 +784,15 @@ class PreviewPage(QWidget):
         self.show_detection_checkbox.toggled.connect(self.toggle_detection_preview)
         control_layout.addWidget(self.show_detection_checkbox)
 
-        # === 修改处：添加物种选择下拉框 ===
         control_layout.addWidget(QLabel("选择物种:"))
         self.species_selector = QComboBox()
         self.species_selector.addItem("全局设置 (Global)", "global")
-        # 连接信号：当选择改变时，更新滑块位置
-        self.species_selector.currentIndexChanged.connect(self._on_species_selector_changed)
         control_layout.addWidget(self.species_selector)
 
         # 置信度滑块
         control_layout.addWidget(QLabel("置信度:"))
         self.preview_conf_slider = ModernSlider(Qt.Horizontal)
+        self.preview_conf_slider.setMinimumWidth(200)  # 之前增加宽度的修改
         self.preview_conf_slider.setRange(5, 95)
         self.preview_conf_slider.setValue(int(self.preview_conf_var * 100))
         self.preview_conf_slider.valueChanged.connect(self._on_preview_confidence_slider_changed)
@@ -802,6 +800,8 @@ class PreviewPage(QWidget):
 
         self.preview_conf_label = QLabel(f"{self.preview_conf_var:.2f}")
         control_layout.addWidget(self.preview_conf_label)
+
+        self.species_selector.currentIndexChanged.connect(self._on_species_selector_changed)
 
         control_layout.addStretch()
 
