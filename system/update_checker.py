@@ -68,15 +68,23 @@ def compare_versions(current_version, remote_version):
     remote_tuple = parse_version(remote_version)
     return remote_tuple > current_tuple
 
-def get_latest_version_info(channel='stable'):
+
+def get_latest_version_info(channel='stable', mirror='official'):
     """
     通过GitHub API获取最新的版本信息。
+    支持镜像源替换。
     """
-    api_url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases"
+    # 根据镜像源构建 API URL
+    base_api_url = "https://api.github.com"
+
+    if mirror == 'kkgithub':
+        base_api_url = "https://api.kkgithub.com"
+
+    api_url = f"{base_api_url}/repos/{GITHUB_USER}/{GITHUB_REPO}/releases"
     headers = {"Accept": "application/vnd.github.v3+json"}
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=10)
+        response = requests.get(api_url, headers=headers, timeout=15)  # 稍微增加超时时间
         response.raise_for_status()
         releases = response.json()
         if not releases:
@@ -98,34 +106,44 @@ def get_latest_version_info(channel='stable'):
             return None
 
         tag_name = latest_release.get('tag_name', 'v0.0.0')
-
-        # [关键修复] 处理 body 为 None 的情况 (GitHub API 返回 null)
         notes = latest_release.get('body')
         if notes is None:
             notes = '无更新说明。'
 
+        # 获取原始下载链接
+        download_url = latest_info = latest_release.get('zipball_url')
+
+        if download_url and mirror != 'official':
+            # 简单的域名替换逻辑
+            if mirror == 'kkgithub':
+                download_url = download_url.replace("api.github.com", "api.kkgithub.com")
+                download_url = download_url.replace("github.com", "kkgithub.com")
+
         return {
             'version': tag_name.lstrip('v'),
             'notes': notes,
-            'url': latest_release.get('zipball_url')
+            'url': download_url
         }
 
     except requests.RequestException as e:
-        print(f"从GitHub获取版本信息失败: {e}")
+        print(f"从GitHub (镜像: {mirror}) 获取版本信息失败: {e}")
         return None
 
-def check_for_updates(parent, silent=False, channel='preview'):
+def check_for_updates(parent, silent=False, channel='preview', mirror='official'):
     """
     在后台线程中检查是否有新版本。
-    此函数由主窗口在启动时调用。
+    警告：此函数在后台线程运行，绝不能直接调用 UI 控件（如 QMessageBox），否则会导致闪退。
     """
     try:
-        latest_info = get_latest_version_info(channel=channel)
+        latest_info = get_latest_version_info(channel=channel, mirror=mirror)
+
         if not latest_info:
-            if not silent:
-                _show_messagebox(parent, "更新错误", "无法在远程仓库中找到版本信息。", "error")
+            if not silent and parent:
+                # [关键修复] 不再直接调用 _show_messagebox (会导致崩溃)
+                # 而是更新状态栏提示错误
+                err_msg = f"检查更新失败: 无法连接到服务器 ({mirror})"
                 QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
-                                         Q_ARG(str, "检查更新失败"))
+                                         Q_ARG(str, err_msg))
             return
 
         remote_version = latest_info['version']
@@ -133,20 +151,15 @@ def check_for_updates(parent, silent=False, channel='preview'):
         # 如果发现新版本
         if compare_versions(APP_VERSION, remote_version):
             if parent:
-                # 仅更新状态栏提示（可选）
                 QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
                                          Q_ARG(str, f"发现新版本：{remote_version}"))
 
-            # [关键逻辑] 发现新版本时，无论 silent 是 True 还是 False，都必须弹窗
-            # 只要 parent 存在，就触发更新提示
             if parent:
                 download_url = latest_info.get('url')
-                # 获取 release notes，并确保它是字符串
                 release_notes = latest_info.get('notes') or '无更新说明。'
                 release_notes = str(release_notes)
 
-                # [关键修复] 传递 3 个参数 (version, url, notes)
-                # 这里的参数类型必须与 main_window.py 中 Slot 的定义完全匹配
+                # 使用 invokeMethod 安全地在主线程弹出更新确认框
                 QMetaObject.invokeMethod(
                     parent,
                     "prompt_for_update",
@@ -157,16 +170,16 @@ def check_for_updates(parent, silent=False, channel='preview'):
                 )
         else:
             # 未发现新版本
-            # 只有在非静默模式下（手动检查）才提示“已经是最新”
             if not silent and parent:
+                # [关键修复] 使用状态栏提示代替弹窗，防止线程崩溃
                 QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
-                                         Q_ARG(str, "已经是最新版本"))
+                                         Q_ARG(str, f"当前已是最新版本 ({APP_VERSION})"))
 
     except Exception as e:
         if not silent and parent:
-            _show_messagebox(parent, "更新错误", f"检查更新失败: {e}", "error")
+            # [关键修复] 使用状态栏提示错误
             QMetaObject.invokeMethod(parent, "set_status_bar_message", Qt.QueuedConnection,
-                                     Q_ARG(str, "检查更新失败，请检查网络连接"))
+                                     Q_ARG(str, f"检查更新出错: {e}"))
 
 def start_download_thread(parent, download_url):
     """启动下载更新的线程。"""

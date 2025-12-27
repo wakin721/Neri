@@ -909,21 +909,28 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _check_for_updates(self, silent=False):
         """检查更新"""
-        # 优先尝试从高级页面的下拉框获取最新的通道选择
-        # 这样可以确保启动时如果加载了"预览版"配置，检查的是预览版通道而不是默认的稳定版
+        # 获取通道
         if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'update_channel_combo'):
             channel_selection = self.advanced_page.update_channel_combo.currentText()
+            # 获取镜像源选择
+            mirror_selection = self.advanced_page.update_mirror_combo.currentText()
         else:
             channel_selection = self.update_channel_var
+            # 默认镜像
+            mirror_selection = "国内源 (KKGitHub)"
 
         channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-        # 使用线程来运行检查，避免阻塞 UI启动
+        # 解析镜像源参数
+        mirror = 'official'
+        if 'KKGitHub' in mirror_selection:
+            mirror = 'kkgithub'
+
+        # 使用线程来运行检查
         update_thread = threading.Thread(
             target=check_for_updates,
-            # 将 silent 参数传给检查函数，由它决定是否静默
-            # silent=True 时，只有发现新版本才会弹窗，无更新时不提示
-            args=(self, silent, channel),
+            # [修改] 传递 mirror 参数
+            args=(self, silent, channel, mirror),
             daemon=True
         )
         update_thread.start()
@@ -935,13 +942,19 @@ class ObjectDetectionGUI(QMainWindow):
             channel_selection = self.advanced_page.update_channel_combo.currentText()
             channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-            # 提示用户检查已经开始
-            self.status_bar.status_label.setText("正在检查更新，请稍候...")
+            # 从高级页面获取镜像源
+            mirror_selection = self.advanced_page.update_mirror_combo.currentText()
+            mirror = 'official'
+            if 'KKGitHub' in mirror_selection:
+                mirror = 'kkgithub'
 
-            # 使用线程来运行检查，避免UI阻塞
+            self.status_bar.status_label.setText(f"正在检查更新 ({mirror_selection})...")
+
+            # 使用线程来运行检查
             update_thread = threading.Thread(
                 target=check_for_updates,
-                args=(self, False, channel),  # self作为parent, silent设置为False
+                # 传递 mirror 参数
+                args=(self, False, channel, mirror),
                 daemon=True
             )
             update_thread.start()
