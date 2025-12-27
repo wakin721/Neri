@@ -1419,6 +1419,9 @@ class SpeciesValidationPage(QWidget):
 
         found_species = set()
 
+        # [新增] 下拉框最小显示阈值
+        MIN_DROPDOWN_CONF = 0.05
+
         # [修改] 始终添加当前左侧列表选中的分类
         # 如果是组合分类（如 "赤狐,狍子"），则拆分后添加各个单物种
         if self.current_selected_species and self.current_selected_species not in ["标记为空", "空"]:
@@ -1479,11 +1482,14 @@ class SpeciesValidationPage(QWidget):
                             is_candidate_match = True
                             break
 
-                # 3. 将所有出现过的名字加入下拉列表
-                found_species.add(final_name)
+                # 3. 将所有出现过的名字加入下拉列表 (增加 0.05 过滤)
+                if final_conf >= MIN_DROPDOWN_CONF:
+                    found_species.add(final_name)
+
                 if "候选项" in box:
                     for c in box["候选项"]:
-                        if c.get('name'): found_species.add(c['name'])
+                        if c.get('name') and float(c.get('conf', 0)) >= MIN_DROPDOWN_CONF:
+                            found_species.add(c['name'])
 
                 # === 4. 更新绝对最大值 (兜底用) ===
                 if final_conf > max_absolute_confidence:
@@ -1521,9 +1527,12 @@ class SpeciesValidationPage(QWidget):
                     s_list = [p.get('species') for p in t_list if p.get('species')]
                     if not s_list: continue
                     dominant_species = Counter(s_list).most_common(1)[0][0]
-                    found_species.add(dominant_species)
 
                     track_max_conf = max([float(p.get('confidence', 0.0)) for p in t_list])
+
+                    # 增加 0.05 过滤
+                    if track_max_conf >= MIN_DROPDOWN_CONF:
+                        found_species.add(dominant_species)
 
                     if track_max_conf > max_absolute_confidence:
                         max_absolute_confidence = track_max_conf
@@ -1558,11 +1567,6 @@ class SpeciesValidationPage(QWidget):
             # 策略2：如果所有物种都被过滤了，选择“绝对置信度最高”的物种
             elif best_absolute_species_name:
                 target_species_name = best_absolute_species_name
-
-        # 执行选中
-        target_index = -1
-        if target_species_name:
-            target_index = self.species_selector.findData(target_species_name)
 
         # 执行选中
         target_index = -1

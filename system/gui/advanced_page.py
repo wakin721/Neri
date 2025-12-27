@@ -1261,6 +1261,12 @@ class AdvancedPage(QWidget):
                                  'cls_model_var') and self.controller.cls_model_var in cls_files:
                         self.cls_model_combo.setCurrentText(self.controller.cls_model_var)
 
+            final_name = self.cls_model_combo.currentText()
+            if final_name == "不使用 (None)" or not final_name:
+                self.cls_model_status_label.setText("已禁用二次识别")
+            else:
+                self.cls_model_status_label.setText(f"{final_name}")
+
             self.cls_model_combo.blockSignals(False)
         except Exception as e:
             logger.error(f"刷新分类模型列表失败: {e}")

@@ -138,8 +138,29 @@ class ImageProcessor:
 
                                     if x2 > x1 and y2 > y1:
                                         crop = original_img[y1:y2, x1:x2]
+
+                                        ch, cw = crop.shape[:2]
+                                        if ch != cw:
+                                            max_dim = max(ch, cw)
+                                            # Calculate padding sizes
+                                            top = (max_dim - ch) // 2
+                                            bottom = max_dim - ch - top
+                                            left = (max_dim - cw) // 2
+                                            right = max_dim - cw - left
+
+                                            # Use grey padding (114, 114, 114) which is standard for YOLO
+                                            crop = cv2.copyMakeBorder(
+                                                crop,
+                                                top, bottom, left, right,
+                                                cv2.BORDER_CONSTANT,
+                                                value=[114, 114, 114]
+                                            )
+
                                         # 运行分类模型
-                                        cls_res = self.cls_model(crop, verbose=False)
+                                        cls_res = self.cls_model(crop,
+                                                                 imgsz=640,
+                                                                 half=use_fp16
+                                                                 )
 
                                         # 获取前3名候选
                                         top3_indices = cls_res[0].probs.top5[:3]  # top5 contains indices

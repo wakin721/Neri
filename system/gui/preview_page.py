@@ -1407,6 +1407,9 @@ class PreviewPage(QWidget):
 
         found_species = set()
 
+        # [新增] 下拉框最小显示阈值
+        MIN_DROPDOWN_CONF = 0.05
+
         # === 变量定义 ===
         # A. 有效最高置信度 (满足阈值)
         best_valid_species_name = None
@@ -1453,11 +1456,14 @@ class PreviewPage(QWidget):
                             is_candidate_match = True
                             break
 
-                            # 3. 将所有出现过的名字加入下拉列表
-                found_species.add(final_name)
+                # 3. 将所有出现过的名字加入下拉列表 (增加 0.05 过滤)
+                if final_conf >= MIN_DROPDOWN_CONF:
+                    found_species.add(final_name)
+
                 if "候选项" in box:
                     for c in box["候选项"]:
-                        if c.get('name'): found_species.add(c['name'])
+                        if c.get('name') and float(c.get('conf', 0)) >= MIN_DROPDOWN_CONF:
+                            found_species.add(c['name'])
 
                 # === 4. 更新绝对最大值 (兜底用) ===
                 if final_conf > max_absolute_confidence:
@@ -1495,9 +1501,12 @@ class PreviewPage(QWidget):
                     s_list = [p.get('species') for p in t_list if p.get('species')]
                     if not s_list: continue
                     dominant_species = Counter(s_list).most_common(1)[0][0]
-                    found_species.add(dominant_species)
 
                     track_max_conf = max([float(p.get('confidence', 0.0)) for p in t_list])
+
+                    # 增加 0.05 过滤
+                    if track_max_conf >= MIN_DROPDOWN_CONF:
+                        found_species.add(dominant_species)
 
                     # === 更新绝对最大值 ===
                     if track_max_conf > max_absolute_confidence:
@@ -1539,7 +1548,7 @@ class PreviewPage(QWidget):
             if self.species_selector.count() > 0:
                 self.species_selector.setCurrentIndex(0)
 
-                # 触发一次改变以更新滑块状态
+        # 触发一次改变以更新滑块状态
         self._on_species_selector_changed()
 
     def _on_species_selector_changed(self):
