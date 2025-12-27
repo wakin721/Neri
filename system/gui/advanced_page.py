@@ -353,6 +353,39 @@ class AdvancedPage(QWidget):
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(12)
 
+        # --- 0. 视频处理模式面板 ---
+        self.video_mode_panel = CollapsiblePanel(
+            title="视频处理模式",
+            subtitle="选择处理每一帧或仅抽取关键帧",
+            icon="🎥"
+        )
+
+        mode_widget = QWidget()
+        mode_layout = QVBoxLayout(mode_widget)
+
+        mode_label = QLabel("选择模式:")
+        mode_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        mode_layout.addWidget(mode_label)
+
+        self.video_mode_combo = ModernComboBox()
+        self.video_mode_combo.addItems(["全部识别", "快速识别"])
+        self.components_to_update.append(self.video_mode_combo)
+
+        # 连接信号：保存设置 + 更新UI状态
+        self.video_mode_combo.currentTextChanged.connect(self._on_setting_changed)
+        self.video_mode_combo.currentTextChanged.connect(self._on_video_mode_changed)
+
+        mode_layout.addWidget(self.video_mode_combo)
+
+        mode_explain = QLabel(
+            "全部识别：分析视频流中的每一帧（受跳帧影响）。\n快速识别：仅在视频的1/4、1/2、3/4处抽取三张图片进行快速识别。")
+        mode_explain.setStyleSheet("color: #888888; font-size: 12px;")
+        mode_explain.setWordWrap(True)
+        mode_layout.addWidget(mode_explain)
+
+        self.video_mode_panel.add_content_widget(mode_widget)
+        content_layout.addWidget(self.video_mode_panel)
+
         # --- 1. 跳帧处理面板 ---
         self.frame_skip_panel = CollapsiblePanel(
             title="跳帧处理",
@@ -1583,6 +1616,17 @@ class AdvancedPage(QWidget):
         self.theme_combo.setCurrentText(theme)
         self.theme_var = theme
 
+    def _on_video_mode_changed(self, text):
+        """当视频模式为快速识别时，禁用跳帧面板"""
+        is_single = (text == "快速识别")
+        # 禁用整个跳帧面板的内容，或者禁用面板本身
+        self.frame_skip_panel.setEnabled(not is_single)
+        # 如果禁用，可以视觉上给一些反馈（可选）
+        if is_single:
+            self.frame_skip_panel.setToolTip("快速识别模式下固定抽取3帧，跳帧设置无效")
+        else:
+            self.frame_skip_panel.setToolTip("")
+
     def get_settings(self):
         """获取页面设置"""
         # 获取当前选择的模型 - 优先级顺序
@@ -1607,6 +1651,7 @@ class AdvancedPage(QWidget):
             "use_augment": self.augment_switch_row.isChecked(),
             "use_agnostic_nms": self.agnostic_switch_row.isChecked(),
             "vid_stride": self.vid_stride_var,
+            "video_mode": self.video_mode_combo.currentText(),
             "min_frame_ratio": self.min_frame_ratio_var,
             "theme": self.get_theme_selection(),
             "auto_sort": self.auto_sort_switch_row.isChecked(),
@@ -1648,6 +1693,13 @@ class AdvancedPage(QWidget):
             self.vid_stride_var = int(settings["vid_stride"])
             self.stride_slider.setValue(self.vid_stride_var)
             self.stride_label.setText(str(self.vid_stride_var))
+
+        if "video_mode" in settings:
+            index = self.video_mode_combo.findText(settings["video_mode"])
+            if index >= 0:
+                self.video_mode_combo.setCurrentIndex(index)
+                # 手动触发一次状态更新，确保跳帧面板状态正确
+                self._on_video_mode_changed(settings["video_mode"])
 
         if "min_frame_ratio" in settings:
             self.min_frame_ratio_var = settings["min_frame_ratio"]
@@ -1813,7 +1865,7 @@ class AdvancedPage(QWidget):
         # 触发设置保存
         self._on_setting_changed()
 
-    def update_quick_settings_sync(self, model_name, stride):
+    def update_quick_settings_sync(self, model_name, stride, video_mode=None):
         """同步开始界面的快速设置到高级设置(不触发信号)"""
         # 1. 同步模型
         if model_name and self.model_combo.currentText() != model_name:
@@ -1823,7 +1875,17 @@ class AdvancedPage(QWidget):
                 self.model_combo.setCurrentIndex(index)
             self.model_combo.blockSignals(False)
 
-        # 2. 同步跳帧
+        # 2. 同步视频模式
+        if video_mode and self.video_mode_combo.currentText() != video_mode:
+            self.video_mode_combo.blockSignals(True)
+            index = self.video_mode_combo.findText(video_mode)
+            if index >= 0:
+                self.video_mode_combo.setCurrentIndex(index)
+                # 手动调用状态更新，确保跳帧面板的禁用/启用状态正确显示
+                self._on_video_mode_changed(video_mode)
+            self.video_mode_combo.blockSignals(False)
+
+        # 3. 同步跳帧
         if stride is not None:
             try:
                 val = int(stride)

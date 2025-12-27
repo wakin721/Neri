@@ -9,6 +9,7 @@ from datetime import datetime
 import gc
 import hashlib
 import shutil
+from collections import Counter
 from PIL import Image
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -116,7 +117,10 @@ class ProcessingThread(QThread):
             conf = self.controller.advanced_page.conf_var
             augment = self.controller.advanced_page.use_augment_var
             agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
-            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1) # 获取跳帧参数，默认为1
+            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1)
+            video_mode_setting = "全部识别"
+            if hasattr(self.controller.start_page, 'video_mode_combo'):
+                video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
 
             from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
             all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
@@ -140,15 +144,18 @@ class ProcessingThread(QThread):
                 f_path = os.path.join(self.file_path, f)
                 units = 1
                 if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
-                    try:
-                        cap = cv2.VideoCapture(f_path)
-                        if cap.isOpened():
-                            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            # 使用math.ceil向上取整计算实际需要处理的帧数 (考虑跳帧)
-                            units = math.ceil(frames / vid_stride) if frames > 0 else 1
-                        cap.release()
-                    except Exception:
-                        units = 1
+                    # 如果是快速识别模式，每个视频算作1个工作单位，不再统计总帧数
+                    if video_mode_setting == "快速识别":
+                        units = 3
+                    else:
+                        try:
+                            cap = cv2.VideoCapture(f_path)
+                            if cap.isOpened():
+                                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                units = math.ceil(frames / vid_stride) if frames > 0 else 1
+                            cap.release()
+                        except Exception:
+                            units = 1
 
                 file_unit_map[f] = units
                 total_work_units += units
@@ -224,11 +231,13 @@ class ProcessingThread(QThread):
                     self.console_log.emit(f"[INFO] {current_time} 当前文件处理完毕，正在停止...", "#ffff00")
                     # 保存进度 (此时 processed_files_count 已包含刚完成的文件)
                     self._save_processing_cache(excel_data, processed_files_count, total_files_count)
+                    self.console_log.emit(f"[INFO] {current_time} 处理已停止", "#ff0000")
                     break
 
                 # 如果是强制停止，直接退出 (虽然通常会被异常捕获，这里做双重保险)
                 if self.force_stop_flag:
                     stopped_manually = True
+                    self.console_log.emit(f"[INFO] {current_time} 处理已强制停止", "#ff0000")
                     break
 
                 current_file_index_display = processed_files_count + 1
@@ -256,103 +265,270 @@ class ProcessingThread(QThread):
                             '检测时间': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
 
-                        # 定义视频状态回调函数，集成进度更新
-                        def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
-                            # 只有在"强制停止"时才抛出异常中断视频
-                            # 如果只是 stop_flag (第一次点击)，则忽略，让视频跑完
-                            if self.force_stop_flag:
-                                raise ForceStopError("用户强制停止")
-                            # frame_idx 是当前绝对帧位置(或接近)，需将其转换为处理过的“单元”数
-                            processed_frames_so_far = math.ceil(frame_idx / vid_stride)
+                        if video_mode_setting == "快速识别":
+                            # 更新日志文本
+                            self.console_log.emit(f"[INFO] 正在对视频进行快速抽帧识别 (1/4, 1/2, 3/4)...", "#aaaaaa")
 
-                            # 计算当前总进度：之前文件完成的单元 + 当前视频已处理帧数
-                            current_total_done = processed_work_units + processed_frames_so_far
+                            cap = cv2.VideoCapture(img_path)
+                            if not cap.isOpened():
+                                raise Exception("无法打开视频文件")
 
-                            elapsed_time = time.time() - start_time
+                            # 获取视频尺寸信息
+                            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-                            # 计算速度 (基于本次会话已处理的单元数)
-                            session_units_done = current_total_done - start_work_units
+                            detection_start = time.time()  # 开始计时
 
-                            if session_units_done > 0 and elapsed_time > 0:
-                                speed = session_units_done / elapsed_time  # 单位：帧/秒
-                                remaining_time = (total_work_units - current_total_done) / speed
-                            else:
-                                speed = 0
-                                remaining_time = float('inf')
+                            sample_points = [
+                                int(total_frames * 1 / 4),
+                                int(total_frames * 1 / 2),
+                                int(total_frames * 3 / 4)
+                            ]
 
-                            # 发送进度更新
-                            self.progress_updated.emit(current_total_done, total_work_units, elapsed_time,
-                                                       remaining_time, speed)
+                            sampled_species_list = []  # 存储每次识别到的物种名列表
+                            max_counts = {}  # 存储每个物种的最大数量
 
-                            # 原始日志逻辑
-                            if counts:
-                                species_str = ", ".join([f"{c} {n}" for n, c in counts.items()])
-                            else:
-                                species_str = "无目标"
+                            # 用于保存 JSON 的变量
+                            best_detect_results = None
+                            best_species_info = None
+                            max_detections_in_frame = -1
 
-                            display_path = img_path.replace('/', '\\')
-                            msg = (f"video {current_file_index_display}/{total_files_count} "
-                                   f"(frame {frame_idx}/{total_frames}) "
-                                   f"{display_path}: {w}x{h} "
-                                   f"{species_str}, {speed_ms:.1f}ms")
-                            self.console_log.emit(msg, None)
+                            temp_frame_path = os.path.join(temp_photo_dir, f"temp_frame_{filename}.jpg")
 
-                        video_output_dir = os.path.join(self.save_path, "video_results")
-                        detection_start = time.time()
+                            # 遍历采样点并增加单帧日志
+                            for i, point in enumerate(sample_points):
+                                if self.force_stop_flag: raise ForceStopError("用户强制停止")
 
-                        # 调用检测方法并传入回调
-                        video_result = self.controller.image_processor.detect_video_species(
-                            img_path,
-                            video_output_dir,
-                            bool(self.use_fp16),
-                            iou, conf, augment, agnostic_nms,
-                            status_callback=video_log_callback,
-                            vid_stride=vid_stride,  # 传入跳帧参数
-                            temp_video_dir=temp_photo_dir
-                        )
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                                ret, frame = cap.read()
+                                if ret:
+                                    cv2.imwrite(temp_frame_path, frame)
 
-                        detection_time = (time.time() - detection_start) * 1000
+                                    # 单帧计时开始
+                                    t1 = time.time()
 
-                        if video_result.get('status') == 'success':
-                            # 解析视频结果
-                            json_path = video_result.get('json_path')
-                            if json_path and os.path.exists(json_path):
-                                try:
-                                    with open(json_path, 'r', encoding='utf-8') as f:
-                                        v_data = json.load(f)
-                                    tracks = v_data.get('tracks', {})
-                                    v_counts = {}
-                                    for t_list in tracks.values():
-                                        if t_list:
-                                            s_name = t_list[0].get('species', 'Unknown')
-                                            v_counts[s_name] = v_counts.get(s_name, 0) + 1
+                                    species_info_frame = self.controller.image_processor.detect_species(
+                                        temp_frame_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
+                                    )
 
-                                    if v_counts:
-                                        image_info['物种名称'] = ','.join(v_counts.keys())
-                                        image_info['物种数量'] = ','.join(map(str, v_counts.values()))
+                                    # 单帧计时结束
+                                    t2 = time.time()
+                                    frame_inference_time = (t2 - t1) * 1000
+
+                                    results = species_info_frame.get('detect_results', [])
+                                    translation_dict = self.controller.image_processor.translation_dict
+
+                                    frame_counts = {}
+                                    current_frame_detection_count = 0
+
+                                    if results:
+                                        for result in results:
+                                            if hasattr(result, 'boxes') and result.boxes is not None:
+                                                for box in result.boxes:
+                                                    current_frame_detection_count += 1
+                                                    cls_id = int(box.cls.item())
+                                                    english_name = result.names.get(cls_id, 'Unknown')
+                                                    translated_name = translation_dict.get(english_name, english_name)
+
+                                                    sampled_species_list.append(translated_name)
+                                                    frame_counts[translated_name] = frame_counts.get(translated_name,
+                                                                                                     0) + 1
+
+                                    # 构造检测结果字符串 (例如 "1 赤狐, 2 马")
+                                    if frame_counts:
+                                        res_parts = [f"{v} {k}" for k, v in frame_counts.items()]
+                                        res_str = ", ".join(res_parts)
                                     else:
-                                        image_info['物种名称'] = '空'
-                                        image_info['物种数量'] = '空'
-                                except Exception as e:
-                                    logger.error(f"解析视频结果JSON失败: {e}")
+                                        res_str = "无目标"  # 或者空字符串，视需求而定
+
+                                    # 构造完整日志
+                                    log_msg = (
+                                        f"video {current_file_index_display}/{total_files_count} "
+                                        f"(frame {point}/{total_frames}) "
+                                        f"{img_path}: {width}x{height} {res_str}, "
+                                        f"{frame_inference_time:.1f}ms"
+                                    )
+
+                                    # 输出日志 (灰色显示，避免太抢眼，或者使用默认颜色)
+                                    self.console_log.emit(log_msg, "#aaaaaa")
+
+                                    # 寻找检测数量最多的帧，作为保存JSON的代表
+                                    if current_frame_detection_count > max_detections_in_frame:
+                                        max_detections_in_frame = current_frame_detection_count
+                                        best_detect_results = results
+                                        best_species_info = species_info_frame
+
+                                    for sp, count in frame_counts.items():
+                                        if count > max_counts.get(sp, 0):
+                                            max_counts[sp] = count
+
+                                processed_work_units += 1
+
+                                elapsed_time = time.time() - start_time
+                                session_units_done = processed_work_units - start_work_units
+
+                                if session_units_done > 0 and elapsed_time > 0:
+                                    speed = session_units_done / elapsed_time
+                                    remaining_time = (total_work_units - processed_work_units) / speed
+                                else:
+                                    speed = 0
+                                    remaining_time = float('inf')
+
+                                self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time,
+                                                           remaining_time, speed)
+
+                            cap.release()
+                            if os.path.exists(temp_frame_path):
+                                os.remove(temp_frame_path)
+
+                            # 保存 JSON 结果到临时文件夹
+                            if best_detect_results is not None:
+                                self.controller.image_processor.save_detection_info_json(
+                                    best_detect_results, filename, best_species_info, temp_photo_dir
+                                )
+                                self.file_processed.emit(img_path, best_detect_results, filename)
+                            else:
+                                empty_info = {'detect_results': []}
+                                self.controller.image_processor.save_detection_info_json(
+                                    [], filename, empty_info, temp_photo_dir
+                                )
+
+                            # 聚合结果
+                            final_result_str = "无目标"
+                            if sampled_species_list:
+                                species_counter = Counter(sampled_species_list)
+                                # 取出现频率最高的1个物种
+                                most_common = species_counter.most_common(1)
+
+                                if most_common:
+                                    winner_species = most_common[0][0]
+                                    winner_count = max_counts.get(winner_species, 0)
+
+                                    # 只记录这一个物种
+                                    image_info['物种名称'] = winner_species
+                                    image_info['物种数量'] = str(winner_count)
+                                    final_result_str = f"{winner_count}x{winner_species}"
+                                else:
+                                    image_info['物种名称'] = '空'
+                                    image_info['物种数量'] = '空'
+                            else:
+                                image_info['物种名称'] = '空'
+                                image_info['物种数量'] = '空'
+
+                            detection_time = (time.time() - detection_start) * 1000
+
+                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            display_img_path = os.path.normpath(img_path)
+
+                            # 输出最终精简日志
+                            log_color = "#00ff00" if final_result_str != "无目标" else "#ffaa00"
+                            log_message = (
+                                f"[INFO] {current_time} {display_img_path} [快速抽帧] | "
+                                f"尺寸:{height}x{width} | "
+                                f"检测结果:[{final_result_str}] | "
+                                f"检测耗时:{detection_time:.1f}ms"
+                            )
+                            self.console_log.emit(log_message, log_color)
+
                         else:
-                            image_info['错误'] = video_result.get('error', 'Video processing failed')
+                            # 定义视频状态回调函数，集成进度更新
+                            def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
+                                # 只有在"强制停止"时才抛出异常中断视频
+                                # 如果只是 stop_flag (第一次点击)，则忽略，让视频跑完
+                                if self.force_stop_flag:
+                                    raise ForceStopError("用户强制停止")
+                                # frame_idx 是当前绝对帧位置(或接近)，需将其转换为处理过的“单元”数
+                                processed_frames_so_far = math.ceil(frame_idx / vid_stride)
 
-                        # 输出视频处理完成日志
-                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        display_img_path = os.path.normpath(img_path)
-                        log_message = (
-                            f"[INFO] {current_time} {display_img_path} [视频] | "
-                            f"检测结果:[{image_info.get('物种名称', '未知')}] | "
-                            f"耗时:{detection_time:.1f}ms"
-                        )
-                        self.console_log.emit(log_message, "#00ff00")
-                        QThread.msleep(5)
+                                # 计算当前总进度：之前文件完成的单元 + 当前视频已处理帧数
+                                current_total_done = processed_work_units + processed_frames_so_far
 
-                        excel_data.append(image_info)
+                                elapsed_time = time.time() - start_time
 
-                        # [修改] 视频处理完成后，累加该视频的总帧数到已完成工作量
-                        processed_work_units += file_unit_map.get(filename, 1)
+                                # 计算速度 (基于本次会话已处理的单元数)
+                                session_units_done = current_total_done - start_work_units
+
+                                if session_units_done > 0 and elapsed_time > 0:
+                                    speed = session_units_done / elapsed_time  # 单位：帧/秒
+                                    remaining_time = (total_work_units - current_total_done) / speed
+                                else:
+                                    speed = 0
+                                    remaining_time = float('inf')
+
+                                # 发送进度更新
+                                self.progress_updated.emit(current_total_done, total_work_units, elapsed_time,
+                                                           remaining_time, speed)
+
+                                # 原始日志逻辑
+                                if counts:
+                                    species_str = ", ".join([f"{c} {n}" for n, c in counts.items()])
+                                else:
+                                    species_str = "无目标"
+
+                                display_path = img_path.replace('/', '\\')
+                                msg = (f"video {current_file_index_display}/{total_files_count} "
+                                       f"(frame {frame_idx}/{total_frames}) "
+                                       f"{display_path}: {w}x{h} "
+                                       f"{species_str}, {speed_ms:.1f}ms")
+                                self.console_log.emit(msg, "#aaaaaa")
+
+                            video_output_dir = os.path.join(self.save_path, "video_results")
+                            detection_start = time.time()
+
+                            # 调用检测方法并传入回调
+                            video_result = self.controller.image_processor.detect_video_species(
+                                img_path,
+                                video_output_dir,
+                                bool(self.use_fp16),
+                                iou, conf, augment, agnostic_nms,
+                                status_callback=video_log_callback,
+                                vid_stride=vid_stride,  # 传入跳帧参数
+                                temp_video_dir=temp_photo_dir
+                            )
+
+                            detection_time = (time.time() - detection_start) * 1000
+
+                            if video_result.get('status') == 'success':
+                                # 解析视频结果
+                                json_path = video_result.get('json_path')
+                                if json_path and os.path.exists(json_path):
+                                    try:
+                                        with open(json_path, 'r', encoding='utf-8') as f:
+                                            v_data = json.load(f)
+                                        tracks = v_data.get('tracks', {})
+                                        v_counts = {}
+                                        for t_list in tracks.values():
+                                            if t_list:
+                                                s_name = t_list[0].get('species', 'Unknown')
+                                                v_counts[s_name] = v_counts.get(s_name, 0) + 1
+
+                                        if v_counts:
+                                            image_info['物种名称'] = ','.join(v_counts.keys())
+                                            image_info['物种数量'] = ','.join(map(str, v_counts.values()))
+                                        else:
+                                            image_info['物种名称'] = '空'
+                                            image_info['物种数量'] = '空'
+                                    except Exception as e:
+                                        logger.error(f"解析视频结果JSON失败: {e}")
+                            else:
+                                image_info['错误'] = video_result.get('error', 'Video processing failed')
+
+                            # 输出视频处理完成日志
+                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            display_img_path = os.path.normpath(img_path)
+                            log_message = (
+                                f"[INFO] {current_time} {display_img_path} [视频] | "
+                                f"检测结果:[{image_info.get('物种名称', '未知')}] | "
+                                f"耗时:{detection_time:.1f}ms"
+                            )
+                            self.console_log.emit(log_message, "#00ff00")
+                            QThread.msleep(5)
+
+                            excel_data.append(image_info)
+
+                            # [修改] 视频处理完成后，累加该视频的总帧数到已完成工作量
+                            processed_work_units += file_unit_map.get(filename, 1)
 
                     else:
                         # === 图片处理逻辑 ===
@@ -457,7 +633,8 @@ class ProcessingThread(QThread):
                     stopped_manually = True
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(f"[WARN] {current_time} 检测到强制停止信号，正在中断后台处理...", "#ff0000")
-                    break  # 跳出文件循环
+                    self.console_log.emit(f"[INFO] {current_time} 处理已强制停止", "#ff0000")
+                    break
 
                 except Exception as e:
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -854,26 +1031,29 @@ class ObjectDetectionGUI(QMainWindow):
         # 获取高级页面的当前设置
         settings = self.advanced_page.get_settings()
 
-        # 提取模型和跳帧参数
+        # 提取模型、跳帧参数和视频模式
         model = settings.get("selected_model")
         stride = settings.get("vid_stride")
+        mode = settings.get("video_mode")
 
         # 调用开始页面的更新方法
         if hasattr(self.start_page, 'update_quick_settings'):
-            self.start_page.update_quick_settings(model, stride)
+            self.start_page.update_quick_settings(model, stride, video_mode=mode)
 
     def _sync_start_to_advanced(self):
         """将开始页面的设置同步到高级页面"""
         # 获取开始页面的当前设置
         settings = self.start_page.get_settings()
 
-        # 提取模型和跳帧参数
+        # 提取模型、跳帧参数和视频模式
         model = settings.get("selected_model")
         stride = settings.get("vid_stride")
+        mode = settings.get("video_mode")
 
         # 调用高级页面的同步方法
         if hasattr(self.advanced_page, 'update_quick_settings_sync'):
-            self.advanced_page.update_quick_settings_sync(model, stride)
+            # [修改] 传入 video_mode 参数
+            self.advanced_page.update_quick_settings_sync(model, stride, video_mode=mode)
 
     def _post_init(self):
         """后期初始化"""

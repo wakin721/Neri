@@ -102,43 +102,50 @@ class StartPage(QWidget):
         )
         basic_layout.addWidget(self.file_path_widget)
 
-        # --- 2. 模型选择与跳帧设置 (下方水平并排) ---
+        # --- 2. 模型选择、视频模式与跳帧设置 (下方水平并排) ---
         settings_row_layout = QHBoxLayout()
         settings_row_layout.setSpacing(20)
 
         # A. 模型选择
         model_layout = QVBoxLayout()
         model_layout.setSpacing(8)
-
         model_label = QLabel("选择模型:")
         model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         model_layout.addWidget(model_label)
-
         self.model_combo = ModernComboBox()
         self.model_combo.setMinimumWidth(200)
         self._populate_models()  # 填充模型列表
         model_layout.addWidget(self.model_combo)
-
         settings_row_layout.addLayout(model_layout)
 
-        # B. 跳帧设置
+        # [新增] B. 视频处理模式
+        mode_layout = QVBoxLayout()
+        mode_layout.setSpacing(8)
+        mode_label = QLabel("视频处理模式:")
+        mode_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        mode_layout.addWidget(mode_label)
+        self.video_mode_combo = ModernComboBox()
+        self.video_mode_combo.setMinimumWidth(150)
+        self.video_mode_combo.addItems(["全部识别", "快速识别"])
+        self.video_mode_combo.setToolTip(
+            "全部识别：识别视频流中的每一帧(受跳帧影响)\n快速识别：仅抽取视频的1/4、1/2、3/4处的三张图片进行快速识别")
+        mode_layout.addWidget(self.video_mode_combo)
+        settings_row_layout.addLayout(mode_layout)
+
+        # C. 跳帧设置 (原 B)
         stride_layout = QVBoxLayout()
         stride_layout.setSpacing(8)
-
         stride_label = QLabel("视频跳帧 (Frame Stride):")
         stride_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         stride_layout.addWidget(stride_label)
-
         self.stride_combo = ModernComboBox()
         self.stride_combo.setMinimumWidth(150)
-        # 默认选项
         self.default_strides = ["5", "10", "15", "20", "25", "30"]
         self.stride_combo.addItems(self.default_strides)
         stride_layout.addWidget(self.stride_combo)
-
         settings_row_layout.addLayout(stride_layout)
 
-        # 添加弹性空间填充右侧，保持左对齐
+        # 添加弹性空间填充右侧
         settings_row_layout.addStretch()
 
         # 将水平布局添加到主垂直布局中
@@ -353,6 +360,9 @@ class StartPage(QWidget):
         # 使用 lambda 丢弃 textChanged 发出的字符串参数，避免 TypeError
         self.model_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
         self.stride_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
+        # 连接新控件信号
+        self.video_mode_combo.currentTextChanged.connect(self._on_video_mode_changed)
+        self.video_mode_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
 
         # 开始/停止按钮
         self.start_stop_button.clicked.connect(self.toggle_processing_requested.emit)
@@ -364,10 +374,27 @@ class StartPage(QWidget):
 
         # 处理时禁用快速设置
         self.model_combo.setEnabled(not is_processing)
-        self.stride_combo.setEnabled(not is_processing)
+
+        # 根据处理状态和当前视频模式决定跳帧选项的启用状态
+        if is_processing:
+            # 处理中：强制禁用
+            self.stride_combo.setEnabled(False)
+        else:
+            # 停止处理：只有当模式不是"快速识别"时才启用
+            current_mode = self.video_mode_combo.currentText()
+            is_quick_mode = (current_mode == "快速识别")
+            self.stride_combo.setEnabled(not is_quick_mode)
+
+        self.video_mode_combo.setEnabled(not is_processing)
 
         # 更新处理按钮的样式和文本
         self._update_button_style(is_processing)
+
+    def _on_video_mode_changed(self, text):
+        """当视频模式改变时，控制跳帧选项的启用状态"""
+        is_single_mode = (text == "快速识别")
+        # 如果是快速识别，禁用跳帧选项；否则启用
+        self.stride_combo.setEnabled(not is_single_mode)
 
     def update_progress(self, value, total, speed, remaining_time, current_file=None):
         """更新进度"""
@@ -402,7 +429,8 @@ class StartPage(QWidget):
         return {
             "file_path": self.get_file_path(),
             "selected_model": self.model_combo.currentText(),
-            "vid_stride": int(self.stride_combo.currentText()) if self.stride_combo.currentText().isdigit() else 1 # [新增]
+            "vid_stride": int(self.stride_combo.currentText()) if self.stride_combo.currentText().isdigit() else 1,
+            "video_mode": self.video_mode_combo.currentText()
         }
 
     def load_settings(self, settings):
@@ -416,6 +444,11 @@ class StartPage(QWidget):
                 index = self.model_combo.findText(settings["selected_model"])
                 if index >= 0:
                     self.model_combo.setCurrentIndex(index)
+
+            if "video_mode" in settings:
+                index = self.video_mode_combo.findText(settings["video_mode"])
+                if index >= 0:
+                    self.video_mode_combo.setCurrentIndex(index)
 
             # 加载跳帧设置
             if "vid_stride" in settings:
@@ -455,7 +488,7 @@ class StartPage(QWidget):
         # 更新按钮样式
         self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)
 
-    def update_quick_settings(self, model_name, stride):
+    def update_quick_settings(self, model_name, stride, video_mode=None):
         """从外部更新快速设置控件状态（不触发信号）"""
         # 1. 更新模型选择
         if model_name:
@@ -465,7 +498,17 @@ class StartPage(QWidget):
                 self.model_combo.setCurrentIndex(index)
             self.model_combo.blockSignals(False)
 
-        # 2. 更新跳帧设置
+        # 2. 更新视频模式
+        if video_mode:
+            self.video_mode_combo.blockSignals(True)
+            index = self.video_mode_combo.findText(video_mode)
+            if index >= 0:
+                self.video_mode_combo.setCurrentIndex(index)
+                # 确保触发UI状态更新（禁用/启用跳帧下拉框）
+                self._on_video_mode_changed(video_mode)
+            self.video_mode_combo.blockSignals(False)
+
+        # 3. 更新跳帧设置
         if stride is not None:
             self.stride_combo.blockSignals(True)
 

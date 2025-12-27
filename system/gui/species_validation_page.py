@@ -287,6 +287,8 @@ class VideoPlayerThread(QThread):
             ret, frame = cap.read()
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.paused = True
+                self.pause_state_changed.emit(True)
                 continue
 
             self.current_frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -405,7 +407,15 @@ class SpeciesValidationPage(QWidget):
         self.species_image_map = defaultdict(list)
         self.current_selected_species = None
         self.current_species_info = {}
-        self.species_conf_var = 0.25
+        # 确保 controller 有 confidence_settings 字典
+        if not hasattr(self.controller, 'confidence_settings'):
+            self.controller.confidence_settings = {"global": 0.25}
+
+        # 加载 temp/conf.json 中的配置到 controller.confidence_settings
+        self._load_species_conf()
+
+        # 设置当前置信度变量 (优先使用加载后的 global 值)
+        self.species_conf_var = self.controller.confidence_settings.get("global", 0.25)
         self.export_format_var = "CSV"
         # 从设置中加载导出格式
         if hasattr(self.controller, 'settings_manager'):
@@ -454,6 +464,59 @@ class SpeciesValidationPage(QWidget):
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
         self._load_species_buttons()
+
+    def _get_conf_path(self):
+        """获取 conf.json 的路径"""
+        # 1. 强制指定目标目录为 'temp'
+        target_dir = "temp"
+
+        # 2. 确保目录存在
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                logger.error(f"创建 temp 目录失败: {e}")
+                # 如果创建失败，回退使用 controller 提供的目录
+                fallback = self.controller.get_temp_photo_dir()
+                if fallback:
+                    return os.path.join(fallback, "conf.json")
+                return "conf.json"
+
+        # 3. 返回 temp/conf.json
+        return os.path.join(target_dir, "conf.json")
+
+    def _load_species_conf(self):
+        """从 conf.json 加载置信度设置，如果不存在则自动创建"""
+        try:
+            json_path = self._get_conf_path()
+
+            # 1. 尝试加载现有文件并更新到 controller.confidence_settings
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.controller.confidence_settings.update(data)
+
+            # 2. 确保内存中始终包含 'global' 键
+            if "global" not in self.controller.confidence_settings:
+                self.controller.confidence_settings["global"] = 0.25
+
+            # 3. 如果文件不存在，则保存当前默认配置到文件
+            if not os.path.exists(json_path):
+                self._save_species_conf()
+                logger.info(f"conf.json 不存在，已自动创建并初始化: {json_path}")
+
+        except Exception as e:
+            logger.error(f"加载 conf.json 失败: {e}")
+
+    def _save_species_conf(self):
+        """保存置信度设置到 conf.json"""
+        try:
+            json_path = self._get_conf_path()
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.controller.confidence_settings, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"保存 conf.json 失败: {e}")
 
     def _apply_theme(self):
         """应用主题样式"""
@@ -1052,7 +1115,11 @@ class SpeciesValidationPage(QWidget):
 
         # 置信度控制
         conf_control_layout = QHBoxLayout()
-        conf_control_layout.addWidget(QLabel("置信度阈值:"))
+        conf_control_layout.addWidget(QLabel("选择物种:"))
+        self.species_selector = ModernComboBox()
+        self.species_selector.addItem("全局设置 (Global)", "global")
+        self.species_selector.currentIndexChanged.connect(self._on_species_selector_changed)
+        conf_control_layout.addWidget(self.species_selector)
 
         self.species_conf_slider = ModernSlider(Qt.Orientation.Horizontal)
         self.species_conf_slider.setRange(5, 95)
@@ -1133,6 +1200,15 @@ class SpeciesValidationPage(QWidget):
 
         self.species_listbox.clear()
         self.species_image_map.clear()
+
+        self.current_selected_species = None
+        self.current_species_info = {}
+        self.species_image_label.clear()
+        self.species_image_label.setText("请从左侧列表选择物种和图像")
+        self.species_photo_listbox.clear()
+
+        # 强制更新下拉框为 Global，并应用置信度
+        self._update_species_selector_items()
 
         confidence_settings = self.controller.confidence_settings
 
@@ -1258,6 +1334,88 @@ class SpeciesValidationPage(QWidget):
         logger.info(f"物种校验页面加载完成，共 {len(sorted_species)} 个物种")
         self._load_species_buttons()
 
+    def _update_species_selector_items(self):
+        """根据当前的检测结果和选中的类别更新下拉框内容"""
+        # 暂时阻断信号
+        self.species_selector.blockSignals(True)
+        self.species_selector.clear()
+
+        # 1. 始终添加全局设置
+        self.species_selector.addItem("全局设置 (Global)", "global")
+
+        found_species = set()
+
+        # 2. 添加当前分类列表选中的物种（如果在有效列表中）
+        if self.current_selected_species and self.current_selected_species not in ["标记为空", "空"]:
+            found_species.add(self.current_selected_species)
+
+        # 3. 添加当前图片/视频检测到的所有物种
+        if self.current_species_info:
+            # 图片数据
+            boxes = self.current_species_info.get("检测框", self.current_species_info.get("detect_results", []))
+            for box in boxes:
+                name = box.get("物种", box.get("species", box.get("class_name")))
+                if name: found_species.add(name)
+
+            # 视频数据
+            tracks = self.current_species_info.get("tracks", {})
+            if tracks:
+                # 简单处理：提取所有出现过的物种
+                for t_list in tracks.values():
+                    s_list = [p.get('species') for p in t_list if p.get('species')]
+                    if s_list:
+                        most_common = Counter(s_list).most_common(1)[0][0]
+                        found_species.add(most_common)
+
+        # 4. 填充下拉框
+        for sp in sorted(list(found_species)):
+            # 避免重复添加 (虽然set已去重，但为了保险)
+            if self.species_selector.findText(sp) == -1:
+                self.species_selector.addItem(sp, sp)
+
+        # 5. 智能选择默认项
+        # 如果当前列表分类就在选项中，优先选中它
+        if self.current_selected_species and self.current_selected_species not in ["标记为空", "空"]:
+            index = self.species_selector.findData(self.current_selected_species)
+            if index != -1:
+                self.species_selector.setCurrentIndex(index)
+            else:
+                self.species_selector.setCurrentIndex(0)
+        else:
+            # 未选择物种时，强制使用全局设置
+            self.species_selector.setCurrentIndex(0)
+
+        self.species_selector.blockSignals(False)
+
+        # 触发一次改变以更新滑块状态
+        self._on_species_selector_changed()
+
+    def _on_species_selector_changed(self):
+        """当下拉框选择改变时，更新滑块到对应物种的保存值"""
+        current_species = self.species_selector.currentData()
+        if not current_species:
+            current_species = "global"
+
+        # 获取保存的设置
+        conf_settings = {}
+        if hasattr(self.controller, 'confidence_settings'):
+            conf_settings = self.controller.confidence_settings
+
+        # 获取值：特定物种 -> 全局 -> 默认0.25
+        saved_val = conf_settings.get(current_species, conf_settings.get("global", 0.25))
+
+        # 更新滑块（阻断信号防止循环调用）
+        self.species_conf_slider.blockSignals(True)
+        self.species_conf_slider.setValue(int(saved_val * 100))
+        self.species_conf_slider.blockSignals(False)
+
+        # 更新标签和内部变量
+        self.species_conf_label.setText(f"{saved_val:.2f}")
+        # 更新内部变量
+        self.species_conf_var = saved_val
+        # 顺便刷新一下检测信息显示 (确保界面上的数量统计与新的置信度一致)
+        self._update_detection_info_display()
+
     def _on_species_selected(self):
         """物种选择事件处理"""
         selected_items = self.species_listbox.selectedItems()
@@ -1272,9 +1430,8 @@ class SpeciesValidationPage(QWidget):
             self.species_image_label.pixmap = None
         self.species_info_label.setText("物种:  | 数量:  | 置信度: ")
 
-        # 解析选中的物种名称（移除数量部分）
+        # 解析选中的物种名称
         selected_text = selected_items[0].text()
-        # 从 "物种名称 (数量)" 格式中提取物种名称
         species_name = selected_text.split(' (')[0] if ' (' in selected_text else selected_text
 
         self.current_selected_species = species_name
@@ -1288,9 +1445,12 @@ class SpeciesValidationPage(QWidget):
         if species_name in ["标记为空", "空"]:
             self.species_conf_slider.setEnabled(False)
             self.species_conf_label.setText("N/A")
+            self.species_selector.setEnabled(False) # 禁用选择器
         else:
             self.species_conf_slider.setEnabled(True)
-            self._update_confidence_label(self.species_conf_slider.value())
+            self.species_selector.setEnabled(True)
+            # === 修改：调用更新下拉框的方法 ===
+            self._update_species_selector_items()
 
         # 添加图片到列表
         for image_file in image_files:
@@ -1311,6 +1471,7 @@ class SpeciesValidationPage(QWidget):
         self._count_marked = None
         self._stop_video_thread()  # 停止之前的视频线程
         self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
+        self.current_species_info = {}  # 重置当前信息
 
         selection = self.species_photo_listbox.selectedItems()
         if not selection:
@@ -1336,6 +1497,10 @@ class SpeciesValidationPage(QWidget):
                     self._update_detection_info_display()
                 except:
                     pass
+
+        # === 修改：加载图片信息后，刷新下拉框（这会包含图片中检测到的新物种）===
+        if self.current_selected_species not in ["标记为空", "空"]:
+            self._update_species_selector_items()
 
         # === 2. 判断文件类型 ===
         if file_name.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS):
@@ -1641,33 +1806,44 @@ class SpeciesValidationPage(QWidget):
         """处理置信度滑块值的变化"""
         self._update_confidence_label(value)
 
-        # 重新计算并更新信息标签
+        # 转换值为小数 (例如 25 -> 0.25)
+        new_conf = value / 100.0 if isinstance(value, int) else value
+
+        # === 修改：使用下拉框选中的物种作为 Key ===
+        current_species_key = self.species_selector.currentData()
+        if not current_species_key:
+            current_species_key = "global"
+
+        # 1. 重新计算并更新信息标签 (文本)
         if hasattr(self, 'current_species_info') and self.current_species_info:
             self._update_detection_info_display()
 
-        # 实时重新绘制检测框
+        # 2. 实时重绘图片检测框
         if (hasattr(self, 'species_validation_original_image') and
                 self.species_validation_original_image and
                 hasattr(self, 'current_species_info') and
                 self.current_species_info):
-            conf_threshold = value / 100.0 if isinstance(value, int) else value
             self._display_image_with_detection_boxes(
                 self.species_validation_original_image,
                 self.current_species_info,
-                conf_threshold
+                new_conf
             )
 
-        # 保存置信度设置
-        if not self.current_selected_species or self.current_selected_species == "标记为空":
+        # 3. 实时更新视频播放器的阈值
+        if self.video_thread and self.video_thread.isRunning():
+            self.video_thread.conf_threshold = new_conf
+
+        # 4. 保存置信度设置到配置文件
+        # 只有在非空标记模式下才保存
+        if self.current_selected_species in ["标记为空", "空"]:
             return
 
-        species_name = self.current_selected_species
-        new_conf = value / 100.0 if isinstance(value, int) else value
-
         if hasattr(self.controller, 'confidence_settings'):
-            self.controller.confidence_settings[species_name] = new_conf
+            self.controller.confidence_settings[current_species_key] = new_conf
             if hasattr(self.controller, 'settings_manager'):
                 self.controller.settings_manager.save_confidence_settings(self.controller.confidence_settings)
+                # 确保 temp/conf.json 也被更新 (PreviewPage 读取的是这个)
+            self._save_species_conf()
 
     def _export_validation_data(self):
         """从校验页面的数据导出为表格文件（Excel或CSV）"""
