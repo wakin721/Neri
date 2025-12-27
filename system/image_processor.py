@@ -113,7 +113,8 @@ class ImageProcessor:
                     imgsz=1024,
                     half=use_fp16,
                     iou=iou,
-                    conf=conf
+                    conf=conf,
+                    max_det=20
                 )
 
                 # 2. 如果启用了分类模型，进行二次识别
