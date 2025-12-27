@@ -141,9 +141,7 @@ class ImageProcessor:
             '最低置信度': min_confidence
         }
 
-    # ==========================================
-    # 新增视频检测方法
-    # ==========================================
+
     def detect_video_species(self, video_source: str, output_dir: str,
                              use_fp16: bool = False, iou: float = 0.3,
                              conf: float = 0.25, augment: bool = True,
