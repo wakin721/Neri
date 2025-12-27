@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from ultralytics import YOLO
 import json
 import torch
+import numpy as np
 from system.utils import resource_path
 import cv2
 
@@ -83,10 +84,52 @@ class ImageProcessor:
         except Exception:
             return False
 
+    def _preprocess_image(self, img: Any) -> Any:
+        """
+        图像预处理：LAB色彩空间增强 (L通道 CLAHE)
+        适用于 BGR 彩色图像和 灰度图像
+        """
+        if img is None or img.size == 0:
+            return None
+
+        try:
+            # [新增] 确保图像是 uint8 类型且内存连续，防止 YOLO 报错 Unsupported image type
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+
+            # 1. 灰度图处理 (2维数组)
+            if len(img.shape) == 2:
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(img)
+                return np.ascontiguousarray(enhanced)
+
+            # 2. 彩色图处理 (3维数组 BGR)
+            elif len(img.shape) == 3:
+                # BGR -> LAB
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+
+                # 只对 L 通道 (亮度) 进行 CLAHE 增强
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                l_enhanced = clahe.apply(l)
+
+                # 合并通道并转回 BGR
+                merged = cv2.merge((l_enhanced, a, b))
+                bgr_enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+                # [重要] 返回连续数组
+                return np.ascontiguousarray(bgr_enhanced)
+
+        except Exception as e:
+            logger.warning(f"图像预处理失败，将使用原图: {e}")
+            return np.ascontiguousarray(img) if img is not None else None
+
+        return img
+
     def detect_species(self, img_path: str, use_fp16: bool = False, iou: float = 0.3,
                        conf: float = 0.25, augment: bool = True,
                        agnostic_nms: bool = True, timeout: float = 20.0) -> Dict[str, Any]:
-        """检测图像中的物种并应用翻译"""
+        """检测图像中的物种并应用翻译 (包含 LAB 预处理增强)"""
         use_fp16 = self._check_cuda(use_fp16)
 
         species_names = ""
@@ -96,18 +139,24 @@ class ImageProcessor:
 
         if not self.model:
             return {
-                '物种名称': species_names,
-                '物种数量': species_counts,
-                'detect_results': detect_results,
-                '最低置信度': min_confidence
+                '物种名称': species_names, '物种数量': species_counts,
+                'detect_results': detect_results, '最低置信度': min_confidence
             }
 
         def run_detection():
             nonlocal species_names, species_counts, detect_results, min_confidence
             try:
-                # 1. 运行检测模型
+                # [修改] 1. 读取并预处理图像
+                original_img_bgr = cv2.imread(img_path)
+                if original_img_bgr is None:
+                    raise FileNotFoundError(f"无法读取图像: {img_path}")
+
+                # 应用增强 (LAB -> CLAHE -> BGR)
+                processed_img = self._preprocess_image(original_img_bgr)
+
+                # [修改] 2. 运行检测模型 (传入 numpy 数组而不是路径)
                 results = self.model(
-                    img_path,
+                    processed_img,
                     augment=augment,
                     agnostic_nms=agnostic_nms,
                     imgsz=1024,
@@ -117,71 +166,68 @@ class ImageProcessor:
                     max_det=20
                 )
 
-                # 2. 如果启用了分类模型，进行二次识别
-                candidates_map = {}  # 用于存储每个检测框的候选物种
+                # 3. 如果启用了分类模型，进行二次识别
+                candidates_map = {}
 
                 if self.cls_model:
                     try:
-                        import cv2
-                        original_img = cv2.imread(img_path)  # 读取原图用于裁剪
-                        if original_img is not None:
-                            original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+                        # [修改] 使用预处理后的图像进行裁切，确保分类器也能受益于增强
+                        # 这是一个优化点：不需要再次读取 cv2.imread
+                        original_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
 
-                            for r in results:
-                                if r.boxes is None: continue
-                                for i, box in enumerate(r.boxes):
-                                    # 获取坐标并裁剪
-                                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                                    # 边界检查
-                                    h, w, _ = original_img.shape
-                                    x1, y1 = max(0, x1), max(0, y1)
-                                    x2, y2 = min(w, x2), min(h, y2)
+                        for r in results:
+                            if r.boxes is None: continue
+                            for i, box in enumerate(r.boxes):
+                                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                                h, w, _ = original_img_rgb.shape
+                                x1, y1 = max(0, x1), max(0, y1)
+                                x2, y2 = min(w, x2), min(h, y2)
 
-                                    if x2 > x1 and y2 > y1:
-                                        crop = original_img[y1:y2, x1:x2]
+                                if x2 > x1 and y2 > y1:
+                                    crop = original_img_rgb[y1:y2, x1:x2]
 
-                                        ch, cw = crop.shape[:2]
-                                        if ch != cw:
-                                            max_dim = max(ch, cw)
-                                            # Calculate padding sizes
-                                            top = (max_dim - ch) // 2
-                                            bottom = max_dim - ch - top
-                                            left = (max_dim - cw) // 2
-                                            right = max_dim - cw - left
+                                    ch, cw = crop.shape[:2]
+                                    if ch != cw:
+                                        max_dim = max(ch, cw)
+                                        # Calculate padding sizes
+                                        top = (max_dim - ch) // 2
+                                        bottom = max_dim - ch - top
+                                        left = (max_dim - cw) // 2
+                                        right = max_dim - cw - left
 
-                                            # Use grey padding (114, 114, 114) which is standard for YOLO
-                                            crop = cv2.copyMakeBorder(
-                                                crop,
-                                                top, bottom, left, right,
-                                                cv2.BORDER_CONSTANT,
-                                                value=[114, 114, 114]
-                                            )
+                                        # Use gray padding (114, 114, 114) which is standard for YOLO
+                                        crop = cv2.copyMakeBorder(
+                                            crop,
+                                            top, bottom, left, right,
+                                            cv2.BORDER_CONSTANT,
+                                            value=[114, 114, 114]
+                                        )
 
-                                        # 运行分类模型
-                                        cls_res = self.cls_model(crop,
-                                                                 imgsz=640,
-                                                                 half=use_fp16
-                                                                 )
+                                    # 运行分类模型
+                                    cls_res = self.cls_model(crop,
+                                                             imgsz=640,
+                                                             half=use_fp16
+                                                             )
 
-                                        # 获取前3名候选
-                                        top3_indices = cls_res[0].probs.top5[:3]  # top5 contains indices
-                                        top3_confs = cls_res[0].probs.top5conf[:3]  # confidences
+                                    # 获取前3名候选
+                                    top3_indices = cls_res[0].probs.top5[:3]  # top5 contains indices
+                                    top3_confs = cls_res[0].probs.top5conf[:3]  # confidences
 
-                                        candidates = []
-                                        for cls_idx, cls_conf in zip(top3_indices, top3_confs):
-                                            raw_name = cls_res[0].names[int(cls_idx)]
-                                            # 翻译名称
-                                            trans_name = self.translation_dict.get(raw_name, raw_name)
-                                            candidates.append({
-                                                "name": trans_name,
-                                                "conf": float(cls_conf)
-                                            })
+                                    candidates = []
+                                    for cls_idx, cls_conf in zip(top3_indices, top3_confs):
+                                        raw_name = cls_res[0].names[int(cls_idx)]
+                                        # 翻译名称
+                                        trans_name = self.translation_dict.get(raw_name, raw_name)
+                                        candidates.append({
+                                            "name": trans_name,
+                                            "conf": float(cls_conf)
+                                        })
 
-                                        # 存储候选信息，Key为box的索引或其他标识
-                                        candidates_map[i] = candidates
+                                    # 存储候选信息，Key为box的索引或其他标识
+                                    candidates_map[i] = candidates
 
-                                        # [可选] 用分类模型的第一名替换检测模型的类别用于初步统计
-                                        # 这里我们不直接修改box.cls，而是在统计时优先使用candidates[0]
+                                    # [可选] 用分类模型的第一名替换检测模型的类别用于初步统计
+                                    # 这里我们不直接修改box.cls，而是在统计时优先使用candidates[0]
                     except Exception as e:
                         logger.error(f"二次分类过程出错: {e}")
 
@@ -248,6 +294,59 @@ class ImageProcessor:
             '最低置信度': min_confidence
         }
 
+    def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:
+        """
+        读取源视频，应用跳帧和LAB增强，保存为临时MP4文件。
+        返回生成的视频的总帧数。
+        """
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            raise Exception(f"无法打开源视频: {source_path}")
+
+        # 获取原始信息
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        orig_fps = cap.get(cv2.CAP_PROP_FPS)
+        if orig_fps <= 0: orig_fps = 25  # 默认值防止错误
+
+        # 保持原始分辨率，不进行缩放
+        new_w = orig_w
+        new_h = orig_h
+
+        # 初始化写入器 (使用 mp4v 编码)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(temp_path, fourcc, orig_fps, (new_w, new_h))
+
+        if not writer.isOpened():
+            cap.release()
+            raise Exception("无法创建临时视频写入器")
+
+        idx = 0
+        saved_count = 0
+
+        try:
+            while True:
+                success, frame = cap.read()
+                if not success:
+                    break
+
+                # 1. 跳帧处理
+                if idx % stride == 0:
+                    if frame is not None and frame.size > 0:
+                        # [修改] 移除 resize 步骤，直接对原尺寸图像进行 LAB 增强
+                        enhanced_frame = self._preprocess_image(frame)
+
+                        # 2. 写入临时视频
+                        if enhanced_frame is not None:
+                            writer.write(enhanced_frame)
+                            saved_count += 1
+
+                idx += 1
+        finally:
+            cap.release()
+            writer.release()
+
+        return saved_count
 
     def detect_video_species(self, video_source: str, output_dir: str,
                              use_fp16: bool = False, iou: float = 0.3,
@@ -258,56 +357,58 @@ class ImageProcessor:
                              temp_video_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
+        策略：先生成跳帧+增强后的临时视频(保持原分辨率)，再进行追踪。
         """
         if hasattr(self, 'model_path') and self.model_path:
             try:
-                logger.info(f"正在重置模型以清理追踪器状态: {self.model_path}")
-                # 重新加载模型实例，彻底清空追踪器历史
                 self.model = self._load_model(self.model_path)
             except Exception as e:
-                logger.warning(f"重置模型状态失败，将尝试使用当前模型继续: {e}")
+                logger.warning(f"重置模型状态失败: {e}")
 
-        if not self.model:
-            logger.error("模型未加载，无法处理视频")
-            return {'error': 'Model not loaded'}
-
+        if not self.model: return {'error': 'Model not loaded'}
         use_fp16 = self._check_cuda(use_fp16)
 
-        # 获取视频总帧数
-        total_frames = 0
-        try:
-            cap = cv2.VideoCapture(video_source)
-            if cap.isOpened():
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-        except Exception as e:
-            logger.warning(f"无法获取视频总帧数: {e}")
-
-        # 1. 获取Tracker配置文件路径
-        tracker_config = resource_path(os.path.join("res", "cls_model", "tracker.yaml"))
-        if not os.path.exists(tracker_config):
-            logger.warning(f"Tracker配置文件未找到: {tracker_config}，将使用默认追踪器")
-            tracker_config = "botsort.yaml"  # Ultralytics 默认值
-
-        # 2. 准备路径
-        # 仅标准化 output_dir 路径，但不立即创建文件夹，避免生成空的 video_results
+        # 准备路径
         output_dir = os.path.normpath(output_dir)
-
         video_name = os.path.splitext(os.path.basename(video_source))[0]
-        if "http" in video_source:
-            video_name = "stream_result"
+        if "http" in video_source: video_name = "stream_result"
 
-        # 3. 运行追踪 (Stream=True 以减少内存占用)
-        logger.info(f"开始视频追踪: {video_source} (跳帧: {vid_stride})")
+        # 确定临时文件夹
+        work_temp_dir = temp_video_dir if temp_video_dir else os.path.join(output_dir, "temp")
+        os.makedirs(work_temp_dir, exist_ok=True)
 
-        # [新增] 使用系统临时目录作为 YOLO 的运行目录，防止在用户目录下生成 runs 文件夹
+        # 定义临时增强视频路径
+        temp_enhanced_video_path = os.path.join(work_temp_dir, f"{video_name}_enhanced_temp.mp4")
+
+        # YOLO 日志路径
         import tempfile
         temp_run_project = os.path.join(tempfile.gettempdir(), "neri_yolo_logs")
 
+        # 追踪器配置
+        tracker_config = resource_path(os.path.join("res", "cls_model", "tracker.yaml"))
+        if not os.path.exists(tracker_config): tracker_config = "botsort.yaml"
+
+        logger.info(f"开始预处理视频 (LAB增强, 保持原分辨率): {video_source}")
+
         try:
-            # save=False 禁止生成视频文件
+            # === 第一步：生成增强后的临时视频 ===
+            # processed_frame_count 是实际生成的帧数（已包含跳帧逻辑）
+            # 这将作为进度条的“总帧数”
+            processed_frame_count = self._create_temp_enhanced_video(
+                video_source, temp_enhanced_video_path, vid_stride
+            )
+
+            if processed_frame_count == 0:
+                raise Exception("预处理后未生成有效帧")
+
+            logger.info(f"预处理完成，生成临时视频: {temp_enhanced_video_path} (共 {processed_frame_count} 帧)")
+
+            # === 第二步：运行 YOLO 追踪 ===
+            # source 直接传入临时视频路径
+            # imgsz=1024 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
+            # vid_stride=1 必须为1，因为我们在第一步已经物理删除了不需要的帧
             results = self.model.track(
-                source=video_source,
+                source=temp_enhanced_video_path,
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
@@ -315,30 +416,29 @@ class ImageProcessor:
                 half=use_fp16,
                 iou=iou,
                 conf=conf,
-                persist=True,  # 视频追踪必须开启 persist
-                save=False,  # [修改] 显式禁止保存视频
-                project=temp_run_project,  # [修改] 重定向到临时目录
-                name="track_log",  # [修改] 临时任务名
+                persist=True,
+                save=False,
+                project=temp_run_project,
+                name="track_log",
                 exist_ok=True,
                 stream=True,
-                vid_stride=vid_stride  # 传入跳帧参数
+                vid_stride=1  # 关键：不要让 YOLO 再次跳帧
             )
 
-            # 4. 数据聚合结构
             tracks_data = defaultdict(list)
-            frame_count = 0
+            current_track_frame = 0
 
-            # 5. 逐帧处理结果
+            # === 第三步：处理结果并同步进度条 ===
             for r in results:
-                frame_count += 1
+                current_track_frame += 1
 
-                # 计算当前实际对应的视频帧索引
-                # frame_count 是处理过的帧数，需要乘以 stride 还原为原始视频帧索引
-                current_real_frame_idx = (frame_count - 1) * vid_stride
+                # 计算对应的原始视频帧索引 (用于数据记录)
+                original_real_frame_idx = (current_track_frame - 1) * vid_stride
 
-                # 处理回调状态
+                # --- [修改核心] 状态回调更新 (用于 UI 进度条) ---
                 if status_callback:
                     try:
+                        # 1. 统计当前帧内的物种数量（用于实时显示）
                         frame_counts = Counter()
                         if r.boxes and r.boxes.cls is not None:
                             for cls_id in r.boxes.cls.int().tolist():
@@ -346,31 +446,25 @@ class ImageProcessor:
                                 trans_name = self.translation_dict.get(name, name)
                                 frame_counts[trans_name] += 1
 
+                        # 2. 计算推理速度（用于显示 FPS 或延迟）
                         speed_ms = 0.0
                         if hasattr(r, 'speed') and isinstance(r.speed, dict):
                             speed_ms = sum(r.speed.values())
 
+                        # 3. 获取当前帧的尺寸
                         h, w = r.orig_shape if hasattr(r, 'orig_shape') else (0, 0)
 
-                        # 回调中使用实际帧进度，以便进度条正确显示
-                        current_progress = min(current_real_frame_idx + 1, total_frames)
-                        status_callback(current_progress, total_frames, w, h, frame_counts, speed_ms)
+                        # 4. [关键] 调用回调函数
+                        # current_track_frame: 当前处理到的帧数（分子）
+                        # processed_frame_count: 临时视频的总帧数（分母，由 _create_temp_enhanced_video 返回）
+                        status_callback(current_track_frame, processed_frame_count, w, h, frame_counts, speed_ms)
 
                     except Exception as e:
-                        # 检测是否为强制停止信号
-                        # 如果异常信息中包含"强制停止"（这是我们在 main_window 中抛出的），
-                        # 则不再视为错误，而是直接向上抛出异常，从而跳出 for r in results 循环，停止 YOLO 追踪。
-                        if "强制停止" in str(e):
-                            logger.info(f"响应用户停止信号，正在中断视频追踪: {e}")
-                            raise e  # 重新抛出异常，让外层的 ForceStopError 捕获逻辑生效
-
-                        # 只有非停止信号的异常才记录为错误
+                        if "强制停止" in str(e): raise e
                         logger.error(f"视频状态回调出错: {e}")
 
-                if r.boxes is None or r.boxes.id is None:
-                    continue
+                if r.boxes is None or r.boxes.id is None: continue
 
-                # 获取转为列表的数据
                 ids = r.boxes.id.int().cpu().tolist()
                 classes = r.boxes.cls.int().cpu().tolist()
                 confs = r.boxes.conf.cpu().tolist()
@@ -381,7 +475,7 @@ class ImageProcessor:
                     translated_name = self.translation_dict.get(english_name, english_name)
 
                     entry = {
-                        "frame_index": current_real_frame_idx,  # [修改] 使用还原后的实际帧索引
+                        "frame_index": original_real_frame_idx,  # 记录原始视频的时间点
                         "species": translated_name,
                         "original_species": english_name,
                         "confidence": float(conf_val),
@@ -389,34 +483,39 @@ class ImageProcessor:
                     }
                     tracks_data[track_id].append(entry)
 
-            # 6. 保存JSON结果
-            # 只有在需要保存 JSON 时才创建目标文件夹
-            target_json_dir = temp_video_dir if temp_video_dir else output_dir
-            os.makedirs(target_json_dir, exist_ok=True)
+            # === 第四步：保存 JSON 结果 ===
+            target_json_dir = output_dir  # 默认输出到选择的目录
+            if temp_video_dir: target_json_dir = temp_video_dir  # 如果指定了临时目录
 
+            os.makedirs(target_json_dir, exist_ok=True)
             json_output_path = os.path.join(target_json_dir, f"{video_name}.json")
 
             final_json_data = {
                 "video_source": video_source,
-                "total_frames_processed": frame_count,
+                "total_frames_processed": current_track_frame,
                 "vid_stride": vid_stride,
                 "tracker_config": tracker_config,
                 "tracks": dict(tracks_data)
             }
-
             with open(json_output_path, 'w', encoding='utf-8') as f:
                 json.dump(final_json_data, f, ensure_ascii=False, indent=4)
 
             logger.info(f"视频处理完成，JSON已保存至: {json_output_path}")
-            return {
-                "json_path": json_output_path,
-                "frame_count": frame_count,
-                "status": "success"
-            }
+
+            return {"json_path": json_output_path, "frame_count": current_track_frame, "status": "success"}
 
         except Exception as e:
             logger.error(f"视频追踪失败: {e}")
             return {"error": str(e), "status": "failed"}
+
+        finally:
+            # === 第五步：清理临时文件 ===
+            if os.path.exists(temp_enhanced_video_path):
+                try:
+                    os.remove(temp_enhanced_video_path)
+                    logger.info(f"已删除临时增强视频: {temp_enhanced_video_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时视频失败: {e}")
 
     def _get_first_detected_species(self, results: Any) -> str:
         """从检测结果中获取第一个物种的名称"""

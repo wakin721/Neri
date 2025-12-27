@@ -439,7 +439,7 @@ class ProcessingThread(QThread):
                                 if self.force_stop_flag:
                                     raise ForceStopError("用户强制停止")
                                 # frame_idx 是当前绝对帧位置(或接近)，需将其转换为处理过的“单元”数
-                                processed_frames_so_far = math.ceil(frame_idx / vid_stride)
+                                processed_frames_so_far = frame_idx
 
                                 # 计算当前总进度：之前文件完成的单元 + 当前视频已处理帧数
                                 current_total_done = processed_work_units + processed_frames_so_far
