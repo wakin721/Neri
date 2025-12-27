@@ -568,7 +568,7 @@ class ProcessingThread(QThread):
                 'processed_files': processed_files,
                 'total_files': total_files,
                 'file_path': self.file_path,
-                'save_path': self.save_path,
+                'save_path': self.file_path,
                 'excel_data': excel_data,
                 'timestamp': datetime.now().isoformat()
             }
@@ -825,20 +825,21 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 开始页面
         self.start_page.browse_file_path_requested.connect(self.browse_file_path)
-        self.start_page.browse_save_path_requested.connect(self.browse_save_path)
         self.start_page.file_path_changed.connect(self._validate_and_update_file_path)
-        self.start_page.save_path_changed.connect(self._validate_and_update_save_path)
         self.start_page.toggle_processing_requested.connect(self.toggle_processing_state)
+
+        self.start_page.settings_changed.connect(self._sync_start_to_advanced)
         self.start_page.settings_changed.connect(self._save_current_settings)
 
         # 高级页面
         if hasattr(self.advanced_page, 'settings_changed'):
             self.advanced_page.settings_changed.connect(self._save_current_settings)
+            self.advanced_page.settings_changed.connect(self._sync_advanced_to_start)
+
         self.advanced_page.update_check_requested.connect(self.check_for_updates_from_ui)
         self.advanced_page.theme_changed.connect(self.change_theme)
         self.advanced_page.params_help_requested.connect(self.show_params_help)
         self.advanced_page.cache_clear_requested.connect(self.clear_image_cache)
-        self.advanced_page.settings_changed.connect(self._save_current_settings)
 
         # 预览页面
         self.preview_page.settings_changed.connect(self._save_current_settings)
@@ -847,6 +848,32 @@ class ObjectDetectionGUI(QMainWindow):
         self.species_validation_page.settings_changed.connect(self._save_current_settings)
         self.species_validation_page.quick_marks_updated.connect(
             self.advanced_page.load_quick_mark_settings)
+
+    def _sync_advanced_to_start(self):
+        """将高级页面的设置实时同步到开始页面"""
+        # 获取高级页面的当前设置
+        settings = self.advanced_page.get_settings()
+
+        # 提取模型和跳帧参数
+        model = settings.get("selected_model")
+        stride = settings.get("vid_stride")
+
+        # 调用开始页面的更新方法
+        if hasattr(self.start_page, 'update_quick_settings'):
+            self.start_page.update_quick_settings(model, stride)
+
+    def _sync_start_to_advanced(self):
+        """将开始页面的设置同步到高级页面"""
+        # 获取开始页面的当前设置
+        settings = self.start_page.get_settings()
+
+        # 提取模型和跳帧参数
+        model = settings.get("selected_model")
+        stride = settings.get("vid_stride")
+
+        # 调用高级页面的同步方法
+        if hasattr(self.advanced_page, 'update_quick_settings_sync'):
+            self.advanced_page.update_quick_settings_sync(model, stride)
 
     def _post_init(self):
         """后期初始化"""
@@ -882,21 +909,28 @@ class ObjectDetectionGUI(QMainWindow):
 
     def _check_for_updates(self, silent=False):
         """检查更新"""
-        # 优先尝试从高级页面的下拉框获取最新的通道选择
-        # 这样可以确保启动时如果加载了"预览版"配置，检查的是预览版通道而不是默认的稳定版
+        # 获取通道
         if hasattr(self, 'advanced_page') and hasattr(self.advanced_page, 'update_channel_combo'):
             channel_selection = self.advanced_page.update_channel_combo.currentText()
+            # 获取镜像源选择
+            mirror_selection = self.advanced_page.update_mirror_combo.currentText()
         else:
             channel_selection = self.update_channel_var
+            # 默认镜像
+            mirror_selection = "国内源 (KKGitHub)"
 
         channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-        # 使用线程来运行检查，避免阻塞 UI启动
+        # 解析镜像源参数
+        mirror = 'official'
+        if 'KKGitHub' in mirror_selection:
+            mirror = 'kkgithub'
+
+        # 使用线程来运行检查
         update_thread = threading.Thread(
             target=check_for_updates,
-            # 将 silent 参数传给检查函数，由它决定是否静默
-            # silent=True 时，只有发现新版本才会弹窗，无更新时不提示
-            args=(self, silent, channel),
+            # [修改] 传递 mirror 参数
+            args=(self, silent, channel, mirror),
             daemon=True
         )
         update_thread.start()
@@ -908,13 +942,19 @@ class ObjectDetectionGUI(QMainWindow):
             channel_selection = self.advanced_page.update_channel_combo.currentText()
             channel = 'preview' if '预览版' in channel_selection else 'stable'
 
-            # 提示用户检查已经开始
-            self.status_bar.status_label.setText("正在检查更新，请稍候...")
+            # 从高级页面获取镜像源
+            mirror_selection = self.advanced_page.update_mirror_combo.currentText()
+            mirror = 'official'
+            if 'KKGitHub' in mirror_selection:
+                mirror = 'kkgithub'
 
-            # 使用线程来运行检查，避免UI阻塞
+            self.status_bar.status_label.setText(f"正在检查更新 ({mirror_selection})...")
+
+            # 使用线程来运行检查
             update_thread = threading.Thread(
                 target=check_for_updates,
-                args=(self, False, channel),  # self作为parent, silent设置为False
+                # 传递 mirror 参数
+                args=(self, False, channel, mirror),
                 daemon=True
             )
             update_thread.start()
@@ -1069,16 +1109,6 @@ class ObjectDetectionGUI(QMainWindow):
                 self.start_page.set_file_path(folder_selected)
             self._validate_and_update_file_path(folder_selected)
 
-    def browse_save_path(self):
-        """浏览保存路径"""
-        folder_selected = QFileDialog.getExistingDirectory(
-            self, "选择结果保存文件夹"
-        )
-        if folder_selected:
-            if hasattr(self.start_page, 'set_save_path'):
-                self.start_page.set_save_path(folder_selected)
-            self._validate_and_update_save_path(folder_selected)
-
     def _validate_and_update_file_path(self, folder_selected):
         """验证和更新文件路径"""
         if hasattr(self.preview_page, 'clear_preview'):
@@ -1104,35 +1134,6 @@ class ObjectDetectionGUI(QMainWindow):
                 f"提供的图像文件路径不存在或不是一个文件夹:\n'{folder_selected}'"
             )
             self.status_bar.status_label.setText("无效的文件路径")
-
-    def _validate_and_update_save_path(self, save_path):
-        """验证和更新保存路径"""
-        if not save_path:
-            return
-
-        if not os.path.isdir(save_path):
-            reply = QMessageBox.question(
-                self, "确认创建路径",
-                f"结果保存路径不存在，是否要创建它？\n\n{save_path}",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                try:
-                    os.makedirs(save_path, exist_ok=True)
-                    if hasattr(self.start_page, 'set_save_path'):
-                        self.start_page.set_save_path(save_path)
-                    self.status_bar.status_label.setText(f"结果保存路径已创建: {save_path}")
-                    self._save_current_settings()
-                except Exception as e:
-                    QMessageBox.critical(self, "路径错误", f"无法创建结果保存路径:\n{e}")
-                    self.status_bar.status_label.setText("结果保存路径创建失败")
-            else:
-                self.status_bar.status_label.setText("操作已取消，请输入有效的结果保存路径。")
-        else:
-            if hasattr(self.start_page, 'set_save_path'):
-                self.start_page.set_save_path(save_path)
-            self.status_bar.status_label.setText(f"结果保存路径已设置: {save_path}")
-            self._save_current_settings()
 
     def show_params_help(self):
         """显示参数帮助"""
@@ -1225,10 +1226,11 @@ class ObjectDetectionGUI(QMainWindow):
         """开始处理"""
         # 获取处理参数
         file_path = self.start_page.get_file_path() if hasattr(self.start_page, 'get_file_path') else ""
-        save_path = self.start_page.get_save_path() if hasattr(self.start_page, 'get_save_path') else ""
+        save_path = file_path
         use_fp16 = self.advanced_page.get_use_fp16() if hasattr(self.advanced_page, 'get_use_fp16') else False
 
-        if not self._validate_inputs(file_path, save_path):
+        # 验证输入时不再传入 save_path
+        if not self._validate_inputs(file_path):
             return
 
         if self.is_processing:
@@ -1376,7 +1378,8 @@ class ObjectDetectionGUI(QMainWindow):
                 # 设置强制停止标志，这将触发 run 方法内部的 ForceStopError
                 self.processing_thread.force_stop_flag = True
 
-    def _validate_inputs(self, file_path: str, save_path: str) -> bool:
+    def _validate_inputs(self, file_path: str) -> bool:
+        """验证输入参数 """
         if not file_path or not os.path.isdir(file_path):
             QMessageBox.critical(self, "错误", "请提供有效的源文件夹路径。")
             return False
