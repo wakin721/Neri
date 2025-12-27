@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QListWidget, QLabel, QTextEdit, QPushButton,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox,
     QMessageBox, QFileDialog, QInputDialog, QScrollArea,
-    QSizePolicy, QApplication, QStackedLayout
+    QSizePolicy, QApplication, QStackedLayout, QComboBox
 )
 from PySide6.QtCore import Qt, Signal, QThread, QTimer, QUrl, QSize, QEvent, QRectF, QPoint
 from PySide6.QtGui import (
@@ -176,11 +176,15 @@ class VideoPlayerThread(QThread):
     playback_finished = Signal()
     pause_state_changed = Signal(bool)
 
-    def __init__(self, video_path, json_path, conf_threshold, draw_boxes=True, min_frame_ratio=0.0, start_frame=0, parent=None):
+    def __init__(self, video_path, json_path, conf_map, draw_boxes=True, min_frame_ratio=0.0, start_frame=0,
+                 parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.json_path = json_path
-        self.conf_threshold = conf_threshold
+
+        # 确保 conf_map 是字典，如果为空则给默认值
+        self.conf_map = conf_map if conf_map else {"global": 0.25}
+
         self.draw_boxes = draw_boxes
         self.min_frame_ratio = min_frame_ratio
         self.start_frame = start_frame
@@ -191,7 +195,6 @@ class VideoPlayerThread(QThread):
         # === 初始化字体 ===
         try:
             self.font_path = resource_path(os.path.join("res", "AlibabaPuHuiTi-3-65-Medium.ttf"))
-            # 字体大小暂时设为 20，稍后在 run 中可根据视频尺寸调整
             self.font = ImageFont.truetype(self.font_path, 20)
             self.font_loaded = True
         except Exception as e:
@@ -202,7 +205,6 @@ class VideoPlayerThread(QThread):
     def toggle_pause(self):
         """切换暂停/播放状态"""
         self.paused = not self.paused
-        # --- 新增：发射信号通知状态改变 ---
         self.pause_state_changed.emit(self.paused)
 
     def run(self):
@@ -244,6 +246,8 @@ class VideoPlayerThread(QThread):
             ret, frame = cap.read()
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.paused = True
+                self.pause_state_changed.emit(True)
                 continue
 
             self.current_frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -331,44 +335,49 @@ class VideoPlayerThread(QThread):
         return parsed_frames
 
     def _draw_boxes_pil(self, pil_img, boxes):
-        """使用 PIL 绘制，支持自定义字体"""
         draw = ImageDraw.Draw(pil_img)
+        img_w, img_h = pil_img.size
 
         for box in boxes:
+            species = box.get('species', 'Unknown')
+            track_id = box.get('track_id', '?')
             conf = box.get('confidence', 0)
-            if conf < self.conf_threshold:
+
+            # 如果 conf_map 中有该物种，使用该物种的阈值；否则使用 global；如果没有 global，默认 0.25
+            threshold = self.conf_map.get(species, self.conf_map.get("global", 0.25))
+
+            if conf < threshold:
                 continue
 
             bbox = box.get('bbox')
             if not bbox: continue
-            x1, y1, x2, y2 = map(int, bbox)
 
-            species = box.get('species', 'Unknown')
-            track_id = box.get('track_id', '?')
+            try:
+                x1_f, y1_f, x2_f, y2_f = map(float, bbox[:4])
+                is_normalized = all(0.0 <= c <= 1.0 for c in [x1_f, y1_f, x2_f, y2_f]) and (x2_f > 0 or y2_f > 0)
+                if is_normalized:
+                    x1, y1, x2, y2 = int(x1_f * img_w), int(y1_f * img_h), int(x2_f * img_w), int(y2_f * img_h)
+                else:
+                    x1, y1, x2, y2 = int(x1_f), int(y1_f), int(x2_f), int(y2_f)
+            except Exception:
+                continue
 
-            # 颜色
             rgb_color = get_species_color(species, return_rgb=True)
-
-            # 绘制框
             draw.rectangle([x1, y1, x2, y2], outline=rgb_color, width=3)
-
-            # 标签
             label = f"{species} #{track_id} ({conf:.2f})"
 
             try:
-                text_bbox = draw.textbbox((0, 0), label, font=self.font)
-                text_w = text_bbox[2] - text_bbox[0]
-                text_h = text_bbox[3] - text_bbox[1]
+                if hasattr(draw, 'textbbox'):
+                    text_bbox = draw.textbbox((0, 0), label, font=self.font)
+                    text_w, text_h = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+                else:
+                    text_w, text_h = draw.textsize(label, font=self.font)
             except:
-                text_w, text_h = draw.textsize(label, font=self.font)
+                text_w, text_h = 100, 20
 
-            # 绘制标签背景
             label_y = max(text_h + 5, y1)
-            draw.rectangle(
-                [x1, label_y - text_h - 5, x1 + text_w + 10, label_y],
-                fill=rgb_color
-            )
-            # 绘制文字
+            if label_y > img_h: label_y = y1
+            draw.rectangle([x1, label_y - text_h - 5, x1 + text_w + 10, label_y], fill=rgb_color)
             draw.text((x1 + 5, label_y - text_h - 5), label, fill='white', font=self.font)
 
     def stop(self):
@@ -403,6 +412,13 @@ class PreviewPage(QWidget):
 
         global_conf = self.controller.confidence_settings.get("global", 0.25)
         self.preview_conf_var = global_conf
+
+        # 1. 初始化置信度字典
+        self.species_conf_map = {"global": 0.25}
+        self._load_species_conf()  # 加载 conf.json
+
+        # 2. 设置默认的全局置信度变量 (用于初始化滑块)
+        self.preview_conf_var = self.species_conf_map.get("global", 0.25)
 
         # === 新增：防抖动定时器 ===
         self.selection_timer = QTimer(self)
@@ -644,6 +660,61 @@ class PreviewPage(QWidget):
                         }}
                     """)
 
+    def _get_conf_path(self):
+        """获取 conf.json 的路径"""
+        # 1. 强制指定目标目录为 'temp'
+        target_dir = "temp"
+
+        # 2. 确保目录存在
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                logger.error(f"创建 temp 目录失败: {e}")
+                # 如果创建失败（例如权限问题），回退使用 controller 提供的目录
+                fallback = self.controller.get_temp_photo_dir()
+                if fallback:
+                    return os.path.join(fallback, "conf.json")
+                return "conf.json"
+
+        # 3. 返回 temp/conf.json
+        return os.path.join(target_dir, "conf.json")
+
+    def _load_species_conf(self):
+        """从 conf.json 加载置信度设置，如果不存在则自动创建"""
+        try:
+            json_path = self._get_conf_path()
+
+            # 1. 尝试加载现有文件
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.species_conf_map.update(data)
+
+            # 2. 确保内存中始终包含 'global' 键
+            # (self.species_conf_map 在 __init__ 中已初始化为 {"global": 0.25}，
+            # 但为了防止读取的 json 是空的或者被意外修改，这里做双重保险)
+            if "global" not in self.species_conf_map:
+                self.species_conf_map["global"] = 0.25
+
+            # 3. === 新增：如果文件不存在，则保存当前默认配置到文件 ===
+            if not os.path.exists(json_path):
+                self._save_species_conf()
+                logger.info(f"conf.json 不存在，已自动创建并初始化: {json_path}")
+
+        except Exception as e:
+            logger.error(f"加载 conf.json 失败: {e}")
+
+    def _save_species_conf(self):
+        """保存置信度设置到 conf.json"""
+        try:
+            json_path = self._get_conf_path()
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.species_conf_map, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"保存 conf.json 失败: {e}")
+
     def _create_widgets(self):
         """创建预览页面的所有控件"""
         # 主布局
@@ -713,9 +784,15 @@ class PreviewPage(QWidget):
         self.show_detection_checkbox.toggled.connect(self.toggle_detection_preview)
         control_layout.addWidget(self.show_detection_checkbox)
 
+        control_layout.addWidget(QLabel("选择物种:"))
+        self.species_selector = QComboBox()
+        self.species_selector.addItem("全局设置 (Global)", "global")
+        control_layout.addWidget(self.species_selector)
+
         # 置信度滑块
         control_layout.addWidget(QLabel("置信度:"))
         self.preview_conf_slider = ModernSlider(Qt.Horizontal)
+        self.preview_conf_slider.setMinimumWidth(200)  # 之前增加宽度的修改
         self.preview_conf_slider.setRange(5, 95)
         self.preview_conf_slider.setValue(int(self.preview_conf_var * 100))
         self.preview_conf_slider.valueChanged.connect(self._on_preview_confidence_slider_changed)
@@ -723,6 +800,8 @@ class PreviewPage(QWidget):
 
         self.preview_conf_label = QLabel(f"{self.preview_conf_var:.2f}")
         control_layout.addWidget(self.preview_conf_label)
+
+        self.species_selector.currentIndexChanged.connect(self._on_species_selector_changed)
 
         control_layout.addStretch()
 
@@ -942,7 +1021,15 @@ class PreviewPage(QWidget):
             # 刷新文本 (确保检测结果统计与当前过滤比例一致)
             self._update_video_info_text(current_file, json_path, min_ratio)
 
-            # [修改] 无论 JSON 是否存在，都直接根据 checked 状态决定是否 draw_boxes
+            # 更新下拉框
+            self.current_preview_info = {}
+            if json_path and os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        self.current_preview_info = json.load(f)
+                except:
+                    pass
+            self._update_species_selector_items()
             # 即使 JSON 不存在，VideoPlayerThread 内部也会安全处理（读取不到数据则不画框），
             self._start_video_detection_thread(current_file, json_path, draw_boxes=checked, start_frame=start_frame)
 
@@ -965,7 +1052,10 @@ class PreviewPage(QWidget):
                     self.current_preview_info = json.load(f)
 
             if self.current_preview_info:
-                self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
+                # 更新下拉框内容
+                self._update_species_selector_items()
+                # 绘制 (传递 None，内部使用 self.species_conf_map)
+                self._redraw_preview_boxes_with_new_confidence(None)
             else:
                 QMessageBox.information(self, "提示", "当前图像还没有检测结果。")
                 self.show_detection_checkbox.setChecked(False)
@@ -1043,9 +1133,10 @@ class PreviewPage(QWidget):
         new_height = max(1, int(h * scale))
         return img.resize((new_width, new_height), Image.LANCZOS)
 
-    def _draw_detection_boxes(self, image_label, original_image, detection_info, conf_threshold_str):
+    def _draw_detection_boxes(self, image_label, original_image, detection_info, conf_map):
         """
         根据给定的置信度阈值，在指定的原始图像上绘制检测框，并更新对应的UI标签。
+        (修复了归一化坐标导致的无法绘制问题)
         """
         # 1. 检查是否有原始图像
         if not original_image:
@@ -1056,190 +1147,265 @@ class PreviewPage(QWidget):
                 image_label.pixmap = None
             return
 
-        # 如果有图像但没有检测信息，则只显示原始图片
-        if not detection_info or not detection_info.get("检测框"):
-            resized_img = self._resize_image_to_fit(
-                original_image,
-                image_label.width() or 400,
-                image_label.height() or 300
-            )
-            # 转换PIL图像为QPixmap
-            img_array = np.array(resized_img)
-            if len(img_array.shape) == 3:  # RGB图像
-                height, width, channel = img_array.shape
-                bytes_per_line = 3 * width
-                q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            else:  # 灰度图像
-                height, width = img_array.shape
-                bytes_per_line = width
-                q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        # 2. 获取检测框列表（兼容多种 JSON 键名）
+        boxes_info = []
+        if detection_info:
+            # 按优先级尝试获取列表
+            for key in ["检测框", "detect_results", "objects", "frames"]:
+                if key in detection_info and detection_info[key]:
+                    boxes_info = detection_info[key]
+                    break
 
-            pixmap = QPixmap.fromImage(q_image)
-            image_label.setPixmap(pixmap)
-            image_label.pixmap = pixmap  # 保持引用
+        # 如果没有检测信息，显示原图
+        if not detection_info or not boxes_info:
+            self._update_pixmap_for_label(original_image)
             return
 
-        # 处理置信度阈值
+        # 4. 字体加载 (保持原逻辑)
         try:
-            if isinstance(conf_threshold_str, (int, float)):
-                conf_threshold = float(conf_threshold_str)
-                if conf_threshold > 1.0:  # 如果是百分比形式
-                    conf_threshold = conf_threshold / 100.0
-            else:
-                conf_threshold = float(conf_threshold_str)
-        except (ValueError, TypeError):
-            conf_threshold = 0.25
-
-        # 字体加载
-        try:
-            font_path = resource_path("assets/simhei.ttf")
-            font_size = max(16, int(0.02 * min(original_image.width, original_image.height)))
+            font_path = resource_path(os.path.join("res", "AlibabaPuHuiTi-3-65-Medium.ttf"))
+            # 动态字体大小：图像短边的 2%
+            font_size = max(12, int(0.02 * min(original_image.width, original_image.height)))
             font = ImageFont.truetype(font_path, font_size)
-        except (IOError, OSError):
-            logger.warning("中文字体文件未找到，使用默认字体")
-            font = ImageFont.load_default()
-
-        # 绘制逻辑
-        img_to_draw = original_image.copy()
-        draw = ImageDraw.Draw(img_to_draw)
-        boxes_info = detection_info.get("检测框", [])
-
-        for box in boxes_info:
+        except Exception:
             try:
-                # 获取置信度，支持多种字段名
-                confidence = box.get("置信度", box.get("confidence", 0))
-                if confidence < conf_threshold:
-                    continue
+                font = ImageFont.load_default()
+            except:
+                font = None  # 极端情况
 
-                # 获取物种名称，支持多种字段名
-                species_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
-
-                # 获取边界框坐标，支持多种格式
-                if "边界框" in box:
-                    bbox = box["边界框"]
-                    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                        x1, y1, x2, y2 = bbox[:4]
-                    else:
-                        continue
-                elif all(key in box for key in ["x1", "y1", "x2", "y2"]):
-                    x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-                elif "bbox" in box:
-                    bbox = box["bbox"]
-                    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                        x1, y1, x2, y2 = bbox[:4]
-                    else:
-                        continue
-                else:
-                    logger.warning(f"无法解析检测框坐标: {box}")
-                    continue
-
-                # 确保坐标为整数并且合理
-                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-
-                # 确保坐标在图像范围内
-                img_width, img_height = original_image.size
-                x1 = max(0, min(x1, img_width))
-                y1 = max(0, min(y1, img_height))
-                x2 = max(0, min(x2, img_width))
-                y2 = max(0, min(y2, img_height))
-
-                # 确保边界框有效
-                if x2 <= x1 or y2 <= y1:
-                    continue
-
-                # 获取物种颜色
-                color = get_species_color(species_name, return_rgb=True)
-
-                # 绘制检测框
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-
-                # 准备标签文本
-                label_text = f"{species_name} ({confidence:.2f})"
-
-                # 计算文本框大小
-                try:
-                    text_bbox = draw.textbbox((0, 0), label_text, font=font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-                except (AttributeError, OSError):
-                    # 兼容旧版PIL
-                    text_width, text_height = draw.textsize(label_text, font=font)
-
-                # 确保标签在图像范围内
-                label_y = max(text_height + 5, y1)
-
-                # 绘制标签背景
-                draw.rectangle(
-                    [x1, label_y - text_height - 5, x1 + text_width + 10, label_y],
-                    fill=color
-                )
-
-                # 绘制标签文本（白色）
-                draw.text((x1 + 5, label_y - text_height - 2), label_text, fill='white', font=font)
-
-            except Exception as e:
-                logger.error(f"绘制检测框时出错: {e}, 检测框数据: {box}")
-                continue
-
-        # 更新UI
+        # 5. 绘制逻辑
         try:
-            label_width = image_label.width() or 400
-            label_height = image_label.height() or 300
-            resized_img = self._resize_image_to_fit(img_to_draw, label_width, label_height)
+            # 确保在副本上绘制，且为 RGB 模式
+            if original_image.mode != 'RGB':
+                img_to_draw = original_image.convert('RGB')
+            else:
+                img_to_draw = original_image.copy()
 
-            # 将PIL图像转换为QPixmap
-            if resized_img.mode != 'RGB':
-                resized_img = resized_img.convert('RGB')
+            draw = ImageDraw.Draw(img_to_draw)
+            img_width, img_height = original_image.size
 
-            img_array = np.array(resized_img)
-            height, width, channel = img_array.shape
-            bytes_per_line = 3 * width
-            q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_image)
+            for box in boxes_info:
+                try:
+                    # --- 置信度过滤 ---
+                    species_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
 
-            image_label.setPixmap(pixmap)
-            image_label.pixmap = pixmap  # 保持引用避免垃圾回收
+                    # === 核心过滤修改 ===
+                    # 根据物种获取阈值
+                    thresh = conf_map.get(species_name, conf_map.get("global", 0.25))
+
+                    raw_conf = box.get("置信度", box.get("confidence", 0))
+                    confidence = float(raw_conf)
+
+                    # 使用特定阈值过滤
+                    if confidence < thresh:
+                        continue
+
+                    # --- 获取坐标 ---
+                    bbox = None
+                    if "边界框" in box:
+                        bbox = box["边界框"]
+                    elif "bbox" in box:
+                        bbox = box["bbox"]
+                    elif all(k in box for k in ["x1", "y1", "x2", "y2"]):
+                        bbox = [box["x1"], box["y1"], box["x2"], box["y2"]]
+
+                    if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                        continue
+
+                    # === 关键修复：先取浮点数，判断是否需要反归一化 ===
+                    x1_f, y1_f, x2_f, y2_f = map(float, bbox[:4])
+
+                    # 判断是否为归一化坐标 (假设所有坐标都 <= 1.0 且不全是0)
+                    # 注意：有些极端情况坐标可能刚好是1.0，所以用 all(...)
+                    is_normalized = all(0.0 <= c <= 1.0 for c in [x1_f, y1_f, x2_f, y2_f]) and (x2_f > 0 or y2_f > 0)
+
+                    if is_normalized:
+                        # 还原为像素坐标
+                        x1 = int(x1_f * img_width)
+                        y1 = int(y1_f * img_height)
+                        x2 = int(x2_f * img_width)
+                        y2 = int(y2_f * img_height)
+                    else:
+                        # 已经是像素坐标，直接转 int
+                        x1, y1, x2, y2 = int(x1_f), int(y1_f), int(x2_f), int(y2_f)
+
+                    # --- 坐标边界限制 ---
+                    x1 = max(0, min(x1, img_width - 1))
+                    y1 = max(0, min(y1, img_height - 1))
+                    x2 = max(0, min(x2, img_width - 1))
+                    y2 = max(0, min(y2, img_height - 1))
+
+                    # 过滤无效框
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+
+                    # --- 获取物种信息 ---
+                    species_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
+                    color = get_species_color(species_name, return_rgb=True)
+
+                    # --- 绘制矩形 ---
+                    # 动态调整线宽
+                    line_width = max(2, int(min(img_width, img_height) * 0.005))
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+
+                    # --- 绘制标签 ---
+                    label_text = f"{species_name} {confidence:.2f}"
+
+                    # 计算文字背景大小
+                    if font:
+                        if hasattr(draw, 'textbbox'):
+                            # Pillow >= 9.2.0
+                            left, top, right, bottom = draw.textbbox((0, 0), label_text, font=font)
+                            text_w, text_h = right - left, bottom - top
+                        else:
+                            # 旧版 Pillow
+                            text_w, text_h = draw.textsize(label_text, font=font)
+                    else:
+                        text_w, text_h = 100, 20  # Fallback
+
+                    # 确保标签不画出界 (优先画在框上方，如果上方没空间则画在框内)
+                    label_y = y1 - text_h - 4
+                    if label_y < 0:
+                        label_y = y1
+
+                    draw.rectangle(
+                        [x1, label_y, x1 + text_w + 8, label_y + text_h + 4],
+                        fill=color
+                    )
+
+                    if font:
+                        draw.text((x1 + 4, label_y), label_text, fill='white', font=font)
+
+                except Exception as e:
+                    # 捕获单个框的绘制错误，不影响其他框
+                    logger.debug(f"绘制单框失败: {e}")
+                    continue
+
+            # 更新UI
+            self._update_pixmap_for_label(img_to_draw)
 
         except Exception as e:
             logger.error(f"更新图像显示时出错: {e}")
-            image_label.clear()
             image_label.setText("图像显示出错")
 
-    def _redraw_preview_boxes_with_new_confidence(self, conf_threshold_str):
-        """根据新的置信度阈值，在预览图像上重新绘制检测框"""
+    def _redraw_preview_boxes_with_new_confidence(self, unused_conf_str):
+        """根据当前的置信度配置 Map，在预览图像上重新绘制检测框"""
         try:
-            # ===== 新增:检查原始图像是否存在 =====
             if not self.original_image:
-                logger.warning("原始图像未加载，无法绘制检测框")
+                if not (self.current_image_path and self.current_image_path.lower().endswith(
+                        self.SUPPORTED_VIDEO_EXTENSIONS)):
+                    logger.warning("原始图像未加载，无法绘制检测框")
+                    pass
                 return
-            # ====================================
-
-            # 确保有有效的置信度值
-            if isinstance(conf_threshold_str, int):
-                conf_threshold = conf_threshold_str / 100.0
-            else:
-                conf_threshold = float(conf_threshold_str) / 100.0
 
             self._draw_detection_boxes(
                 image_label=self.image_label,
                 original_image=self.original_image,
                 detection_info=self.current_preview_info,
-                conf_threshold_str=conf_threshold
+                conf_map=self.species_conf_map # 传递 map
             )
         except Exception as e:
             logger.error(f"重绘预览检测框失败: {e}")
 
+    def _update_species_selector_items(self):
+        """根据当前的检测结果更新下拉框内容"""
+        # 暂时阻断信号，防止清空时触发 change 事件
+        self.species_selector.blockSignals(True)
+        self.species_selector.clear()
+
+        # === 修改 1: 恢复全局设置选项 ===
+        self.species_selector.addItem("全局设置 (Global)", "global")
+
+        found_species = set()
+
+        # 从当前 JSON 数据中提取所有物种
+        if self.current_preview_info:
+            # --- 情况 A: 处理图片 JSON 结构 ---
+            boxes = self.current_preview_info.get("检测框", self.current_preview_info.get("detect_results", []))
+            for box in boxes:
+                name = box.get("物种", box.get("species", box.get("class_name")))
+                if name: found_species.add(name)
+
+            # --- 情况 B: 处理视频 JSON 结构 (tracks) ---
+            tracks = self.current_preview_info.get("tracks", {})
+            if tracks:
+                # 获取当前的过滤比例，确保下拉框显示的物种与视频画框的一致
+                min_ratio = 0.0
+                if hasattr(self.controller, 'advanced_page'):
+                    min_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+                total_frames = self.current_preview_info.get('total_frames_processed', 1)
+                threshold = total_frames * min_ratio
+
+                for t_list in tracks.values():
+                    # 过滤掉帧数不足的轨迹
+                    if len(t_list) >= threshold:
+                        # 找出该轨迹的最终判定物种 (投票法)
+                        s_list = [p.get('species') for p in t_list if p.get('species')]
+                        if s_list:
+                            # 选取出现最多的物种作为该轨迹的代表
+                            dominant_species = Counter(s_list).most_common(1)[0][0]
+                            found_species.add(dominant_species)
+
+        # 将发现的物种添加到下拉框
+        for sp in sorted(list(found_species)):
+            self.species_selector.addItem(sp, sp)
+
+        self.species_selector.blockSignals(False)
+
+        # === 修改 2: 默认选中策略 ===
+        # 如果列表中除了Global还有其他物种 (count > 1)，优先选中第一个物种 (索引1)
+        # 这样能体现 "优先使用已识别物种" 的交互体验
+        if self.species_selector.count() > 1:
+            self.species_selector.setCurrentIndex(1)
+        elif self.species_selector.count() > 0:
+            self.species_selector.setCurrentIndex(0)  # 只有Global时选Global
+
+        # 触发一次改变以更新滑块状态
+        self._on_species_selector_changed()
+
+    def _on_species_selector_changed(self):
+        """当下拉框选择改变时，更新滑块到对应物种的保存值"""
+        current_species = self.species_selector.currentData()  # 获取 user data
+
+        # 如果没有选中任何物种（例如列表为空），默认读取 global 配置
+        if not current_species:
+            current_species = "global"
+
+        # 从字典中获取该物种的保存值，如果没有，获取 global，如果还没有，默认 0.25
+        saved_val = self.species_conf_map.get(current_species, self.species_conf_map.get("global", 0.25))
+
+        # 阻断滑块信号，防止滑块移动反过来触发 _on_preview_confidence_slider_changed 重复保存
+        self.preview_conf_slider.blockSignals(True)
+        self.preview_conf_slider.setValue(int(saved_val * 100))
+        self.preview_conf_slider.blockSignals(False)
+
+        self.preview_conf_label.setText(f"{saved_val:.2f}")
+
     def _on_preview_confidence_slider_changed(self, value):
         """处理预览页置信度滑块值的变化"""
+        new_conf = value / 100.0
         if self.preview_conf_label:
-            self.preview_conf_label.setText(f"{value / 100.0:.2f}")
+            self.preview_conf_label.setText(f"{new_conf:.2f}")
 
-        # 更新预览置信度变量
-        self.preview_conf_var = value / 100.0
+        # === 修改核心：更新当前选中物种的阈值 ===
+        current_species = self.species_selector.currentData()
+        if current_species:
+            self.species_conf_map[current_species] = new_conf
+            # 立即保存到文件
+            self._save_species_conf()
 
-        # 如果显示检测结果且有检测信息，则重绘
+        # === 视频实时更新 ===
+        # 将整个 map 传递给视频线程
+        if self.video_thread and self.video_thread.isRunning():
+            self.video_thread.conf_map = self.species_conf_map
+
+        # === 图片实时重绘 ===
         if self.show_detection_checkbox.isChecked() and self.current_preview_info:
-            self._redraw_preview_boxes_with_new_confidence(value)
+            is_video = self.current_image_path and self.current_image_path.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+            if not is_video:
+                # 调用重绘，注意这里不再传递单一 conf，而是传递 None 或 map，需修改下游函数
+                self._redraw_preview_boxes_with_new_confidence(None)
 
     def _on_detection_completed(self, loaded_detection_info, filename):
         """检测完成处理"""
@@ -1249,6 +1415,8 @@ class PreviewPage(QWidget):
                 # 更新检测信息显示
                 self._update_detection_info(loaded_detection_info)
 
+                self._update_species_selector_items()
+
                 # 自动显示检测框
                 if not self.show_detection_checkbox.isChecked():
                     self.show_detection_checkbox.setChecked(True)
@@ -1257,6 +1425,10 @@ class PreviewPage(QWidget):
                     self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
             else:
                 QMessageBox.information(self, "提示", "未检测到任何对象。")
+
+                # 可选：如果未检测到对象，也可以刷新一下以重置为 Global
+                self.current_preview_info = {}
+                self._update_species_selector_items()
 
         except Exception as e:
             logger.error(f"处理检测结果失败: {e}")
@@ -1457,16 +1629,7 @@ class PreviewPage(QWidget):
         if not settings:
             return
 
-        if "preview_conf" in settings:
-            self.preview_conf_var = settings["preview_conf"]
-            # 更新滑块，这通常会触发信号自动更新Label，但为了保险手动更新一次
-            self.preview_conf_slider.setValue(int(self.preview_conf_var * 100))
-
-            # 使用正确的属性名 preview_conf_label
-            if hasattr(self, 'preview_conf_label'):
-                self.preview_conf_label.setText(f"{self.preview_conf_var:.2f}")
-
-        # [新增] 加载“显示检测结果”按钮的状态
+        # 加载“显示检测结果”按钮的状态
         if "show_detection" in settings:
             should_show = settings["show_detection"]
 
@@ -1583,19 +1746,17 @@ class PreviewPage(QWidget):
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.pixmap = pixmap
 
-        # ===== 修改:更新信息显示，直接从原始图像获取尺寸 =====
+        # 更新信息显示
         self.info_text.clear()
         info1 = f"文件名: {image_info.get('文件名', '')}    格式: {image_info.get('格式', '')}"
         info2 = f"拍摄日期: {image_info.get('拍摄日期', '未知')} {image_info.get('拍摄时间', '')}    "
 
         try:
-            # 直接从原始图像获取实际尺寸
             if self.original_image:
                 img_width, img_height = self.original_image.size
                 file_size_kb = os.path.getsize(file_path) / 1024
                 info2 += f"尺寸: {img_width}x{img_height}px    文件大小: {file_size_kb:.1f} KB"
             else:
-                # 如果原始图像加载失败，尝试从image_info获取
                 width = image_info.get('宽度', image_info.get('width', '未知'))
                 height = image_info.get('高度', image_info.get('height', '未知'))
                 file_size_kb = os.path.getsize(file_path) / 1024
@@ -1605,7 +1766,6 @@ class PreviewPage(QWidget):
             info2 += "尺寸: 未知"
 
         self.info_text.setPlainText(info1 + "\n" + info2)
-        # =====================================================
 
         # 检查并加载已有的检测结果
         self.current_preview_info = {}  # 重置检测信息
@@ -1613,16 +1773,27 @@ class PreviewPage(QWidget):
         if temp_photo_dir:
             base_name, _ = os.path.splitext(os.path.basename(file_path))
             json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+
+            # 标记是否加载了有效的检测结果
+            has_detections = False
+
             if os.path.exists(json_path):
                 try:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         self.current_preview_info = json.load(f)
                     self._update_detection_info(self.current_preview_info)
-                    # 如果已勾选显示检测结果,则绘制检测框
-                    if self.show_detection_checkbox.isChecked():
-                        self._redraw_preview_boxes_with_new_confidence(self.preview_conf_slider.value())
+                    has_detections = True
                 except Exception as e:
                     logger.error(f"加载 {json_path} 文件失败: {e}")
+
+            # === 修复：无论是否有检测结果，都强制更新物种选择器 ===
+            # 这样当切换到无结果的图片时，列表会被重置为仅包含 Global
+            self._update_species_selector_items()
+            # ====================================================
+
+            # 如果已勾选显示检测结果且有检测数据,则绘制检测框
+            if has_detections and self.show_detection_checkbox.isChecked():
+                self._redraw_preview_boxes_with_new_confidence(None)
 
     def _on_loading_failed(self, file_path, error_message):
         """当图片加载失败时显示错误信息"""
@@ -1709,6 +1880,19 @@ class PreviewPage(QWidget):
 
             self._update_video_info_text(file_path, json_path, min_ratio)
 
+            # === 修复开始：在加载视频时，立即读取 JSON 并更新下拉框 ===
+            self.current_preview_info = {}
+            if json_path and os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        self.current_preview_info = json.load(f)
+                except Exception as e:
+                    logger.error(f"加载视频JSON失败: {e}")
+
+            # 立即更新物种选择器
+            self._update_species_selector_items()
+            # === 修复结束 ===
+
             # === 启动 OpenCV 线程 ===
             self._start_video_detection_thread(file_path, json_path, draw_boxes=show_boxes)
             return
@@ -1780,7 +1964,8 @@ class PreviewPage(QWidget):
 
         # 传递 start_frame 参数
         self.video_thread = VideoPlayerThread(
-            video_path, json_path, conf,
+            video_path, json_path,
+            self.species_conf_map,
             draw_boxes=draw_boxes,
             min_frame_ratio=min_ratio,
             start_frame=start_frame  # <--- 传递起始帧
