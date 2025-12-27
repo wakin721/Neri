@@ -10,7 +10,7 @@ DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
 
 # 文件支持相关常量
 SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp')
-SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.ts')
+SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.ts')
 DATE_FORMATS = ['%Y:%m:%d %H:%M:%S', '%Y:%d:%m %H:%M:%S', '%Y-%m-%d %H:%M:%S']
 INDEPENDENT_DETECTION_THRESHOLD = 30 * 60  # 30分钟，单位：秒
 
