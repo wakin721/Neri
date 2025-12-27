@@ -1781,3 +1781,28 @@ class AdvancedPage(QWidget):
 
         # 触发设置保存
         self._on_setting_changed()
+
+    def update_quick_settings_sync(self, model_name, stride):
+        """同步开始界面的快速设置到高级设置(不触发信号)"""
+        # 1. 同步模型
+        if model_name and self.model_combo.currentText() != model_name:
+            self.model_combo.blockSignals(True)
+            index = self.model_combo.findText(model_name)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+            self.model_combo.blockSignals(False)
+
+        # 2. 同步跳帧
+        if stride is not None:
+            try:
+                val = int(stride)
+                # 只有当数值确实改变时才更新，避免不必要的UI刷新
+                if self.vid_stride_var != val:
+                    self.vid_stride_var = val
+
+                    self.stride_slider.blockSignals(True)
+                    self.stride_slider.setValue(val)
+                    self.stride_label.setText(str(val))
+                    self.stride_slider.blockSignals(False)
+            except ValueError:
+                pass
