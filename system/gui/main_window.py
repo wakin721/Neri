@@ -926,6 +926,11 @@ class ObjectDetectionGUI(QMainWindow):
             self.model_var = ""
             logger.error("在 res/model 目录中未找到任何有效的模型文件 (.pt)。")
 
+        self.cls_model_var = ""
+        saved_cls_model = settings.get("selected_cls_model") if settings else None
+        if saved_cls_model:
+            self._load_cls_model_by_name(saved_cls_model)
+
     def _find_model_file(self) -> str:
         """查找模型文件"""
         try:
@@ -939,6 +944,31 @@ class ObjectDetectionGUI(QMainWindow):
         except Exception as e:
             logger.error(f"查找模型文件时出错: {e}")
             return None
+
+    def _load_cls_model_by_name(self, model_name: str):
+        """根据名称加载分类模型"""
+        # 如果名称为空或为"不使用"，则卸载模型
+        if not model_name or model_name == "不使用 (None)":
+            if hasattr(self, 'image_processor'):
+                self.image_processor.load_cls_model(None)
+            self.cls_model_var = ""
+            return
+
+        try:
+            res_dir = resource_path("res")
+            model_path = os.path.join(res_dir, "cls_model", model_name)
+
+            if os.path.exists(model_path):
+                if hasattr(self, 'image_processor'):
+                    self.image_processor.load_cls_model(model_path)
+                self.cls_model_var = model_name
+                logger.info(f"已加载分类模型: {model_name}")
+            else:
+                logger.warning(f"分类模型文件不存在: {model_path}")
+                # 文件不存在时，不更新变量，或重置为空
+                # self.cls_model_var = ""
+        except Exception as e:
+            logger.error(f"加载分类模型失败: {e}")
 
     def _create_ui_elements(self):
         """创建UI元素"""
@@ -1033,12 +1063,13 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 提取模型、跳帧参数和视频模式
         model = settings.get("selected_model")
+        cls_model = settings.get("selected_cls_model")
         stride = settings.get("vid_stride")
         mode = settings.get("video_mode")
 
         # 调用开始页面的更新方法
         if hasattr(self.start_page, 'update_quick_settings'):
-            self.start_page.update_quick_settings(model, stride, video_mode=mode)
+            self.start_page.update_quick_settings(model, stride, video_mode=mode, cls_model_name=cls_model)
 
     def _sync_start_to_advanced(self):
         """将开始页面的设置同步到高级页面"""
@@ -1047,13 +1078,28 @@ class ObjectDetectionGUI(QMainWindow):
 
         # 提取模型、跳帧参数和视频模式
         model = settings.get("selected_model")
+        cls_model = settings.get("selected_cls_model")
         stride = settings.get("vid_stride")
         mode = settings.get("video_mode")
 
-        # 调用高级页面的同步方法
+        # 检查并加载检测模型 (防止在开始界面切换模型后未实际加载)
+        if model and model != getattr(self, 'model_var', None):
+            model_path = os.path.join(resource_path("res"), "model", model)
+            if os.path.exists(model_path):
+                try:
+                    self.image_processor.load_model(model_path)
+                    self.model_var = model
+                except Exception as e:
+                    logger.error(f"同步加载检测模型失败: {e}")
+
+            # 检查并加载分类模型
+        if cls_model != getattr(self, 'cls_model_var', None):
+            self._load_cls_model_by_name(cls_model)
+
+            # 调用高级页面的同步方法
         if hasattr(self.advanced_page, 'update_quick_settings_sync'):
-            # [修改] 传入 video_mode 参数
-            self.advanced_page.update_quick_settings_sync(model, stride, video_mode=mode)
+            # [修改] 传递 cls_model_name 参数
+            self.advanced_page.update_quick_settings_sync(model, stride, video_mode=mode, cls_model_name=cls_model)
 
     def _post_init(self):
         """后期初始化"""
@@ -1245,6 +1291,8 @@ class ObjectDetectionGUI(QMainWindow):
             else:
                 self.status_bar.status_label.setText("就绪")
         elif page_id == "preview":
+            if hasattr(self.preview_page, 'reload_and_apply_conf'):
+                self.preview_page.reload_and_apply_conf()
             if hasattr(self.start_page, 'get_file_path'):
                 file_path = self.start_page.get_file_path()
                 if file_path and os.path.isdir(file_path):
@@ -1263,6 +1311,9 @@ class ObjectDetectionGUI(QMainWindow):
         elif page_id == "species_validation":
             if not self.is_processing:
                 self.status_bar.status_label.setText("就绪")
+
+            if hasattr(self.species_validation_page, 'reload_and_apply_conf'):
+                self.species_validation_page.reload_and_apply_conf()
             # 确保物种校验页面的数据被加载
             if hasattr(self.species_validation_page, '_load_species_data'):
                 # 使用QTimer延迟执行，确保页面完全显示后再加载数据
@@ -1615,6 +1666,7 @@ class ObjectDetectionGUI(QMainWindow):
         # 添加其他设置，确保包含模型信息
         settings.update({
             "selected_model": getattr(self, 'model_var', ''),
+            "selected_cls_model": getattr(self, 'cls_model_var', ''),
         })
 
         # 如果model_var为空，尝试从image_processor获取
@@ -1629,11 +1681,14 @@ class ObjectDetectionGUI(QMainWindow):
         if not settings:
             return
         try:
-            # 加载到各个页面
-            if hasattr(self.start_page, 'load_settings'):
-                self.start_page.load_settings(settings)
+            # 先加载高级页面设置（确保模型相关设置先被处理）
             if hasattr(self.advanced_page, 'load_settings'):
                 self.advanced_page.load_settings(settings)
+
+            # 再加载开始页面设置
+            if hasattr(self.start_page, 'load_settings'):
+                self.start_page.load_settings(settings)
+
             if hasattr(self.preview_page, 'load_settings'):
                 self.preview_page.load_settings(settings)
             if hasattr(self.species_validation_page, 'load_settings'):

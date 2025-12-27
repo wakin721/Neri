@@ -118,7 +118,19 @@ class StartPage(QWidget):
         model_layout.addWidget(self.model_combo)
         settings_row_layout.addLayout(model_layout)
 
-        # [新增] B. 视频处理模式
+        # B. 分类模型选择 (新增部分)
+        cls_model_layout = QVBoxLayout()
+        cls_model_layout.setSpacing(8)
+        cls_model_label = QLabel("分类模型 (可选):")
+        cls_model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        cls_model_layout.addWidget(cls_model_label)
+        self.cls_model_combo = ModernComboBox()
+        self.cls_model_combo.setMinimumWidth(200)
+        self._populate_cls_models()  # 调用新方法填充
+        cls_model_layout.addWidget(self.cls_model_combo)
+        settings_row_layout.addLayout(cls_model_layout)
+
+        # C. 视频处理模式
         mode_layout = QVBoxLayout()
         mode_layout.setSpacing(8)
         mode_label = QLabel("视频处理模式:")
@@ -132,7 +144,7 @@ class StartPage(QWidget):
         mode_layout.addWidget(self.video_mode_combo)
         settings_row_layout.addLayout(mode_layout)
 
-        # C. 跳帧设置 (原 B)
+        # D. 跳帧设置 (原 B)
         stride_layout = QVBoxLayout()
         stride_layout.setSpacing(8)
         stride_label = QLabel("视频跳帧 (Frame Stride):")
@@ -269,6 +281,20 @@ class StartPage(QWidget):
             self.model_combo.addItem("加载失败")
             print(f"Error loading models: {e}")
 
+    def _populate_cls_models(self):
+        """扫描并填充分类模型列表"""
+        self.cls_model_combo.clear()
+        self.cls_model_combo.addItem("不使用 (None)", "")  # 默认选项
+        try:
+            cls_model_dir = resource_path(os.path.join("res", "cls_model"))
+            if os.path.exists(cls_model_dir):
+                model_files = [f for f in os.listdir(cls_model_dir) if f.lower().endswith('.pt')]
+                model_files.sort()
+                if model_files:
+                    self.cls_model_combo.addItems(model_files)
+        except Exception as e:
+            print(f"Error loading cls models: {e}")
+
     def _create_bottom_controls(self, parent_layout):
         """创建底部控制区域"""
         bottom_widget = QWidget()
@@ -359,6 +385,7 @@ class StartPage(QWidget):
 
         # 使用 lambda 丢弃 textChanged 发出的字符串参数，避免 TypeError
         self.model_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
+        self.cls_model_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
         self.stride_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
         # 连接新控件信号
         self.video_mode_combo.currentTextChanged.connect(self._on_video_mode_changed)
@@ -374,6 +401,7 @@ class StartPage(QWidget):
 
         # 处理时禁用快速设置
         self.model_combo.setEnabled(not is_processing)
+        self.cls_model_combo.setEnabled(not is_processing)
 
         # 根据处理状态和当前视频模式决定跳帧选项的启用状态
         if is_processing:
@@ -429,46 +457,71 @@ class StartPage(QWidget):
         return {
             "file_path": self.get_file_path(),
             "selected_model": self.model_combo.currentText(),
+            "selected_cls_model": self.cls_model_combo.currentText(),
             "vid_stride": int(self.stride_combo.currentText()) if self.stride_combo.currentText().isdigit() else 1,
             "video_mode": self.video_mode_combo.currentText()
         }
 
     def load_settings(self, settings):
         """加载页面设置"""
+        # 1. 加载文件路径
         if "file_path" in settings and settings["file_path"] and os.path.exists(settings["file_path"]):
             self.set_file_path(settings["file_path"])
 
-            # 加载模型选择
-            if "selected_model" in settings and settings["selected_model"]:
-                # 尝试选中设置中的模型
-                index = self.model_combo.findText(settings["selected_model"])
+        # 2. 加载检测模型选择
+        if "selected_model" in settings and settings["selected_model"]:
+            # 尝试选中设置中的模型
+            index = self.model_combo.findText(settings["selected_model"])
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+
+        # 3. [新增/修改] 加载分类模型选择
+        if "selected_cls_model" in settings:
+            cls_model = settings["selected_cls_model"]
+            self.cls_model_combo.blockSignals(True)  # 暂时屏蔽信号，防止触发不必要的更新
+
+            # 如果保存的设置有效（不是空字符串）
+            if cls_model:
+                # 3.1 尝试精确匹配
+                index = self.cls_model_combo.findText(cls_model)
+
+                # 3.2 如果找不到精确匹配，尝试模糊匹配 (例如处理 "不使用 (None)" 或文件名差异)
+                if index < 0:
+                    index = self.cls_model_combo.findText(cls_model, Qt.MatchContains)
+
+                # 3.3 应用选择
                 if index >= 0:
-                    self.model_combo.setCurrentIndex(index)
+                    self.cls_model_combo.setCurrentIndex(index)
+                else:
+                    # 如果找不到对应模型（可能文件被删），默认归位到 "不使用"
+                    self.cls_model_combo.setCurrentIndex(0)
+            else:
+                # 如果设置为空，默认选中第一项 "不使用"
+                self.cls_model_combo.setCurrentIndex(0)
 
-            if "video_mode" in settings:
-                index = self.video_mode_combo.findText(settings["video_mode"])
-                if index >= 0:
-                    self.video_mode_combo.setCurrentIndex(index)
+            self.cls_model_combo.blockSignals(False)  # 恢复信号
 
-            # 加载跳帧设置
-            if "vid_stride" in settings:
-                stride_val = str(settings["vid_stride"])
+        # 4. 加载视频模式
+        if "video_mode" in settings:
+            index = self.video_mode_combo.findText(settings["video_mode"])
+            if index >= 0:
+                self.video_mode_combo.setCurrentIndex(index)
 
-                self.stride_combo.blockSignals(True)  # 暂时屏蔽信号
+        # 5. 加载跳帧设置
+        if "vid_stride" in settings:
+            stride_val = str(settings["vid_stride"])
 
-                # 1. 清空当前列表
-                self.stride_combo.clear()
-                # 2. 重新添加默认选项
-                self.stride_combo.addItems(self.default_strides)
+            self.stride_combo.blockSignals(True)
 
-                # 3. 如果当前设置的值不在默认列表中，则单独添加
-                if stride_val not in self.default_strides:
-                    self.stride_combo.addItem(stride_val)
+            self.stride_combo.clear()
+            self.stride_combo.addItems(self.default_strides)
 
-                # 4. 选中当前值
-                self.stride_combo.setCurrentText(stride_val)
+            # 如果当前设置的值不在默认列表中，则单独添加
+            if stride_val not in self.default_strides:
+                self.stride_combo.addItem(stride_val)
 
-                self.stride_combo.blockSignals(False)  # 恢复信号
+            self.stride_combo.setCurrentText(stride_val)
+            self.stride_combo.blockSignals(False)
 
     def update_theme(self):
         """更新主题"""
@@ -488,7 +541,7 @@ class StartPage(QWidget):
         # 更新按钮样式
         self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)
 
-    def update_quick_settings(self, model_name, stride, video_mode=None):
+    def update_quick_settings(self, model_name, stride, video_mode=None, cls_model_name=None):
         """从外部更新快速设置控件状态（不触发信号）"""
         # 1. 更新模型选择
         if model_name:
@@ -497,6 +550,21 @@ class StartPage(QWidget):
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
             self.model_combo.blockSignals(False)
+
+        if cls_model_name is not None:
+            self.cls_model_combo.blockSignals(True)
+            # 处理空值情况
+            target_name = cls_model_name if cls_model_name else "不使用 (None)"
+            index = self.cls_model_combo.findText(target_name)
+            # 如果找不到完全匹配的，尝试找包含的（兼容纯文件名和显示名）
+            if index < 0 and cls_model_name:
+                index = self.cls_model_combo.findText(cls_model_name, Qt.MatchContains)
+
+            if index >= 0:
+                self.cls_model_combo.setCurrentIndex(index)
+            else:
+                self.cls_model_combo.setCurrentIndex(0)  # 默认不使用
+            self.cls_model_combo.blockSignals(False)
 
         # 2. 更新视频模式
         if video_mode:

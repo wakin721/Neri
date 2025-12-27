@@ -21,6 +21,7 @@ class ImageProcessor:
         """初始化图像处理器"""
         self.model = self._load_model(model_path)
         self.translation_dict = self._load_translation_file()
+        self.cls_model = None
 
     def _load_model(self, model_path: str) -> Optional[YOLO]:
         """加载YOLO模型"""
@@ -30,6 +31,31 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"加载模型失败: {e}")
             return None
+
+    def load_model(self, model_path: str) -> None:
+        """加载新的模型"""
+        try:
+            from ultralytics import YOLO
+            self.model = YOLO(model_path)
+            self.model_path = model_path
+            logger.info(f"模型已加载: {model_path}")
+
+        except Exception as e:
+            logger.error(f"加载模型失败: {e}")
+            raise Exception(f"加载模型失败: {e}")
+
+    def load_cls_model(self, model_path: str) -> None:
+        """加载分类模型"""
+        try:
+            if not model_path:
+                self.cls_model = None
+                logger.info("分类模型已卸载")
+                return
+            logger.info(f"正在加载分类模型: {model_path}")
+            self.cls_model = YOLO(model_path)
+        except Exception as e:
+            logger.error(f"加载分类模型失败: {e}")
+            self.cls_model = None
 
     def _load_translation_file(self) -> Dict[str, str]:
         """加载翻译文件"""
@@ -79,6 +105,7 @@ class ImageProcessor:
         def run_detection():
             nonlocal species_names, species_counts, detect_results, min_confidence
             try:
+                # 1. 运行检测模型
                 results = self.model(
                     img_path,
                     augment=augment,
@@ -88,14 +115,60 @@ class ImageProcessor:
                     iou=iou,
                     conf=conf
                 )
+
+                # 2. 如果启用了分类模型，进行二次识别
+                candidates_map = {}  # 用于存储每个检测框的候选物种
+
+                if self.cls_model:
+                    try:
+                        import cv2
+                        original_img = cv2.imread(img_path)  # 读取原图用于裁剪
+                        if original_img is not None:
+                            original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+
+                            for r in results:
+                                if r.boxes is None: continue
+                                for i, box in enumerate(r.boxes):
+                                    # 获取坐标并裁剪
+                                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                                    # 边界检查
+                                    h, w, _ = original_img.shape
+                                    x1, y1 = max(0, x1), max(0, y1)
+                                    x2, y2 = min(w, x2), min(h, y2)
+
+                                    if x2 > x1 and y2 > y1:
+                                        crop = original_img[y1:y2, x1:x2]
+                                        # 运行分类模型
+                                        cls_res = self.cls_model(crop, verbose=False)
+
+                                        # 获取前3名候选
+                                        top3_indices = cls_res[0].probs.top5[:3]  # top5 contains indices
+                                        top3_confs = cls_res[0].probs.top5conf[:3]  # confidences
+
+                                        candidates = []
+                                        for cls_idx, cls_conf in zip(top3_indices, top3_confs):
+                                            raw_name = cls_res[0].names[int(cls_idx)]
+                                            # 翻译名称
+                                            trans_name = self.translation_dict.get(raw_name, raw_name)
+                                            candidates.append({
+                                                "name": trans_name,
+                                                "conf": float(cls_conf)
+                                            })
+
+                                        # 存储候选信息，Key为box的索引或其他标识
+                                        candidates_map[i] = candidates
+
+                                        # [可选] 用分类模型的第一名替换检测模型的类别用于初步统计
+                                        # 这里我们不直接修改box.cls，而是在统计时优先使用candidates[0]
+                    except Exception as e:
+                        logger.error(f"二次分类过程出错: {e}")
+
                 detect_results = results
 
                 for r in results:
                     if r.boxes is None or len(r.boxes) == 0:
                         continue
 
-                    data_list = r.boxes.cls.tolist()
-                    counts = Counter(data_list)
                     species_dict = r.names
                     confidences = r.boxes.conf.tolist()
 
@@ -105,14 +178,26 @@ class ImageProcessor:
                             min_confidence = "%.3f" % current_min_confidence
 
                     detected_species_counts = {}
-                    for element, count in counts.items():
-                        english_name = species_dict.get(int(element), "unknown")
-                        translated_name = self.translation_dict.get(english_name, english_name)
 
-                        if translated_name in detected_species_counts:
-                            detected_species_counts[translated_name] += count
+                    # 遍历每一个框进行统计
+                    for i, box in enumerate(r.boxes):
+                        # 如果有分类结果，优先使用分类结果的第一名
+                        if i in candidates_map and candidates_map[i]:
+                            final_name = candidates_map[i][0]['name']
                         else:
-                            detected_species_counts[translated_name] = count
+                            # 否则使用检测结果
+                            cls_id = int(box.cls.item())
+                            raw_name = r.names[cls_id]
+                            final_name = self.translation_dict.get(raw_name, raw_name)
+
+                        detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
+
+                        # [重要] 将候选信息注入到 results 对象中以便 save_detection_info_json 读取
+                        # 这里我们利用 Python 对象的动态特性，临时挂载属性
+                        if not hasattr(r, 'candidates_data'):
+                            r.candidates_data = {}
+                        if i in candidates_map:
+                            r.candidates_data[i] = candidates_map[i]
 
                     species_list = list(detected_species_counts.keys())
                     counts_list = list(map(str, detected_species_counts.values()))
@@ -177,18 +262,14 @@ class ImageProcessor:
             logger.warning(f"无法获取视频总帧数: {e}")
 
         # 1. 获取Tracker配置文件路径
-        tracker_config = resource_path(os.path.join("res", "model", "tracker.yaml"))
+        tracker_config = resource_path(os.path.join("res", "cls_model", "tracker.yaml"))
         if not os.path.exists(tracker_config):
             logger.warning(f"Tracker配置文件未找到: {tracker_config}，将使用默认追踪器")
             tracker_config = "botsort.yaml"  # Ultralytics 默认值
 
         # 2. 准备路径
-        # [修改] 仅标准化 output_dir 路径，但不立即创建文件夹，避免生成空的 video_results
+        # 仅标准化 output_dir 路径，但不立即创建文件夹，避免生成空的 video_results
         output_dir = os.path.normpath(output_dir)
-
-        # [修改] 移除之前的 project_path 和 run_name 计算，不再让 YOLO 输出到该目录
-        # project_path = os.path.dirname(output_dir)
-        # run_name = os.path.basename(output_dir)
 
         video_name = os.path.splitext(os.path.basename(video_source))[0]
         if "http" in video_source:
@@ -315,22 +396,6 @@ class ImageProcessor:
             logger.error(f"视频追踪失败: {e}")
             return {"error": str(e), "status": "failed"}
 
-    def save_detection_result(self, results: Any, image_name: str, save_path: str) -> None:
-        """保存探测结果图片"""
-        if not results:
-            return
-
-        try:
-            result_path = os.path.join(save_path, "result")
-            os.makedirs(result_path, exist_ok=True)
-
-            for c, h in enumerate(results):
-                species_name = self._get_first_detected_species(results)
-                result_file = os.path.join(result_path, f"{image_name}_result_{species_name}.jpg")
-                h.save(filename=result_file)
-        except Exception as e:
-            logger.error(f"保存检测结果图片失败: {e}")
-
     def _get_first_detected_species(self, results: Any) -> str:
         """从检测结果中获取第一个物种的名称"""
         try:
@@ -398,6 +463,13 @@ class ImageProcessor:
 
                             box_info = {"物种": translated_name, "置信度": confidence, "边界框": bbox}
 
+                            if hasattr(r, 'candidates_data') and i in r.candidates_data:
+                                box_info["候选项"] = r.candidates_data[i]
+                                # 如果有分类结果，将"物种"字段更新为分类置信度最高的那一个
+                                if r.candidates_data[i]:
+                                    box_info["物种"] = r.candidates_data[i][0]['name']
+                                    box_info["置信度"] = r.candidates_data[i][0]['conf']
+
                             boxes_info.append(box_info)
                         all_confidences = r.boxes.conf.tolist()
                         all_classes = r.boxes.cls.tolist()
@@ -418,14 +490,4 @@ class ImageProcessor:
             logger.error(f"保存检测结果JSON失败: {e}")
             return ""
 
-    def load_model(self, model_path: str) -> None:
-        """加载新的模型"""
-        try:
-            from ultralytics import YOLO
-            self.model = YOLO(model_path)
-            self.model_path = model_path
-            logger.info(f"模型已加载: {model_path}")
 
-        except Exception as e:
-            logger.error(f"加载模型失败: {e}")
-            raise Exception(f"加载模型失败: {e}")

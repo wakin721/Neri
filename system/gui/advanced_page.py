@@ -160,7 +160,6 @@ class AdvancedPage(QWidget):
         self.software_settings_layout = QVBoxLayout(software_settings_group)
         self._create_software_settings_content()
 
-
     def _create_model_params_content(self):
         """创建模型参数设置内容"""
         # 主内容容器
@@ -189,22 +188,60 @@ class AdvancedPage(QWidget):
         self.components_to_update.append(self.model_combo)
         model_layout.addWidget(self.model_combo)
 
-        # 状态和按钮
-        model_bottom_frame = QFrame()
-        model_bottom_layout = QHBoxLayout(model_bottom_frame)
+        # 分类模型选择区域
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        model_layout.addWidget(separator)
 
+        select_cls_label = QLabel("选择分类模型 (二次识别)")
+        select_cls_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        model_layout.addWidget(select_cls_label)
+
+        self.cls_model_combo = ModernComboBox()
+        self.cls_model_combo.addItem("不使用 (None)", "")
+        self.components_to_update.append(self.cls_model_combo)
+        model_layout.addWidget(self.cls_model_combo)
+
+        # 连接信号
+        self.cls_model_combo.currentTextChanged.connect(self._on_cls_model_selection_changed)
+
+        # 底部操作区域：包含状态提示文字和刷新按钮
+        bottom_action_frame = QFrame()
+        bottom_action_layout = QHBoxLayout(bottom_action_frame)
+        bottom_action_layout.setContentsMargins(0, 5, 0, 0)  # 增加一点顶部间距
+
+        # 创建状态标签容器 (垂直布局，同时显示检测模型和分类模型的状态)
+        status_container = QWidget()
+        status_layout = QHBoxLayout(status_container)  # 这里修改为 QHBoxLayout
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(15)  # 增加间距，让两个文字之间分开一些
+
+        # 状态标签
         self.model_status_label = QLabel(self.model_status_var)
-        self.model_status_label.setFont(QFont("Segoe UI", 10))
+        self.model_status_label.setFont(QFont("Segoe UI", 9))
+        self.model_status_label.setStyleSheet("color: #ffffff;")
 
+        # 为了区分，可以在两个状态中间加个分隔符，或者仅依靠 spacing
+        self.cls_model_status_label = QLabel("")
+        self.cls_model_status_label.setFont(QFont("Segoe UI", 9))
+        self.cls_model_status_label.setStyleSheet("color: #ffffff;")
+
+        status_layout.addWidget(self.model_status_label)
+        # 添加一个弹簧或竖线分割可以更清晰，这里直接并列
+        status_layout.addWidget(self.cls_model_status_label)
+
+        # 刷新按钮 (移动到了最下方)
         refresh_model_button = RoundedButton("刷新列表")
         refresh_model_button.setMinimumWidth(80)
         refresh_model_button.clicked.connect(self._refresh_model_list)
 
-        model_bottom_layout.addWidget(self.model_status_label)
-        model_bottom_layout.addStretch()
-        model_bottom_layout.addWidget(refresh_model_button)
+        # 添加到底部布局：左侧文字，右侧按钮
+        bottom_action_layout.addWidget(status_container)
+        bottom_action_layout.addStretch()
+        bottom_action_layout.addWidget(refresh_model_button)
 
-        model_layout.addWidget(model_bottom_frame)
+        model_layout.addWidget(bottom_action_frame)
 
         self.model_panel.add_content_widget(model_widget)
         content_layout.addWidget(self.model_panel)
@@ -1150,7 +1187,7 @@ class AdvancedPage(QWidget):
             return f'"{python_exe_path}" -m pip'
 
     def _refresh_model_list(self):
-        """刷新可用模型列表"""
+        """刷新可用模型列表 (包含检测和分类模型)"""
         model_dir = os.path.join(resource_path("res") ,"model")
         try:
             # 保存当前选择
@@ -1201,6 +1238,51 @@ class AdvancedPage(QWidget):
                 self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
             except:
                 pass
+
+        # 刷新分类模型列表 (res/cls_model)
+        cls_model_dir = os.path.join(resource_path("res"), "cls_model")
+        try:
+            # 保存当前选择
+            current_cls = self.cls_model_combo.currentText()
+            self.cls_model_combo.blockSignals(True)
+            self.cls_model_combo.clear()
+            self.cls_model_combo.addItem("不使用 (None)", "")
+
+            if os.path.exists(cls_model_dir):
+                cls_files = [f for f in os.listdir(cls_model_dir) if f.lower().endswith('.pt')]
+                if cls_files:
+                    cls_files.sort()
+                    self.cls_model_combo.addItems(cls_files)
+
+                    # 尝试恢复选择
+                    if current_cls in cls_files:
+                        self.cls_model_combo.setCurrentText(current_cls)
+                    elif hasattr(self.controller,
+                                 'cls_model_var') and self.controller.cls_model_var in cls_files:
+                        self.cls_model_combo.setCurrentText(self.controller.cls_model_var)
+
+            self.cls_model_combo.blockSignals(False)
+        except Exception as e:
+            logger.error(f"刷新分类模型列表失败: {e}")
+
+    def _on_cls_model_selection_changed(self, model_name):
+        """处理分类模型选择变化"""
+        if model_name == "不使用 (None)" or not model_name:
+            if hasattr(self.controller, 'image_processor'):
+                self.controller.image_processor.load_cls_model(None)
+            self.controller.cls_model_var = ""
+            self.cls_model_status_label.setText("已禁用二次识别")
+            self._on_setting_changed()
+            return
+
+        cls_model_path = resource_path(os.path.join("res", "cls_model", model_name))
+        if os.path.exists(cls_model_path):
+            if hasattr(self.controller, 'image_processor'):
+                # 可以在这里使用线程加载，为简化直接调用
+                self.controller.image_processor.load_cls_model(cls_model_path)
+            self.controller.cls_model_var = model_name
+            self.cls_model_status_label.setText(f"{model_name}")
+            self._on_setting_changed()
 
     def _install_python_package(self):
         """安装Python包"""
@@ -1657,10 +1739,11 @@ class AdvancedPage(QWidget):
             "auto_sort": self.auto_sort_switch_row.isChecked(),
             "update_channel": self.update_channel_combo.currentText(),
             "update_mirror": self.update_mirror_combo.currentText(),
-            "pytorch_version": self.pytorch_version_combo.currentText(),  # 同样修复
-            "package": self.package_edit.text().strip(),  # 直接从输入框获取当前值
-            "version_constraint": self.version_constraint_edit.text().strip(),  # 直接从输入框获取当前值
+            "pytorch_version": self.pytorch_version_combo.currentText(),
+            "package": self.package_edit.text().strip(),
+            "version_constraint": self.version_constraint_edit.text().strip(),
             "selected_model": selected_model,
+            "selected_cls_model": self.cls_model_combo.currentText(),
             "export_columns": [name for name, cb in self.export_checkboxes.items() if cb.isChecked()],
         }
 
@@ -1741,6 +1824,13 @@ class AdvancedPage(QWidget):
             selected_model = settings["selected_model"]
             # 使用定时器延迟设置，确保模型列表已经加载
             QTimer.singleShot(200, lambda: self._set_selected_model(selected_model))
+
+        if "selected_cls_model" in settings:
+            cls_model = settings["selected_cls_model"]
+            # 延迟设置以确保列表已加载，且只有在列表中存在时才设置
+            QTimer.singleShot(250, lambda: self.cls_model_combo.setCurrentText(cls_model)
+                                           if self.cls_model_combo.findText(cls_model) >= 0
+                                           else None)
 
         if "export_columns" in settings:
             selected_columns = settings["export_columns"]
@@ -1865,7 +1955,7 @@ class AdvancedPage(QWidget):
         # 触发设置保存
         self._on_setting_changed()
 
-    def update_quick_settings_sync(self, model_name, stride, video_mode=None):
+    def update_quick_settings_sync(self, model_name, stride, video_mode=None, cls_model_name=None):
         """同步开始界面的快速设置到高级设置(不触发信号)"""
         # 1. 同步模型
         if model_name and self.model_combo.currentText() != model_name:
@@ -1873,7 +1963,37 @@ class AdvancedPage(QWidget):
             index = self.model_combo.findText(model_name)
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
+                # [新增] 同步检测模型时，顺便更新检测模型状态文字
+                self.model_status_label.setText(f"当前使用: {model_name}")
             self.model_combo.blockSignals(False)
+
+        if cls_model_name is not None:
+            current_cls = self.cls_model_combo.currentText()
+            # 只有当确实不同的时候才更新
+            if current_cls != cls_model_name:
+                self.cls_model_combo.blockSignals(True)
+                # 处理特殊情况：StartPage可能传回 "不使用 (None)" 或 ""
+                target_name = cls_model_name
+                if not target_name:
+                    target_name = "不使用 (None)"
+
+                index = self.cls_model_combo.findText(target_name)
+                # 尝试模糊匹配（如果 StartPage 和 AdvancedPage 的 "不使用" 文本定义稍有不同）
+                if index < 0 and "None" in target_name:
+                    index = 0  # 假设第一项是不使用
+
+                if index >= 0:
+                    self.cls_model_combo.setCurrentIndex(index)
+
+                    # [修改核心部分] 手动更新分类模型的状态文字
+                    # 因为blockSignals(True)屏蔽了自动更新，这里必须手动设置Label
+                    final_name = self.cls_model_combo.currentText()
+                    if final_name == "不使用 (None)" or not final_name:
+                        self.cls_model_status_label.setText("已禁用二次识别")
+                    else:
+                        self.cls_model_status_label.setText(f"{final_name}")
+
+                self.cls_model_combo.blockSignals(False)
 
         # 2. 同步视频模式
         if video_mode and self.video_mode_combo.currentText() != video_mode:

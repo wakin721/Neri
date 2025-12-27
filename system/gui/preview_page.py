@@ -398,6 +398,8 @@ class PreviewPage(QWidget):
         self.current_detection_results = None
         self.image_loader_thread = None
 
+        self.current_image_path = None
+
         self.current_preview_info = {}
         self.active_keybinds = []
         self._is_navigating = False
@@ -1091,32 +1093,98 @@ class PreviewPage(QWidget):
         # 启动线程
         self.detection_worker.start()
 
-    def _update_detection_info(self, species_info):
-        """更新检测信息显示"""
+    def _update_detection_info(self, species_info=None):
+        """
+        更新检测信息显示 (支持动态置信度过滤)
+        :param species_info: 可选，如果传入则更新当前的 current_preview_info，否则使用现有的
+        """
         try:
-            # 获取当前文本内容的前两行（基本信息）
+            # 1. 只有传入新数据时才更新缓存，否则使用已有的缓存进行重算
+            if species_info:
+                self.current_preview_info = species_info
+
+            if not self.current_preview_info:
+                return
+
+            # 获取基本信息（文件名、尺寸等，保留原有的前两行）
             current_text = self.info_text.toPlainText().strip()
             current_lines = current_text.split('\n') if current_text else []
-            basic_info = "\n".join(current_lines[:2]) if len(current_lines) >= 2 else current_text
+            # 尝试保留前两行基本信息，如果当前已经是检测结果文本，则重新生成可能比较麻烦，
+            # 建议依靠 update_image_info 生成的基础信息，或者在这里简单保留 header
+            # 这里为了稳健，如果行数不够，就不保留了，实际逻辑中通常 update_image_info 会先被调用
+            basic_info = "\n".join(current_lines[:2]) if len(current_lines) >= 2 else ""
+            if "检测结果" in basic_info: basic_info = ""  # 防止重复叠加
 
-            # 构建检测结果信息
+            # === 动态统计逻辑 ===
+            counts = Counter()
+            valid_confidences = []
+
+            # 获取检测框列表
+            boxes = self.current_preview_info.get("检测框",
+                                                  self.current_preview_info.get("detect_results",
+                                                                                self.current_preview_info.get("objects",
+                                                                                                              [])))
+
+            if boxes:
+                for box in boxes:
+                    # 1. 获取基础信息
+                    species_name = box.get("物种", box.get("species", "未知"))
+                    confidence = float(box.get("置信度", box.get("confidence", 0.0)))
+                    final_name = species_name  # 默认使用原始识别结果
+                    is_valid = False
+
+                    # 2. 候选项逻辑 (与画框逻辑保持一致)
+                    if "候选项" in box and box["候选项"]:
+                        # 检查候选项是否满足其特定阈值
+                        candidate_matched = False
+                        for cand in box["候选项"]:
+                            c_name = cand.get('name')
+                            c_conf = float(cand.get('conf', 0))
+                            # 获取该候选项的阈值
+                            c_thresh = self.species_conf_map.get(c_name, self.species_conf_map.get("global", 0.25))
+
+                            if c_conf >= c_thresh:
+                                final_name = c_name
+                                confidence = c_conf
+                                candidate_matched = True
+                                break  # 找到第一个满足的候选项即可
+
+                        if candidate_matched:
+                            is_valid = True
+
+                    # 3. 如果没有匹配的候选项，检查主物种是否满足阈值
+                    if not is_valid:
+                        thresh = self.species_conf_map.get(species_name, self.species_conf_map.get("global", 0.25))
+                        if confidence >= thresh:
+                            is_valid = True
+                            final_name = species_name
+
+                    # 4. 统计
+                    if is_valid:
+                        counts[final_name] += 1
+                        valid_confidences.append(confidence)
+
+            # === 构建显示文本 ===
             detection_parts = ["检测结果:"]
-            if species_info and species_info.get('物种名称') and species_info['物种名称'] != '空':
-                names = species_info['物种名称'].split(',')
-                counts = species_info.get('物种数量', '').split(',')
-                info_parts = [f"{n}: {c}只" for n, c in zip(names, counts)]
+
+            if counts:
+                # 按数量降序排列
+                info_parts = [f"{n}: {c}只" for n, c in counts.most_common()]
                 detection_parts.append(", ".join(info_parts))
-                if species_info.get('最低置信度'):
-                    detection_parts.append(f"最低置信度: {species_info['最低置信度']}")
-                if species_info.get('检测时间'):
-                    detection_parts.append(f"检测于: {species_info['检测时间']}")
+
+                if valid_confidences:
+                    min_conf = min(valid_confidences)
+                    detection_parts.append(f"最低置信度: {min_conf:.3f}")
+
+                # 尝试获取原始的检测时间
+                detect_time = self.current_preview_info.get('检测时间', '')
+                if detect_time:
+                    detection_parts.append(f"检测于: {detect_time}")
             else:
-                detection_parts.append("未检测到已知物种")
+                detection_parts.append("当前置信度下未检测到目标")
 
-            # 合并基本信息和检测信息
+            # 合并信息
             full_info = basic_info + "\n" + " | ".join(detection_parts)
-
-            # 设置完整文本内容
             self.info_text.setPlainText(full_info)
 
         except Exception as e:
@@ -1136,7 +1204,7 @@ class PreviewPage(QWidget):
     def _draw_detection_boxes(self, image_label, original_image, detection_info, conf_map):
         """
         根据给定的置信度阈值，在指定的原始图像上绘制检测框，并更新对应的UI标签。
-        (修复了归一化坐标导致的无法绘制问题)
+        (修复了归一化坐标导致的无法绘制问题，并增加了候选项筛选逻辑)
         """
         # 1. 检查是否有原始图像
         if not original_image:
@@ -1186,21 +1254,52 @@ class PreviewPage(QWidget):
 
             for box in boxes_info:
                 try:
-                    # --- 置信度过滤 ---
-                    species_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
+                    # ==================== [修改开始] 多物种标签逻辑 ====================
+                    valid_display_texts = []  # 存储最终显示的文本片段
+                    seen_names = set()  # 用于去重
+                    primary_species = None  # 用于决定框颜色的主要物种（最高置信度者）
 
-                    # === 核心过滤修改 ===
-                    # 根据物种获取阈值
-                    thresh = conf_map.get(species_name, conf_map.get("global", 0.25))
+                    # 1. 收集所有可能的物种来源 (候选项 + 主结果)
+                    candidates = []
 
-                    raw_conf = box.get("置信度", box.get("confidence", 0))
-                    confidence = float(raw_conf)
+                    # A. 收集候选项
+                    if "候选项" in box and box["候选项"]:
+                        for cand in box["候选项"]:
+                            candidates.append((cand.get('name'), float(cand.get('conf', 0))))
 
-                    # 使用特定阈值过滤
-                    if confidence < thresh:
+                    # B. 收集主结果 (作为补充，防止候选项缺失)
+                    raw_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
+                    raw_conf = float(box.get("置信度", box.get("confidence", 0)))
+                    candidates.append((raw_name, raw_conf))
+
+                    # 2. 排序：按置信度降序，确保高置信度的排在前面
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+
+                    # 3. 遍历检查阈值并构建标签
+                    for name, conf in candidates:
+                        if name in seen_names:
+                            continue  # 去重
+
+                        # 获取该物种的特定阈值 (优先取特定设置，否则取全局)
+                        thresh = conf_map.get(name, conf_map.get("global", 0.25))
+
+                        if conf >= thresh:
+                            valid_display_texts.append(f"{name} {conf:.2f}")
+                            seen_names.add(name)
+
+                            # 记录第一个通过阈值的物种（即置信度最高的），用于确定框的颜色
+                            if primary_species is None:
+                                primary_species = name
+
+                    # 如果没有任何物种通过阈值，则不绘制此框
+                    if not valid_display_texts:
                         continue
 
-                    # --- 获取坐标 ---
+                    # 4. 组合最终显示的标签文本 (例如: "赤狐 0.95 | 狗 0.88")
+                    label_text = " | ".join(valid_display_texts)
+                    # ==================== [修改结束] ====================
+
+                    # --- B. 获取并转换坐标 (归一化处理) ---
                     bbox = None
                     if "边界框" in box:
                         bbox = box["边界框"]
@@ -1209,64 +1308,50 @@ class PreviewPage(QWidget):
                     elif all(k in box for k in ["x1", "y1", "x2", "y2"]):
                         bbox = [box["x1"], box["y1"], box["x2"], box["y2"]]
 
-                    if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-                        continue
+                    if not bbox or len(bbox) < 4: continue
 
-                    # === 关键修复：先取浮点数，判断是否需要反归一化 ===
                     x1_f, y1_f, x2_f, y2_f = map(float, bbox[:4])
 
-                    # 判断是否为归一化坐标 (假设所有坐标都 <= 1.0 且不全是0)
-                    # 注意：有些极端情况坐标可能刚好是1.0，所以用 all(...)
+                    # 判断是否为归一化坐标 (0.0-1.0)
                     is_normalized = all(0.0 <= c <= 1.0 for c in [x1_f, y1_f, x2_f, y2_f]) and (x2_f > 0 or y2_f > 0)
 
                     if is_normalized:
-                        # 还原为像素坐标
                         x1 = int(x1_f * img_width)
                         y1 = int(y1_f * img_height)
                         x2 = int(x2_f * img_width)
                         y2 = int(y2_f * img_height)
                     else:
-                        # 已经是像素坐标，直接转 int
                         x1, y1, x2, y2 = int(x1_f), int(y1_f), int(x2_f), int(y2_f)
 
-                    # --- 坐标边界限制 ---
+                    # 边界限制
                     x1 = max(0, min(x1, img_width - 1))
                     y1 = max(0, min(y1, img_height - 1))
                     x2 = max(0, min(x2, img_width - 1))
                     y2 = max(0, min(y2, img_height - 1))
 
-                    # 过滤无效框
-                    if x2 <= x1 or y2 <= y1:
-                        continue
+                    if x2 <= x1 or y2 <= y1: continue
 
-                    # --- 获取物种信息 ---
-                    species_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
-                    color = get_species_color(species_name, return_rgb=True)
+                    # --- C. 绘制样式 ---
+                    # 使用置信度最高的有效物种来决定颜色
+                    color = get_species_color(primary_species, return_rgb=True)
 
-                    # --- 绘制矩形 ---
-                    # 动态调整线宽
+                    # 动态线宽
                     line_width = max(2, int(min(img_width, img_height) * 0.005))
                     draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
 
-                    # --- 绘制标签 ---
-                    label_text = f"{species_name} {confidence:.2f}"
-
-                    # 计算文字背景大小
+                    # 绘制标签背景和文字 (使用上面生成的 label_text)
                     if font:
-                        if hasattr(draw, 'textbbox'):
-                            # Pillow >= 9.2.0
+                        if hasattr(draw, 'textbbox'):  # PIL >= 9.2.0
                             left, top, right, bottom = draw.textbbox((0, 0), label_text, font=font)
                             text_w, text_h = right - left, bottom - top
-                        else:
-                            # 旧版 Pillow
+                        else:  # 旧版 PIL
                             text_w, text_h = draw.textsize(label_text, font=font)
                     else:
-                        text_w, text_h = 100, 20  # Fallback
+                        text_w, text_h = 100, 20
 
-                    # 确保标签不画出界 (优先画在框上方，如果上方没空间则画在框内)
+                    # 优先在框上方显示标签
                     label_y = y1 - text_h - 4
-                    if label_y < 0:
-                        label_y = y1
+                    if label_y < 0: label_y = y1
 
                     draw.rectangle(
                         [x1, label_y, x1 + text_w + 8, label_y + text_h + 4],
@@ -1277,7 +1362,6 @@ class PreviewPage(QWidget):
                         draw.text((x1 + 4, label_y), label_text, fill='white', font=font)
 
                 except Exception as e:
-                    # 捕获单个框的绘制错误，不影响其他框
                     logger.debug(f"绘制单框失败: {e}")
                     continue
 
@@ -1308,44 +1392,124 @@ class PreviewPage(QWidget):
             logger.error(f"重绘预览检测框失败: {e}")
 
     def _update_species_selector_items(self):
-        """根据当前的检测结果更新下拉框内容"""
+        """
+        根据当前的检测结果更新下拉框内容。
+        自动选择逻辑：
+        1. 优先选择：当前置信度阈值下可见的、置信度最高的物种。
+        2. 回退策略：如果所有物种都被当前阈值过滤掉（不可见），则选择绝对置信度最高的物种。
+        """
         # 暂时阻断信号，防止清空时触发 change 事件
         self.species_selector.blockSignals(True)
         self.species_selector.clear()
 
-        # === 修改 1: 恢复全局设置选项 ===
+        # 1. 恢复全局设置选项
         self.species_selector.addItem("全局设置 (Global)", "global")
 
         found_species = set()
 
+        # === 变量定义 ===
+        # A. 有效最高置信度 (满足阈值)
+        best_valid_species_name = None
+        max_valid_confidence = -1.0
+
+        # B. 绝对最高置信度 (无视阈值，作为兜底)
+        best_absolute_species_name = None
+        max_absolute_confidence = -1.0
+
+        # 获取全局默认阈值
+        global_thresh = self.species_conf_map.get("global", 0.25)
+
         # 从当前 JSON 数据中提取所有物种
         if self.current_preview_info:
             # --- 情况 A: 处理图片 JSON 结构 ---
-            boxes = self.current_preview_info.get("检测框", self.current_preview_info.get("detect_results", []))
+            boxes = self.current_preview_info.get("检测框",
+                                                  self.current_preview_info.get("detect_results",
+                                                                                self.current_preview_info.get("objects",
+                                                                                                              [])))
+
             for box in boxes:
-                name = box.get("物种", box.get("species", box.get("class_name")))
-                if name: found_species.add(name)
+                # 1. 获取原始信息
+                raw_name = box.get("物种", box.get("species", box.get("class_name")))
+                raw_conf = float(box.get("置信度", box.get("confidence", 0.0)))
+
+                if not raw_name: continue
+
+                # 默认情况下，最终显示的物种和置信度就是原始的
+                final_name = raw_name
+                final_conf = raw_conf
+
+                # 2. 处理候选项逻辑 (确定该框最终判定为什么物种)
+                is_candidate_match = False
+                if "候选项" in box and box["候选项"]:
+                    candidates = box["候选项"]
+                    for cand in candidates:
+                        c_name = cand.get('name')
+                        c_conf = float(cand.get('conf', 0.0))
+                        c_thresh = self.species_conf_map.get(c_name, global_thresh)
+
+                        if c_conf >= c_thresh:
+                            final_name = c_name
+                            final_conf = c_conf
+                            is_candidate_match = True
+                            break
+
+                            # 3. 将所有出现过的名字加入下拉列表
+                found_species.add(final_name)
+                if "候选项" in box:
+                    for c in box["候选项"]:
+                        if c.get('name'): found_species.add(c['name'])
+
+                # === 4. 更新绝对最大值 (兜底用) ===
+                if final_conf > max_absolute_confidence:
+                    max_absolute_confidence = final_conf
+                    best_absolute_species_name = final_name
+
+                # === 5. 更新有效最大值 (优先用) ===
+                is_valid = False
+                if is_candidate_match:
+                    is_valid = True
+                else:
+                    thresh = self.species_conf_map.get(final_name, global_thresh)
+                    if final_conf >= thresh:
+                        is_valid = True
+
+                if is_valid:
+                    if final_conf > max_valid_confidence:
+                        max_valid_confidence = final_conf
+                        best_valid_species_name = final_name
 
             # --- 情况 B: 处理视频 JSON 结构 (tracks) ---
             tracks = self.current_preview_info.get("tracks", {})
             if tracks:
-                # 获取当前的过滤比例，确保下拉框显示的物种与视频画框的一致
                 min_ratio = 0.0
                 if hasattr(self.controller, 'advanced_page'):
                     min_ratio = self.controller.advanced_page.min_frame_ratio_var
 
                 total_frames = self.current_preview_info.get('total_frames_processed', 1)
-                threshold = total_frames * min_ratio
+                threshold_frames = total_frames * min_ratio
 
                 for t_list in tracks.values():
-                    # 过滤掉帧数不足的轨迹
-                    if len(t_list) >= threshold:
-                        # 找出该轨迹的最终判定物种 (投票法)
-                        s_list = [p.get('species') for p in t_list if p.get('species')]
-                        if s_list:
-                            # 选取出现最多的物种作为该轨迹的代表
-                            dominant_species = Counter(s_list).most_common(1)[0][0]
-                            found_species.add(dominant_species)
+                    if len(t_list) < threshold_frames:
+                        continue
+
+                    s_list = [p.get('species') for p in t_list if p.get('species')]
+                    if not s_list: continue
+                    dominant_species = Counter(s_list).most_common(1)[0][0]
+                    found_species.add(dominant_species)
+
+                    track_max_conf = max([float(p.get('confidence', 0.0)) for p in t_list])
+
+                    # === 更新绝对最大值 ===
+                    if track_max_conf > max_absolute_confidence:
+                        max_absolute_confidence = track_max_conf
+                        best_absolute_species_name = dominant_species
+
+                    # === 更新有效最大值 ===
+                    sp_thresh = self.species_conf_map.get(dominant_species, global_thresh)
+                    if track_max_conf >= sp_thresh:
+                        if track_max_conf > max_valid_confidence:
+                            max_valid_confidence = track_max_conf
+                            best_valid_species_name = dominant_species
 
         # 将发现的物种添加到下拉框
         for sp in sorted(list(found_species)):
@@ -1353,15 +1517,29 @@ class PreviewPage(QWidget):
 
         self.species_selector.blockSignals(False)
 
-        # === 修改 2: 默认选中策略 ===
-        # 如果列表中除了Global还有其他物种 (count > 1)，优先选中第一个物种 (索引1)
-        # 这样能体现 "优先使用已识别物种" 的交互体验
-        if self.species_selector.count() > 1:
-            self.species_selector.setCurrentIndex(1)
-        elif self.species_selector.count() > 0:
-            self.species_selector.setCurrentIndex(0)  # 只有Global时选Global
+        # === 核心逻辑：确定最终选中的目标 ===
+        target_species_name = None
 
-        # 触发一次改变以更新滑块状态
+        # 策略1：优先选择“有效且置信度最高”的物种
+        if best_valid_species_name:
+            target_species_name = best_valid_species_name
+        # 策略2：如果所有物种都被过滤了（没有有效的），则选择“绝对置信度最高”的物种
+        elif best_absolute_species_name:
+            target_species_name = best_absolute_species_name
+
+        # 执行选中
+        target_index = -1
+        if target_species_name:
+            target_index = self.species_selector.findData(target_species_name)
+
+        if target_index != -1:
+            self.species_selector.setCurrentIndex(target_index)
+        else:
+            # 降级策略：如果没有结果，默认保持 Global
+            if self.species_selector.count() > 0:
+                self.species_selector.setCurrentIndex(0)
+
+                # 触发一次改变以更新滑块状态
         self._on_species_selector_changed()
 
     def _on_species_selector_changed(self):
@@ -1388,24 +1566,37 @@ class PreviewPage(QWidget):
         if self.preview_conf_label:
             self.preview_conf_label.setText(f"{new_conf:.2f}")
 
-        # === 修改核心：更新当前选中物种的阈值 ===
+        # 1. 更新当前选中物种的阈值配置
         current_species = self.species_selector.currentData()
         if current_species:
             self.species_conf_map[current_species] = new_conf
-            # 立即保存到文件
             self._save_species_conf()
 
-        # === 视频实时更新 ===
-        # 将整个 map 传递给视频线程
+        is_video = self.current_image_path and self.current_image_path.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+
+        # 2. 视频模式处理
         if self.video_thread and self.video_thread.isRunning():
+            # 更新线程内的配置
             self.video_thread.conf_map = self.species_conf_map
 
-        # === 图片实时重绘 ===
-        if self.show_detection_checkbox.isChecked() and self.current_preview_info:
-            is_video = self.current_image_path and self.current_image_path.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+            # === 新增：实时更新视频信息面板 ===
+            temp_dir = self.controller.get_temp_photo_dir()
+            base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+            json_path = os.path.join(temp_dir, f"{base_name}.json")
+
+            min_ratio = 0.0
+            if hasattr(self.controller, 'advanced_page'):
+                min_ratio = self.controller.advanced_page.min_frame_ratio_var
+
+            self._update_video_info_text(self.current_image_path, json_path, min_ratio)
+
+        # 3. 图片模式处理
+        elif self.show_detection_checkbox.isChecked() and self.current_preview_info:
             if not is_video:
-                # 调用重绘，注意这里不再传递单一 conf，而是传递 None 或 map，需修改下游函数
+                # 重绘框
                 self._redraw_preview_boxes_with_new_confidence(None)
+                # === 新增：实时更新图片信息面板 ===
+                self._update_detection_info()  # 不传参，使用 self.current_preview_info
 
     def _on_detection_completed(self, loaded_detection_info, filename):
         """检测完成处理"""
@@ -2124,31 +2315,31 @@ class PreviewPage(QWidget):
             logger.error(f"绘制暂停图标失败: {e}")
 
     def _update_video_info_text(self, file_path, json_path, min_frame_ratio=0.0):
-        """生成详细的视频信息文本"""
+        """生成详细的视频信息文本 (支持动态置信度过滤)"""
         try:
             # 1. 获取视频基础信息 (Opencv + OS)
             file_name = os.path.basename(file_path)
             file_ext = os.path.splitext(file_name)[1].replace('.', '')
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             file_size_kb = file_size_mb * 1024
-
-            # 获取修改时间作为拍摄时间
             mtime = os.path.getmtime(file_path)
             date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
 
             width, height = 0, 0
+            # 简单获取宽高，如果不频繁调用可以接受
             cap = cv2.VideoCapture(file_path)
             if cap.isOpened():
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
+            cap.release()
 
-            # 第一部分：基础信息
             info_text = (f"文件名: {file_name}    格式: {file_ext}\n"
                          f"拍摄日期: {date_str}    尺寸: {width}x{height}px    文件大小: {file_size_kb:.1f} KB")
 
             # 2. 处理检测结果
             if os.path.exists(json_path):
+                # 如果没有缓存或路径变了，才重新加载 JSON，否则使用内存中的 self.current_preview_info 可能会更快
+                # 这里为了数据一致性，还是读取文件或使用传入的 json_path
                 with open(json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
 
@@ -2162,40 +2353,46 @@ class PreviewPage(QWidget):
                 has_detections = False
 
                 for t_id, points in tracks.items():
-                    # 过滤掉帧数不足的目标
+                    # A. 过滤掉帧数不足的目标
                     if len(points) < threshold:
                         continue
 
-                    has_detections = True
-
+                    # B. 获取该轨迹的物种 (投票法)
                     s_list = [p.get('species') for p in points if p.get('species')]
-                    if s_list:
-                        sp = Counter(s_list).most_common(1)[0][0]
-                    else:
-                        sp = 'Unknown'
+                    if not s_list: continue
+                    sp = Counter(s_list).most_common(1)[0][0]
 
+                    # === C. 新增：置信度过滤 ===
+                    # 获取该物种的当前阈值
+                    thresh = self.species_conf_map.get(sp, self.species_conf_map.get("global", 0.25))
+
+                    # 检查该轨迹中是否至少有一帧（或平均值）超过了阈值？
+                    # 通常策略：如果整个轨迹的最高置信度都低于阈值，则视为误检
+                    track_max_conf = max([float(p.get('confidence', 0)) for p in points])
+
+                    if track_max_conf < thresh:
+                        continue
+                    # ========================
+
+                    has_detections = True
                     species_count[sp] += 1
 
-                    # 更新最低置信度
-                    for p in points:
-                        conf = p.get('confidence', 1.0)
-                        if conf < min_confidence:
-                            min_confidence = conf
+                    # 更新最低置信度 (仅统计通过筛选的)
+                    if track_max_conf < min_confidence:
+                        min_confidence = track_max_conf
 
-                # 获取检测时间 (JSON文件修改时间)
+                # 获取检测时间
                 json_mtime = os.path.getmtime(json_path)
                 detect_time = datetime.fromtimestamp(json_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-                # 构建检测结果字符串
                 if has_detections:
                     res_parts = []
                     for sp, count in species_count.items():
                         res_parts.append(f"{sp}: {count}只")
-
                     res_str = " | ".join(res_parts)
                     result_text = f"\n检测结果: | {res_str} | 最低置信度: {min_confidence:.3f} | 检测于: {detect_time}"
                 else:
-                    result_text = f"\n检测结果: 未检测到有效目标 (过滤比例 {min_frame_ratio:.0%})"
+                    result_text = f"\n检测结果: 当前条件下未检测到有效目标"
 
                 info_text += result_text
             else:
@@ -2205,7 +2402,6 @@ class PreviewPage(QWidget):
 
         except Exception as e:
             logger.error(f"生成视频信息失败: {e}")
-            self.info_text.setPlainText(f"正在播放视频: {os.path.basename(file_path)}\n(获取详细信息失败)")
 
     def _try_connect_settings_signal(self):
         """尝试连接高级设置页面的信号"""
@@ -2260,3 +2456,35 @@ class PreviewPage(QWidget):
             draw_boxes=True,
             start_frame=start_frame
         )
+
+    def reload_and_apply_conf(self):
+        """
+        [新增] 从 conf.json 重新加载配置并强制刷新界面。
+        用于页面切换时同步最新的置信度设置。
+        """
+        # 1. 从磁盘加载最新配置到内存 (self.species_conf_map)
+        self._load_species_conf()
+
+        # 2. 刷新下拉框和滑块状态
+        # 这会将滑块位置更新为最新的数值，并更新 self.preview_conf_label
+        self._on_species_selector_changed()
+
+        # 3. 刷新视图 (如果显示检测框已开启)
+        if self.show_detection_checkbox.isChecked():
+            # A. 视频模式：更新线程内的 map
+            if self.video_thread and self.video_thread.isRunning():
+                self.video_thread.conf_map = self.species_conf_map
+                # 如果需要更新信息面板
+                temp_dir = self.controller.get_temp_photo_dir()
+                if self.current_image_path:
+                    base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+                    json_path = os.path.join(temp_dir, f"{base_name}.json")
+                    min_ratio = 0.0
+                    if hasattr(self.controller, 'advanced_page'):
+                        min_ratio = self.controller.advanced_page.min_frame_ratio_var
+                    self._update_video_info_text(self.current_image_path, json_path, min_ratio)
+
+            # B. 图片模式：重绘框和更新信息
+            elif self.original_image and self.current_preview_info:
+                self._redraw_preview_boxes_with_new_confidence(None)
+                self._update_detection_info()

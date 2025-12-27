@@ -141,7 +141,7 @@ class DataProcessor:
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
                         file_format: str = 'excel', columns_to_export: Optional[List[str]] = None,
                         min_frame_ratio: float = 0.0) -> bool:
-        """将图像信息导出为Excel或CSV文件"""
+        """将图像信息导出为Excel或CSV文件 (增加候选物种过滤逻辑)"""
         if not image_info_list:
             logger.warning("没有数据可导出")
             return False
@@ -152,12 +152,8 @@ class DataProcessor:
                 with open(conf_path, 'r', encoding='utf-8') as f:
                     file_conf = json.load(f)
                     if isinstance(file_conf, dict):
-                        # 如果 confidence_settings 为 None，初始化为空字典
                         if confidence_settings is None:
                             confidence_settings = {}
-
-                        # 使用配置文件中的值更新置信度设置 (覆盖传入的参数)
-                        # 例如：如果有 "盘羊": 0.5，则导出时盘羊的阈值会变为 0.5
                         confidence_settings.update(file_conf)
                         logger.info(f"导出数据时已加载并应用阈值配置文件: {conf_path}")
             except Exception as e:
@@ -259,27 +255,78 @@ class DataProcessor:
                         info['物种数量'] = ','.join([str(final_species_counts[s]) for s in species_list])
                         info['最低置信度'] = f"{min(valid_confidences):.3f}" if valid_confidences else ''
 
+
                 else:
-                    # === 图片文件处理 (原有逻辑) ===
-                    confidences = info.get('all_confidences', [])
-                    classes = info.get('all_classes', [])
-                    names_map = info.get('names_map', {})
+                    # === 图片文件处理 [修改核心部分] ===
+                    # 优先检查是否存在详细的 '检测框' 信息 (新版 JSON 结构)
+                    boxes_info = info.get('检测框', [])
                     final_species_counts = Counter()
                     valid_confidences = []
 
-                    if confidences and classes and names_map:
-                        for cls, conf in zip(classes, confidences):
-                            species_name = names_map.get(str(int(cls)))
-                            if species_name:
-                                threshold = confidence_settings.get(species_name,
-                                                                    confidence_settings.get("global", 0.25))
-                                if conf >= threshold:
-                                    final_species_counts[species_name] += 1
-                                    valid_confidences.append(conf)
+                    if boxes_info:
+                        for box in boxes_info:
+                            # 默认使用主结果
+                            chosen_species = box.get('物种')
+                            chosen_conf = float(box.get('置信度', 0))
 
+                            # [新增逻辑] 如果存在候选项，根据阈值筛选最佳物种
+                            if '候选项' in box and box['候选项']:
+                                candidates = box['候选项']  # 假设格式: [{'name': 'A', 'conf': 0.6}, ...]
+                                selected_candidate = None
+
+                                # 遍历候选 (例如: A 60%, B 50%)
+                                for cand in candidates:
+                                    cand_name = cand.get('name')
+                                    cand_conf = float(cand.get('conf', 0))
+
+                                    # 获取该候选物种对应的阈值
+                                    thresh = confidence_settings.get(cand_name, confidence_settings.get("global", 0.25))
+                                    # 检查是否满足条件 (例如: A(0.6) < 0.8 [Skip], B(0.5) > 0.4 [Pick])
+                                    if cand_conf >= thresh:
+                                        selected_candidate = cand_name
+                                        chosen_conf = cand_conf  # 更新为该候选的置信度
+                                        break  # 找到满足条件的最高置信度物种，停止
+
+                                if selected_candidate:
+                                    chosen_species = selected_candidate
+                                else:
+                                    # 如果所有候选都不满足阈值，则视为该检测框无效（被过滤掉）
+                                    continue
+
+                            else:
+                                # 没有候选项，使用原始的主物种逻辑
+                                if not chosen_species: continue
+                                thresh = confidence_settings.get(chosen_species,
+                                                                 confidence_settings.get("global", 0.25))
+                                if chosen_conf < thresh:
+                                    continue
+
+                            # 统计有效框
+                            final_species_counts[chosen_species] += 1
+                            valid_confidences.append(chosen_conf)
+
+
+                    # 兼容旧逻辑 (如果没有 '检测框' 字段)
+                    elif 'all_confidences' in info and 'all_classes' in info:
+                        confidences = info.get('all_confidences', [])
+                        classes = info.get('all_classes', [])
+                        names_map = info.get('names_map', {})
+
+                        if confidences and classes and names_map:
+                            for cls, conf in zip(classes, confidences):
+                                species_name = names_map.get(str(int(cls)))
+                                if species_name:
+                                    threshold = confidence_settings.get(species_name,
+                                                                        confidence_settings.get("global", 0.25))
+                                    if conf >= threshold:
+                                        final_species_counts[species_name] += 1
+                                        valid_confidences.append(conf)
+
+                    # 更新 info 中的统计结果
                     species_list = list(final_species_counts.keys())
                     if not species_list:
                         info['物种名称'], info['物种数量'], info['最低置信度'], info['物种类型'] = '空', '空', '', ''
+
                     else:
                         info['物种名称'] = ','.join(species_list)
                         info['物种数量'] = ','.join(map(str, final_species_counts.values()))
