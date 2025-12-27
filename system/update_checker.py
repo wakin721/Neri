@@ -10,6 +10,9 @@ import sys
 import subprocess
 import threading
 import platform
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QProgressBar, QMessageBox
 # Make sure Slot is imported
 from PySide6.QtCore import Qt, QThread, Signal, QMetaObject, Q_ARG, QObject, Slot
@@ -74,17 +77,20 @@ def get_latest_version_info(channel='stable', mirror='official'):
     通过GitHub API获取最新的版本信息。
     支持镜像源替换。
     """
-    # 根据镜像源构建 API URL
     base_api_url = "https://api.github.com"
+    verify_ssl = True
 
+    # [修正] 请仔细检查这里，必须是两个 k (kkgithub)
     if mirror == 'kkgithub':
         base_api_url = "https://api.kkgithub.com"
+        verify_ssl = False
 
     api_url = f"{base_api_url}/repos/{GITHUB_USER}/{GITHUB_REPO}/releases"
     headers = {"Accept": "application/vnd.github.v3+json"}
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=15)  # 稍微增加超时时间
+        # 发送请求时禁用SSL验证(如果是镜像源)
+        response = requests.get(api_url, headers=headers, timeout=15, verify=verify_ssl)
         response.raise_for_status()
         releases = response.json()
         if not releases:
@@ -106,17 +112,21 @@ def get_latest_version_info(channel='stable', mirror='official'):
             return None
 
         tag_name = latest_release.get('tag_name', 'v0.0.0')
-        notes = latest_release.get('body')
-        if notes is None:
-            notes = '无更新说明。'
+        notes = latest_release.get('body') or '无更新说明。'
 
         # 获取原始下载链接
-        download_url = latest_info = latest_release.get('zipball_url')
+        download_url = latest_release.get('zipball_url')
 
+        # [关键修正] 域名替换逻辑
         if download_url and mirror != 'official':
-            # 简单的域名替换逻辑
             if mirror == 'kkgithub':
-                download_url = download_url.replace("api.github.com", "api.kkgithub.com")
+                # 1. 先恢复成标准github域名（防止万一URL已经是kkgithub导致重复）
+                if "kkgithub.com" in download_url:
+                    download_url = download_url.replace("kkgithub.com", "github.com")
+
+                # 2. 只需要这一行替换即可。
+                # 不要分别替换 api.github.com，因为 github.com 包含在 api.github.com 中。
+                # replace("github.com", "kkgithub.com") 会自动将 api.github.com 变为 api.kkgithub.com
                 download_url = download_url.replace("github.com", "kkgithub.com")
 
         return {
@@ -209,7 +219,12 @@ class UpdateWorker(QObject):
         """执行下载、解压、安装的完整流程。"""
         try:
             self.status_changed.emit("正在从GitHub下载更新...")
-            response = requests.get(self.download_url, stream=True, timeout=30)
+            verify_ssl = True
+            if 'kkgithub' in self.download_url:
+                verify_ssl = False
+
+            # 添加 verify=verify_ssl 和 timeout=60
+            response = requests.get(self.download_url, stream=True, timeout=60, verify=verify_ssl)
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
             self.progress_max_set.emit(total_size if total_size > 0 else 100)

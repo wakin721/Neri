@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem, QApplication, QLabel
+    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QPalette, QIcon, QPixmap, QPainter, QColor
@@ -8,8 +8,7 @@ from PySide6.QtSvg import QSvgRenderer
 
 from system.gui.ui_components import (
     Win11Colors, RoundedButton,
-    ModernLineEdit, PathInputWidget,
-    ModernGroupBox, ModernComboBox
+    ModernLineEdit, PathInputWidget, ModernGroupBox
 )
 import os
 from system.utils import resource_path
@@ -73,8 +72,8 @@ class StartPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
 
-        # 基础设置组 (原路径设置 + 快速设置)
-        self._create_basic_settings_group(layout)
+        # 路径设置组
+        self._create_paths_group(layout)
 
         # 添加控制台组件（初始隐藏）
         self._create_console_widget(layout)
@@ -86,65 +85,6 @@ class StartPage(QWidget):
 
         # 底部控制区域
         self._create_bottom_controls(layout)
-
-    def _create_basic_settings_group(self, parent_layout):
-        """创建基础设置组 (包含路径、模型和跳帧)"""
-        # 分组框名称改为 "基础设置"
-        basic_group = ModernGroupBox("基础设置")
-        basic_layout = QVBoxLayout(basic_group)
-        basic_layout.setSpacing(20)
-        basic_layout.setContentsMargins(16, 16, 16, 16)
-
-        # --- 1. 图像文件路径 (占满一行) ---
-        self.file_path_widget = PathInputWidget(
-            "图像文件路径:",
-            "请选择包含图像文件的文件夹"
-        )
-        basic_layout.addWidget(self.file_path_widget)
-
-        # --- 2. 模型选择与跳帧设置 (下方水平并排) ---
-        settings_row_layout = QHBoxLayout()
-        settings_row_layout.setSpacing(20)
-
-        # A. 模型选择
-        model_layout = QVBoxLayout()
-        model_layout.setSpacing(8)
-
-        model_label = QLabel("选择模型:")
-        model_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-        model_layout.addWidget(model_label)
-
-        self.model_combo = ModernComboBox()
-        self.model_combo.setMinimumWidth(200)
-        self._populate_models()  # 填充模型列表
-        model_layout.addWidget(self.model_combo)
-
-        settings_row_layout.addLayout(model_layout)
-
-        # B. 跳帧设置
-        stride_layout = QVBoxLayout()
-        stride_layout.setSpacing(8)
-
-        stride_label = QLabel("视频跳帧 (Frame Stride):")
-        stride_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-        stride_layout.addWidget(stride_label)
-
-        self.stride_combo = ModernComboBox()
-        self.stride_combo.setMinimumWidth(150)
-        # 默认选项
-        self.default_strides = ["5", "10", "15", "20", "25", "30"]
-        self.stride_combo.addItems(self.default_strides)
-        stride_layout.addWidget(self.stride_combo)
-
-        settings_row_layout.addLayout(stride_layout)
-
-        # 添加弹性空间填充右侧，保持左对齐
-        settings_row_layout.addStretch()
-
-        # 将水平布局添加到主垂直布局中
-        basic_layout.addLayout(settings_row_layout)
-
-        parent_layout.addWidget(basic_group)
 
     def _create_console_widget(self, parent_layout):
         """创建控制台组件"""
@@ -243,24 +183,28 @@ class StartPage(QWidget):
         scrollbar = self.console_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _create_paths_group(self, parent_layout):
+        """创建路径设置组"""
+        paths_group = ModernGroupBox("路径设置")
+        paths_layout = QVBoxLayout(paths_group)
+        paths_layout.setSpacing(16)
+        paths_layout.setContentsMargins(16, 16, 16, 16)
 
-    def _populate_models(self):
-        """扫描并填充模型列表"""
-        self.model_combo.clear()
-        try:
-            model_dir = resource_path(os.path.join("res", "model"))
-            if os.path.exists(model_dir):
-                model_files = [f for f in os.listdir(model_dir) if f.lower().endswith('.pt')]
-                model_files.sort()
-                if model_files:
-                    self.model_combo.addItems(model_files)
-                else:
-                    self.model_combo.addItem("未找到模型")
-            else:
-                self.model_combo.addItem("模型目录不存在")
-        except Exception as e:
-            self.model_combo.addItem("加载失败")
-            print(f"Error loading models: {e}")
+        # 图像文件路径
+        self.file_path_widget = PathInputWidget(
+            "图像文件路径:",
+            "请选择包含图像文件的文件夹"
+        )
+        paths_layout.addWidget(self.file_path_widget)
+
+        # 结果保存路径
+        self.save_path_widget = PathInputWidget(
+            "结果保存路径:",
+            "请选择保存处理结果的文件夹"
+        )
+        paths_layout.addWidget(self.save_path_widget)
+
+        parent_layout.addWidget(paths_group)
 
     def _create_bottom_controls(self, parent_layout):
         """创建底部控制区域"""
@@ -349,10 +293,8 @@ class StartPage(QWidget):
         # 路径输入控件
         self.file_path_widget.browse_requested.connect(self.browse_file_path_requested.emit)
         self.file_path_widget.path_changed.connect(self.file_path_changed.emit)
-
-        # 使用 lambda 丢弃 textChanged 发出的字符串参数，避免 TypeError
-        self.model_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
-        self.stride_combo.currentTextChanged.connect(lambda _: self.settings_changed.emit())
+        self.save_path_widget.browse_requested.connect(self.browse_save_path_requested.emit)
+        self.save_path_widget.path_changed.connect(self.save_path_changed.emit)
 
         # 开始/停止按钮
         self.start_stop_button.clicked.connect(self.toggle_processing_requested.emit)
@@ -361,10 +303,7 @@ class StartPage(QWidget):
         """设置UI的处理状态"""
         # 禁用或启用设置控件
         self.file_path_widget.set_enabled(not is_processing)
-
-        # 处理时禁用快速设置
-        self.model_combo.setEnabled(not is_processing)
-        self.stride_combo.setEnabled(not is_processing)
+        self.save_path_widget.set_enabled(not is_processing)
 
         # 更新处理按钮的样式和文本
         self._update_button_style(is_processing)
@@ -385,7 +324,7 @@ class StartPage(QWidget):
 
     def get_save_path(self):
         """获取保存路径"""
-        return None
+        return self.save_path_widget.get_path()
 
     # 设置器方法
     def set_file_path(self, path):
@@ -394,15 +333,14 @@ class StartPage(QWidget):
 
     def set_save_path(self, path):
         """设置保存路径"""
-        pass
+        self.save_path_widget.set_path(path)
 
     # 设置和加载方法
     def get_settings(self):
         """获取页面设置"""
         return {
             "file_path": self.get_file_path(),
-            "selected_model": self.model_combo.currentText(),
-            "vid_stride": int(self.stride_combo.currentText()) if self.stride_combo.currentText().isdigit() else 1 # [新增]
+            "save_path": self.get_save_path(),
         }
 
     def load_settings(self, settings):
@@ -410,32 +348,8 @@ class StartPage(QWidget):
         if "file_path" in settings and settings["file_path"] and os.path.exists(settings["file_path"]):
             self.set_file_path(settings["file_path"])
 
-            # 加载模型选择
-            if "selected_model" in settings and settings["selected_model"]:
-                # 尝试选中设置中的模型
-                index = self.model_combo.findText(settings["selected_model"])
-                if index >= 0:
-                    self.model_combo.setCurrentIndex(index)
-
-            # 加载跳帧设置
-            if "vid_stride" in settings:
-                stride_val = str(settings["vid_stride"])
-
-                self.stride_combo.blockSignals(True)  # 暂时屏蔽信号
-
-                # 1. 清空当前列表
-                self.stride_combo.clear()
-                # 2. 重新添加默认选项
-                self.stride_combo.addItems(self.default_strides)
-
-                # 3. 如果当前设置的值不在默认列表中，则单独添加
-                if stride_val not in self.default_strides:
-                    self.stride_combo.addItem(stride_val)
-
-                # 4. 选中当前值
-                self.stride_combo.setCurrentText(stride_val)
-
-                self.stride_combo.blockSignals(False)  # 恢复信号
+        if "save_path" in settings and settings["save_path"]:
+            self.set_save_path(settings["save_path"])
 
     def update_theme(self):
         """更新主题"""
@@ -447,38 +361,6 @@ class StartPage(QWidget):
         for child in self.findChildren(PathInputWidget):
             if hasattr(child, 'update_theme'):
                 child.update_theme()
-        # 更新下拉框样式
-        for child in self.findChildren(ModernComboBox):
-            if hasattr(child, 'update_theme'):
-                child.update_theme()
 
         # 更新按钮样式
         self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)
-
-    def update_quick_settings(self, model_name, stride):
-        """从外部更新快速设置控件状态（不触发信号）"""
-        # 1. 更新模型选择
-        if model_name:
-            self.model_combo.blockSignals(True)
-            index = self.model_combo.findText(model_name)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
-            self.model_combo.blockSignals(False)
-
-        # 2. 更新跳帧设置
-        if stride is not None:
-            self.stride_combo.blockSignals(True)
-
-            stride_str = str(stride)
-
-            # 每次更新都重置列表，确保不残留历史数值
-            self.stride_combo.clear()
-            self.stride_combo.addItems(self.default_strides)
-
-            # 如果当前下拉框里没有这个数值（非默认值），添加进去
-            if stride_str not in self.default_strides:
-                self.stride_combo.addItem(stride_str)
-
-            self.stride_combo.setCurrentText(stride_str)
-
-            self.stride_combo.blockSignals(False)

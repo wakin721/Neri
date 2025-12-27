@@ -2,7 +2,6 @@
 
 import os
 import logging
-import json
 from typing import Dict, List, Optional
 from datetime import datetime
 import pandas as pd
@@ -145,23 +144,6 @@ class DataProcessor:
         if not image_info_list:
             logger.warning("没有数据可导出")
             return False
-
-        conf_path = os.path.join("temp", "conf.json")
-        if os.path.exists(conf_path):
-            try:
-                with open(conf_path, 'r', encoding='utf-8') as f:
-                    file_conf = json.load(f)
-                    if isinstance(file_conf, dict):
-                        # 如果 confidence_settings 为 None，初始化为空字典
-                        if confidence_settings is None:
-                            confidence_settings = {}
-
-                        # 使用配置文件中的值更新置信度设置 (覆盖传入的参数)
-                        # 例如：如果有 "盘羊": 0.5，则导出时盘羊的阈值会变为 0.5
-                        confidence_settings.update(file_conf)
-                        logger.info(f"导出数据时已加载并应用阈值配置文件: {conf_path}")
-            except Exception as e:
-                logger.error(f"加载阈值配置文件失败: {e}，将继续使用默认设置", exc_info=True)
 
         # --- 加载生物物种名录 ---
         species_info_map = {}

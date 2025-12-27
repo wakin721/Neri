@@ -80,8 +80,7 @@ class AdvancedPage(QWidget):
         self.min_frame_ratio_var = 0.0  # 默认 0%
         self.theme_var = "自动"
         self.cache_size_var = "正在计算..."
-        self.update_channel_var = "预览版 (Preview)"
-        self.update_mirror_var = "国内源 (KKGitHub)"# 默认镜像源为 国内源 (KKGitHub)
+        self.update_channel_var = "稳定版 (Release)"
         self.pytorch_version_var = "2.9.0 (CUDA 13.0)"
         self.package_var = ""
         self.version_constraint_var = ""
@@ -789,30 +788,10 @@ class AdvancedPage(QWidget):
 
         self.update_channel_combo = ModernComboBox()
         self.update_channel_combo.addItems(["稳定版 (Release)", "预览版 (Preview)"])
+        # 确保设置初始值
         self.update_channel_combo.setCurrentText(self.update_channel_var)
         self.components_to_update.append(self.update_channel_combo)
-        # 确保连接信号
-        self.update_channel_combo.currentTextChanged.connect(self._on_update_channel_changed)
         update_layout.addWidget(self.update_channel_combo)
-
-        # 镜像源选择
-        mirror_label = QLabel("选择镜像源 (Mirror Source)")
-        mirror_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-        update_layout.addWidget(mirror_label)
-
-        self.update_mirror_combo = ModernComboBox()
-        # 添加选项：官方源、KKGitHub、GithubFast
-        self.update_mirror_combo.addItems([
-            "官方源 (Official)",
-            "国内源 (KKGitHub)"
-        ])
-        # 设置当前选中的值
-        self.update_mirror_combo.setCurrentText(self.update_mirror_var)
-        # 添加到自动更新主题列表
-        self.components_to_update.append(self.update_mirror_combo)
-        # 连接信号以保存设置
-        self.update_mirror_combo.currentTextChanged.connect(self._on_update_mirror_changed)
-        update_layout.addWidget(self.update_mirror_combo)
 
         # 状态和检查按钮
         update_bottom_frame = QFrame()
@@ -857,7 +836,6 @@ class AdvancedPage(QWidget):
         # 下拉框连接
         self.pytorch_version_combo.currentTextChanged.connect(self._on_pytorch_version_changed)
         self.update_channel_combo.currentTextChanged.connect(self._on_update_channel_changed)
-        self.update_mirror_combo.currentTextChanged.connect(self._on_update_mirror_changed) # 连接镜像源变化信号
         self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
 
         # 输入框连接
@@ -865,10 +843,6 @@ class AdvancedPage(QWidget):
         self.version_constraint_edit.textChanged.connect(self._on_version_constraint_changed)
 
         self.model_combo.currentTextChanged.connect(self._on_model_selection_changed)
-
-    def _on_update_mirror_changed(self, mirror):
-        self.update_mirror_var = mirror
-        self._on_setting_changed()
 
     def _on_model_selection_changed(self, model_name):
         """处理模型选择变化。"""
@@ -1610,8 +1584,7 @@ class AdvancedPage(QWidget):
             "min_frame_ratio": self.min_frame_ratio_var,
             "theme": self.get_theme_selection(),
             "auto_sort": self.auto_sort_switch_row.isChecked(),
-            "update_channel": self.update_channel_combo.currentText(),
-            "update_mirror": self.update_mirror_combo.currentText(),
+            "update_channel": self.update_channel_combo.currentText(),  # 直接从下拉框获取当前值
             "pytorch_version": self.pytorch_version_combo.currentText(),  # 同样修复
             "package": self.package_edit.text().strip(),  # 直接从输入框获取当前值
             "version_constraint": self.version_constraint_edit.text().strip(),  # 直接从输入框获取当前值
@@ -1668,10 +1641,6 @@ class AdvancedPage(QWidget):
             self.update_channel_var = settings["update_channel"]
             # 确保同时更新下拉框的选择
             self.update_channel_combo.setCurrentText(self.update_channel_var)
-
-        if "update_mirror" in settings:
-            self.update_mirror_var = settings["update_mirror"]
-            self.update_mirror_combo.setCurrentText(self.update_mirror_var)
 
         if "pytorch_version" in settings:
             self.pytorch_version_var = settings["pytorch_version"]
@@ -1812,28 +1781,3 @@ class AdvancedPage(QWidget):
 
         # 触发设置保存
         self._on_setting_changed()
-
-    def update_quick_settings_sync(self, model_name, stride):
-        """同步开始界面的快速设置到高级设置(不触发信号)"""
-        # 1. 同步模型
-        if model_name and self.model_combo.currentText() != model_name:
-            self.model_combo.blockSignals(True)
-            index = self.model_combo.findText(model_name)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
-            self.model_combo.blockSignals(False)
-
-        # 2. 同步跳帧
-        if stride is not None:
-            try:
-                val = int(stride)
-                # 只有当数值确实改变时才更新，避免不必要的UI刷新
-                if self.vid_stride_var != val:
-                    self.vid_stride_var = val
-
-                    self.stride_slider.blockSignals(True)
-                    self.stride_slider.setValue(val)
-                    self.stride_label.setText(str(val))
-                    self.stride_slider.blockSignals(False)
-            except ValueError:
-                pass
