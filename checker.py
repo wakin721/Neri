@@ -12,56 +12,6 @@ requirements_path = os.path.join(base_path, "requirements.txt")
 python_exe_path = f"{base_path}\\toolkit\\python.exe"
 
 
-def clean_pip_leftovers():
-    """
-    [新增功能] 自动清理 toolkit/Lib/site-packages 下 pip 安装失败残留的
-    以 ~ 开头的临时文件夹（例如 ~-rch, ~cv-python 等）。
-    """
-    # 构造 site-packages 的路径
-    site_packages = os.path.join(base_path, "toolkit", "Lib", "site-packages")
-
-    if not os.path.exists(site_packages):
-        return
-
-    print(f"\n==============================================")
-    print(f"正在检查依赖卸载后的残留文件...")
-
-    cleaned_count = 0
-    try:
-        # 获取目录下所有文件和文件夹
-        items = os.listdir(site_packages)
-        for item in items:
-            # 识别以 ~ 开头的文件夹
-            if item.startswith("~"):
-                full_path = os.path.join(site_packages, item)
-
-                if os.path.isdir(full_path):
-                    print(f"发现残留文件夹: {item}，正在执行自动清理...")
-                    try:
-                        # 强制递归删除文件夹
-                        shutil.rmtree(full_path)
-                        print(f"✅ 已成功删除: {item}")
-                        cleaned_count += 1
-                    except Exception as e:
-                        print(f"❌ 删除失败 {item}: {e} (文件可能被占用，请关闭程序后重试)")
-                else:
-                    # 如果是文件而非文件夹，也可以尝试删除
-                    try:
-                        os.remove(full_path)
-                        print(f"✅ 已删除残留文件: {item}")
-                        cleaned_count += 1
-                    except Exception:
-                        pass
-
-    except Exception as e:
-        print(f"扫描清理目录时出错: {e}")
-
-    if cleaned_count == 0:
-        print("未发现残留文件，环境整洁。")
-    else:
-        print(f"清理完成，共释放了 {cleaned_count} 个残留项占用的空间。")
-
-
 def move_pt_files():
     """检测res文件夹下的.pt文件并移动到res/model文件夹。"""
     res_path = os.path.join(base_path, "res")
@@ -388,8 +338,10 @@ def install_dependencies():
 
 
 if __name__ == "__main__":
+    # 首先检测并移动. pt模型文件
+    move_pt_files()
 
-    # 【第一步】安装PyTorch（根据CUDA版本）
+    # 安装PyTorch（根据CUDA版本）
     if not is_pytorch_installed():
         if not install_pytorch():
             print("\nPyTorch安装失败。请检查以上错误。")
@@ -397,13 +349,7 @@ if __name__ == "__main__":
             time.sleep(15)
             sys.exit(1)
 
-    # 【第二步】执行清理：检查并删除 pip 残留文件
-    clean_pip_leftovers()
-
-    # 【第三步】检测并移动 .pt 模型文件
-    move_pt_files()
-
-    # 【第四步】检查并安装其他依赖
+    # 然后检查并安装其他依赖
     if not check_dependencies():
         if not install_dependencies():
             print("\n环境设置失败。请检查以上错误。")
