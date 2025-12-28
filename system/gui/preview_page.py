@@ -29,7 +29,7 @@ from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
 from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS, get_species_color
 from system.utils import resource_path
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow
+from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow, ModernComboBox
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +787,7 @@ class PreviewPage(QWidget):
         control_layout.addWidget(self.show_detection_checkbox)
 
         control_layout.addWidget(QLabel("选择物种:"))
-        self.species_selector = QComboBox()
+        self.species_selector = ModernComboBox()
         self.species_selector.addItem("全局设置 (Global)", "global")
         control_layout.addWidget(self.species_selector)
 

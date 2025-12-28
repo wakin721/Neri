@@ -385,7 +385,7 @@ class ImageProcessor:
         temp_run_project = os.path.join(tempfile.gettempdir(), "neri_yolo_logs")
 
         # 追踪器配置
-        tracker_config = resource_path(os.path.join("res", "cls_model", "tracker.yaml"))
+        tracker_config = resource_path(os.path.join("res", "model_cls", "tracker.yaml"))
         if not os.path.exists(tracker_config): tracker_config = "botsort.yaml"
 
         logger.info(f"开始预处理视频 (LAB增强, 保持原分辨率): {video_source}")

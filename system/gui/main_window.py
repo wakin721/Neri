@@ -956,7 +956,7 @@ class ObjectDetectionGUI(QMainWindow):
 
         try:
             res_dir = resource_path("res")
-            model_path = os.path.join(res_dir, "cls_model", model_name)
+            model_path = os.path.join(res_dir, "model_cls", model_name)
 
             if os.path.exists(model_path):
                 if hasattr(self, 'image_processor'):
@@ -1047,6 +1047,8 @@ class ObjectDetectionGUI(QMainWindow):
         self.advanced_page.theme_changed.connect(self.change_theme)
         self.advanced_page.params_help_requested.connect(self.show_params_help)
         self.advanced_page.cache_clear_requested.connect(self.clear_image_cache)
+
+        self.advanced_page.models_refreshed.connect(self.start_page.refresh_model_lists)
 
         # 预览页面
         self.preview_page.settings_changed.connect(self._save_current_settings)

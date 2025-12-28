@@ -60,6 +60,7 @@ class AdvancedPage(QWidget):
     theme_changed = Signal()
     params_help_requested = Signal()
     cache_clear_requested = Signal()
+    models_refreshed = Signal()
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -220,12 +221,14 @@ class AdvancedPage(QWidget):
         # 状态标签
         self.model_status_label = QLabel(self.model_status_var)
         self.model_status_label.setFont(QFont("Segoe UI", 9))
-        self.model_status_label.setStyleSheet("color: #ffffff;")
+        # 删除强制白色样式的代码，使其跟随主题自动变色
+        # self.model_status_label.setStyleSheet("color: #ffffff;")
 
         # 为了区分，可以在两个状态中间加个分隔符，或者仅依靠 spacing
         self.cls_model_status_label = QLabel("")
         self.cls_model_status_label.setFont(QFont("Segoe UI", 9))
-        self.cls_model_status_label.setStyleSheet("color: #ffffff;")
+        # 删除强制白色样式的代码，使其跟随主题自动变色
+        # self.cls_model_status_label.setStyleSheet("color: #ffffff;")
 
         status_layout.addWidget(self.model_status_label)
         # 添加一个弹簧或竖线分割可以更清晰，这里直接并列
@@ -1240,7 +1243,7 @@ class AdvancedPage(QWidget):
                 pass
 
         # 刷新分类模型列表 (res/cls_model)
-        cls_model_dir = os.path.join(resource_path("res"), "cls_model")
+        cls_model_dir = os.path.join(resource_path("res"), "model_cls")
         try:
             # 保存当前选择
             current_cls = self.cls_model_combo.currentText()
@@ -1268,6 +1271,8 @@ class AdvancedPage(QWidget):
                 self.cls_model_status_label.setText(f"{final_name}")
 
             self.cls_model_combo.blockSignals(False)
+            self.models_refreshed.emit()
+
         except Exception as e:
             logger.error(f"刷新分类模型列表失败: {e}")
 

@@ -108,17 +108,17 @@ class ModernNavigationButton(QWidget):
             self._text_active = QColor(255, 255, 255)  # 选中文字（白色）
             self._icon_normal = QColor(255, 255, 255, 180)  # 普通图标（白色半透明）
             self._icon_active = QColor(255, 255, 255)  # 选中图标（白色）
-            self._indicator_color = QColor(255, 255, 255)  # 指示器颜色（白色）
+            self._indicator_color = QColor(208, 183, 204)  # 指示器颜色（白色）
         else:
             # 浅色主题配色
             self._bg_normal = QColor(0, 0, 0, 0)  # 透明背景
             self._bg_hover = QColor(0, 0, 0, 15)  # 微妙的黑色悬停
-            self._bg_active = QColor(0xdb, 0xbc, 0xc1)  # 选中颜色 #dbbcc1
+            self._bg_active = QColor(226, 216, 219)  # 选中颜色 #dbbcc1
             self._text_normal = QColor(0, 0, 0, 200)  # 普通文字（黑色半透明）
             self._text_active = QColor(0, 0, 0)  # 选中文字（黑色）
             self._icon_normal = QColor(0, 0, 0, 160)  # 普通图标（黑色半透明）
             self._icon_active = QColor(0, 0, 0)  # 选中图标（黑色）
-            self._indicator_color = QColor(0, 0, 0)  # 指示器颜色（黑色）
+            self._indicator_color = QColor(119, 81, 104)  # 指示器颜色（黑色）
 
         self.update()
 

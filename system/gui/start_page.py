@@ -286,7 +286,7 @@ class StartPage(QWidget):
         self.cls_model_combo.clear()
         self.cls_model_combo.addItem("不使用 (None)", "")  # 默认选项
         try:
-            cls_model_dir = resource_path(os.path.join("res", "cls_model"))
+            cls_model_dir = resource_path(os.path.join("res", "model_cls"))
             if os.path.exists(cls_model_dir):
                 model_files = [f for f in os.listdir(cls_model_dir) if f.lower().endswith('.pt')]
                 model_files.sort()
@@ -294,6 +294,33 @@ class StartPage(QWidget):
                     self.cls_model_combo.addItems(model_files)
         except Exception as e:
             print(f"Error loading cls models: {e}")
+
+    def refresh_model_lists(self):
+        """刷新所有模型列表 (供外部调用)"""
+        # 1. 记录当前选中的项，以便刷新后尝试恢复
+        current_model = self.model_combo.currentText()
+        current_cls = self.cls_model_combo.currentText()
+
+        # 2. 重新填充列表
+        self._populate_models()
+        self._populate_cls_models()
+
+        # 3. 尝试恢复检测模型选择
+        if current_model:
+            index = self.model_combo.findText(current_model)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+
+        # 4. 尝试恢复分类模型选择
+        if current_cls:
+            # 精确匹配
+            index_cls = self.cls_model_combo.findText(current_cls)
+            if index_cls < 0:
+                # 模糊匹配 (处理文件名差异或 "不使用" 的不同写法)
+                index_cls = self.cls_model_combo.findText(current_cls, Qt.MatchContains)
+
+            if index_cls >= 0:
+                self.cls_model_combo.setCurrentIndex(index_cls)
 
     def _create_bottom_controls(self, parent_layout):
         """创建底部控制区域"""
