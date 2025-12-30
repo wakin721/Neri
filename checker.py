@@ -199,18 +199,43 @@ def get_pytorch_install_command(cuda_version):
 
 
 def is_pytorch_installed():
-    """检查PyTorch是否已安装。"""
+    """检查PyTorch是否已安装（使用子进程避免文件占用）。"""
     try:
-        import torch
-        print(f"检测到已安装的PyTorch版本: {torch.__version__}")
-        print(f"CUDA可用: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"CUDA版本: {torch.version.cuda}")
-            print(f"可用GPU数量: {torch.cuda.device_count()}")
-            if torch.cuda.device_count() > 0:
-                print(f"GPU设备: {torch.cuda.get_device_name(0)}")
-        return True
-    except ImportError:
+        # 构造一段Python脚本，在子进程中运行检查
+        # 这样主进程就不会加载torch和numpy的DLL，避免pip安装时出现[WinError 5]拒绝访问
+        check_script = (
+            "import torch; "
+            "print(f'Version: {torch.__version__}'); "
+            "print(f'CUDA: {torch.cuda.is_available()}'); "
+            "print(f'GPU_Count: {torch.cuda.device_count()}'); "
+            "sys.exit(0) if torch else sys.exit(1)"
+        )
+
+        result = subprocess.run(
+            [python_exe_path, "-c", check_script],
+            capture_output=True,
+            text=True,
+            encoding='gbk',  # 防止中文系统编码问题
+            errors='ignore'
+        )
+
+        if result.returncode == 0:
+            print(f"检测到PyTorch已安装。")
+            # 简单解析输出并打印，保持用户体验
+            for line in result.stdout.splitlines():
+                if "Version:" in line:
+                    print(f"PyTorch版本: {line.split(': ')[1]}")
+                if "CUDA:" in line:
+                    print(f"CUDA可用: {line.split(': ')[1]}")
+                if "GPU_Count:" in line:
+                    count = line.split(': ')[1]
+                    print(f"可用GPU数量: {count}")
+            return True
+        else:
+            return False
+
+    except Exception as e:
+        # 发生任何错误都视为未安装或环境有问题
         return False
 
 
@@ -256,12 +281,41 @@ def install_pytorch():
         rc = process.poll()
         if rc == 0:
             print("\nPyTorch安装成功")
-            # 验证安装
+
+            # --- [修改部分开始] ---
+
+            # 1. 刷新Python导入系统的缓存，确保能发现新安装的包
+            import importlib
+            importlib.invalidate_caches()
+
+            # 2. 尝试在当前进程直接验证
             if is_pytorch_installed():
                 return True
-            else:
-                print("警告：PyTorch安装完成但无法导入")
-                return False
+
+            # 3. 如果当前进程导入失败（可能是因为DLL加载问题或环境缓存），
+            #    尝试启动一个子进程来验证安装。如果子进程能导入，说明环境是好的。
+            print("正在尝试验证Pytorch是否安装成功...")
+            try:
+                # 使用指定解释器运行简单导入测试
+                verify_cmd = [
+                    python_exe_path,
+                    "-c",
+                    "import torch; print(f'Verification Success: torch {torch.__version__}')"
+                ]
+                subprocess.check_call(
+                    verify_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                print("验证通过：PyTorch已正确安装。")
+                return True
+            except subprocess.CalledProcessError:
+                print("验证失败。")
+            except Exception as e:
+                print(f"验证过程出错: {e}")
+
+            print("警告：PyTorch安装完成但无法导入")
+            return False
         else:
             print(f"\nPyTorch安装失败，退出代码： {rc}")
             return False

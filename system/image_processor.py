@@ -126,6 +126,38 @@ class ImageProcessor:
 
         return img
 
+    def _apply_temperature_scaling(self, probs: torch.Tensor, temperature: float = 3.0) -> torch.Tensor:
+        """
+        标准温度缩放 (Temperature Scaling)：
+        直接利用 Softmax 的性质平滑概率分布。
+
+        Args:
+            probs: 原始概率分布 (Tensor)
+            temperature: 温度系数 (T > 1 平滑分布; T < 1 锐化分布; T = 1 原样)
+                         建议设置在 2.0 - 5.0 之间以解决过度自信问题。
+        """
+        try:
+            # 如果温度系数无效或为1，直接返回
+            if temperature <= 0 or temperature == 1.0:
+                return probs
+
+            # 1. 反推 Logits (添加 epsilon 防止 log(0) 得到 -inf)
+            eps = 1e-9
+            # 注意：如果 probs 中有 0，log 后会变成负无穷，为了数值稳定性，限制最小值为 eps
+            safe_probs = torch.clamp(probs, min=eps)
+            logits = torch.log(safe_probs)
+
+            # 2. 应用温度系数缩放
+            # T 越大，logits 之间的差异越小
+            scaled_logits = logits / temperature
+
+            # 3. 重新计算 Softmax
+            return torch.nn.functional.softmax(scaled_logits, dim=0)
+
+        except Exception as e:
+            logger.warning(f"温度缩放失败: {e}")
+            return probs
+
     def detect_species(self, img_path: str, use_fp16: bool = False, iou: float = 0.3,
                        conf: float = 0.25, augment: bool = True,
                        agnostic_nms: bool = True, timeout: float = 20.0) -> Dict[str, Any]:
@@ -180,8 +212,20 @@ class ImageProcessor:
                             for i, box in enumerate(r.boxes):
                                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                                 h, w, _ = original_img_rgb.shape
-                                x1, y1 = max(0, x1), max(0, y1)
-                                x2, y2 = min(w, x2), min(h, y2)
+                                # 设定扩展比例，例如 0.2 表示每边向外扩展 20%
+                                expand_ratio = 0.1
+
+                                box_width = x2 - x1
+                                box_height = y2 - y1
+
+                                pad_w = int(box_width * expand_ratio)
+                                pad_h = int(box_height * expand_ratio)
+
+                                # 应用扩展并进行边界检查，防止越界
+                                x1 = max(0, x1 - pad_w)
+                                y1 = max(0, y1 - pad_h)
+                                x2 = min(w, x2 + pad_w)
+                                y2 = min(h, y2 + pad_h)
 
                                 if x2 > x1 and y2 > y1:
                                     crop = original_img_rgb[y1:y2, x1:x2]
@@ -205,17 +249,28 @@ class ImageProcessor:
 
                                     # 运行分类模型
                                     cls_res = self.cls_model(crop,
-                                                             imgsz=640,
                                                              half=use_fp16
                                                              )
 
-                                    # 获取前3名候选
-                                    top3_indices = cls_res[0].probs.top5[:3]  # top5 contains indices
-                                    top3_confs = cls_res[0].probs.top5conf[:3]  # confidences
+                                    # 获取原始概率张量 (Tensor)
+                                    original_probs = cls_res[0].probs.data
+
+                                    # 应用温度缩放 (temperature=3.0 可根据实际需求调整，越大越平缓)
+                                    smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
+
+                                    # 手动获取前 3 名 (TopK)
+                                    # values: 置信度, indices: 类别索引
+                                    topk_confs, topk_indices = torch.topk(smoothed_probs, 3)
+
+                                    # 转为列表处理
+                                    top3_indices = topk_indices.tolist()
+                                    top3_confs = topk_confs.tolist()
 
                                     candidates = []
                                     for cls_idx, cls_conf in zip(top3_indices, top3_confs):
+                                        # 注意：这里需要通过 names 字典获取原始名称
                                         raw_name = cls_res[0].names[int(cls_idx)]
+
                                         # 翻译名称
                                         trans_name = self.translation_dict.get(raw_name, raw_name)
                                         candidates.append({
@@ -247,26 +302,31 @@ class ImageProcessor:
 
                     detected_species_counts = {}
 
-                    # 遍历每一个框进行统计
                     for i, box in enumerate(r.boxes):
-                        # 如果有分类结果，优先使用分类结果的第一名
+                        final_name = ""
+
+                        # 1. 优先检查是否存在分类模型的结果 (candidates_map)
+                        # candidates_map[i] 是一个列表，第0个元素即为置信度最高的分类结果
                         if i in candidates_map and candidates_map[i]:
+                            # 提取分类模型的第一名名称
                             final_name = candidates_map[i][0]['name']
                         else:
-                            # 否则使用检测结果
+                            # 2. 如果没有分类结果，降级使用检测模型原本的类别
                             cls_id = int(box.cls.item())
                             raw_name = r.names[cls_id]
                             final_name = self.translation_dict.get(raw_name, raw_name)
 
+                        # 3. 进行计数
                         detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
 
-                        # [重要] 将候选信息注入到 results 对象中以便 save_detection_info_json 读取
-                        # 这里我们利用 Python 对象的动态特性，临时挂载属性
+                        # [重要] 将分类候选项注入到 results 对象中
+                        # 这样后续保存 JSON (save_detection_info_json) 时也能读取到这些修正后的信息
                         if not hasattr(r, 'candidates_data'):
                             r.candidates_data = {}
                         if i in candidates_map:
                             r.candidates_data[i] = candidates_map[i]
 
+                        # 生成统计字符串
                     species_list = list(detected_species_counts.keys())
                     counts_list = list(map(str, detected_species_counts.values()))
 

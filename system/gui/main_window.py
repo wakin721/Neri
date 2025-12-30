@@ -865,35 +865,6 @@ class ObjectDetectionGUI(QMainWindow):
         y = (screen.height() - window_rect.height()) // 2
         self.move(x, y)
 
-        # --- 关键修改 1: 必须最先设置 AppID ---
-        # 这告诉 Windows 这是一个独立的程序，不应该和 python.exe 混在一起
-        if platform.system() == "Windows":
-            try:
-                # 如果修改代码后图标还不更新，尝试在下方字符串末尾加个 ".v2" 强制刷新 Windows 缓存
-                myappid = f'mycompany.{APP_TITLE}.{APP_VERSION}'
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            except Exception as e:
-                logger.warning(f"设置 AppID 失败: {e}")
-
-        # --- 关键修改 2: 同时设置 应用程序图标 和 窗口图标 ---
-        try:
-            ico_path = resource_path("res/ico.ico")
-
-            # 增加文件存在性检查，确保路径正确
-            if os.path.exists(ico_path):
-                icon = QIcon(ico_path)
-
-                # A. 设置主窗口图标 (界面左上角)
-                self.setWindowIcon(icon)
-
-                # B. ！！！设置应用程序全局图标 (任务栏图标)！！！
-                QApplication.instance().setWindowIcon(icon)
-            else:
-                logger.warning(f"图标文件未找到: {ico_path}")
-
-        except Exception as e:
-            logger.warning(f"无法加载窗口图标: {e}")
-
     def _initialize_model(self, settings: dict):
         """初始化模型"""
         saved_model_name = settings.get("selected_model") if settings else None

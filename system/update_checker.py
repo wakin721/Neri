@@ -8,6 +8,7 @@ import io
 import shutil
 import sys
 import subprocess
+import time
 import threading
 import platform
 import urllib3
@@ -75,12 +76,11 @@ def compare_versions(current_version, remote_version):
 def get_latest_version_info(channel='stable', mirror='official'):
     """
     通过GitHub API获取最新的版本信息。
-    支持镜像源替换。
+    支持镜像源替换，并优先使用Assets中的zip包。
     """
     base_api_url = "https://api.github.com"
     verify_ssl = True
 
-    # [修正] 请仔细检查这里，必须是两个 k (kkgithub)
     if mirror == 'kkgithub':
         base_api_url = "https://api.kkgithub.com"
         verify_ssl = False
@@ -89,7 +89,6 @@ def get_latest_version_info(channel='stable', mirror='official'):
     headers = {"Accept": "application/vnd.github.v3+json"}
 
     try:
-        # 发送请求时禁用SSL验证(如果是镜像源)
         response = requests.get(api_url, headers=headers, timeout=15, verify=verify_ssl)
         response.raise_for_status()
         releases = response.json()
@@ -114,25 +113,34 @@ def get_latest_version_info(channel='stable', mirror='official'):
         tag_name = latest_release.get('tag_name', 'v0.0.0')
         notes = latest_release.get('body') or '无更新说明。'
 
-        # 获取原始下载链接
+        # 1. 默认获取源码包下载链接
         download_url = latest_release.get('zipball_url')
 
-        # [关键修正] 域名替换逻辑
+        # 2. [修改] 优先检查 Assets 里的 exe 文件
+        assets = latest_release.get('assets', [])
+        for asset in assets:
+            # 查找以 .exe 结尾的文件
+            if asset.get('name', '').lower().endswith('.exe'):
+                download_url = asset.get('browser_download_url')
+                # 记录文件名，方便后续保存
+                latest_info_filename = asset.get('name')
+                break
+        else:
+            # 如果没找到 exe，回退到 zip 或源码包
+            latest_info_filename = "update.zip"
+
+        # 域名替换逻辑
         if download_url and mirror != 'official':
             if mirror == 'kkgithub':
-                # 1. 先恢复成标准github域名（防止万一URL已经是kkgithub导致重复）
                 if "kkgithub.com" in download_url:
                     download_url = download_url.replace("kkgithub.com", "github.com")
-
-                # 2. 只需要这一行替换即可。
-                # 不要分别替换 api.github.com，因为 github.com 包含在 api.github.com 中。
-                # replace("github.com", "kkgithub.com") 会自动将 api.github.com 变为 api.kkgithub.com
                 download_url = download_url.replace("github.com", "kkgithub.com")
 
         return {
             'version': tag_name.lstrip('v'),
             'notes': notes,
-            'url': download_url
+            'url': download_url,
+            'filename': latest_info_filename
         }
 
     except requests.RequestException as e:
@@ -204,6 +212,7 @@ def start_download_thread(parent, download_url):
 class UpdateWorker(QObject):
     """
     更新工作线程，负责下载和解压文件，并通过信号与主线程通信。
+    包含断线重试机制。
     """
     status_changed = Signal(str)
     progress_updated = Signal(int)
@@ -215,64 +224,180 @@ class UpdateWorker(QObject):
         self.download_url = download_url
         self._is_running = True
 
+    def _format_speed(self, bytes_per_sec):
+        """辅助函数：格式化速度显示"""
+        if bytes_per_sec < 1024:
+            return f"{bytes_per_sec:.1f} B/s"
+        elif bytes_per_sec < 1024 * 1024:
+            return f"{bytes_per_sec / 1024:.1f} KB/s"
+        else:
+            return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+
     def run(self):
         """执行下载、解压、安装的完整流程。"""
-        try:
-            self.status_changed.emit("正在从GitHub下载更新...")
-            verify_ssl = True
-            if 'kkgithub' in self.download_url:
-                verify_ssl = False
+        # --- 配置 ---
+        max_retries = 3  # 最大重试次数
+        retry_delay = 3  # 重试间隔(秒)
+        verify_ssl = True
+        if 'kkgithub' in self.download_url:
+            verify_ssl = False
 
-            # 添加 verify=verify_ssl 和 timeout=60
-            response = requests.get(self.download_url, stream=True, timeout=60, verify=verify_ssl)
-            response.raise_for_status()
-            total_size = int(response.headers.get('content-length', 0))
-            self.progress_max_set.emit(total_size if total_size > 0 else 100)
+        download_success = False
+        file_buffer = io.BytesIO()
+        last_error = ""
+        self.last_ui_update = 0
 
-            downloaded_size = 0
-            file_buffer = io.BytesIO()
-
-            for chunk in response.iter_content(chunk_size=8192):
+        # =======================
+        # 阶段 1: 下载 (带重试)
+        # =======================
+        for attempt in range(max_retries):
+            try:
                 if not self._is_running:
                     self.finished.emit(False, "用户取消操作")
                     return
-                if chunk:
-                    file_buffer.write(chunk)
-                    downloaded_size += len(chunk)
-                    if total_size > 0:
-                        self.progress_updated.emit(downloaded_size)
 
-            self.status_changed.emit("下载完成，正在解压并安装...")
-            self.progress_max_set.emit(0)  # 进入不确定模式
+                # 每次尝试前重置缓冲区
+                file_buffer.seek(0)
+                file_buffer.truncate(0)
 
-            if getattr(sys, 'frozen', False):
-                app_root = os.path.dirname(sys.executable)
-            else:
-                app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # 更新状态
+                if attempt > 0:
+                    self.status_changed.emit(f"下载中断，正在重试 ({attempt + 1}/{max_retries})...")
+                    time.sleep(retry_delay)
+                else:
+                    self.status_changed.emit("正在连接服务器...")
 
-            file_buffer.seek(0)
+                # 发起请求
+                response = requests.get(self.download_url, stream=True, timeout=(5, 30), verify=verify_ssl)
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+                self.progress_max_set.emit(total_size if total_size > 0 else 100)
 
-            with zipfile.ZipFile(file_buffer) as z:
-                root_folder_in_zip = z.namelist()[0]
-                for member in z.infolist():
+                downloaded_size = 0
+
+                # --- 速度计算初始化 ---
+                start_time = time.time()
+                last_time = start_time
+                last_downloaded_size = 0
+                update_interval = 0.5
+                # --------------------
+
+                self.status_changed.emit("开始下载...")
+
+                for chunk in response.iter_content(chunk_size=8192):
                     if not self._is_running:
                         self.finished.emit(False, "用户取消操作")
                         return
-                    path_in_zip = member.filename.replace(root_folder_in_zip, '', 1)
-                    if not path_in_zip or ".git" in path_in_zip: continue
-                    target_path = os.path.join(app_root, path_in_zip)
-                    if member.is_dir():
-                        os.makedirs(target_path, exist_ok=True)
-                    else:
-                        target_dir = os.path.dirname(target_path)
-                        os.makedirs(target_dir, exist_ok=True)
-                        with z.open(member) as source, open(target_path, "wb") as target:
-                            shutil.copyfileobj(source, target)
+                    if chunk:
+                        file_buffer.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            self.progress_updated.emit(downloaded_size)
 
-            self.finished.emit(True, "更新成功")
+                        # --- 实时计算下载速度 ---
+                        current_time = time.time()
+                        if current_time - self.last_ui_update > 0.1:  # 限制每秒最多更新10次UI
+                            self.progress_updated.emit(downloaded_size)
+                            self.last_ui_update = current_time
+                            speed = (downloaded_size - last_downloaded_size) / (current_time - last_time)
+                            speed_str = self._format_speed(speed)
+
+                            # 计算百分比
+                            if total_size > 0:
+                                percent = int(downloaded_size * 100 / total_size)
+                                status_msg = f"正在下载... {percent}% ({speed_str})"
+                            else:
+                                downloaded_mb = downloaded_size / (1024 * 1024)
+                                status_msg = f"正在下载... {downloaded_mb:.1f} MB ({speed_str})"
+
+                            self.status_changed.emit(status_msg)
+                            last_time = current_time
+                            last_downloaded_size = downloaded_size
+                        # ----------------------
+
+                # 如果循环正常结束，说明下载完成
+                download_success = True
+                break  # 跳出重试循环
+
+            except Exception as e:
+                # 捕获所有下载异常（包括 IncompleteRead, ConnectionError, Timeout 等）
+                last_error = str(e)
+                print(f"下载尝试 {attempt + 1} 失败: {e}")
+                # 继续下一次循环
+
+        if not download_success:
+            self.finished.emit(False, f"更新下载失败 (重试{max_retries}次): {last_error}")
+            return
+
+        # =======================
+        # 阶段 2: 解压与安装
+        # =======================
+        try:
+            self.status_changed.emit("下载完成，准备安装...")
+
+            # 获取下载的文件名后缀
+            is_exe = self.download_url.lower().endswith('.exe')
+            import tempfile
+            # 确定保存路径（如果是 exe，建议保存到用户临时文件夹或程序目录）
+            save_path = os.path.join(tempfile.gettempdir(), "Neri_Update")
+            os.makedirs(save_path, exist_ok=True)
+
+            if is_exe:
+                # 获取文件名并保存
+                file_name = self.download_url.split('/')[-1]
+                target_file = os.path.join(save_path, file_name)
+
+                with open(target_file, "wb") as f:
+                    f.write(file_buffer.getvalue())
+
+                # 将最终路径传给 finished 信号，方便重启调用
+                self.finished.emit(True, target_file)
+
+            else:
+                self.progress_max_set.emit(0)  # 忙碌模式
+
+                if getattr(sys, 'frozen', False):
+                    app_root = os.path.dirname(sys.executable)
+                else:
+                    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+                file_buffer.seek(0)
+
+                with zipfile.ZipFile(file_buffer) as z:
+                    # 智能判断是否需要去除顶层目录
+                    all_names = z.namelist()
+                    root_folder_to_strip = ""
+
+                    if all_names:
+                        common_prefix = os.path.commonprefix(all_names)
+                        if '/' in common_prefix:
+                            root_folder_to_strip = common_prefix
+
+                    for member in z.infolist():
+                        if not self._is_running:
+                            self.finished.emit(False, "用户取消操作")
+                            return
+
+                        if root_folder_to_strip:
+                            path_in_zip = member.filename.replace(root_folder_to_strip, '', 1)
+                        else:
+                            path_in_zip = member.filename
+
+                        if not path_in_zip or ".git" in path_in_zip: continue
+
+                        target_path = os.path.join(app_root, path_in_zip)
+                        if member.is_dir():
+                            os.makedirs(target_path, exist_ok=True)
+                        else:
+                            target_dir = os.path.dirname(target_path)
+                            os.makedirs(target_dir, exist_ok=True)
+                            with z.open(member) as source, open(target_path, "wb") as target:
+                                shutil.copyfileobj(source, target)
+
+                self.finished.emit(True, "更新成功")
 
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self.finished.emit(False, f"解压安装失败: {str(e)}")
 
     def stop(self):
         self._is_running = False
@@ -308,6 +433,7 @@ class UpdateProgressDialog(QDialog):
         self.thread.started.connect(self.worker.run)
 
         self.thread.start()
+        self.new_exe_path = None
 
     # --- FIX STARTS HERE ---
     @Slot(int)
@@ -323,16 +449,20 @@ class UpdateProgressDialog(QDialog):
     # --- FIX ENDS HERE ---
 
     def on_finished(self, success, message):
-        """处理工作线程完成的信号"""
         self.thread.quit()
         self.thread.wait()
         self.close()
 
         if success:
             self.finished_successfully = True
+            # 如果 message 是一个真实存在的 exe 路径
+            if message.lower().endswith('.exe') and os.path.exists(message):
+                self.new_exe_path = message
+            else:
+                self.new_exe_path = None
         else:
             if "用户取消操作" not in message:
-                _show_messagebox(self.parent(), "更新失败", f"更新过程中发生错误: {message}", "error")
+                _show_messagebox(self.parent(), "更新失败", f"错误: {message}", "error")
 
     def exec(self):
         """重写exec，在对话框关闭后执行重启逻辑"""
@@ -349,126 +479,51 @@ class UpdateProgressDialog(QDialog):
         event.accept()
 
     def ask_restart(self):
-        reply = QMessageBox.question(self.parent(), "更新成功",
-                                     "程序已成功更新！\n是否立即重启应用程序以应用更改？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        # 只有确实拿到了新路径才执行直接启动逻辑
+        if self.new_exe_path and self.new_exe_path.lower().endswith('.exe'):
             try:
-                # 确定重启命令的参数
-                if getattr(sys, 'frozen', False):
-                    # 对于打包后的程序（frozen=True），重启逻辑保持不变，直接重启主程序
-                    args = [sys.executable]
-                    if platform.system() == "Windows":
-                        cmd = ' '.join(f'"{arg}"' for arg in args)
-                        subprocess.Popen(f'start "Restarting Application" {cmd}', shell=True)
-                    elif platform.system() == "Darwin":  # macOS
-                        cmd = ' '.join(f'"{arg}"' for arg in args)
-                        mac_cmd = cmd.replace("\"", "\\\"")
-                        subprocess.Popen(
-                            ["osascript", "-e", f'tell app "Terminal" to do script "{mac_cmd}"'],
-                            close_fds=True
-                        )
-                    else:  # Linux
-                        terminal_found = False
-                        for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                            try:
-                                if terminal == "gnome-terminal":
-                                    subprocess.Popen([terminal, "--"] + args, close_fds=True)
-                                elif terminal == "konsole":
-                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                elif terminal == "xterm":
-                                    subprocess.Popen([terminal, "-e"] + args, close_fds=True)
-                                terminal_found = True
-                                break
-                            except FileNotFoundError:
-                                continue
-                        if not terminal_found:
-                            _show_messagebox(self.parent(), "重启提示",
-                                             "无法自动打开新终端，请手动重启程序以应用更新。",
-                                             "info")
-                else:
-                    # 对于开发环境（直接运行 .py 文件）
-                    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    python_exe_path = os.path.join(app_root, "toolkit", "python.exe")
-                    pythonw_exe_path = os.path.join(app_root, "toolkit", "pythonw.exe")
-                    checker_script_path = os.path.join(app_root, 'checker.py')
-                    main_script_path = os.path.join(app_root, 'gui.py')
+                if platform.system() == "Windows":
+                    # 使用 subprocess.DETACHED_PROCESS 标志让新进程完全独立（可选）
+                    subprocess.Popen(f'start "" "{self.new_exe_path}"', shell=True)
 
-                    if not os.path.exists(python_exe_path):
-                        python_exe_path = sys.executable
-                        # 尝试基于 sys.executable 推断 pythonw.exe 的路径
-                        pythonw_exe_path = python_exe_path.replace("python.exe", "pythonw.exe")
-
-                    if not os.path.exists(pythonw_exe_path):
-                        # 如果 pythonw.exe 不存在，则回退到 python.exe
-                        pythonw_exe_path = python_exe_path
-
-                    if not os.path.exists(checker_script_path):
-                        _show_messagebox(self.parent(), "重启错误", f"找不到脚本: {checker_script_path}", "error")
-                        return
-                    if not os.path.exists(main_script_path):
-                        _show_messagebox(self.parent(), "重启错误", f"找不到主脚本: {main_script_path}", "error")
-                        return
-
-                    # 在新的控制台中重新启动应用程序
-                    if platform.system() == "Windows":
-                        # 修改后的 Windows 重启逻辑，确保 checker.py 在可见的命令行窗口中运行
-                        # 使用 start 命令打开新的命令行窗口，并在其中运行 checker.py
-                        # /WAIT 参数确保等待 checker.py 执行完毕
-                        # 然后使用 pythonw.exe 启动 gui.py（无窗口）
-                        cmd_sequence = f'start "Neri checker" /WAIT "{python_exe_path}" "{checker_script_path}" && "{pythonw_exe_path}" "{main_script_path}"'
-
-                        # 使用 cmd /c 执行命令序列
-                        subprocess.Popen(f'cmd /c "{cmd_sequence}"', shell=True)
-
-                    elif platform.system() == "Darwin":  # macOS
-                        # 使用bash执行命令序列
-                        bash_cmd = f'''
-if "{python_exe_path}" "{checker_script_path}"; then 
-"{pythonw_exe_path}" "{main_script_path}" & 
-fi; 
-exit
-'''.strip().replace('\n', ' ')
-
-                        subprocess.Popen([
-                            "osascript", "-e",
-                            f'tell app "Terminal" to do script "{bash_cmd.replace(chr(34), chr(92) + chr(34))}"'
-                        ], close_fds=True)
-
-                    else:  # Linux
-                        # 使用bash执行命令序列
-                        bash_cmd = f'''
-if "{python_exe_path}" "{checker_script_path}"; then 
-"{pythonw_exe_path}" "{main_script_path}" & 
-fi; 
-exit
-'''.strip().replace('\n', ' ')
-
-                        terminal_found = False
-                        for terminal in ["gnome-terminal", "konsole", "xterm"]:
-                            try:
-                                if terminal == "gnome-terminal":
-                                    subprocess.Popen([terminal, "--", "bash", "-c", bash_cmd], close_fds=True)
-                                elif terminal == "konsole":
-                                    subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
-                                elif terminal == "xterm":
-                                    subprocess.Popen([terminal, "-e", "bash", "-c", bash_cmd], close_fds=True)
-                                terminal_found = True
-                                break
-                            except FileNotFoundError:
-                                continue
-                        if not terminal_found:
-                            _show_messagebox(self.parent(), "重启提示",
-                                             "无法自动打开新终端，请手动重启程序以应用更新。",
-                                             "info")
-
-                # 关闭当前的应用程序实例
-                self.parent().close()
+                # 退出当前程序
+                if self.parent(): self.parent().close()
                 QApplication.instance().quit()
-
-
+                sys.exit(0)
             except Exception as e:
-                _show_messagebox(self.parent(), "重启失败", f"无法重新启动应用程序: {e}", "error")
+                _show_messagebox(self.parent(), "启动失败", f"无法运行更新程序: {e}", "error")
+
+        else:
+            reply = QMessageBox.question(self.parent(), "更新成功",
+                                         "程序已成功更新！\n是否立即重启应用程序以应用更改？",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                try:
+                    # 获取应用程序根目录
+                    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    # 指定启动 Neri.exe
+                    exe_path = os.path.join(app_root, "Neri.exe")
+
+                    # 检查 Neri.exe 是否存在 (针对非 frozen 情况)
+                    if not getattr(sys, 'frozen', False) and not os.path.exists(exe_path):
+                        _show_messagebox(self.parent(), "重启错误", f"找不到可执行文件: {exe_path}", "error")
+                        return
+
+                    # 执行重启逻辑
+                    if platform.system() == "Windows":
+                        # 使用 start 命令启动，确保与当前进程分离
+                        subprocess.Popen(f'start "" "{exe_path}"', shell=True)
+                    elif platform.system() == "Darwin":  # macOS
+                        subprocess.Popen(["open", exe_path])
+                    else:  # Linux
+                        subprocess.Popen([exe_path])
+
+                    # 关闭当前的应用程序实例
+                    self.parent().close()
+                    QApplication.instance().quit()
+
+                except Exception as e:
+                    _show_messagebox(self.parent(), "重启失败", f"无法重新启动应用程序: {e}", "error")
 
 
 def _show_messagebox(parent, title, message, msg_type):
