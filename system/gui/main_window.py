@@ -133,27 +133,29 @@ class ProcessingThread(QThread):
             from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
             all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
 
-            # 1. 获取所有文件
+            # 获取所有文件
             all_files_list = sorted([f for f in os.listdir(self.file_path)
                                     if f.lower().endswith(all_extensions)])
 
-            # 2. 分离图片和视频 (断点续传逻辑需要基于原始总列表索引，比较复杂，
+            # 分离所有图片和视频
+            all_images_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
+            all_videos_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
+
+            # 构建全局执行列表：[所有图片..., 所有视频...]
+            # 这是实际的处理顺序，resume_from 索引必须基于此列表
+            full_execution_list = all_images_global + all_videos_global
+
             # 记录总文件数
-            total_files_count = len(all_files_list)
+            total_files_count = len(full_execution_list)
 
-            # 根据 resume_from 确定本次需要处理的文件子集
-            files_to_process_subset = all_files_list[self.resume_from:]
+            # 根据 resume_from 从【全局执行列表】中确定本次需要处理的文件子集
+            files_to_process_subset = full_execution_list[self.resume_from:]
 
-            # 将待处理子集分为图片和视频
+            # 将待处理子集再次分为图片和视频 (用于后续构建 Batch 队列)
+            # 注意：如果恢复点在视频部分，pending_images 将为空
             pending_images = [f for f in files_to_process_subset if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
             pending_videos = [f for f in files_to_process_subset if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
 
-            # 处理顺序：先处理所有图片，再处理所有视频
-            sorted_processing_queue = pending_images + pending_videos
-
-            # =========================================================================
-            # [修改] 预计算总工作单元（统计视频帧数 + 图片数量）
-            # =========================================================================
             self.console_log.emit("=" * 118, None)
             self.console_log.emit(f"[INFO] 正在预扫描文件以计算总工作量(统计视频帧数)...", "#00ff00")
             QThread.msleep(10)
@@ -161,7 +163,7 @@ class ProcessingThread(QThread):
             total_work_units = 0  # 总工作量（帧数+图片数）
             file_unit_map = {}  # 记录每个文件对应的工作量
 
-            for f in all_files_list:
+            for f in full_execution_list:  # [修改] 遍历 full_execution_list 确保顺序一致
                 f_path = os.path.join(self.file_path, f)
                 units = 1
                 if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
@@ -184,7 +186,8 @@ class ProcessingThread(QThread):
             # 计算断点续传前的已完成工作量
             processed_work_units = 0
             for i in range(self.resume_from):
-                processed_work_units += file_unit_map.get(all_files_list[i], 1)
+                # 使用 full_execution_list 获取已处理过的文件，确保计算正确
+                processed_work_units += file_unit_map.get(full_execution_list[i], 1)
 
             # 记录本次会话开始时的已完成量，用于计算实时速度
             start_work_units = processed_work_units
@@ -211,7 +214,7 @@ class ProcessingThread(QThread):
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # [修改] 日志显示总帧数/图数
             self.console_log.emit(
-                f"[INFO] {current_time} 开始处理 {total_files_count} 个文件 (总计 {total_work_units} 帧/图)", "#00ff00")
+                f"[INFO] {current_time} 开始处理 {total_files_count} 个文件 (总计 {total_work_units} 单元)", "#00ff00")
             QThread.msleep(10)
 
             display_file_path = os.path.normpath(self.file_path)
@@ -348,6 +351,39 @@ class ProcessingThread(QThread):
                                 int(total_frames * 3 / 4)
                             ]
 
+                            temp_frames_map = []  # 存储 (temp_path, point_index)
+
+                            for i, point in enumerate(sample_points):
+                                if self.force_stop_flag: raise ForceStopError("用户强制停止")
+
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                                ret, frame = cap.read()
+                                if ret:
+                                    # 使用带索引的临时文件名，防止覆盖
+                                    frame_temp_path = os.path.join(temp_photo_dir, f"temp_frame_{filename}_{i}.jpg")
+                                    cv2.imwrite(frame_temp_path, frame)
+                                    temp_frames_map.append({
+                                        'path': frame_temp_path,
+                                        'point': point
+                                    })
+
+                            cap.release()
+
+                            if not temp_frames_map:
+                                raise Exception("无法从视频中提取有效帧")
+
+                            # === [修改] 第二步：调用 Batch 接口一次性检测 ===
+                            # 提取所有路径
+                            batch_paths = [item['path'] for item in temp_frames_map]
+
+                            # 批量检测
+                            batch_results = self.controller.image_processor.detect_batch_species(
+                                batch_paths,
+                                bool(self.use_fp16),
+                                iou, conf, augment, agnostic_nms
+                            )
+
+                            # === [修改] 第三步：统一处理结果 ===
                             sampled_species_list = []  # 存储每次识别到的物种名列表
                             max_counts = {}  # 存储每个物种的最大数量
 
@@ -356,93 +392,73 @@ class ProcessingThread(QThread):
                             best_species_info = None
                             max_detections_in_frame = -1
 
-                            temp_frame_path = os.path.join(temp_photo_dir, f"temp_frame_{filename}.jpg")
-
-                            # 遍历采样点并增加单帧日志
-                            for i, point in enumerate(sample_points):
+                            # 遍历批量结果
+                            for idx, species_info_frame in enumerate(batch_results):
                                 if self.force_stop_flag: raise ForceStopError("用户强制停止")
 
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, point)
-                                ret, frame = cap.read()
-                                if ret:
-                                    cv2.imwrite(temp_frame_path, frame)
+                                # 获取对应的元数据
+                                point = temp_frames_map[idx]['point']
+                                frame_temp_path = temp_frames_map[idx]['path']
 
-                                    # 单帧计时开始
-                                    t1 = time.time()
+                                results = species_info_frame.get('detect_results', [])
+                                translation_dict = self.controller.image_processor.translation_dict
 
-                                    species_info_frame = self.controller.image_processor.detect_species(
-                                        temp_frame_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
-                                    )
+                                frame_counts = {}
+                                current_frame_detection_count = 0
 
-                                    # 单帧计时结束
-                                    t2 = time.time()
-                                    frame_inference_time = (t2 - t1) * 1000
+                                if results:
+                                    for result in results:
+                                        if hasattr(result, 'boxes') and result.boxes is not None:
+                                            for box in result.boxes:
+                                                current_frame_detection_count += 1
+                                                cls_id = int(box.cls.item())
+                                                english_name = result.names.get(cls_id, 'Unknown')
+                                                translated_name = translation_dict.get(english_name, english_name)
 
-                                    results = species_info_frame.get('detect_results', [])
-                                    translation_dict = self.controller.image_processor.translation_dict
+                                                sampled_species_list.append(translated_name)
+                                                frame_counts[translated_name] = frame_counts.get(translated_name, 0) + 1
 
-                                    frame_counts = {}
-                                    current_frame_detection_count = 0
+                                # 构造检测结果字符串 (例如 "1 赤狐, 2 马")
+                                if frame_counts:
+                                    res_parts = [f"{v} {k}" for k, v in frame_counts.items()]
+                                    res_str = ", ".join(res_parts)
+                                else:
+                                    res_str = "无目标"
 
-                                    if results:
-                                        for result in results:
-                                            if hasattr(result, 'boxes') and result.boxes is not None:
-                                                for box in result.boxes:
-                                                    current_frame_detection_count += 1
-                                                    cls_id = int(box.cls.item())
-                                                    english_name = result.names.get(cls_id, 'Unknown')
-                                                    translated_name = translation_dict.get(english_name, english_name)
+                                # 构造完整日志 (注：Batch模式下无法精确计算单帧耗时，取平均值或仅显示Batch总耗时)
+                                log_msg = (
+                                    f"video {current_file_index_display}/{total_files_count} "
+                                    f"(frame {point}/{total_frames}) "
+                                    f"{img_path}: {width}x{height} {res_str}"
+                                )
+                                self.console_log.emit(log_msg, "#aaaaaa")
 
-                                                    sampled_species_list.append(translated_name)
-                                                    frame_counts[translated_name] = frame_counts.get(translated_name,
-                                                                                                     0) + 1
+                                # 寻找检测数量最多的帧，作为保存JSON的代表
+                                if current_frame_detection_count > max_detections_in_frame:
+                                    max_detections_in_frame = current_frame_detection_count
+                                    best_detect_results = results
+                                    best_species_info = species_info_frame
 
-                                    # 构造检测结果字符串 (例如 "1 赤狐, 2 马")
-                                    if frame_counts:
-                                        res_parts = [f"{v} {k}" for k, v in frame_counts.items()]
-                                        res_str = ", ".join(res_parts)
-                                    else:
-                                        res_str = "无目标"  # 或者空字符串，视需求而定
+                                for sp, count in frame_counts.items():
+                                    if count > max_counts.get(sp, 0):
+                                        max_counts[sp] = count
 
-                                    # 构造完整日志
-                                    log_msg = (
-                                        f"video {current_file_index_display}/{total_files_count} "
-                                        f"(frame {point}/{total_frames}) "
-                                        f"{img_path}: {width}x{height} {res_str}, "
-                                        f"{frame_inference_time:.1f}ms"
-                                    )
+                                # 清理当前临时文件
+                                if os.path.exists(frame_temp_path):
+                                    os.remove(frame_temp_path)
 
-                                    # 输出日志 (灰色显示，避免太抢眼，或者使用默认颜色)
-                                    self.console_log.emit(log_msg, "#aaaaaa")
-
-                                    # 寻找检测数量最多的帧，作为保存JSON的代表
-                                    if current_frame_detection_count > max_detections_in_frame:
-                                        max_detections_in_frame = current_frame_detection_count
-                                        best_detect_results = results
-                                        best_species_info = species_info_frame
-
-                                    for sp, count in frame_counts.items():
-                                        if count > max_counts.get(sp, 0):
-                                            max_counts[sp] = count
-
+                                # 更新进度条 (此处为了平滑，可以在循环中更新)
                                 processed_work_units += 1
-
                                 elapsed_time = time.time() - start_time
                                 session_units_done = processed_work_units - start_work_units
-
                                 if session_units_done > 0 and elapsed_time > 0:
                                     speed = session_units_done / elapsed_time
                                     remaining_time = (total_work_units - processed_work_units) / speed
                                 else:
                                     speed = 0
                                     remaining_time = float('inf')
-
                                 self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time,
                                                            remaining_time, speed)
-
-                            cap.release()
-                            if os.path.exists(temp_frame_path):
-                                os.remove(temp_frame_path)
 
                             # 保存 JSON 结果到临时文件夹
                             if best_detect_results is not None:
@@ -635,7 +651,11 @@ class ProcessingThread(QThread):
                                 detect_results = species_info.get('detect_results')
 
                                 # 提取元数据
-                                image_meta, _ = ImageMetadataExtractor.extract_metadata(img_path, f_name)
+                                image_meta, pil_img = ImageMetadataExtractor.extract_metadata(img_path, f_name)
+
+                                if pil_img:
+                                    image_meta['宽度'] = pil_img.width
+                                    image_meta['高度'] = pil_img.height
 
                                 # 填充数据
                                 image_meta['物种名称'] = species_info.get('物种名称', '空')
@@ -661,8 +681,13 @@ class ProcessingThread(QThread):
                                 result_str = image_meta['物种名称']
                                 color = "#ffaa00" if (not result_str or result_str == "空") else "#00ff00"
                                 res_txt = "无目标" if color == "#ffaa00" else f"{image_meta['物种数量']}x{image_meta['物种名称']}"
+
+                                # 获取图片分辨率 (尝试获取中文或英文键名)
+                                img_w = image_meta.get('宽度', '?')
+                                img_h = image_meta.get('高度', '?')
+
                                 log_message = (f"[INFO] {current_time} {display_img_path} | "
-                                               f"Batch处理 | 结果:[{res_txt}] | "
+                                               f"尺寸:{img_w}x{img_h} | 结果:[{res_txt}] | "
                                                f"约耗时:{avg_time:.1f}ms")
                                 self.console_log.emit(log_message, color)
 

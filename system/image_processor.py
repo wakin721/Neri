@@ -3,6 +3,7 @@
 import os
 import logging
 import concurrent.futures
+import gc
 from typing import Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
 from ultralytics import YOLO
@@ -157,215 +158,6 @@ class ImageProcessor:
         except Exception as e:
             logger.warning(f"温度缩放失败: {e}")
             return probs
-
-    def detect_species(self, img_path: str, use_fp16: bool = False, iou: float = 0.3,
-                       conf: float = 0.25, augment: bool = True,
-                       agnostic_nms: bool = True, timeout: float = 20.0) -> Dict[str, Any]:
-        """检测图像中的物种并应用翻译 (包含 LAB 预处理增强)"""
-        use_fp16 = self._check_cuda(use_fp16)
-
-        # === 权重设置 ===
-        w_det = 0.4
-        w_cls = 0.6
-
-        species_names = ""
-        species_counts = ""
-        detect_results = None
-        min_confidence = None
-
-        if not self.model:
-            return {
-                '物种名称': species_names, '物种数量': species_counts,
-                'detect_results': detect_results, '最低置信度': min_confidence
-            }
-
-        def run_detection():
-            nonlocal species_names, species_counts, detect_results, min_confidence
-            try:
-                # [修改] 1. 读取并预处理图像
-                original_img_bgr = cv2.imread(img_path)
-                if original_img_bgr is None:
-                    raise FileNotFoundError(f"无法读取图像: {img_path}")
-
-                # 应用增强 (LAB -> CLAHE -> BGR)
-                processed_img = self._preprocess_image(original_img_bgr)
-
-                # [修改] 2. 运行检测模型 (传入 numpy 数组而不是路径)
-                results = self.model(
-                    processed_img,
-                    augment=augment,
-                    agnostic_nms=agnostic_nms,
-                    imgsz=1024,
-                    half=use_fp16,
-                    iou=iou,
-                    conf=conf,
-                    max_det=20
-                )
-
-                # 3. 如果启用了分类模型，进行二次识别
-                candidates_map = {}
-
-                if self.cls_model:
-                    try:
-                        # 使用预处理后的图像进行裁切，确保分类器也能受益于增强
-                        # 这是一个优化点：不需要再次读取 cv2.imread
-                        original_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
-
-                        for r in results:
-                            if r.boxes is None: continue
-                            for i, box in enumerate(r.boxes):
-                                det_conf = float(box.conf.item())
-                                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                                h, w, _ = original_img_rgb.shape
-                                # 设定扩展比例，例如 0.2 表示每边向外扩展 20%
-                                expand_ratio = 0.1
-
-                                box_width = x2 - x1
-                                box_height = y2 - y1
-
-                                pad_w = int(box_width * expand_ratio)
-                                pad_h = int(box_height * expand_ratio)
-
-                                # 应用扩展并进行边界检查，防止越界
-                                x1 = max(0, x1 - pad_w)
-                                y1 = max(0, y1 - pad_h)
-                                x2 = min(w, x2 + pad_w)
-                                y2 = min(h, y2 + pad_h)
-
-                                if x2 > x1 and y2 > y1:
-                                    crop = original_img_rgb[y1:y2, x1:x2]
-
-                                    ch, cw = crop.shape[:2]
-                                    if ch != cw:
-                                        max_dim = max(ch, cw)
-                                        # Calculate padding sizes
-                                        top = (max_dim - ch) // 2
-                                        bottom = max_dim - ch - top
-                                        left = (max_dim - cw) // 2
-                                        right = max_dim - cw - left
-
-                                        # Use gray padding (114, 114, 114) which is standard for YOLO
-                                        crop = cv2.copyMakeBorder(
-                                            crop,
-                                            top, bottom, left, right,
-                                            cv2.BORDER_CONSTANT,
-                                            value=[114, 114, 114]
-                                        )
-
-                                    # 运行分类模型
-                                    cls_res = self.cls_model(crop,
-                                                             half=use_fp16
-                                                             )
-
-                                    # 获取原始概率张量 (Tensor)
-                                    original_probs = cls_res[0].probs.data
-
-                                    # 应用温度缩放 (temperature=3.0 可根据实际需求调整，越大越平缓)
-                                    smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
-
-                                    # 手动获取前 3 名 (TopK)
-                                    # values: 置信度, indices: 类别索引
-                                    topk_confs, topk_indices = torch.topk(smoothed_probs, 3)
-
-                                    # 转为列表处理
-                                    top3_indices = topk_indices.tolist()
-                                    top3_confs = topk_confs.tolist()
-
-                                    candidates = []
-                                    for cls_idx, cls_conf in zip(top3_indices, top3_confs):
-                                        raw_name = cls_res[0].names[int(cls_idx)]
-                                        trans_name = self.translation_dict.get(raw_name, raw_name)
-
-                                        cls_conf_val = float(cls_conf)
-
-                                        # === 加权置信度计算 ===
-                                        # 融合公式：Score = (检测置信度 * w_det) + (分类置信度 * w_cls)
-                                        weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
-
-                                        candidates.append({
-                                            "name": trans_name,
-                                            "conf": weighted_conf,  # 使用融合后的分数作为主置信度
-                                            "raw_cls_conf": cls_conf_val,  # 保留原始分类分以便调试
-                                            "raw_det_conf": det_conf  # 保留原始检测分
-                                        })
-
-                                        # 根据加权后的 conf 重新排序，确保 candidates[0] 是融合后最优的
-                                    candidates.sort(key=lambda x: x["conf"], reverse=True)
-
-                                    candidates_map[i] = candidates
-
-                                    # 用分类模型的第一名替换检测模型的类别用于初步统计
-                                    # 这里我们不直接修改box.cls，而是在统计时优先使用candidates[0]
-                    except Exception as e:
-                        logger.error(f"二次分类过程出错: {e}")
-
-                detect_results = results
-
-                for r in results:
-                    if r.boxes is None or len(r.boxes) == 0:
-                        continue
-
-                    species_dict = r.names
-                    confidences = r.boxes.conf.tolist()
-
-                    if confidences:
-                        current_min_confidence = min(confidences)
-                        if min_confidence is None or current_min_confidence < min_confidence:
-                            min_confidence = "%.3f" % current_min_confidence
-
-                    detected_species_counts = {}
-
-                    for i, box in enumerate(r.boxes):
-                        final_name = ""
-
-                        # 1. 优先检查是否存在分类模型的结果 (candidates_map)
-                        # candidates_map[i] 是一个列表，第0个元素即为置信度最高的分类结果
-                        if i in candidates_map and candidates_map[i]:
-                            # 提取分类模型的第一名名称
-                            final_name = candidates_map[i][0]['name']
-                        else:
-                            # 2. 如果没有分类结果，降级使用检测模型原本的类别
-                            cls_id = int(box.cls.item())
-                            raw_name = r.names[cls_id]
-                            final_name = self.translation_dict.get(raw_name, raw_name)
-
-                        # 3. 进行计数
-                        detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
-
-                        # [重要] 将分类候选项注入到 results 对象中
-                        # 这样后续保存 JSON (save_detection_info_json) 时也能读取到这些修正后的信息
-                        if not hasattr(r, 'candidates_data'):
-                            r.candidates_data = {}
-                        if i in candidates_map:
-                            r.candidates_data[i] = candidates_map[i]
-
-                        # 生成统计字符串
-                    species_list = list(detected_species_counts.keys())
-                    counts_list = list(map(str, detected_species_counts.values()))
-
-                    species_names = ",".join(species_list)
-                    species_counts = ",".join(counts_list)
-
-                return True
-            except Exception as e:
-                logger.error(f"物种检测失败: {e}")
-                return False
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(run_detection)
-            try:
-                success = future.result(timeout=timeout)
-                if not success:
-                    raise Exception("检测过程出错")
-            except concurrent.futures.TimeoutError:
-                raise TimeoutError(f"物种检测超时（>{timeout}秒）")
-
-        return {
-            '物种名称': species_names if species_names else "空",
-            '物种数量': species_counts if species_counts else "空",
-            'detect_results': detect_results,
-            '最低置信度': min_confidence
-        }
 
     def _process_single_image_task(self, args):
         """辅助方法：处理单张图片的线程任务"""
@@ -628,9 +420,23 @@ class ImageProcessor:
                 logger.error(f"批量检测失败: {e}")
                 return False
 
-        # 这里不使用 ThreadPoolExecutor 内部再次开线程，因为外层已经是线程了
-        # 直接运行
+            finally:
+                pass
+
         run_batch_process()
+
+        try:
+            # 1. 强制进行 Python 垃圾回收，断开未使用的 Tensor 引用
+            gc.collect()
+
+            # 2. 如果使用 GPU，强制清空 PyTorch 的显存缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                # 可选：整理碎片（PyTorch 某些版本支持）
+                # torch.cuda.ipc_collect()
+        except Exception as e:
+            logger.warning(f"显存清理过程中发生错误 (不影响结果): {e}")
+
         return batch_results_info
 
     def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:

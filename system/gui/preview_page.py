@@ -55,14 +55,16 @@ class DetectionWorker(QThread):
             use_agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
 
             from datetime import datetime
-            results = self.controller.image_processor.detect_species(
-                self.img_path,
+            batch_results = self.controller.image_processor.detect_batch_species(
+                [self.img_path],
                 use_fp16,
                 iou,
                 conf,
                 use_augment,
                 use_agnostic_nms
             )
+
+            results = batch_results[0] if batch_results else {}
 
             current_detection_results = results['detect_results']
             species_info = {k: v for k, v in results.items() if k != 'detect_results'}
