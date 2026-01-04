@@ -1651,7 +1651,7 @@ class SpeciesValidationPage(QWidget):
 
     def _on_species_photo_selected(self):
         """当选择物种照片/视频时的处理"""
-        # [新增] 1. 检查是否选择了同一个正在播放的视频
+        # 1. 检查是否选择了同一个正在播放的视频
         selection = self.species_photo_listbox.selectedItems()
         if selection:
             file_name = selection[0].text()
@@ -2900,14 +2900,33 @@ class SpeciesValidationPage(QWidget):
 
     def _stop_video_thread(self):
         """停止视频线程"""
-        if self.video_thread and self.video_thread.isRunning():
-            self.video_thread.stop()
+        if self.video_thread:
+            # 1. 关键修复：先断开信号连接。
+            # 即使线程还在后台由于惯性跑完最后一帧，也无法触发 UI 更新去覆盖静态图。
+            try:
+                self.video_thread.frame_ready.disconnect(self._on_video_frame_ready)
+                self.video_thread.pause_state_changed.disconnect(self._on_video_pause_state_changed)
+            except Exception:
+                # 忽略如果没有连接时的异常
+                pass
+
+            # 2. 停止线程运行
+            if self.video_thread.isRunning():
+                self.video_thread.stop()
+                # 注意：不要在这里使用 wait() 阻塞主线程，因为我们已经断开了信号，
+                # 让线程自己在后台安全退出即可。
+
             self.video_thread.deleteLater()
             self.video_thread = None
 
+        # 3. 清除缓存的视频帧，防止 resizeEvent 意外重绘旧视频帧
+        self._current_video_frame_pixmap = None
+        self._is_video_paused = False
+
     def _on_video_frame_ready(self, pixmap):
         """接收视频帧并显示"""
-        if not self.isVisible(): return
+        if not self.video_thread or not self.isVisible():
+            return
 
         self._current_video_frame_pixmap = pixmap
 
