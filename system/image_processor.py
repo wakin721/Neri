@@ -3,7 +3,7 @@
 import os
 import logging
 import concurrent.futures
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
 from ultralytics import YOLO
 import json
@@ -164,6 +164,10 @@ class ImageProcessor:
         """检测图像中的物种并应用翻译 (包含 LAB 预处理增强)"""
         use_fp16 = self._check_cuda(use_fp16)
 
+        # === 权重设置 ===
+        w_det = 0.4
+        w_cls = 0.6
+
         species_names = ""
         species_counts = ""
         detect_results = None
@@ -203,13 +207,14 @@ class ImageProcessor:
 
                 if self.cls_model:
                     try:
-                        # [修改] 使用预处理后的图像进行裁切，确保分类器也能受益于增强
+                        # 使用预处理后的图像进行裁切，确保分类器也能受益于增强
                         # 这是一个优化点：不需要再次读取 cv2.imread
                         original_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
 
                         for r in results:
                             if r.boxes is None: continue
                             for i, box in enumerate(r.boxes):
+                                det_conf = float(box.conf.item())
                                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                                 h, w, _ = original_img_rgb.shape
                                 # 设定扩展比例，例如 0.2 表示每边向外扩展 20%
@@ -268,20 +273,28 @@ class ImageProcessor:
 
                                     candidates = []
                                     for cls_idx, cls_conf in zip(top3_indices, top3_confs):
-                                        # 注意：这里需要通过 names 字典获取原始名称
                                         raw_name = cls_res[0].names[int(cls_idx)]
-
-                                        # 翻译名称
                                         trans_name = self.translation_dict.get(raw_name, raw_name)
+
+                                        cls_conf_val = float(cls_conf)
+
+                                        # === 加权置信度计算 ===
+                                        # 融合公式：Score = (检测置信度 * w_det) + (分类置信度 * w_cls)
+                                        weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
+
                                         candidates.append({
                                             "name": trans_name,
-                                            "conf": float(cls_conf)
+                                            "conf": weighted_conf,  # 使用融合后的分数作为主置信度
+                                            "raw_cls_conf": cls_conf_val,  # 保留原始分类分以便调试
+                                            "raw_det_conf": det_conf  # 保留原始检测分
                                         })
 
-                                    # 存储候选信息，Key为box的索引或其他标识
+                                        # 根据加权后的 conf 重新排序，确保 candidates[0] 是融合后最优的
+                                    candidates.sort(key=lambda x: x["conf"], reverse=True)
+
                                     candidates_map[i] = candidates
 
-                                    # [可选] 用分类模型的第一名替换检测模型的类别用于初步统计
+                                    # 用分类模型的第一名替换检测模型的类别用于初步统计
                                     # 这里我们不直接修改box.cls，而是在统计时优先使用candidates[0]
                     except Exception as e:
                         logger.error(f"二次分类过程出错: {e}")
@@ -353,6 +366,272 @@ class ImageProcessor:
             'detect_results': detect_results,
             '最低置信度': min_confidence
         }
+
+    def _process_single_image_task(self, args):
+        """辅助方法：处理单张图片的线程任务"""
+        idx, path = args
+        try:
+            # 这里的 self._preprocess_image 需要确保能被访问
+            img = cv2.imread(path)
+            if img is None:
+                return None
+            # 预处理 (LAB增强等)
+            proc_img = self._preprocess_image(img)
+            # 转换副本用于后续裁剪 (RGB)
+            orig_rgb = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
+            return (idx, proc_img, orig_rgb)
+        except Exception as e:
+            logger.warning(f"处理图片 {path} 失败: {e}")
+            return None
+
+    def preload_batch_data(self, img_paths: List[str]) -> Optional[Tuple]:
+        """
+        预加载一批图片数据，返回 (valid_indices, processed_imgs, original_imgs_rgb)
+        """
+        try:
+            processed_imgs = []
+            valid_indices = []
+            original_imgs_rgb = []
+
+            max_workers = min(len(img_paths), 8)
+
+            # 使用线程池并行读取和预处理
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self._process_single_image_task, (idx, path))
+                    for idx, path in enumerate(img_paths)
+                ]
+
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        idx, proc_img, orig_rgb = result
+                        valid_indices.append(idx)
+                        processed_imgs.append(proc_img)
+                        original_imgs_rgb.append(orig_rgb)
+
+            if not processed_imgs:
+                return None
+
+            return (valid_indices, processed_imgs, original_imgs_rgb)
+        except Exception as e:
+            logger.error(f"预加载数据失败: {e}")
+            return None
+
+    def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
+                             conf: float = 0.25, augment: bool = True,
+                             agnostic_nms: bool = True, timeout: float = 60.0,
+                             preloaded_data: Optional[Tuple] = None) -> List[Dict[str, Any]]:
+        """
+        批量检测图像中的物种
+        :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
+        """
+        use_fp16 = self._check_cuda(use_fp16)
+        w_det = 0.4
+        w_cls = 0.6
+        batch_results_info = []
+
+        if not self.model:
+            for _ in img_paths:
+                batch_results_info.append({
+                    '物种名称': "", '物种数量': "",
+                    'detect_results': None, '最低置信度': None
+                })
+            return batch_results_info
+
+        def run_batch_process():
+            nonlocal batch_results_info
+            try:
+                # [修改] 1. 优先使用预加载的数据，否则现场处理
+                if preloaded_data:
+                    valid_indices, processed_imgs, original_imgs_rgb = preloaded_data
+                else:
+                    # 如果没有预加载数据，则执行原有的加载逻辑 (调用新提取的 _process_single_image_task)
+                    processed_imgs = []
+                    valid_indices = []
+                    original_imgs_rgb = []
+                    max_workers = min(len(img_paths), 8)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = [
+                            executor.submit(self._process_single_image_task, (idx, path))
+                            for idx, path in enumerate(img_paths)
+                        ]
+                        for future in futures:
+                            result = future.result()
+                            if result is not None:
+                                idx, proc_img, orig_rgb = result
+                                valid_indices.append(idx)
+                                processed_imgs.append(proc_img)
+                                original_imgs_rgb.append(orig_rgb)
+
+                if not processed_imgs:
+                    return
+
+                # 2. 批量运行检测模型
+                # stream=False 确保返回完整列表
+                det_results = self.model(
+                    processed_imgs,
+                    augment=augment,
+                    agnostic_nms=agnostic_nms,
+                    imgsz=1024,
+                    half=use_fp16,
+                    iou=iou,
+                    conf=conf,
+                    max_det=20,
+                )
+
+                # 3. 准备分类裁剪 (Collection Phase)
+                all_crops = []
+                # 映射: list index -> (result_index_in_batch, box_index)
+                crop_map_info = []
+
+                # 初始化每个结果的 candidates_map
+                batch_candidates_maps = [{} for _ in det_results]
+
+                if self.cls_model:
+                    for r_idx, r in enumerate(det_results):
+                        if r.boxes is None: continue
+
+                        orig_img_rgb = original_imgs_rgb[r_idx]
+                        h, w, _ = orig_img_rgb.shape
+
+                        for b_idx, box in enumerate(r.boxes):
+                            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+                            # === 裁剪逻辑 (保持与单张一致) ===
+                            expand_ratio = 0.1
+                            box_width = x2 - x1
+                            box_height = y2 - y1
+                            pad_w = int(box_width * expand_ratio)
+                            pad_h = int(box_height * expand_ratio)
+
+                            x1 = max(0, x1 - pad_w)
+                            y1 = max(0, y1 - pad_h)
+                            x2 = min(w, x2 + pad_w)
+                            y2 = min(h, y2 + pad_h)
+
+                            if x2 > x1 and y2 > y1:
+                                crop = orig_img_rgb[y1:y2, x1:x2]
+
+                                # Padding Square (Gray 114)
+                                ch, cw = crop.shape[:2]
+                                if ch != cw:
+                                    max_dim = max(ch, cw)
+                                    top = (max_dim - ch) // 2
+                                    bottom = max_dim - ch - top
+                                    left = (max_dim - cw) // 2
+                                    right = max_dim - cw - left
+                                    crop = cv2.copyMakeBorder(
+                                        crop, top, bottom, left, right,
+                                        cv2.BORDER_CONSTANT, value=[114, 114, 114]
+                                    )
+
+                                all_crops.append(crop)
+                                crop_map_info.append((r_idx, b_idx))
+
+                    # 4. 批量运行分类模型 (Batch Inference)
+                    if all_crops:
+                        # 这里的 batch size 可以根据显存调整，YOLO通常自动处理
+                        cls_results_list = self.cls_model(all_crops, half=use_fp16)
+
+                        # 5. 映射回原结果 (Map Back)
+                        for i, cls_res in enumerate(cls_results_list):
+                            r_idx, b_idx = crop_map_info[i]
+
+                            # 获取原始检测置信度
+                            det_conf = float(det_results[r_idx].boxes[b_idx].conf.item())
+
+                            # 温度缩放 & TopK
+                            original_probs = cls_res.probs.data
+                            smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
+                            topk_confs, topk_indices = torch.topk(smoothed_probs, 3)
+
+                            candidates = []
+                            for c_idx, c_conf in zip(topk_indices.tolist(), topk_confs.tolist()):
+                                raw_name = cls_res.names[int(c_idx)]
+                                trans_name = self.translation_dict.get(raw_name, raw_name)
+                                cls_conf_val = float(c_conf)
+
+                                # 加权置信度
+                                weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
+
+                                candidates.append({
+                                    "name": trans_name,
+                                    "conf": weighted_conf,
+                                    "raw_cls_conf": cls_conf_val,
+                                    "raw_det_conf": det_conf
+                                })
+
+                            candidates.sort(key=lambda x: x["conf"], reverse=True)
+                            batch_candidates_maps[r_idx][b_idx] = candidates
+
+                # 6. 结果整合与统计
+                # 此时 det_results 的长度等于 processed_imgs 的长度
+                # 我们需要将其映射回原始 img_paths 的长度（处理读取失败的情况）
+
+                det_iter = iter(det_results)
+                cand_map_iter = iter(batch_candidates_maps)
+
+                for idx in range(len(img_paths)):
+                    if idx not in valid_indices:
+                        # 读取失败的图片返回空
+                        batch_results_info.append({
+                            '物种名称': "", '物种数量': "",
+                            'detect_results': None, '最低置信度': None
+                        })
+                        continue
+
+                    r = next(det_iter)
+                    candidates_map = next(cand_map_iter)
+
+                    min_conf = None
+                    detected_species_counts = {}
+
+                    if r.boxes:
+                        confs = r.boxes.conf.tolist()
+                        if confs:
+                            current_min = min(confs)
+                            min_conf = "%.3f" % current_min
+
+                        for i, box in enumerate(r.boxes):
+                            final_name = ""
+                            # 优先使用分类修正结果
+                            if i in candidates_map and candidates_map[i]:
+                                final_name = candidates_map[i][0]['name']
+                            else:
+                                cls_id = int(box.cls.item())
+                                raw_name = r.names[cls_id]
+                                final_name = self.translation_dict.get(raw_name, raw_name)
+
+                            detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
+
+                            # 注入数据用于JSON保存
+                            if not hasattr(r, 'candidates_data'):
+                                r.candidates_data = {}
+                            if i in candidates_map:
+                                r.candidates_data[i] = candidates_map[i]
+
+                    species_str = ",".join(list(detected_species_counts.keys()))
+                    counts_str = ",".join(list(map(str, detected_species_counts.values())))
+
+                    batch_results_info.append({
+                        '物种名称': species_str if species_str else "空",
+                        '物种数量': counts_str if counts_str else "空",
+                        'detect_results': [r],  # 保持列表格式以便兼容 save_detection_info_json
+                        '最低置信度': min_conf
+                    })
+
+                return True
+
+            except Exception as e:
+                logger.error(f"批量检测失败: {e}")
+                return False
+
+        # 这里不使用 ThreadPoolExecutor 内部再次开线程，因为外层已经是线程了
+        # 直接运行
+        run_batch_process()
+        return batch_results_info
 
     def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:
         """

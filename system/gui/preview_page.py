@@ -2142,13 +2142,55 @@ class PreviewPage(QWidget):
 
     def eventFilter(self, source, event):
         """事件过滤器：处理 image_label 上的点击事件"""
-        if source == self.image_label and event.type() == QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.LeftButton:
-                # 仅在视频检测线程运行时响应点击
-                if self.video_thread and self.video_thread.isRunning():
-                    self.toggle_video_playback()
+        if source == self.image_label:
+            
+            # === 1. 双击事件 (左键) -> 调用系统默认程序打开 ===
+            if event.type() == QEvent.Type.MouseButtonDblClick:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._open_media_externally()
                     return True
+
+            # === 2. 鼠标按下事件 ===
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                
+                # 情况 A: 右键单击 -> 调用系统默认程序打开
+                if event.button() == Qt.MouseButton.RightButton:
+                    self._open_media_externally()
+                    return True
+                
+                # 情况 B: 左键单击 -> 视频暂停/播放逻辑 (原有逻辑)
+                elif event.button() == Qt.MouseButton.LeftButton:
+                    # 注意：双击时会先触发一次 Press (暂停)，随后触发 DblClick (打开外部)，这是符合预期的
+                    if self.video_thread and self.video_thread.isRunning():
+                        self.toggle_video_playback()
+                        return True
+                        
         return super().eventFilter(source, event)
+
+    def _open_media_externally(self):
+        """调用系统默认程序打开当前显示的图片或视频"""
+        
+        # === 1. 视频暂停逻辑 ===
+        # 在打开外部程序前，如果视频正在播放，先暂停；如果已暂停，保持暂停
+        if self.video_thread and self.video_thread.isRunning():
+            if not self.video_thread.paused:
+                self.video_thread.toggle_pause()
+
+        # === 2. 路径检查与打开 ===
+        # 检查当前是否有文件路径
+        if not hasattr(self, 'current_image_path') or not self.current_image_path:
+            return
+
+        # 检查文件是否存在
+        if os.path.exists(self.current_image_path):
+            try:
+                # 使用 QDesktopServices 打开本地文件
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.current_image_path))
+                logger.info(f"已调用系统默认软件打开: {self.current_image_path}")
+            except Exception as e:
+                logger.error(f"无法打开外部文件: {e}")
+        else:
+            logger.warning(f"文件不存在，无法打开: {self.current_image_path}")
 
     def _start_video_detection_thread(self, video_path, json_path, draw_boxes=True, start_frame=0):
         """Starts the OpenCV QThread for video"""

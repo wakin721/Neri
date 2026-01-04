@@ -75,6 +75,7 @@ class AdvancedPage(QWidget):
         self.iou_var = 0.3
         self.conf_var = 0.25
         self.use_fp16_var = self.controller.cuda_available if hasattr(controller, 'cuda_available') else False
+        self.batch_size_var = 16
         self.use_augment_var = True
         self.use_agnostic_nms_var = True
         self.vid_stride_var = 1  # 默认值为1 (处理每一帧)
@@ -324,7 +325,43 @@ class AdvancedPage(QWidget):
 
         accel_widget = QWidget()
         accel_layout = QVBoxLayout(accel_widget)
+        accel_layout.setSpacing(15)  # 增加间距以美观显示滑块
 
+        # 1. 批处理大小设置 (Batch Size)
+        batch_frame = QFrame()
+        batch_layout = QVBoxLayout(batch_frame)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+
+        batch_label_frame = QFrame()
+        batch_label_layout = QHBoxLayout(batch_label_frame)
+        batch_label_layout.setContentsMargins(0, 0, 0, 0)
+
+        batch_title = QLabel("批处理大小 (Batch Size)")
+        batch_title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.batch_size_label = QLabel(str(self.batch_size_var))
+        self.batch_size_label.setFont(QFont("Segoe UI", 10))
+
+        batch_label_layout.addWidget(batch_title)
+        batch_label_layout.addStretch()
+        batch_label_layout.addWidget(self.batch_size_label)
+
+        self.batch_slider = ModernSlider()
+        self.batch_slider.setRange(1, 64)  # 范围 1-64，可根据需求调整
+        self.batch_slider.setValue(self.batch_size_var)
+        self.batch_slider.valueChanged.connect(self._update_batch_size_label)
+        self.batch_slider.valueChanged.connect(self._on_setting_changed)
+        self.components_to_update.append(self.batch_slider)
+
+        batch_layout.addWidget(batch_label_frame)
+        batch_layout.addWidget(self.batch_slider)
+
+        batch_explain = QLabel("数值越大处理越快，但显存占用越高。显存不足时请调小此值。")
+        batch_explain.setStyleSheet("color: #888888; font-size: 12px;")
+        batch_layout.addWidget(batch_explain)
+
+        accel_layout.addWidget(batch_frame)
+
+        # 2. FP16 开关
         # 替换为开关行
         self.fp16_switch_row = SwitchRow("使用FP16加速 (需要支持CUDA)", checked=self.use_fp16_var)
         self.fp16_switch_row.switch().setEnabled(
@@ -385,6 +422,11 @@ class AdvancedPage(QWidget):
 
         content_layout.addWidget(button_frame)
         self.model_params_layout.addWidget(content_widget)
+
+    def _update_batch_size_label(self, value):
+        """更新Batch Size标签"""
+        self.batch_size_var = value
+        self.batch_size_label.setText(str(value))
 
     def _create_video_settings_content(self):
         """创建视频检测设置内容"""
@@ -1039,6 +1081,7 @@ class AdvancedPage(QWidget):
         self.iou_var = 0.3
         self.conf_var = 0.25
         self.use_fp16_var = self.controller.cuda_available if hasattr(self.controller, 'cuda_available') else False
+        self.batch_size_var = 16
         self.use_augment_var = True
         self.use_agnostic_nms_var = True
 
@@ -1741,6 +1784,7 @@ class AdvancedPage(QWidget):
             "iou_threshold": self.iou_var,
             "conf_threshold": self.conf_var,
             "use_fp16": self.get_use_fp16(),
+            "batch_size": self.batch_size_var,
             "use_augment": self.augment_switch_row.isChecked(),
             "use_agnostic_nms": self.agnostic_switch_row.isChecked(),
             "vid_stride": self.vid_stride_var,
@@ -1774,6 +1818,11 @@ class AdvancedPage(QWidget):
         if "use_fp16" in settings:
             self.use_fp16_var = settings["use_fp16"]
             self.fp16_switch_row.setChecked(self.use_fp16_var)
+
+        if "batch_size" in settings:
+            self.batch_size_var = int(settings["batch_size"])
+            self.batch_slider.setValue(self.batch_size_var)
+            self.batch_size_label.setText(str(self.batch_size_var))
 
         if "use_augment" in settings:
             self.use_augment_var = settings["use_augment"]

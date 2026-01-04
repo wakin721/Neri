@@ -5,6 +5,7 @@ import logging
 import threading
 import json
 import time
+import concurrent.futures
 from datetime import datetime
 import gc
 import hashlib
@@ -106,11 +107,18 @@ class ProcessingThread(QThread):
         start_time = time.time()
         excel_data = [] if self.resume_from == 0 else self.controller.excel_data
 
+        # 定义Batch Size
+        BATCH_SIZE = getattr(self.controller.advanced_page, 'batch_size_var', 16)
+
         # 记录已处理的文件数（用于索引文件列表）
         processed_files_count = self.resume_from
         stopped_manually = False
         earliest_date = None
         temp_photo_dir = self.controller.get_temp_photo_dir()
+        # 在进入 task_queue 循环之前，初始化预加载器
+        preloader_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # 用于存储 {queue_index: future_object} 的字典
+        preload_futures = {}
 
         try:
             iou = self.controller.advanced_page.iou_var
@@ -125,10 +133,23 @@ class ProcessingThread(QThread):
             from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
             all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
 
-            # 获取文件夹下所有支持的文件
+            # 1. 获取所有文件
             all_files_list = sorted([f for f in os.listdir(self.file_path)
-                                     if f.lower().endswith(all_extensions)])
+                                    if f.lower().endswith(all_extensions)])
+
+            # 2. 分离图片和视频 (断点续传逻辑需要基于原始总列表索引，比较复杂，
+            # 记录总文件数
             total_files_count = len(all_files_list)
+
+            # 根据 resume_from 确定本次需要处理的文件子集
+            files_to_process_subset = all_files_list[self.resume_from:]
+
+            # 将待处理子集分为图片和视频
+            pending_images = [f for f in files_to_process_subset if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
+            pending_videos = [f for f in files_to_process_subset if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
+
+            # 处理顺序：先处理所有图片，再处理所有视频
+            sorted_processing_queue = pending_images + pending_videos
 
             # =========================================================================
             # [修改] 预计算总工作单元（统计视频帧数 + 图片数量）
@@ -171,7 +192,7 @@ class ProcessingThread(QThread):
             # 初始化进度变量
             self.current_total_files = total_files_count
             self.current_excel_data = excel_data
-            self.current_processed_files = processed_files_count
+            processed_files_count = self.resume_from
 
             # 输出开始信息
             self.console_log.emit("=" * 118, None)
@@ -198,14 +219,22 @@ class ProcessingThread(QThread):
 
             self.console_log.emit(f"[INFO] {current_time} 源路径: {display_file_path}", "#aaaaaa")
             QThread.msleep(10)
-            self.console_log.emit(f"[INFO] {current_time} 保存路径: {display_save_path}", "#aaaaaa")
-            QThread.msleep(10)
             self.console_log.emit(
                 f"[INFO] {current_time} 参数配置: IOU={iou}, CONF={conf}, FP16={self.use_fp16}, AUGMENT={augment}, AGNOSTIC_NMS={agnostic_nms}, VID_STRIDE={vid_stride}",
                 "#aaaaaa")
             QThread.msleep(10)
             self.console_log.emit("=" * 118, None)
             QThread.msleep(10)
+
+            # 1. 将待处理图片分批
+            image_batches = [pending_images[i:i + BATCH_SIZE] for i in range(0, len(pending_images), BATCH_SIZE)]
+
+            # 2. 构建混合队列：
+            task_queue = []
+            for batch in image_batches:
+                task_queue.append(('batch', batch))
+            for vid in pending_videos:
+                task_queue.append(('video', vid))
 
             if self.resume_from > 0:
                 # 获取本次需要处理的文件列表
@@ -220,8 +249,17 @@ class ProcessingThread(QThread):
             else:
                 files_to_process = all_files_list
 
+            if len(task_queue) > 0 and task_queue[0][0] == 'batch':
+                # 获取第一个任务的文件路径列表
+                first_batch_paths = [os.path.join(self.file_path, f) for f in task_queue[0][1]]
+                preload_futures[0] = preloader_executor.submit(
+                    self.controller.image_processor.preload_batch_data,
+                    first_batch_paths
+                )
+
             # 遍历处理文件
-            for idx, filename in enumerate(files_to_process):
+            for i, (task_type, task_data) in enumerate(task_queue):
+                img = None
                 # 1. 检查停止标志 (循环开始处)
                 # 如果 stop_flag 被设置(第一次点击)，但没有强制停止(第二次点击)
                 # 说明用户希望"等待当前处理完毕后停止"。此时上一个文件已跑完，可以安全退出了。
@@ -240,11 +278,35 @@ class ProcessingThread(QThread):
                     self.console_log.emit(f"[INFO] {current_time} 处理已强制停止", "#ff0000")
                     break
 
-                current_file_index_display = processed_files_count + 1
-                img_path = os.path.join(self.file_path, filename)
-                is_video = filename.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)
+                # 如果下一个任务是 batch，立即提交预加载任务
+                next_task_idx = i + 1
+                if next_task_idx < len(task_queue):
+                    next_type, next_data = task_queue[next_task_idx]
+                    if next_type == 'batch' and next_task_idx not in preload_futures:
+                        next_batch_paths = [os.path.join(self.file_path, f) for f in next_data]
+                        preload_futures[next_task_idx] = preloader_executor.submit(
+                            self.controller.image_processor.preload_batch_data,
+                            next_batch_paths
+                        )
 
-                # 发射当前处理文件变化信号
+                filename = ""
+                img_path = ""
+                is_video = (task_type == 'video')
+
+                # 提前计算当前显示的文件索引
+                current_file_index_display = processed_files_count + 1
+
+                # 提前解析路径，确保 emit 时 img_path 有值
+                if is_video:
+                    filename = task_data
+                    img_path = os.path.join(self.file_path, filename)
+                elif task_type == 'batch':
+                    # 如果是批处理，取第一个文件作为当前进度的显示路径
+                    if task_data:
+                        filename = task_data[0]  # 暂时取第一个用于显示
+                        img_path = os.path.join(self.file_path, filename)
+
+                # 发射信号
                 self.current_file_changed.emit(img_path, current_file_index_display, total_files_count)
 
                 try:
@@ -530,104 +592,107 @@ class ProcessingThread(QThread):
                             # [修改] 视频处理完成后，累加该视频的总帧数到已完成工作量
                             processed_work_units += file_unit_map.get(filename, 1)
 
-                    else:
-                        # === 图片处理逻辑 ===
-                        if self.force_stop_flag:
-                            raise ForceStopError("用户强制停止")
-                        # 提取元数据
-                        image_info, img = ImageMetadataExtractor.extract_metadata(img_path, filename)
+                    elif task_type == 'batch':
+                        batch_filenames = task_data
+                        batch_paths = [os.path.join(self.file_path, f) for f in batch_filenames]
 
-                        img_height, img_width = 0, 0
-                        if img is not None:
-                            if hasattr(img, 'shape') and len(img.shape) >= 2:
-                                img_height, img_width = img.shape[:2]
-                            else:
+                        # 更新UI显示为这批的第一个文件
+                        current_file_index_display = processed_files_count + 1
+                        self.current_file_changed.emit(batch_paths[0], current_file_index_display, total_files_count)
+
+                        try:
+                            # 获取预加载数据
+                            preloaded_data = None
+                            if i in preload_futures:
                                 try:
-                                    with Image.open(img_path) as pil_img:
-                                        img_width, img_height = pil_img.size
+                                    # 获取结果（如果还没加载完会在这里阻塞，但通常已经完成或正在进行）
+                                    preloaded_data = preload_futures[i].result()
+                                    # 用完即删，释放内存
+                                    del preload_futures[i]
                                 except Exception as e:
-                                    logger.warning(f"无法获取图像尺寸 {filename}: {e}")
+                                    logger.error(f"获取预加载数据失败: {e}")
 
-                        if img_height == 0 or img_width == 0:
-                            raise ValueError(f"无法获取有效的图像尺寸")
+                            # 1. 调用批量检测 (传入 preloaded_data)
+                            batch_start_time = time.time()
 
-                        detection_start = time.time()
-                        species_info = self.controller.image_processor.detect_species(
-                            img_path, bool(self.use_fp16), iou, conf, augment, agnostic_nms
-                        )
-                        detection_time = (time.time() - detection_start) * 1000
-                        species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                        detect_results = species_info.get('detect_results')
-
-                        # 获取翻译字典并统计
-                        translation_dict = self.controller.image_processor.translation_dict
-                        species_counts = {}
-                        if detect_results:
-                            for result in detect_results:
-                                if hasattr(result, 'boxes') and result.boxes is not None:
-                                    for box in result.boxes:
-                                        cls_id = int(box.cls.item())
-                                        english_name = result.names.get(cls_id, 'Unknown')
-                                        translated_name = translation_dict.get(english_name, english_name)
-                                        species_counts[translated_name] = species_counts.get(translated_name, 0) + 1
-
-                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        display_img_path = os.path.normpath(img_path)
-
-                        if species_counts:
-                            detection_summary = ', '.join([f"{count}x{name}" for name, count in species_counts.items()])
-                            log_message = (
-                                f"[INFO] {current_time} {display_img_path} | "
-                                f"尺寸:{img_height}x{img_width} | "
-                                f"检测结果:[{detection_summary}] | "
-                                f"检测耗时:{detection_time:.1f}ms"
+                            # 注意：这里调用 detect_batch_species 时传入了 preloaded_data
+                            batch_results = self.controller.image_processor.detect_batch_species(
+                                batch_paths, bool(self.use_fp16), iou, conf, augment, agnostic_nms,
+                                preloaded_data=preloaded_data
                             )
-                            self.console_log.emit(log_message, "#00ff00")
-                        else:
-                            log_message = (
-                                f"[INFO] {current_time} {display_img_path} | "
-                                f"尺寸:{img_height}x{img_width} | "
-                                f"检测结果:[无目标] | "
-                                f"检测耗时:{detection_time:.1f}ms"
-                            )
-                            self.console_log.emit(log_message, "#ffaa00")
-                        QThread.msleep(5)
 
-                        self.controller.image_processor.save_detection_info_json(
-                            detect_results, filename, species_info, temp_photo_dir
-                        )
-                        self.file_processed.emit(img_path, detect_results, filename)
+                            batch_time = (time.time() - batch_start_time) * 1000
+                            avg_time = batch_time / len(batch_filenames) if batch_filenames else 0
 
-                        complete_detection_info = {
-                            **species_info,
-                            'detect_results': detect_results,
-                            'filename': filename
-                        }
-                        self.current_file_preview.emit(img_path, complete_detection_info)
+                            # 2. 遍历结果并保存
+                            for b_idx, f_name in enumerate(batch_filenames):
+                                if self.force_stop_flag: raise ForceStopError("用户强制停止")
 
-                        if 'detect_results' in species_info:
-                            del species_info['detect_results']
+                                # 这里的变量用于异常捕获时的日志显示
+                                filename = f_name
+                                img_path = batch_paths[b_idx]
+                                species_info = batch_results[b_idx]
+                                detect_results = species_info.get('detect_results')
 
-                        image_info.update(species_info)
-                        excel_data.append(image_info)
+                                # 提取元数据
+                                image_meta, _ = ImageMetadataExtractor.extract_metadata(img_path, f_name)
 
-                        # [修改] 图片处理完成后，工作量 +1
-                        processed_work_units += 1
+                                # 填充数据
+                                image_meta['物种名称'] = species_info.get('物种名称', '空')
+                                image_meta['物种数量'] = species_info.get('物种数量', '空')
+                                image_meta['最低置信度'] = species_info.get('最低置信度', None)
+                                image_meta['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                        # [修改] 更新进度条 (图片)
-                        elapsed_time = time.time() - start_time
-                        session_units_done = processed_work_units - start_work_units
+                                # 保存临时 JSON
+                                self.controller.image_processor.save_detection_info_json(
+                                    detect_results, f_name, species_info, temp_photo_dir
+                                )
 
-                        if session_units_done > 0 and elapsed_time > 0:
-                            speed = session_units_done / elapsed_time  # 图/秒
-                            remaining_time = (total_work_units - processed_work_units) / speed
-                        else:
-                            speed = 0
-                            remaining_time = float('inf')
+                                # 发射 UI 信号
+                                self.file_processed.emit(img_path, detect_results, f_name)
+                                full_info = {**species_info, 'filename': f_name}
+                                self.current_file_preview.emit(img_path, full_info)
+                                if 'detect_results' in image_meta: del image_meta['detect_results']
+                                excel_data.append(image_meta)
 
-                        self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time, remaining_time,
-                                                   speed)
+                                # 单张日志
+                                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                display_img_path = os.path.normpath(img_path)
+                                result_str = image_meta['物种名称']
+                                color = "#ffaa00" if (not result_str or result_str == "空") else "#00ff00"
+                                res_txt = "无目标" if color == "#ffaa00" else f"{image_meta['物种数量']}x{image_meta['物种名称']}"
+                                log_message = (f"[INFO] {current_time} {display_img_path} | "
+                                               f"Batch处理 | 结果:[{res_txt}] | "
+                                               f"约耗时:{avg_time:.1f}ms")
+                                self.console_log.emit(log_message, color)
+
+                                # 更新进度
+                                processed_work_units += 1
+                                processed_files_count += 1
+
+                                # 更新进度条
+                                elapsed_time = time.time() - start_time
+                                session_units_done = processed_work_units - start_work_units
+
+                                if session_units_done > 0 and elapsed_time > 0:
+                                    speed = session_units_done / elapsed_time
+                                    remaining_time = (total_work_units - processed_work_units) / speed
+
+                                else:
+                                    speed = 0;
+                                    remaining_time = float('inf')
+
+                                self.progress_updated.emit(processed_work_units, total_work_units, elapsed_time,
+                                                           remaining_time, speed)
+
+                            # 内存清理
+                            del batch_results
+                            gc.collect()
+
+                        except Exception as e:
+                            logger.error(f"Batch处理内部错误: {e}")
+                            # 即使出错也要推进 processed_files_count，防止死循环
+                            processed_files_count += len(batch_filenames)
 
                 except ForceStopError:
                     stopped_manually = True
@@ -660,7 +725,6 @@ class ProcessingThread(QThread):
                     else:
                         processed_work_units += 1
 
-                processed_files_count += 1
                 self.current_processed_files = processed_files_count
                 self.current_excel_data = excel_data
 
