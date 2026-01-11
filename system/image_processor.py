@@ -210,6 +210,45 @@ class ImageProcessor:
             logger.error(f"预加载数据失败: {e}")
             return None
 
+    def _crop_single_box(self, args):
+        """辅助方法：处理单个检测框的裁剪与Padding任务"""
+        r_idx, b_idx, box, orig_img_rgb = args
+        try:
+            h, w, _ = orig_img_rgb.shape
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+            # 扩展逻辑
+            expand_ratio = 0.1
+            box_width = x2 - x1
+            box_height = y2 - y1
+            pad_w = int(box_width * expand_ratio)
+            pad_h = int(box_height * expand_ratio)
+
+            x1 = max(0, x1 - pad_w)
+            y1 = max(0, y1 - pad_h)
+            x2 = min(w, x2 + pad_w)
+            y2 = min(h, y2 + pad_h)
+
+            if x2 > x1 and y2 > y1:
+                crop = orig_img_rgb[y1:y2, x1:x2]
+
+                # Padding Square
+                ch, cw = crop.shape[:2]
+                if ch != cw:
+                    max_dim = max(ch, cw)
+                    top = (max_dim - ch) // 2
+                    bottom = max_dim - ch - top
+                    left = (max_dim - cw) // 2
+                    right = max_dim - cw - left
+                    crop = cv2.copyMakeBorder(
+                        crop, top, bottom, left, right,
+                        cv2.BORDER_CONSTANT, value=[114, 114, 114]
+                    )
+                return (r_idx, b_idx, crop)
+        except Exception as e:
+            pass
+        return None
+
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
                              conf: float = 0.25, augment: bool = True,
                              agnostic_nms: bool = True, timeout: float = 60.0,
@@ -275,52 +314,30 @@ class ImageProcessor:
 
                 # 3. 准备分类裁剪 (Collection Phase)
                 all_crops = []
-                # 映射: list index -> (result_index_in_batch, box_index)
-                crop_map_info = []
-
-                # 初始化每个结果的 candidates_map
+                crop_map_info = []  # 映射: list index -> (result_index_in_batch, box_index)
                 batch_candidates_maps = [{} for _ in det_results]
 
                 if self.cls_model:
+                    crop_tasks = []
+                    # 收集所有需要裁剪的任务
                     for r_idx, r in enumerate(det_results):
                         if r.boxes is None: continue
-
                         orig_img_rgb = original_imgs_rgb[r_idx]
-                        h, w, _ = orig_img_rgb.shape
-
+                        
                         for b_idx, box in enumerate(r.boxes):
-                            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                            crop_tasks.append((r_idx, b_idx, box, orig_img_rgb))
 
-                            # === 裁剪逻辑 (保持与单张一致) ===
-                            expand_ratio = 0.1
-                            box_width = x2 - x1
-                            box_height = y2 - y1
-                            pad_w = int(box_width * expand_ratio)
-                            pad_h = int(box_height * expand_ratio)
-
-                            x1 = max(0, x1 - pad_w)
-                            y1 = max(0, y1 - pad_h)
-                            x2 = min(w, x2 + pad_w)
-                            y2 = min(h, y2 + pad_h)
-
-                            if x2 > x1 and y2 > y1:
-                                crop = orig_img_rgb[y1:y2, x1:x2]
-
-                                # Padding Square (Gray 114)
-                                ch, cw = crop.shape[:2]
-                                if ch != cw:
-                                    max_dim = max(ch, cw)
-                                    top = (max_dim - ch) // 2
-                                    bottom = max_dim - ch - top
-                                    left = (max_dim - cw) // 2
-                                    right = max_dim - cw - left
-                                    crop = cv2.copyMakeBorder(
-                                        crop, top, bottom, left, right,
-                                        cv2.BORDER_CONSTANT, value=[114, 114, 114]
-                                    )
-
-                                all_crops.append(crop)
-                                crop_map_info.append((r_idx, b_idx))
+                    # 并行执行裁剪和Padding
+                    if crop_tasks:
+                        # 这里的 workers 数量不需要太多，主要是为了解耦内存操作
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                            results = executor.map(self._crop_single_box, crop_tasks)
+                            
+                            for res in results:
+                                if res is not None:
+                                    r_idx, b_idx, crop = res
+                                    all_crops.append(crop)
+                                    crop_map_info.append((r_idx, b_idx))
 
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
@@ -441,8 +458,8 @@ class ImageProcessor:
 
     def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:
         """
-        读取源视频，应用跳帧和LAB增强，保存为临时MP4文件。
-        返回生成的视频的总帧数。
+        [修改] 读取源视频，应用跳帧和LAB增强，保存为临时MP4文件。
+        使用 Batch + ThreadPool 优化处理速度。
         """
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
@@ -452,15 +469,10 @@ class ImageProcessor:
         orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         orig_fps = cap.get(cv2.CAP_PROP_FPS)
-        if orig_fps <= 0: orig_fps = 25  # 默认值防止错误
+        if orig_fps <= 0: orig_fps = 25
 
-        # 保持原始分辨率，不进行缩放
-        new_w = orig_w
-        new_h = orig_h
-
-        # 初始化写入器 (使用 mp4v 编码)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(temp_path, fourcc, orig_fps, (new_w, new_h))
+        writer = cv2.VideoWriter(temp_path, fourcc, orig_fps, (orig_w, orig_h))
 
         if not writer.isOpened():
             cap.release()
@@ -468,25 +480,45 @@ class ImageProcessor:
 
         idx = 0
         saved_count = 0
-
+        batch_size = 32  # 批处理大小，控制内存占用
+        
         try:
             while True:
-                success, frame = cap.read()
-                if not success:
+                frames_batch = []
+                # 1. 预读取一批符合 stride 的帧
+                for _ in range(batch_size):
+                    # 循环读取直到找到符合 stride 的帧或视频结束
+                    while True:
+                        success, frame = cap.read()
+                        if not success:
+                            break # 视频结束
+                        
+                        current_idx = idx
+                        idx += 1
+                        
+                        if current_idx % stride == 0:
+                            frames_batch.append(frame)
+                            break # 找到一帧，加入批次
+                    
+                    if not success: # 如果视频读取完毕，跳出批次循环
+                        break
+
+                if not frames_batch:
                     break
 
-                # 1. 跳帧处理
-                if idx % stride == 0:
-                    if frame is not None and frame.size > 0:
-                        # [修改] 移除 resize 步骤，直接对原尺寸图像进行 LAB 增强
-                        enhanced_frame = self._preprocess_image(frame)
+                # 2. 并行预处理 (LAB增强)
+                processed_batch = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(frames_batch), 8)) as executor:
+                    # 使用 map 保证结果顺序与 frames_batch 一致
+                    results = executor.map(self._preprocess_image, frames_batch)
+                    processed_batch = list(results)
 
-                        # 2. 写入临时视频
-                        if enhanced_frame is not None:
-                            writer.write(enhanced_frame)
-                            saved_count += 1
+                # 3. 顺序写入视频
+                for p_frame in processed_batch:
+                    if p_frame is not None:
+                        writer.write(p_frame)
+                        saved_count += 1
 
-                idx += 1
         finally:
             cap.release()
             writer.release()
