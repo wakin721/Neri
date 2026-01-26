@@ -1268,6 +1268,7 @@ class SpeciesValidationPage(QWidget):
             return
 
         all_species_keys = set()
+        processed_basenames = set()  # [新增] 用于记录已处理（有JSON）的文件名
 
         # === 循环处理所有文件 ===
         for json_file in json_files:
@@ -1275,6 +1276,9 @@ class SpeciesValidationPage(QWidget):
             image_filename = image_basename_map.get(base_name)
             if not image_filename:
                 continue
+            
+            # [新增] 记录该文件已被处理
+            processed_basenames.add(base_name)
 
             json_path = os.path.join(photo_dir, json_file)
             try:
@@ -1326,7 +1330,7 @@ class SpeciesValidationPage(QWidget):
 
                     valid_species_list = []
                     is_ambiguous_image = False
-                    AMBIGUITY_THRESHOLD = 0.15
+                    AMBIGUITY_THRESHOLD = 0.10
 
                     for box in boxes:
                         candidates_pool = []
@@ -1377,17 +1381,34 @@ class SpeciesValidationPage(QWidget):
             except Exception as e:
                 logger.error(f"重载处理文件 {json_file} 时出错: {e}")
                 continue
+        
+        # [新增] 处理未检测（无JSON）的文件
+        all_source_basenames = set(image_basename_map.keys())
+        undetected_basenames = all_source_basenames - processed_basenames
+        
+        if undetected_basenames:
+            undetected_key = "未检测"
+            all_species_keys.add(undetected_key)
+            for base in undetected_basenames:
+                filename = image_basename_map[base]
+                self.species_image_map[undetected_key].append(filename)
 
         # ==================== 排序逻辑 ====================
         def sort_priority(name):
             if name == "需人工检验":
                 return 0  # 优先级最高
             if name in ["标记为空", "空"]:
-                return 2  # 优先级最低
+                return 2  # 优先级较低
+            if name == "未检测":
+                return 3  # [新增] 优先级最低
             return 1  # 普通物种
 
-        # 先按优先级排序，同优先级的按名称字母排序
-        sorted_species = sorted(list(all_species_keys), key=lambda x: (sort_priority(x), x))
+        # 修改处：在优先级之后，增加按数量降序排序（数量越多越靠前）
+        # 排序规则：1. 优先级 (0-3) -> 2. 数量 (负号表示降序) -> 3. 名称 (字母顺序)
+        sorted_species = sorted(
+            list(all_species_keys), 
+            key=lambda x: (sort_priority(x), -len(self.species_image_map[x]), x)
+        )
 
         for species in sorted_species:
             count = len(self.species_image_map[species])
@@ -1620,7 +1641,7 @@ class SpeciesValidationPage(QWidget):
         species_name = selected_text.split(' (')[0] if ' (' in selected_text else selected_text
 
         self.current_selected_species = species_name
-        image_files = self.species_image_map.get(species_name, [])
+        image_files = sorted(self.species_image_map.get(species_name, []))
 
         photo_count = len(image_files)
         if hasattr(self.controller, 'status_bar'):
