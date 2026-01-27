@@ -1374,6 +1374,16 @@ class SpeciesValidationPage(QWidget):
                     else:
                         final_species_name = "标记为空"
 
+                if final_species_name and final_species_name not in ["需人工检验", "标记为空", "未检测", "空"]:
+                    # 1. 统一逗号格式
+                    normalized_name = final_species_name.replace('，', ',')
+                    if ',' in normalized_name:
+                        # 2. 拆分、去除空格、排序
+                        parts = [p.strip() for p in normalized_name.split(',') if p.strip()]
+                        if parts:
+                            # 3. 重新组合
+                            final_species_name = ",".join(sorted(parts))
+
                 # 将文件添加到对应的 Map (在循环内收集数据)
                 all_species_keys.add(final_species_name)
                 self.species_image_map[final_species_name].append(image_filename)
@@ -2328,10 +2338,18 @@ class SpeciesValidationPage(QWidget):
         """增加快速标记物种的使用次数"""
         if hasattr(self.controller, 'settings_manager'):
             quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
-            if species_name in quick_marks_data:
-                quick_marks_data[species_name] = quick_marks_data.get(species_name, 0) + 1
-            else:
-                quick_marks_data[species_name] = 1
+            # 1. 确保中文逗号被替换为英文逗号
+            normalized_name = species_name.replace('，', ',')
+            
+            # 2. 按逗号拆分并去除首尾空格
+            species_list = [s.strip() for s in normalized_name.split(',') if s.strip()]
+            
+            # 3. 对拆分后的每个独立物种分别计数
+            for single_species in species_list:
+                if single_species in quick_marks_data:
+                    quick_marks_data[single_species] = quick_marks_data.get(single_species, 0) + 1
+                else:
+                    quick_marks_data[single_species] = 1
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
 
     def _update_json_file(self, file_name, new_species=None, new_count=None, new_remark=None):
