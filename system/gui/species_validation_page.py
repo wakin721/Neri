@@ -1285,13 +1285,15 @@ class SpeciesValidationPage(QWidget):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     detection_info = json.load(f)
 
-                final_species_name = "标记为空"  # 默认归宿
+                final_species_name = "空"  # 默认归宿
 
                 # ==================== 1. 人工校验 (最高优先级) ====================
                 if detection_info.get('最低置信度') == '人工校验':
-                    final_species_name = detection_info.get('物种名称', '标记为空')
-                    if final_species_name in ["", "未知", None]:
+                    res_name = detection_info.get('物种名称', '')
+                    if res_name in ["空", "标记为空", "", "未知", None]:
                         final_species_name = "标记为空"
+                    else:
+                        final_species_name = res_name
 
                 # ==================== 2. 视频文件处理逻辑 ====================
                 elif 'tracks' in detection_info:
@@ -1320,7 +1322,7 @@ class SpeciesValidationPage(QWidget):
                         unique_species = sorted(list(set(valid_votes)))
                         final_species_name = ",".join(unique_species)
                     else:
-                        final_species_name = "标记为空"
+                        final_species_name = "空"
 
                 # ==================== 3. 图片文件处理逻辑 ====================
                 else:
@@ -1372,7 +1374,7 @@ class SpeciesValidationPage(QWidget):
                         unique_species = sorted(list(set(valid_species_list)))
                         final_species_name = ",".join(unique_species)
                     else:
-                        final_species_name = "标记为空"
+                        final_species_name = "空"
 
                 if final_species_name and final_species_name not in ["需人工检验", "标记为空", "未检测", "空"]:
                     # 1. 统一逗号格式
@@ -1406,12 +1408,14 @@ class SpeciesValidationPage(QWidget):
         # ==================== 排序逻辑 ====================
         def sort_priority(name):
             if name == "需人工检验":
-                return 0  # 优先级最高
-            if name in ["标记为空", "空"]:
-                return 2  # 优先级较低
+                return 0
+            if name == "空": # 人工确认过的空优先级排在普通物种后面
+                return 2
+            if name == "标记为空":      # 模型检测的空排在最后
+                return 3
             if name == "未检测":
-                return 3  # [新增] 优先级最低
-            return 1  # 普通物种
+                return 4
+            return 1
 
         # 修改处：在优先级之后，增加按数量降序排序（数量越多越靠前）
         # 排序规则：1. 优先级 (0-3) -> 2. 数量 (负号表示降序) -> 3. 名称 (字母顺序)
