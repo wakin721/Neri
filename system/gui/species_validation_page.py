@@ -1734,6 +1734,9 @@ class SpeciesValidationPage(QWidget):
                     self._update_detection_info_display()
                 except:
                     pass
+            else:
+                # 未检测到JSON文件（未检测），强制重置显示信息
+                self.species_info_label.setText("物种:  | 数量:  | 置信度: ")
 
         # 加载图片信息后，刷新下拉框
         if self.current_selected_species not in ["标记为空", "空"]:
