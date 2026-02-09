@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem, QApplication, QLabel
+    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpacerItem, QApplication, QLabel, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QPalette, QIcon, QPixmap, QPainter, QColor
@@ -407,7 +407,7 @@ class StartPage(QWidget):
     def _setup_connections(self):
         """设置信号连接"""
         # 路径输入控件
-        self.file_path_widget.browse_requested.connect(self.browse_file_path_requested.emit)
+        self.file_path_widget.browse_requested.connect(self._on_browse_file_path)
         self.file_path_widget.path_changed.connect(self.file_path_changed.emit)
 
         # 使用 lambda 丢弃 textChanged 发出的字符串参数，避免 TypeError
@@ -420,6 +420,25 @@ class StartPage(QWidget):
 
         # 开始/停止按钮
         self.start_stop_button.clicked.connect(self.toggle_processing_requested.emit)
+
+    def _on_browse_file_path(self):
+        """处理浏览文件路径请求，默认打开当前已有路径"""
+        # 获取当前已填写的路径
+        current_path = self.get_file_path()
+        
+        # 确定起始目录：如果当前路径存在，则使用该路径；否则默认为空（通常是系统最近访问目录）
+        start_dir = current_path if current_path and os.path.exists(current_path) else ""
+        
+        # 打开文件夹选择对话框
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择图像文件夹",  # 对话框标题
+            start_dir         # 起始目录 [关键修改]
+        )
+        
+        # 如果用户选择了路径（未点击取消），则更新控件
+        if directory:
+            self.set_file_path(directory)
 
     def set_processing_state(self, is_processing: bool):
         """设置UI的处理状态"""
