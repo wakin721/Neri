@@ -84,7 +84,7 @@ class AdvancedPage(QWidget):
         self.cache_size_var = "正在计算..."
         self.update_channel_var = "预览版 (Preview)"
         self.update_mirror_var = "国内源 (KKGitHub)"# 默认镜像源为 国内源 (KKGitHub)
-        self.pytorch_version_var = "2.9.0 (CUDA 13.0)"
+        self.pytorch_version_var = "2.10.0 (CPU Only)"
         self.package_var = ""
         self.version_constraint_var = ""
         self.pytorch_status_var = "未检查"
@@ -616,10 +616,10 @@ class AdvancedPage(QWidget):
 
         self.pytorch_version_combo = ModernComboBox()
         versions = [
-            "2.9.1 (CUDA 13.0)",
-            "2.9.1 (CUDA 12.8)",
-            "2.9.1 (CUDA 12.6)",
-            "2.9.1 (CPU Only)",
+            "2.10.0 (CUDA 13.0)",
+            "2.10.0 (CUDA 12.8)",
+            "2.10.0 (CUDA 12.6)",
+            "2.10.0 (CPU Only)",
             "2.7.1 (CUDA 12.8)",
             "2.7.1 (CUDA 12.6)",
             "2.7.1 (CUDA 11.8)",
