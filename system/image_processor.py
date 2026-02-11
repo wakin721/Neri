@@ -310,6 +310,7 @@ class ImageProcessor:
                     iou=iou,
                     conf=conf,
                     max_det=20,
+                    save=False
                 )
 
                 # 3. 准备分类裁剪 (Collection Phase)
@@ -342,7 +343,7 @@ class ImageProcessor:
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
                         # 这里的 batch size 可以根据显存调整，YOLO通常自动处理
-                        cls_results_list = self.cls_model(all_crops, half=use_fp16)
+                        cls_results_list = self.cls_model(all_crops, half=use_fp16, save=False)
 
                         # 5. 映射回原结果 (Map Back)
                         for i, cls_res in enumerate(cls_results_list):

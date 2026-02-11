@@ -11,6 +11,7 @@ from PySide6.QtGui import (
     QKeySequence, QShortcut, QPainterPath, QDesktopServices
 )
 from PySide6.QtSvg import QSvgRenderer
+import openpyxl
 import os
 import json
 import logging
@@ -88,10 +89,19 @@ class CorrectionDialog(QDialog):
             }
         """)
 
+        try:
+            self.excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
+        except NameError:
+            # 兼容未导入 resource_path 的情况
+            self.excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
+
         # 初始化输入框
         self.species_name_edit = QLineEdit()
         self.species_count_edit = QLineEdit()
+        self.species_type_edit = QLineEdit()
         self.remark_edit = QLineEdit()
+
+        self.species_name_edit.editingFinished.connect(self._auto_fill_type_from_db)
 
         # 如果有原始信息，则预先填充输入框
         if self.original_info:
@@ -122,6 +132,7 @@ class CorrectionDialog(QDialog):
             self.species_name_edit.setText(recalculated_info.get('物种名称', ''))
             self.species_count_edit.setText(recalculated_info.get('物种数量', ''))
             self.remark_edit.setText(self.original_info.get('备注', ''))
+            self._auto_fill_type_from_db()
 
         self.setup_ui()
 
@@ -136,6 +147,7 @@ class CorrectionDialog(QDialog):
 
         form_layout.addRow("正确物种名称:", self.species_name_edit)
         form_layout.addRow("物种数量:", self.species_count_edit)
+        form_layout.addRow("物种类型:", self.species_type_edit)
         form_layout.addRow("备注:", self.remark_edit)
 
         layout.addLayout(form_layout)
@@ -159,11 +171,93 @@ class CorrectionDialog(QDialog):
 
         self.resize(400, 200)
 
+    def _auto_fill_type_from_db(self):
+        full_name_str = self.species_name_edit.text().strip().replace('，', ',')
+        if not full_name_str:
+            return
+
+        species_names = [n.strip() for n in full_name_str.split(',') if n.strip()]
+        found_types = []
+
+        # 调用父类 (SpeciesValidationPage) 的缓存查询逻辑
+        for name in species_names:
+            sType = self.parent._get_species_info_with_cache(name)
+            found_types.append(sType)
+
+        if any(found_types):
+            combined_type = ",".join(found_types)
+            self.species_type_edit.setText(combined_type)
+
+    def _update_excel_db(self, name_str, type_str):
+        """更新或新增 Excel 中的物种类型（支持批量处理多个物种）"""
+        if not name_str or not type_str or not os.path.exists(self.excel_path):
+            return
+
+        # 拆分名称和类型
+        names = [n.strip() for n in name_str.replace('，', ',').split(',') if n.strip()]
+        types = [t.strip() for t in type_str.replace('，', ',').split(',') if t.strip()]
+
+        # 只有当名称数量和类型数量一致时，才进行拆分更新
+        # 否则无法确定对应关系，就不更新数据库（或者您可以选择其他策略）
+        if len(names) != len(types):
+            logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新名录。")
+            return
+
+        try:
+            workbook = openpyxl.load_workbook(self.excel_path)
+            sheet = workbook.active
+
+            # 获取当前Excel中的所有物种所在行映射 {name: row_index}
+            existing_rows = {}
+            for idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
+                cell_b = row[1]  # B列
+                if cell_b.value:
+                    existing_rows[str(cell_b.value).strip()] = idx
+
+            max_row = sheet.max_row
+            updated_any = False
+
+            # 遍历每一对 (物种, 类型) 进行更新或新增
+            for s_name, s_type in zip(names, types):
+                if not s_name or not s_type:
+                    continue
+
+                if s_name in existing_rows:
+                    # [情况1] 存在：更新 P 列
+                    row_idx = existing_rows[s_name]
+                    cell_p = sheet.cell(row=row_idx, column=16)  # P列
+                    current_val = str(cell_p.value).strip() if cell_p.value else ""
+
+                    if current_val != s_type:
+                        cell_p.value = s_type
+                        updated_any = True
+                        logger.info(f"更新物种名录: {s_name} -> {s_type}")
+                else:
+                    # [情况2] 不存在：新增一行
+                    max_row += 1
+                    sheet.cell(row=max_row, column=2).value = s_name  # B列
+                    sheet.cell(row=max_row, column=16).value = s_type  # P列
+                    # 更新映射，防止同一次保存中重复添加
+                    existing_rows[s_name] = max_row
+                    updated_any = True
+                    logger.info(f"新增物种到名录: {s_name} -> {s_type}")
+
+            if updated_any:
+                workbook.save(self.excel_path)
+
+            workbook.close()
+
+        except PermissionError:
+            QMessageBox.warning(self, "保存失败", "无法更新物种名录文件，请检查文件是否已在Excel中打开。")
+        except Exception as e:
+            logger.error(f"更新物种名录失败: {e}")
+
     def accept_input(self):
         # 将中文逗号替换为英文逗号
         species_name = self.species_name_edit.text().strip().replace('，', ',')
         species_count_str = self.species_count_edit.text().strip().replace('，', ',')
         remark = self.remark_edit.text().strip()
+        species_type = self.species_type_edit.text().strip()
 
         # 校验物种名称
         if not species_name:
@@ -196,6 +290,10 @@ class CorrectionDialog(QDialog):
                     '3. 文字"空"'
                 )
                 return
+
+        if species_type:
+            # 在后台线程或直接执行更新操作
+            self._update_excel_db(species_name, species_type)
 
         self.result = (species_name, species_count_str, remark)
         self.accept()
@@ -505,6 +603,9 @@ class SpeciesValidationPage(QWidget):
 
         # 启用事件过滤器以支持点击暂停
         self.species_image_label.installEventFilter(self)
+
+        self.species_cache_file = os.path.join("temp", "species_db_cache.json")
+        self.species_cache = self._load_species_cache()
 
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
@@ -1155,7 +1256,7 @@ class SpeciesValidationPage(QWidget):
         info_slider_group = ModernGroupBox("检测信息与设置")
         info_slider_layout = QVBoxLayout(info_slider_group)
 
-        self.species_info_label = QLabel("物种:  | 数量:  | 置信度: ")
+        self.species_info_label = QLabel("物种:  | 数量:  | 类型:  | 置信度: ")
         info_slider_layout.addWidget(self.species_info_label)
 
         # 置信度控制
@@ -1648,7 +1749,7 @@ class SpeciesValidationPage(QWidget):
         self.species_image_label.setText("请从左侧列表选择物种和图像")
         if hasattr(self.species_image_label, 'pixmap'):
             self.species_image_label.pixmap = None
-        self.species_info_label.setText("物种:  | 数量:  | 置信度: ")
+        self.species_info_label.setText("物种:  | 数量:  | 类型:  | 置信度: ")
 
         # 解析选中的物种名称
         selected_text = selected_items[0].text()
@@ -1736,7 +1837,7 @@ class SpeciesValidationPage(QWidget):
                     pass
             else:
                 # 未检测到JSON文件（未检测），强制重置显示信息
-                self.species_info_label.setText("物种:  | 数量:  | 置信度: ")
+                self.species_info_label.setText("物种:  | 数量:  | 类型:  | 置信度: ")
 
         # 加载图片信息后，刷新下拉框
         if self.current_selected_species not in ["标记为空", "空"]:
@@ -1961,7 +2062,6 @@ class SpeciesValidationPage(QWidget):
                     padding: {padding};
                     font-size: {font_size};
                     text-align: center;
-                    word-wrap: break-word;
                 }}
             """)
 
@@ -2561,7 +2661,23 @@ class SpeciesValidationPage(QWidget):
                     confidence = self.current_species_info.get('最低置信度', '未知')
 
             # 更新 UI 标签
-            info_text = f"物种: {species_name} | 数量: {species_count} | 置信度: {confidence}"
+            species_type_str = "空"
+            if species_name and species_name not in ["空", "未知", "N/A", "标记为空"]:
+                type_list = []
+                # 支持多物种（逗号分隔）
+                names = species_name.replace('，', ',').split(',')
+                for name in names:
+                    name = name.strip()
+                    if name:
+                        # 利用缓存获取类型，若无则自动查Excel并更新缓存
+                        sType = self._get_species_info_with_cache(name)
+                        type_list.append(sType if sType else "空")
+
+                if type_list:
+                    species_type_str = ",".join(type_list)
+
+            # 更新 UI 标签
+            info_text = f"物种: {species_name} | 数量: {species_count} | 类型: {species_type_str} | 置信度: {confidence}"
             self.species_info_label.setText(info_text)
 
         except Exception as e:
@@ -3148,3 +3264,155 @@ class SpeciesValidationPage(QWidget):
                 self.video_thread.conf_threshold = self.species_conf_var
                 if self.video_thread.paused:
                     self.video_thread.refresh_frame()
+
+    def _load_species_cache(self):
+        """启动时加载临时物种缓存，并预加载 quick_mark.json 中使用频率最高的200种物种"""
+        cache = {}
+
+        # 1. 尝试加载现有缓存
+        if os.path.exists(self.species_cache_file):
+            try:
+                with open(self.species_cache_file, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+            except Exception as e:
+                logger.error(f"加载物种缓存失败: {e}")
+
+        # 2. 从 quick_mark.json 同步高频物种
+        try:
+            # 获取 quick_mark.json 路径
+            qm_path = os.path.join("temp", "quick_mark.json")
+            # 如果能通过 controller 获取更准确的路径则使用，否则使用默认
+            if hasattr(self.controller, 'settings_manager') and hasattr(self.controller.settings_manager,
+                                                                        'settings_dir'):
+                qm_path = os.path.join(self.controller.settings_manager.settings_dir, "quick_mark.json")
+
+            if os.path.exists(qm_path):
+                with open(qm_path, 'r', encoding='utf-8') as f:
+                    qm_data = json.load(f)
+
+                # 提取计数 (排除非物种key)
+                excluded_keys = {'list', 'list_auto', 'auto'}
+                species_counts = {k: v for k, v in qm_data.items() if
+                                  k not in excluded_keys and isinstance(v, (int, float))}
+
+                # 按使用次数降序排序，取前200名
+                top_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)[:200]
+                missing_species = [name for name, count in top_species if name not in cache]
+
+                # 如果有缺失的物种，从Excel批量读取
+                if missing_species:
+                    logger.info(f"发现 {len(missing_species)} 个高频物种未在缓存中，正在从Excel同步...")
+
+                    # 获取 Excel 路径，尝试兼容 resource_path
+                    try:
+                        from system.utils import resource_path
+                        excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
+                    except ImportError:
+                        excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
+
+                    if os.path.exists(excel_path):
+                        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+                        sheet = wb.active
+
+                        missing_set = set(missing_species)
+
+                        # 遍历 Excel 查找缺失物种 (B列为中文名, P列为类型)
+                        for row in sheet.iter_rows(min_row=2, values_only=True):
+                            if not missing_set:
+                                break
+
+                            # 获取物种名 (B列, 索引1)
+                            name = str(row[1]).strip() if row[1] else ""
+                            if name in missing_set:
+                                # 获取物种类型 (P列, 索引15)
+                                type_str = str(row[15]).strip() if (len(row) > 15 and row[15]) else ""
+                                cache[name] = type_str
+                                missing_set.remove(name)
+
+                        wb.close()
+
+                        # 对于在Excel中未找到的物种，设为空字符串，防止下次重复无效查询
+                        for name in missing_set:
+                            cache[name] = "空"
+
+                        # 将更新后的缓存保存回磁盘
+                        try:
+                            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
+                            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
+                                json.dump(cache, f, ensure_ascii=False, indent=4)
+                        except Exception as e:
+                            logger.error(f"保存预加载缓存失败: {e}")
+
+                        logger.info("高频物种缓存同步完成")
+        except Exception as e:
+            logger.error(f"同步高频物种缓存失败: {e}")
+
+        return cache
+
+    def _save_species_cache(self):
+        """保存物种缓存到临时文件"""
+        try:
+            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
+            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.species_cache, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"保存物种缓存失败: {e}")
+
+    def _get_species_info_with_cache(self, species_name):
+        """从缓存读取，若无则查Excel并更新缓存，同时处理200条清理逻辑"""
+        if not species_name:
+            return "空"
+
+        # 1. 命中缓存直接返回
+        if species_name in self.species_cache:
+            return self.species_cache[species_name]
+
+        # 2. 未命中，从 Excel 中查询
+        species_type = "空"
+        try:
+            excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
+            if os.path.exists(excel_path):
+                # 这里的逻辑参考原代码中的 openpyxl 查询
+                wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+                sheet = wb.active
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if row[1] and str(row[1]).strip() == species_name:
+                        species_type = str(row[15]) if len(row) > 15 and row[15] else ""
+                        break
+                wb.close()
+        except Exception as e:
+            logger.error(f"查询Excel失败: {e}")
+
+        # 3. 检查缓存容量，执行清理逻辑
+        if len(self.species_cache) >= 200:
+            self._prune_species_cache()
+
+        # 4. 更新缓存
+        self.species_cache[species_name] = species_type
+        self._save_species_cache()
+        return species_type
+
+    def _prune_species_cache(self):
+        """当超过200种时，根据 quick_mark.json 中的使用次数删除最少使用的50种"""
+        try:
+            qm_path = os.path.join("temp", "quick_mark.json")
+            usage_counts = {}
+            if os.path.exists(qm_path):
+                with open(qm_path, 'r', encoding='utf-8') as f:
+                    usage_counts = json.load(f)
+
+            # 找出缓存中所有物种在 quick_mark 中的次数，没有记录的视为 0
+            cache_items = []
+            for name in self.species_cache.keys():
+                count = usage_counts.get(name, 0)
+                cache_items.append((name, count))
+
+            # 按使用次数升序排序，取前50个
+            to_delete = sorted(cache_items, key=lambda x: x[1])[:50]
+
+            for name, _ in to_delete:
+                del self.species_cache[name]
+
+            logger.info(f"物种缓存已清理，删除了使用次数最少的 {len(to_delete)} 种")
+        except Exception as e:
+            logger.error(f"清理物种缓存失败: {e}")

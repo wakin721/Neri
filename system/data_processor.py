@@ -170,7 +170,8 @@ class DataProcessor:
                 column_mapping = {
                     'A': '学名', 'B': '中文名', 'H': '纲',
                     'I': '目拉丁名', 'J': '目中文名', 'K': '科拉丁名',
-                    'L': '科中文名', 'M': '属拉丁名', 'N': '属中文名'
+                    'L': '科中文名', 'M': '属拉丁名', 'N': '属中文名',
+                    'P': '物种类型'
                 }
 
                 df_species.columns = [chr(65 + i) for i in range(len(df_species.columns))]
@@ -189,7 +190,8 @@ class DataProcessor:
                             '科名': str(row.get('L', '')).strip(),
                             '科拉丁名': str(row.get('K', '')).strip(),
                             '属名': str(row.get('N', '')).strip(),
-                            '属拉丁名': str(row.get('M', '')).strip()
+                            '属拉丁名': str(row.get('M', '')).strip(),
+                            '物种类型': str(row.get('P', '')).strip()
                         }
 
                 if species_info_map:
@@ -343,12 +345,17 @@ class DataProcessor:
                             type_list.append("人员")
                         elif species in species_info_map:  # 核心匹配逻辑
                             s_info = species_info_map[species]
-                            if s_info.get('纲') == '鸟纲':
-                                type_list.append("鸟")
-                            elif s_info.get('纲') == '哺乳纲':
-                                type_list.append("兽")
-                            elif s_info.get('纲') == '家畜':
-                                type_list.append("家畜")
+                            p_type = s_info.get('物种类型', '')
+                            if p_type:
+                                type_list.append(p_type)
+                            else:
+                                # 如果 P 列为空，则回退到原有的根据纲判断的逻辑（可选）
+                                if s_info.get('纲') in ['鸟纲', '鸟']:
+                                    type_list.append("鸟")
+                                elif s_info.get('纲') in ['哺乳纲', '兽']:
+                                    type_list.append("兽")
+                                elif s_info.get('纲') == '家畜':
+                                    type_list.append("家畜")
 
                             for key in sci_info_lists.keys():
                                 if key != '纲': sci_info_lists[key].append(s_info.get(key, ''))
