@@ -149,7 +149,7 @@ def get_pytorch_install_command(cuda_version):
     if cuda_version is None:
         # CPU版本
         print("将安装CPU版本的PyTorch")
-        return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
+        return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio"]
 
     # 解析CUDA版本
     try:
@@ -161,41 +161,41 @@ def get_pytorch_install_command(cuda_version):
         if cuda_major >= 13:
             # CUDA 13.0+
             print("安装CUDA 13.0版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu130"]
         elif cuda_major >= 12 and cuda_minor >= 8:
             # CUDA 12.8
             print("安装CUDA 12.8版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu128"]
         elif cuda_major >= 12 and cuda_minor >= 6:
             # CUDA 12.6
             print("安装CUDA 12.6版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu126"]
         elif cuda_major >= 12 and cuda_minor >= 4:
             # CUDA 12.4
             print("安装CUDA 12.4版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu124"]
         elif cuda_major >= 12 and cuda_minor >= 1:
             # CUDA 12.1
             print("安装CUDA 12.1版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu121"]
         elif cuda_major >= 11 and cuda_minor >= 8:
             # CUDA 11.8
             print("安装CUDA 11.8版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio", "--index-url",
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio", "--index-url",
                     "https://download.pytorch.org/whl/cu118"]
         else:
             # 旧版本CUDA，使用CPU版本
             print(f"CUDA版本 {cuda_version} 过旧，将安装CPU版本的PyTorch")
-            return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
+            return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio"]
 
     except Exception as e:
         print(f"解析CUDA版本时出错: {e}，将使用CPU版本")
-        return [python_exe_path, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
+        return [python_exe_path, "-m", "pip", "install", "-U", "torch", "torchvision", "torchaudio"]
 
 
 def is_pytorch_installed():
