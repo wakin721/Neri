@@ -189,8 +189,8 @@ class CorrectionDialog(QDialog):
             self.species_type_edit.setText(combined_type)
 
     def _update_excel_db(self, name_str, type_str):
-        """更新或新增 Excel 中的物种类型（支持批量处理多个物种）"""
-        if not name_str or not type_str or not os.path.exists(self.excel_path):
+        """更新或新增 Excel 中的物种类型，并同步更新 JSON 缓存"""
+        if not name_str or not type_str:
             return
 
         # 拆分名称和类型
@@ -198,59 +198,93 @@ class CorrectionDialog(QDialog):
         types = [t.strip() for t in type_str.replace('，', ',').split(',') if t.strip()]
 
         # 只有当名称数量和类型数量一致时，才进行拆分更新
-        # 否则无法确定对应关系，就不更新数据库（或者您可以选择其他策略）
         if len(names) != len(types):
             logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新名录。")
             return
 
-        try:
-            workbook = openpyxl.load_workbook(self.excel_path)
-            sheet = workbook.active
+        # --- 1. 更新 Excel 文件 ---
+        if os.path.exists(self.excel_path):
+            try:
+                workbook = openpyxl.load_workbook(self.excel_path)
+                sheet = workbook.active
 
-            # 获取当前Excel中的所有物种所在行映射 {name: row_index}
-            existing_rows = {}
-            for idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
-                cell_b = row[1]  # B列
-                if cell_b.value:
-                    existing_rows[str(cell_b.value).strip()] = idx
+                # 获取当前Excel中的所有物种所在行映射 {name: row_index}
+                existing_rows = {}
+                for idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
+                    cell_b = row[1]  # B列
+                    if cell_b.value:
+                        existing_rows[str(cell_b.value).strip()] = idx
 
-            max_row = sheet.max_row
-            updated_any = False
+                max_row = sheet.max_row
+                updated_any = False
 
-            # 遍历每一对 (物种, 类型) 进行更新或新增
-            for s_name, s_type in zip(names, types):
-                if not s_name or not s_type:
-                    continue
+                # 遍历每一对 (物种, 类型) 进行 Excel 更新
+                for s_name, s_type in zip(names, types):
+                    if not s_name or not s_type:
+                        continue
 
-                if s_name in existing_rows:
-                    # [情况1] 存在：更新 P 列
-                    row_idx = existing_rows[s_name]
-                    cell_p = sheet.cell(row=row_idx, column=16)  # P列
-                    current_val = str(cell_p.value).strip() if cell_p.value else ""
+                    if s_name in existing_rows:
+                        # [情况1] 存在：更新 P 列
+                        row_idx = existing_rows[s_name]
+                        cell_p = sheet.cell(row=row_idx, column=16)  # P列
+                        current_val = str(cell_p.value).strip() if cell_p.value else ""
 
-                    if current_val != s_type:
-                        cell_p.value = s_type
+                        if current_val != s_type:
+                            cell_p.value = s_type
+                            updated_any = True
+                            logger.info(f"更新物种名录Excel: {s_name} -> {s_type}")
+                    else:
+                        # [情况2] 不存在：新增一行
+                        max_row += 1
+                        sheet.cell(row=max_row, column=2).value = s_name  # B列
+                        sheet.cell(row=max_row, column=16).value = s_type  # P列
+                        existing_rows[s_name] = max_row
                         updated_any = True
-                        logger.info(f"更新物种名录: {s_name} -> {s_type}")
-                else:
-                    # [情况2] 不存在：新增一行
-                    max_row += 1
-                    sheet.cell(row=max_row, column=2).value = s_name  # B列
-                    sheet.cell(row=max_row, column=16).value = s_type  # P列
-                    # 更新映射，防止同一次保存中重复添加
-                    existing_rows[s_name] = max_row
-                    updated_any = True
-                    logger.info(f"新增物种到名录: {s_name} -> {s_type}")
+                        logger.info(f"新增物种到名录Excel: {s_name} -> {s_type}")
 
-            if updated_any:
-                workbook.save(self.excel_path)
+                if updated_any:
+                    workbook.save(self.excel_path)
+                    logger.info("Excel 数据库已成功保存。")
 
-            workbook.close()
+                workbook.close()
 
-        except PermissionError:
-            QMessageBox.warning(self, "保存失败", "无法更新物种名录文件，请检查文件是否已在Excel中打开。")
+            except PermissionError:
+                QMessageBox.warning(self, "保存失败", "无法更新物种名录文件，请检查文件是否已在Excel中打开。")
+            except Exception as e:
+                logger.error(f"更新物种名录Excel失败: {e}")
+
+        # --- 2. 同步更新 JSON 缓存文件 (temp/species_db_cache.json) ---
+        try:
+            cache_path = os.path.join("temp", "species_db_cache.json")
+            cache_data = {}
+
+            # 2.1 读取现有缓存
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, 'r', encoding='utf-8') as f:
+                        cache_data = json.load(f)
+                except json.JSONDecodeError:
+                    cache_data = {}  # 如果文件损坏，则重新开始
+
+            # 2.2 更新字典数据
+            for s_name, s_type in zip(names, types):
+                if s_name and s_type:
+                    cache_data[s_name] = s_type
+
+                    # 同时更新父页面的内存缓存，确保界面即时生效
+                    if hasattr(self.parent, 'species_cache'):
+                        self.parent.species_cache[s_name] = s_type
+
+            # 2.3 写入文件
+            # 确保存储目录存在
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=4)
+
+            logger.info(f"已同步更新物种缓存到: {cache_path}")
+
         except Exception as e:
-            logger.error(f"更新物种名录失败: {e}")
+            logger.error(f"同步更新JSON缓存失败: {e}")
 
     def accept_input(self):
         # 将中文逗号替换为英文逗号
@@ -1495,7 +1529,7 @@ class SpeciesValidationPage(QWidget):
                 logger.error(f"重载处理文件 {json_file} 时出错: {e}")
                 continue
         
-        # [新增] 处理未检测（无JSON）的文件
+        # 处理未检测（无JSON）的文件
         all_source_basenames = set(image_basename_map.keys())
         undetected_basenames = all_source_basenames - processed_basenames
         
@@ -2163,7 +2197,7 @@ class SpeciesValidationPage(QWidget):
                 new_conf
             )
 
-        # [修改] 实时更新视频阈值并请求刷新
+        # 实时更新视频阈值并请求刷新
         if self.video_thread and self.video_thread.isRunning():
             self.video_thread.conf_threshold = new_conf
             # 如果视频暂停，请求刷新当前帧以显示新的框
@@ -2236,7 +2270,6 @@ class SpeciesValidationPage(QWidget):
         all_image_data = []
         earliest_date = None
 
-        # === 修复开始：同时支持图片和视频文件的查找与元数据提取 ===
         for json_file in json_files:
             json_path = os.path.join(temp_dir, json_file)
             image_filename_base = os.path.splitext(json_file)[0]
@@ -2295,7 +2328,6 @@ class SpeciesValidationPage(QWidget):
                         earliest_date = date_taken
             except Exception as e:
                 logger.error(f"处理文件 {json_file} 时出错: {e}")
-        # === 修复结束 ===
 
         if not all_image_data:
             QMessageBox.critical(self, "错误", "未能成功处理任何数据，无法导出。")
