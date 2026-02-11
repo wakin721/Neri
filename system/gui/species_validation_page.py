@@ -2105,13 +2105,23 @@ class SpeciesValidationPage(QWidget):
         else:
             return  # 如果格式未知则不执行操作
 
-        default_filename = f"validation_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}{file_extension}"
+        # 1. 提取文件夹名称 (使用 normpath 去除可能的末尾斜杠，然后取 basename)
+        folder_name = os.path.basename(os.path.normpath(source_dir))
+
+        # 2. 生成时间戳
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        # 3. 拼接文件名: 文件夹名_validation_data_时间戳.后缀
+        default_filename = f"{folder_name}_validation_data_{timestamp}{file_extension}"
+
+        # 4. 组合完整路径，使保存对话框默认打开源目录
+        default_save_path = os.path.join(source_dir, default_filename)
 
         # 弹出文件保存对话框
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "选择表格保存位置",
-            default_filename,
+            default_save_path,
             file_types
         )
 
