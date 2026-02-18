@@ -1120,6 +1120,7 @@ class PreviewPage(QWidget):
             # === 动态统计逻辑 ===
             counts = Counter()
             valid_confidences = []
+            has_manual = False
 
             # 获取检测框列表
             boxes = self.current_preview_info.get("检测框",
@@ -1131,8 +1132,17 @@ class PreviewPage(QWidget):
                 for box in boxes:
                     # 1. 获取基础信息
                     species_name = box.get("物种", box.get("species", "未知"))
-                    confidence = float(box.get("置信度", box.get("confidence", 0.0)))
-                    final_name = species_name  # 默认使用原始识别结果
+                    raw_conf = box.get("置信度", box.get("confidence", 0.0))
+                    is_manual = (str(raw_conf) == "人工校验")
+                    if is_manual:
+                        confidence = 1.0  # 赋满值确保通过任何置信度滑块的筛选
+                    else:
+                        try:
+                            confidence = float(raw_conf)
+                        except ValueError:
+                            confidence = 0.0
+
+                    final_name = species_name
                     is_valid = False
 
                     # 2. 候选项逻辑 (与画框逻辑保持一致)
@@ -1141,13 +1151,22 @@ class PreviewPage(QWidget):
                         candidate_matched = False
                         for cand in box["候选项"]:
                             c_name = cand.get('name')
-                            c_conf = float(cand.get('conf', 0))
+                            c_raw_conf = cand.get('conf', 0)
+                            c_is_manual = (str(c_raw_conf) == "人工校验")
+                            if c_is_manual:
+                                c_conf = 1.0
+                            else:
+                                try:
+                                    c_conf = float(c_raw_conf)
+                                except ValueError:
+                                    c_conf = 0.0
                             # 获取该候选项的阈值
                             c_thresh = self.species_conf_map.get(c_name, self.species_conf_map.get("global", 0.25))
 
                             if c_conf >= c_thresh:
                                 final_name = c_name
                                 confidence = c_conf
+                                is_manual = c_is_manual
                                 candidate_matched = True
                                 break  # 找到第一个满足的候选项即可
 
@@ -1164,17 +1183,27 @@ class PreviewPage(QWidget):
                     # 4. 统计
                     if is_valid:
                         counts[final_name] += 1
-                        valid_confidences.append(confidence)
+                        if is_manual:
+                            has_manual = True
+                        else:
+                            valid_confidences.append(confidence)
 
             # === 构建显示文本 ===
             detection_parts = ["检测结果:"]
+
+            # 检查 JSON 外层是否直接指定了人工校验（专门处理没有画框但人工标记为“空”的图像）
+            root_conf = str(self.current_preview_info.get("最低置信度", ""))
+            if root_conf == "人工校验":
+                has_manual = True
 
             if counts:
                 # 按数量降序排列
                 info_parts = [f"{n}: {c}只" for n, c in counts.most_common()]
                 detection_parts.append(", ".join(info_parts))
 
-                if valid_confidences:
+                if has_manual:
+                    detection_parts.append("最低置信度: 人工校验")
+                elif valid_confidences:
                     min_conf = min(valid_confidences)
                     detection_parts.append(f"最低置信度: {min_conf:.3f}")
 
@@ -1183,7 +1212,18 @@ class PreviewPage(QWidget):
                 if detect_time:
                     detection_parts.append(f"检测于: {detect_time}")
             else:
-                detection_parts.append("当前置信度下未检测到目标")
+                # 如果没有画框，但被标记为人工校验
+                if has_manual:
+                    # 尝试读取 JSON 里的物种名称（比如 "空"），读不到则默认显示 "无目标"
+                    empty_name = self.current_preview_info.get("物种名称", "无目标")
+                    detection_parts.append(empty_name)
+                    detection_parts.append("最低置信度: 人工校验")
+
+                    detect_time = self.current_preview_info.get('检测时间', '')
+                    if detect_time:
+                        detection_parts.append(f"检测于: {detect_time}")
+                else:
+                    detection_parts.append("当前置信度下未检测到目标")
 
             # 合并信息
             full_info = basic_info + "\n" + " | ".join(detection_parts)
@@ -1267,11 +1307,20 @@ class PreviewPage(QWidget):
                     # A. 收集候选项
                     if "候选项" in box and box["候选项"]:
                         for cand in box["候选项"]:
-                            candidates.append((cand.get('name'), float(cand.get('conf', 0))))
+                            c_conf_val = cand.get('conf', 0)
+                            c_conf = 1.0 if str(c_conf_val) == "人工校验" else float(c_conf_val) if c_conf_val else 0.0
+                            candidates.append((cand.get('name'), c_conf))
 
                     # B. 收集主结果 (作为补充，防止候选项缺失)
                     raw_name = box.get("物种", box.get("species", box.get("class_name", "未知")))
-                    raw_conf = float(box.get("置信度", box.get("confidence", 0)))
+                    conf_val = box.get("置信度", box.get("confidence", 0))
+                    if str(conf_val) == "人工校验":
+                        raw_conf = 1.0
+                    else:
+                        try:
+                            raw_conf = float(conf_val)
+                        except ValueError:
+                            raw_conf = 0.0
                     candidates.append((raw_name, raw_conf))
 
                     # 2. 排序：按置信度降序，确保高置信度的排在前面
@@ -1435,9 +1484,14 @@ class PreviewPage(QWidget):
             for box in boxes:
                 # 1. 获取原始信息
                 raw_name = box.get("物种", box.get("species", box.get("class_name")))
-                raw_conf = float(box.get("置信度", box.get("confidence", 0.0)))
-
-                if not raw_name: continue
+                conf_val = box.get("置信度", box.get("confidence", 0.0))
+                if str(conf_val) == "人工校验":
+                    raw_conf = 1.0
+                else:
+                    try:
+                        raw_conf = float(conf_val)
+                    except ValueError:
+                        raw_conf = 0.0
 
                 # 默认情况下，最终显示的物种和置信度就是原始的
                 final_name = raw_name
@@ -1449,8 +1503,14 @@ class PreviewPage(QWidget):
                     candidates = box["候选项"]
                     for cand in candidates:
                         c_name = cand.get('name')
-                        c_conf = float(cand.get('conf', 0.0))
-                        c_thresh = self.species_conf_map.get(c_name, global_thresh)
+                        c_conf_val = cand.get('conf', 0.0)
+                        if str(c_conf_val) == "人工校验":
+                            c_conf = 1.0
+                        else:
+                            try:
+                                c_conf = float(c_conf_val)
+                            except ValueError:
+                                c_conf = 0.0
 
                         if c_conf >= c_thresh:
                             final_name = c_name
@@ -2404,6 +2464,7 @@ class PreviewPage(QWidget):
                 species_count = defaultdict(int)
                 min_confidence = 1.0
                 has_detections = False
+                has_manual = False
 
                 for t_id, points in tracks.items():
                     # A. 过滤掉帧数不足的目标
@@ -2415,37 +2476,66 @@ class PreviewPage(QWidget):
                     if not s_list: continue
                     sp = Counter(s_list).most_common(1)[0][0]
 
-                    # === C. 新增：置信度过滤 ===
+                    # C. 置信度过滤
                     # 获取该物种的当前阈值
                     thresh = self.species_conf_map.get(sp, self.species_conf_map.get("global", 0.25))
 
-                    # 检查该轨迹中是否至少有一帧（或平均值）超过了阈值？
-                    # 通常策略：如果整个轨迹的最高置信度都低于阈值，则视为误检
-                    track_max_conf = max([float(p.get('confidence', 0)) for p in points])
+                    track_max_conf = 0.0
+                    track_has_manual = False
+                    for p in points:
+                        p_conf_raw = p.get('confidence', 0)
+                        if str(p_conf_raw) == "人工校验":
+                            track_has_manual = True
+                            track_max_conf = 1.0
+                            break
+                        else:
+                            try:
+                                val = float(p_conf_raw)
+                                if val > track_max_conf:
+                                    track_max_conf = val
+                            except ValueError:
+                                pass
 
-                    if track_max_conf < thresh:
+                    if not track_has_manual and track_max_conf < thresh:
                         continue
-                    # ========================
 
                     has_detections = True
                     species_count[sp] += 1
 
-                    # 更新最低置信度 (仅统计通过筛选的)
-                    if track_max_conf < min_confidence:
-                        min_confidence = track_max_conf
+                    if track_has_manual:
+                        has_manual = True
+                    else:
+                        # 更新最低置信度 (仅统计通过筛选的)
+                        if track_max_conf < min_confidence:
+                            min_confidence = track_max_conf
 
-                # 获取检测时间
-                json_mtime = os.path.getmtime(json_path)
-                detect_time = datetime.fromtimestamp(json_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                # 获取检测时间 (优先读取JSON里记录的时间)
+                detect_time = data.get('检测时间', '')
+                if not detect_time:
+                    json_mtime = os.path.getmtime(json_path)
+                    detect_time = datetime.fromtimestamp(json_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                # 检查 JSON 外层是否直接指定了人工校验（专门处理无目标的视频）
+                root_conf = str(data.get("最低置信度", ""))
+                is_root_manual = (root_conf == "人工校验")
 
                 if has_detections:
                     res_parts = []
                     for sp, count in species_count.items():
                         res_parts.append(f"{sp}: {count}只")
                     res_str = " | ".join(res_parts)
-                    result_text = f"\n检测结果: | {res_str} | 最低置信度: {min_confidence:.3f} | 检测于: {detect_time}"
+
+                    if has_manual or is_root_manual:
+                        result_text = f"\n检测结果: | {res_str} | 最低置信度: 人工校验 | 检测于: {detect_time}"
+                    else:
+                        result_text = f"\n检测结果: | {res_str} | 最低置信度: {min_confidence:.3f} | 检测于: {detect_time}"
                 else:
-                    result_text = f"\n检测结果: 当前条件下未检测到有效目标"
+                    # 【修改】如果没有任何有效轨迹，但被标记为人工校验为空
+                    if is_root_manual:
+                        empty_name = data.get("物种名称", "无目标")
+                        result_text = f"\n检测结果: | {empty_name} | 最低置信度: 人工校验 | 检测于: {detect_time}"
+                    else:
+                        result_text = f"\n检测结果: 当前条件下未检测到有效目标"
 
                 info_text += result_text
             else:
