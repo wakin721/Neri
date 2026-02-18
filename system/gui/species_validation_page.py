@@ -1977,7 +1977,6 @@ class SpeciesValidationPage(QWidget):
             # 如果自动排序开启，则刷新按钮列表
             if hasattr(self.controller,
                        'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self.controller.advanced_page.update_auto_sorted_list()
                 self._load_species_buttons()
                 self.quick_marks_updated.emit()
 
@@ -2026,7 +2025,6 @@ class SpeciesValidationPage(QWidget):
             # 如果自动排序开启，则刷新按钮列表
             if hasattr(self.controller,
                        'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self.controller.advanced_page.update_auto_sorted_list()
                 self._load_species_buttons()
                 self.quick_marks_updated.emit()
 
@@ -2484,7 +2482,7 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"保存验证数据失败: {e}")
 
     def _increment_quick_mark_count(self, species_name):
-        """增加快速标记物种的使用次数"""
+        """增加快速标记物种的使用次数，并更新 list_auto (基于近期使用+总数兜底)"""
         if hasattr(self.controller, 'settings_manager'):
             quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
             # 1. 确保中文逗号被替换为英文逗号
@@ -2493,12 +2491,53 @@ class SpeciesValidationPage(QWidget):
             # 2. 按逗号拆分并去除首尾空格
             species_list = [s.strip() for s in normalized_name.split(',') if s.strip()]
             
+            if "recent_history" not in quick_marks_data:
+                quick_marks_data["recent_history"] = []
+            
             # 3. 对拆分后的每个独立物种分别计数
             for single_species in species_list:
+                # 更新总计数
                 if single_species in quick_marks_data:
                     quick_marks_data[single_species] = quick_marks_data.get(single_species, 0) + 1
                 else:
                     quick_marks_data[single_species] = 1
+                
+                # 追加到近期记录队列
+                quick_marks_data["recent_history"].append(single_species)
+
+            max_recent_len = 50
+            if len(quick_marks_data["recent_history"]) > max_recent_len:
+                quick_marks_data["recent_history"] = quick_marks_data["recent_history"][-max_recent_len:]
+
+            # 获取固定列表的长度作为按钮总数参考（通常为 11 个）
+            target_btn_count = len(quick_marks_data.get("list", []))
+            if target_btn_count == 0:
+                target_btn_count = 11
+
+            # A. 统计近期频次 (反转列表以保证频次相同时，越晚使用的越靠前)
+            from collections import Counter
+            recent_counter = Counter(reversed(quick_marks_data["recent_history"]))
+            recent_sorted = [item[0] for item in recent_counter.most_common()]
+
+            # B. 统计总数频次作兜底 (排除非物种的 key)
+            excluded_keys = {'list', 'list_auto', 'auto', 'recent_history'}
+            total_counts = {k: v for k, v in quick_marks_data.items() if k not in excluded_keys and isinstance(v, (int, float))}
+            total_sorted = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+            total_sorted_species = [item[0] for item in total_sorted]
+
+            # C. 组合最终列表：优先填充近期常用，空余部分用总数最高的补齐
+            new_list_auto = []
+            for sp in recent_sorted:
+                if len(new_list_auto) < target_btn_count:
+                    new_list_auto.append(sp)
+            
+            for sp in total_sorted_species:
+                if len(new_list_auto) < target_btn_count and sp not in new_list_auto:
+                    new_list_auto.append(sp)
+
+            quick_marks_data["list_auto"] = new_list_auto
+            
+            # 保存更新后的数据
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
 
     def _update_json_file(self, file_name, new_species=None, new_count=None, new_remark=None):
