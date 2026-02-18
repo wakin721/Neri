@@ -1407,6 +1407,11 @@ class ObjectDetectionGUI(QMainWindow):
         if hasattr(self.preview_page, 'clear_preview'):
             self.preview_page.clear_preview()
 
+        if hasattr(self.preview_page, 'validation_data'):
+            self.preview_page.validation_data.clear()
+        if hasattr(self.species_validation_page, 'validation_data'):
+            self.species_validation_page.validation_data.clear()
+
         if not folder_selected:
             self.status_bar.status_label.setText("文件路径已清除")
             self._save_current_settings()
@@ -1796,6 +1801,11 @@ class ObjectDetectionGUI(QMainWindow):
         # 清除内存中的数据
         if hasattr(self.preview_page, 'clear_validation_data'):
             self.preview_page.clear_validation_data()
+
+        if hasattr(self.preview_page, 'validation_data'):
+            self.preview_page.validation_data.clear()
+        if hasattr(self.species_validation_page, 'validation_data'):
+            self.species_validation_page.validation_data.clear()
 
     def closeEvent(self, event):
         """关闭事件"""
