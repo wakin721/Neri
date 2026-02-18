@@ -1398,12 +1398,22 @@ class SpeciesValidationPage(QWidget):
             image_basename_map = {os.path.splitext(f)[0]: f for f in source_files}
 
             json_files = [f for f in os.listdir(photo_dir) if f.lower().endswith('.json') and f != 'validation.json']
+
+            # ==================== 加载 validation.json ====================
+            validation_file_path = os.path.join(photo_dir, "validation.json")
+            if os.path.exists(validation_file_path):
+                try:
+                    with open(validation_file_path, 'r', encoding='utf-8') as f:
+                        self.validation_data.update(json.load(f))
+                except Exception as e:
+                    logger.error(f"加载 validation.json 失败: {e}")
+
         except Exception as e:
             logger.error(f"读取目录失败: {e}")
             return
 
         all_species_keys = set()
-        processed_basenames = set()  # [新增] 用于记录已处理（有JSON）的文件名
+        processed_basenames = set()
 
         # === 循环处理所有文件 ===
         for json_file in json_files:
@@ -1411,14 +1421,20 @@ class SpeciesValidationPage(QWidget):
             image_filename = image_basename_map.get(base_name)
             if not image_filename:
                 continue
-            
-            # [新增] 记录该文件已被处理
+
             processed_basenames.add(base_name)
 
             json_path = os.path.join(photo_dir, json_file)
             try:
                 with open(json_path, 'r', encoding='utf-8') as f:
                     detection_info = json.load(f)
+
+                # ==================== 判断是否已校验 ====================
+                is_validated = False
+                if image_filename in self.validation_data:
+                    is_validated = True
+                elif detection_info.get('最低置信度') == '人工校验':
+                    is_validated = True
 
                 final_species_name = "空"  # 默认归宿
 
@@ -1521,9 +1537,16 @@ class SpeciesValidationPage(QWidget):
                             # 3. 重新组合
                             final_species_name = ",".join(sorted(parts))
 
-                # 将文件添加到对应的 Map (在循环内收集数据)
-                all_species_keys.add(final_species_name)
-                self.species_image_map[final_species_name].append(image_filename)
+                display_key = final_species_name
+                if final_species_name not in ["空", "标记为空", "未检测", "需人工检验"]:
+                    if is_validated:
+                        display_key = f"[已校验] {final_species_name}"
+                    else:
+                        display_key = f"[未校验] {final_species_name}"
+
+                # 将文件添加到对应的 Map
+                all_species_keys.add(display_key)
+                self.species_image_map[display_key].append(image_filename)
 
             except Exception as e:
                 logger.error(f"重载处理文件 {json_file} 时出错: {e}")
@@ -1532,7 +1555,7 @@ class SpeciesValidationPage(QWidget):
         # 处理未检测（无JSON）的文件
         all_source_basenames = set(image_basename_map.keys())
         undetected_basenames = all_source_basenames - processed_basenames
-        
+
         if undetected_basenames:
             undetected_key = "未检测"
             all_species_keys.add(undetected_key)
@@ -1544,16 +1567,19 @@ class SpeciesValidationPage(QWidget):
         def sort_priority(name):
             if name == "需人工检验":
                 return 0
-            if name == "空": # 人工确认过的空优先级排在普通物种后面
+            if name.startswith("[未校验]"):
+                return 1
+            if name == "空":
                 return 2
-            if name == "标记为空":      # 模型检测的空排在最后
+            if name.startswith("[已校验]"):
                 return 3
-            if name == "未检测":
+            if name == "标记为空":
                 return 4
-            return 1
+            if name == "未检测":
+                return 5
+            return 6
 
-        # 修改处：在优先级之后，增加按数量降序排序（数量越多越靠前）
-        # 排序规则：1. 优先级 (0-3) -> 2. 数量 (负号表示降序) -> 3. 名称 (字母顺序)
+        # 排序规则：1. 优先级 (0-5) -> 2. 数量 (负号表示降序) -> 3. 名称 (字母顺序)
         sorted_species = sorted(
             list(all_species_keys), 
             key=lambda x: (sort_priority(x), -len(self.species_image_map[x]), x)
@@ -1787,10 +1813,13 @@ class SpeciesValidationPage(QWidget):
 
         # 解析选中的物种名称
         selected_text = selected_items[0].text()
-        species_name = selected_text.split(' (')[0] if ' (' in selected_text else selected_text
+        map_key = selected_text.split(' (')[0] if ' (' in selected_text else selected_text
+
+        # 剥离前缀，还原真实的物种名称供逻辑使用
+        species_name = map_key.replace('[已校验] ', '').replace('[未校验] ', '')
 
         self.current_selected_species = species_name
-        image_files = sorted(self.species_image_map.get(species_name, []))
+        image_files = sorted(self.species_image_map.get(map_key, []))
 
         photo_count = len(image_files)
         if hasattr(self.controller, 'status_bar'):
@@ -1800,11 +1829,10 @@ class SpeciesValidationPage(QWidget):
         if species_name in ["标记为空", "空"]:
             self.species_conf_slider.setEnabled(False)
             self.species_conf_label.setText("N/A")
-            self.species_selector.setEnabled(False) # 禁用选择器
+            self.species_selector.setEnabled(False)  # 禁用选择器
         else:
             self.species_conf_slider.setEnabled(True)
             self.species_selector.setEnabled(True)
-            # === 修改：调用更新下拉框的方法 ===
             self._update_species_selector_items()
 
         # 添加图片到列表
@@ -3096,30 +3124,37 @@ class SpeciesValidationPage(QWidget):
         # 1. 选中物种
         for i in range(self.species_listbox.count()):
             item = self.species_listbox.item(i)
-            # 检查物种名称是否匹配 (忽略后面的数量)
-            if item and item.text().startswith(species_name + " ("):
-                # 设置当前选中项
-                self.species_listbox.setCurrentItem(item)
-                # 滚动以确保可见
-                self.species_listbox.scrollToItem(item)
+            if not item: continue
 
-                # [新增] 手动调用选中逻辑以填充照片列表
-                # 因为 setCurrentItem 不会触发 itemClicked 信号，必须手动刷新右侧列表
-                self._on_species_selected()
+            # ==================== [修改] 忽略前缀进行匹配 ====================
+            item_text = item.text()
+            map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+            clean_name = map_key.replace('[已校验] ', '').replace('[未校验] ', '')
 
-                # 2. 定义一个内部函数来选中照片
-                def select_image_item():
-                    for j in range(self.species_photo_listbox.count()):
-                        photo_item = self.species_photo_listbox.item(j)
-                        if photo_item and photo_item.text() == image_filename:
-                            self.species_photo_listbox.setCurrentItem(photo_item)
-                            self.species_photo_listbox.scrollToItem(photo_item)
-                            break
+            # 检查物种名称是否匹配 (如"赤狐")
+            if clean_name == species_name:
+                # 进一步检查要选中的图像是否正处于这个 [校验/未校验] 分组内
+                if image_filename in self.species_image_map.get(map_key, []):
+                    # 设置当前选中项
+                    self.species_listbox.setCurrentItem(item)
+                    # 滚动以确保可见
+                    self.species_listbox.scrollToItem(item)
 
-                # 3. 使用QTimer延迟执行照片选择，以确保照片列表已更新
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(100, select_image_item)
-                return
+                    # 手动调用选中逻辑以填充照片列表
+                    self._on_species_selected()
+
+                    # 2. 定义一个内部函数来选中照片
+                    def select_image_item():
+                        for j in range(self.species_photo_listbox.count()):
+                            photo_item = self.species_photo_listbox.item(j)
+                            if photo_item and photo_item.text() == image_filename:
+                                self.species_photo_listbox.setCurrentItem(photo_item)
+                                self.species_photo_listbox.scrollToItem(photo_item)
+                                break
+
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(100, select_image_item)
+                    return
 
     def _start_video_thread(self, video_path, json_path):
         """启动视频播放线程"""
