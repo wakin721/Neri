@@ -21,9 +21,7 @@ from collections import defaultdict, Counter
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-import csv
 import shutil
-from collections import defaultdict, Counter
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, get_species_color
 from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox
@@ -1404,7 +1402,9 @@ class SpeciesValidationPage(QWidget):
             if os.path.exists(validation_file_path):
                 try:
                     with open(validation_file_path, 'r', encoding='utf-8') as f:
-                        self.validation_data.update(json.load(f))
+                        loaded_data = json.load(f)
+                        # 直接加载现有数据，保证原有数据不丢失
+                        self.validation_data.update(loaded_data)
                 except Exception as e:
                     logger.error(f"加载 validation.json 失败: {e}")
 
@@ -1431,9 +1431,11 @@ class SpeciesValidationPage(QWidget):
 
                 # ==================== 判断是否已校验 ====================
                 is_validated = False
-                if image_filename in self.validation_data:
+                # 1. 优先检查 JSON 文件中是否已明确记录为人工校验（适用于用户修改了物种、数量或标记为空的情况）
+                if detection_info.get('最低置信度') == '人工校验':
                     is_validated = True
-                elif detection_info.get('最低置信度') == '人工校验':
+                # 2. 检查 validation_data 中该文件的值是否明确为 True（适用于用户直接点击了“正确”按钮的情况）
+                elif self.validation_data.get(image_filename) is True:
                     is_validated = True
 
                 final_species_name = "空"  # 默认归宿
@@ -1959,7 +1961,6 @@ class SpeciesValidationPage(QWidget):
                 height, width, channel = img_array.shape
                 bytes_per_line = 3 * width
 
-                from PySide6.QtGui import QImage
                 q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(q_image)
 
@@ -2510,10 +2511,29 @@ class SpeciesValidationPage(QWidget):
         """保存验证数据到文件"""
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
+
             if temp_photo_dir:
                 validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+
+                # 1. 先读取硬盘上已有的老数据（如果存在）
+                disk_data = {}
+                if os.path.exists(validation_file_path):
+                    try:
+                        with open(validation_file_path, 'r', encoding='utf-8') as f:
+                            disk_data = json.load(f)
+                    except Exception as e:
+                        logger.error(f"读取原有 validation.json 失败: {e}")
+
+                # 2. 将内存中的最新操作合并到硬盘数据中 (相同文件以内存中最新的操作为准)
+                disk_data.update(self.validation_data)
+
+                # 3. 同步回内存字典，确保状态一致
+                self.validation_data.update(disk_data)
+
+                # 4. 全量写入文件（增加 sort_keys=True 实现按文件名自动排序）
                 with open(validation_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.validation_data, f, ensure_ascii=False, indent=2)
+                    json.dump(self.validation_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+
         except Exception as e:
             logger.error(f"保存验证数据失败: {e}")
 
@@ -2541,7 +2561,7 @@ class SpeciesValidationPage(QWidget):
                 # 追加到近期记录队列
                 quick_marks_data["recent_history"].append(single_species)
 
-            max_recent_len = 50
+            max_recent_len = 200
             if len(quick_marks_data["recent_history"]) > max_recent_len:
                 quick_marks_data["recent_history"] = quick_marks_data["recent_history"][-max_recent_len:]
 
@@ -2868,7 +2888,6 @@ class SpeciesValidationPage(QWidget):
             height, width, channel = img_array.shape
             bytes_per_line = 3 * width
 
-            from PySide6.QtGui import QImage, QPixmap
             q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(q_image)
 
@@ -3285,10 +3304,6 @@ class SpeciesValidationPage(QWidget):
 
     def _generate_white_icon_pixmap(self, icon_path, size):
         """生成白色图标 (复用 PreviewPage 的逻辑)"""
-        from PySide6.QtSvg import QSvgRenderer
-        from PySide6.QtGui import QPainter, QPixmap
-        from system.utils import resource_path
-
         if not os.path.exists(icon_path): return None
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
