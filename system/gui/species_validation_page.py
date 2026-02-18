@@ -118,7 +118,7 @@ class CorrectionDialog(QDialog):
                             filtered_species_counts[species_name] += 1
 
                 if not filtered_species_counts:
-                    recalculated_info['物种名称'] = "空"
+                    recalculated_info['物种名称'] = "[未校验] 空"
                     recalculated_info['物种数量'] = "空"
                 else:
                     recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
@@ -1431,20 +1431,20 @@ class SpeciesValidationPage(QWidget):
 
                 # ==================== 判断是否已校验 ====================
                 is_validated = False
-                # 1. 优先检查 JSON 文件中是否已明确记录为人工校验（适用于用户修改了物种、数量或标记为空的情况）
+                # 1. 优先检查 JSON 文件中是否已明确记录为人工校验（适用于用户修改了物种、数量或[已校验] 标记为空的情况）
                 if detection_info.get('最低置信度') == '人工校验':
                     is_validated = True
                 # 2. 检查 validation_data 中该文件的值是否明确为 True（适用于用户直接点击了“正确”按钮的情况）
                 elif self.validation_data.get(image_filename) is True:
                     is_validated = True
 
-                final_species_name = "空"  # 默认归宿
+                final_species_name = "[未校验] 空"  # 默认归宿
 
                 # ==================== 1. 人工校验 (最高优先级) ====================
                 if detection_info.get('最低置信度') == '人工校验':
                     res_name = detection_info.get('物种名称', '')
-                    if res_name in ["空", "标记为空", "", "未知", None]:
-                        final_species_name = "标记为空"
+                    if res_name in ["[未校验] 空", "[已校验] 空", "", "未知", None]:
+                        final_species_name = "[已校验] 空"
                     else:
                         final_species_name = res_name
 
@@ -1475,7 +1475,7 @@ class SpeciesValidationPage(QWidget):
                         unique_species = sorted(list(set(valid_votes)))
                         final_species_name = ",".join(unique_species)
                     else:
-                        final_species_name = "空"
+                        final_species_name = "[未校验] 空"
 
                 # ==================== 3. 图片文件处理逻辑 ====================
                 else:
@@ -1527,9 +1527,9 @@ class SpeciesValidationPage(QWidget):
                         unique_species = sorted(list(set(valid_species_list)))
                         final_species_name = ",".join(unique_species)
                     else:
-                        final_species_name = "空"
+                        final_species_name = "[未校验] 空"
 
-                if final_species_name and final_species_name not in ["需人工检验", "标记为空", "未检测", "空"]:
+                if final_species_name and final_species_name not in ["需人工检验", "[已校验] 空", "未检测", "[未校验] 空"]:
                     # 1. 统一逗号格式
                     normalized_name = final_species_name.replace('，', ',')
                     if ',' in normalized_name:
@@ -1540,7 +1540,7 @@ class SpeciesValidationPage(QWidget):
                             final_species_name = ",".join(sorted(parts))
 
                 display_key = final_species_name
-                if final_species_name not in ["空", "标记为空", "未检测", "需人工检验"]:
+                if final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
                     if is_validated:
                         display_key = f"[已校验] {final_species_name}"
                     else:
@@ -1571,11 +1571,11 @@ class SpeciesValidationPage(QWidget):
                 return 0
             if name.startswith("[未校验]"):
                 return 1
-            if name == "空":
+            if name == "[未校验] 空":
                 return 2
             if name.startswith("[已校验]"):
                 return 3
-            if name == "标记为空":
+            if name == "[已校验] 空":
                 return 4
             if name == "未检测":
                 return 5
@@ -1609,12 +1609,12 @@ class SpeciesValidationPage(QWidget):
 
         found_species = set()
 
-        # [新增] 下拉框最小显示阈值
+        # 下拉框最小显示阈值
         MIN_DROPDOWN_CONF = 0.05
 
-        # [修改] 始终添加当前左侧列表选中的分类
+        # 始终添加当前左侧列表选中的分类
         # 如果是组合分类（如 "赤狐,狍子"），则拆分后添加各个单物种
-        if self.current_selected_species and self.current_selected_species not in ["标记为空", "空"]:
+        if self.current_selected_species and self.current_selected_species not in ["[已校验] 空", "[未校验] 空"]:
             if "," in self.current_selected_species:
                 # 拆分并添加
                 parts = self.current_selected_species.split(",")
@@ -1828,7 +1828,7 @@ class SpeciesValidationPage(QWidget):
             self.controller.status_bar.status_label.setText(f"当前物种共有 {photo_count} 张照片")
 
         # 根据选择的物种来决定是否显示置信度滑块
-        if species_name in ["标记为空", "空"]:
+        if species_name in ["[已校验] 空", "[未校验] 空"]:
             self.species_conf_slider.setEnabled(False)
             self.species_conf_label.setText("N/A")
             self.species_selector.setEnabled(False)  # 禁用选择器
@@ -1862,7 +1862,7 @@ class SpeciesValidationPage(QWidget):
                     self.video_thread and self.video_thread.isRunning()):
 
                 # 如果是同一个视频，只更新信息和下拉框，不重启播放
-                if self.current_selected_species not in ["标记为空", "空"]:
+                if self.current_selected_species not in ["[已校验] 空", "[未校验] 空"]:
                     self._update_species_selector_items()
                 return
 
@@ -1904,7 +1904,7 @@ class SpeciesValidationPage(QWidget):
                 self.species_info_label.setText("物种:  | 数量:  | 类型:  | 置信度: ")
 
         # 加载图片信息后，刷新下拉框
-        if self.current_selected_species not in ["标记为空", "空"]:
+        if self.current_selected_species not in ["[已校验] 空", "[未校验] 空"]:
             self._update_species_selector_items()
 
         # === 2. 判断文件类型 ===
@@ -2240,7 +2240,7 @@ class SpeciesValidationPage(QWidget):
                 self.video_thread.refresh_frame()
 
         # 2. 保存设置
-        if self.current_selected_species in ["标记为空", "空"]:
+        if self.current_selected_species in ["[已校验] 空", "[未校验] 空"]:
             return
 
         if hasattr(self.controller, 'confidence_settings'):
@@ -2439,8 +2439,8 @@ class SpeciesValidationPage(QWidget):
                         data = json.load(f)
                         if data.get("最低置信度") == "人工校验":
                             species_name = data.get("物种名称", "unknown")
-                            if species_name == "空":
-                                species_name = "空"
+                            if species_name == "[未校验] 空":
+                                species_name = "[未校验] 空"
 
                             species_dir = os.path.join(error_dir, species_name)
                             os.makedirs(species_dir, exist_ok=True)
@@ -2530,7 +2530,7 @@ class SpeciesValidationPage(QWidget):
                 # 3. 同步回内存字典，确保状态一致
                 self.validation_data.update(disk_data)
 
-                # 4. 全量写入文件（增加 sort_keys=True 实现按文件名自动排序）
+                # 4. 全量写入文件
                 with open(validation_file_path, 'w', encoding='utf-8') as f:
                     json.dump(self.validation_data, f, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -2722,7 +2722,7 @@ class SpeciesValidationPage(QWidget):
                     species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                     confidence = f"{min_conf_val:.2f}"
                 else:
-                    species_name = "空"
+                    species_name = "[未校验] 空"
                     species_count = "0"
                     confidence = "N/A"
 
@@ -2778,7 +2778,7 @@ class SpeciesValidationPage(QWidget):
                         species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                         confidence = f"{min_conf_val:.2f}"
                     else:
-                        species_name = "空"
+                        species_name = "[未校验] 空"
                         species_count = "0"
                         confidence = "N/A"
                 else:
@@ -2789,7 +2789,7 @@ class SpeciesValidationPage(QWidget):
 
             # 更新 UI 标签
             species_type_str = "空"
-            if species_name and species_name not in ["空", "未知", "N/A", "标记为空"]:
+            if species_name and species_name not in ["[未校验] 空", "未知", "N/A", "[已校验] 空"]:
                 type_list = []
                 # 支持多物种（逗号分隔）
                 names = species_name.replace('，', ',').split(',')
