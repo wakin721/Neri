@@ -1988,7 +1988,9 @@ class SpeciesValidationPage(QWidget):
             self._move_to_next_image()
             # 将焦点设置回照片列表
             self.species_photo_listbox.setFocus()
+            QTimer.singleShot(50, self._refresh_species_list_logic)
             return
+
         if species_name == "空" and count == "空":
             self._update_json_file(file_name, new_species="空", new_count="空")
             self.validation_data[file_name] = False
@@ -1996,6 +1998,7 @@ class SpeciesValidationPage(QWidget):
             self._move_to_next_image()
             # 将焦点设置回照片列表
             self.species_photo_listbox.setFocus()
+            QTimer.singleShot(50, self._refresh_species_list_logic)
             return
 
         # 处理物种按钮点击
@@ -2026,12 +2029,14 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = False
             self._save_validation_data()
 
-            # 如果数量也已选择，则移动到下一张图片
+            # 如果数量也已选择，则移动到下一张图片并刷新列表
             if self._count_marked is not None:
                 self._move_to_next_image()
-
-            # 将焦点设置回照片列表
-            self.species_photo_listbox.setFocus()
+                self.species_photo_listbox.setFocus()
+                QTimer.singleShot(50, self._refresh_species_list_logic)
+            else:
+                # 仅选择了物种，尚未选择数量，不刷新列表
+                self.species_photo_listbox.setFocus()
 
     def _mark_other_species(self):
         """处理"其他"按钮的逻辑，弹出对话框"""
@@ -2057,7 +2062,8 @@ class SpeciesValidationPage(QWidget):
                 self.quick_marks_updated.emit()
 
             self._move_to_next_image()
-
+            
+        QTimer.singleShot(50, self._refresh_species_list_logic)
         # 无论对话框结果如何，都将焦点设置回照片列表
         self.species_photo_listbox.setFocus()
 
@@ -2190,12 +2196,14 @@ class SpeciesValidationPage(QWidget):
         new_species = self._species_marked if self._species_marked is not None else None
         self._update_json_file(file_name, new_species=new_species, new_count=str(self._count_marked))
 
-        # 如果物种也已选择，则移动到下一张图片
+        # 如果物种也已选择，则移动到下一张图片并刷新列表
         if self._species_marked is not None:
             self._move_to_next_image()
-
-        # 将焦点设置回照片列表
-        self.species_photo_listbox.setFocus()
+            self.species_photo_listbox.setFocus()
+            QTimer.singleShot(50, self._refresh_species_list_logic)
+        else:
+            # 仅选择了数量，尚未选择物种，不刷新列表
+            self.species_photo_listbox.setFocus()
 
     def _on_confidence_slider_changed(self, value):
         """处理置信度滑块值的变化"""
@@ -3333,11 +3341,83 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"绘制暂停图标失败: {e}")
 
     def _refresh_species_list_logic(self):
-        """
-        [新增] 定时器触发的逻辑：重新根据置信度分类文件，并恢复选中状态
-        """
+        """重新加载物种列表，并尽可能恢复之前的选中状态"""
         # 保存配置到磁盘 (延迟保存)
         self._save_species_conf()
+
+        # 1. 记住当前的选中状态
+        current_species = self.current_selected_species
+        current_photo_item = self.species_photo_listbox.currentItem()
+        current_photo_name = current_photo_item.text() if current_photo_item else None
+        current_photo_row = self.species_photo_listbox.currentRow()
+
+        # 2. 重新加载物种数据
+        # 暂时阻断信号，避免在 clear() 和 addItem() 期间触发不必要的闪烁
+        self.species_listbox.blockSignals(True)
+        self._load_species_data()
+        self.species_listbox.blockSignals(False)
+
+        # 3. 尝试恢复物种选中状态
+        if current_species:
+            target_item = None
+
+            # 优先通过照片名反查新的分组 (这样可以跟随照片的状态跳跃，例如从未校验跳到已校验)
+            if current_photo_name:
+                for idx in range(self.species_listbox.count()):
+                    item = self.species_listbox.item(idx)
+                    item_text = item.text()
+                    map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                    if current_photo_name in self.species_image_map.get(map_key, []):
+                        target_item = item
+                        break
+
+            # 如果没找到（照片可能被移除了），尝试找回原来的物种名
+            if not target_item:
+                for prefix in ["[未校验] ", "[已校验] ", ""]:
+                    search_key = f"{prefix}{current_species}"
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if map_key == search_key:
+                            target_item = item
+                            break
+                    if target_item:
+                        break
+
+            if target_item:
+                self.species_listbox.blockSignals(True)
+                self.species_listbox.setCurrentItem(target_item)
+                self.species_listbox.scrollToItem(target_item)
+                self.species_listbox.blockSignals(False)
+
+                # 手动恢复照片列表
+                item_text = target_item.text()
+                map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                self.current_selected_species = map_key.replace('[已校验] ', '').replace('[未校验] ', '')
+                image_files = sorted(self.species_image_map.get(map_key, []))
+
+                self.species_photo_listbox.blockSignals(True)
+                self.species_photo_listbox.clear()
+                for img in image_files:
+                    self.species_photo_listbox.addItem(img)
+
+                # 恢复照片选中
+                if current_photo_name:
+                    items = self.species_photo_listbox.findItems(current_photo_name, Qt.MatchFlag.MatchExactly)
+                    if items:
+                        self.species_photo_listbox.setCurrentItem(items[0])
+                        self.species_photo_listbox.scrollToItem(items[0])
+                    else:
+                        row = min(current_photo_row, self.species_photo_listbox.count() - 1)
+                        if row >= 0:
+                            self.species_photo_listbox.setCurrentRow(row)
+                self.species_photo_listbox.blockSignals(False)
+
+                # 更新状态栏
+                if hasattr(self.controller, 'status_bar'):
+                    self.controller.status_bar.status_label.setText(f"当前物种共有 {len(image_files)} 张照片")
+        self.species_photo_listbox.setFocus()
 
     def reload_and_apply_conf(self):
         """
