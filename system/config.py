@@ -54,4 +54,3 @@ def get_species_color(species_name, return_rgb=False):
 
 
     return hex_color
-
