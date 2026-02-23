@@ -2677,7 +2677,7 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"加入撤回栈失败: {e}")
 
     def _undo_last_action(self):
-        """执行撤回操作并自动刷新界面"""
+        """执行撤回操作并自动刷新界面，并在状态栏提示"""
         if not hasattr(self, 'undo_stack') or not self.undo_stack:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
@@ -2722,6 +2722,14 @@ class SpeciesValidationPage(QWidget):
             # 触发强制选中，自动刷新界面
             self._force_select_file = file_name
             self._refresh_species_list_logic()
+            
+            if hasattr(self.controller, 'status_bar'):
+                # 获取刷新列表后自带的状态栏文本 (例如: "当前物种共有 X 张照片")
+                current_text = self.controller.status_bar.status_label.text()
+                # 拼接上撤回提示，覆盖回状态栏
+                self.controller.status_bar.status_label.setText(
+                    f"✅ 已成功撤回对 {file_name} 的操作  |  {current_text}"
+                )
             
         except Exception as e:
             logger.error(f"撤回失败: {e}")
