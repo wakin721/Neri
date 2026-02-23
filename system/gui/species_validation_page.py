@@ -1583,7 +1583,10 @@ class SpeciesValidationPage(QWidget):
                             final_species_name = ",".join(sorted(parts))
 
                 display_key = final_species_name
-                if final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
+                
+                if final_species_name == "[未校验] 空" and is_validated:
+                    display_key = "[已校验] 空"
+                elif final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
                     if is_validated:
                         display_key = f"[已校验] {final_species_name}"
                     else:
