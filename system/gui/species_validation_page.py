@@ -1196,7 +1196,7 @@ class SpeciesValidationPage(QWidget):
         # 分隔线
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        separator.setStyleSheet("background-color: rgba(128, 128, 128, 0.3); margin: 4px 0px;")
         action_buttons_layout.addWidget(separator)
 
         other_button = QPushButton("其他")
