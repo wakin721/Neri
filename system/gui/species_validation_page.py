@@ -118,7 +118,7 @@ class CorrectionDialog(QDialog):
                             filtered_species_counts[species_name] += 1
 
                 if not filtered_species_counts:
-                    recalculated_info['物种名称'] = "[未校验] 空"
+                    recalculated_info['物种名称'] = "空"
                     recalculated_info['物种数量'] = "空"
                 else:
                     recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
