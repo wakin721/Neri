@@ -2701,9 +2701,23 @@ class SpeciesValidationPage(QWidget):
             # 还原 内存验证状态 并 保存
             if old_val is not None:
                 self.validation_data[file_name] = old_val
+                self._save_validation_data()
             else:
                 self.validation_data.pop(file_name, None)
-            self._save_validation_data()
+                # 因为 _save_validation_data() 采用的是 update 增量合并逻辑，
+                # 所以必须手动从 validation.json 中删除该记录，防止僵尸数据被重新读回内存
+                validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+                if os.path.exists(validation_file_path):
+                    try:
+                        with open(validation_file_path, 'r', encoding='utf-8') as f:
+                            disk_data = json.load(f)
+                        
+                        if file_name in disk_data:
+                            disk_data.pop(file_name, None)
+                            with open(validation_file_path, 'w', encoding='utf-8') as f:
+                                json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                    except Exception as e:
+                        logger.error(f"撤回时清理 validation.json 失败: {e}")
             
             # 触发强制选中，自动刷新界面
             self._force_select_file = file_name
