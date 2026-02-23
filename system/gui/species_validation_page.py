@@ -1276,6 +1276,49 @@ class SpeciesValidationPage(QWidget):
         # 添加弹性空间，将所有按钮推到顶部
         quantity_buttons_layout.addStretch()
 
+        # ==================== 撤回按钮 ====================
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("background-color: rgba(128, 128, 128, 0.3); margin: 4px 0px;")
+        quantity_buttons_layout.addWidget(separator)
+
+        undo_button = QPushButton()
+        undo_button.setToolTip("撤销上一步操作")
+        undo_button.setMaximumWidth(58)
+        undo_button.setMinimumWidth(45)
+        undo_button.setFixedHeight(32)
+
+        # 加载 SVG 图标并将其渲染为与数字按钮文字一致的白色
+        try:
+            from PySide6.QtGui import QIcon
+            from system.utils import resource_path
+            icon_path = resource_path(os.path.join("res", "icon", "return.svg"))
+            
+            # 复用类中已有的方法生成白色图标 (大小可根据实际视觉效果微调，这里设为 18)
+            white_icon_pixmap = self._generate_white_icon_pixmap(icon_path, 18)
+            if white_icon_pixmap:
+                undo_button.setIcon(QIcon(white_icon_pixmap))
+            else:
+                undo_button.setText("撤回")
+        except Exception as e:
+            logger.error(f"加载撤回图标失败: {e}")
+            undo_button.setText("撤回")
+            
+        # 移除写死的颜色，仅保留尺寸限制，使其自动继承主题中 QPushButton 的全局样式
+        undo_button.setStyleSheet("""
+            QPushButton {
+                max-width: 58px; 
+                min-width: 45px; 
+                height: 32px;
+                padding: 6px 6px; 
+                text-align: center;
+            }
+        """)
+
+        undo_button.clicked.connect(self._undo_last_action)
+        quantity_buttons_layout.addWidget(undo_button)
+        # =======================================================
+
         parent_layout.addWidget(self.quantity_buttons_frame)
 
     def _create_bottom_area(self, parent_layout):
@@ -1982,6 +2025,8 @@ class SpeciesValidationPage(QWidget):
 
         file_name = selection[0].text()
 
+        self._push_to_undo_stack(file_name)
+
         # "Correct" 和 "Empty" 按钮仍然会立即跳转
         if is_correct is True:
             self.validation_data[file_name] = True
@@ -2050,6 +2095,7 @@ class SpeciesValidationPage(QWidget):
         dialog = CorrectionDialog(self, title="输入其他物种信息", original_info=self.current_species_info)
         # 执行对话框并检查用户是否点击了"确定"
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
+            self._push_to_undo_stack(file_name)
             species_name, species_count, remark = dialog.result
             self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
             # 标记为错误并跳转
@@ -2147,6 +2193,8 @@ class SpeciesValidationPage(QWidget):
             return
 
         file_name = selection[0].text()
+
+        self._push_to_undo_stack(file_name)
 
         final_count = count
         if count == "更多":
@@ -2595,6 +2643,71 @@ class SpeciesValidationPage(QWidget):
             
             # 保存更新后的数据
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+
+    def _push_to_undo_stack(self, file_name):
+        """将当前文件的状态压入撤回栈"""
+        if not hasattr(self, 'undo_stack'):
+            self.undo_stack = []
+            
+        try:
+            temp_photo_dir = self.controller.get_temp_photo_dir()
+            if not temp_photo_dir: return
+            
+            json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
+            old_json = None
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    old_json = json.load(f)
+                    
+            old_val = self.validation_data.get(file_name)
+                
+            self.undo_stack.append({
+                'file_name': file_name,
+                'json_data': old_json,
+                'validation_data': old_val
+            })
+            
+            # 限制栈大小为 50 步，防止占用过多内存
+            if len(self.undo_stack) > 50:
+                self.undo_stack.pop(0)
+        except Exception as e:
+            logger.error(f"加入撤回栈失败: {e}")
+
+    def _undo_last_action(self):
+        """执行撤回操作并自动刷新界面"""
+        if not hasattr(self, 'undo_stack') or not self.undo_stack:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
+            return
+        
+        try:
+            last_state = self.undo_stack.pop()
+            file_name = last_state['file_name']
+            old_json = last_state['json_data']
+            old_val = last_state['validation_data']
+            
+            temp_photo_dir = self.controller.get_temp_photo_dir()
+            if not temp_photo_dir: return
+            json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
+            
+            # 还原 JSON
+            if old_json is not None:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(old_json, f, ensure_ascii=False, indent=2)
+            
+            # 还原 内存验证状态 并 保存
+            if old_val is not None:
+                self.validation_data[file_name] = old_val
+            else:
+                self.validation_data.pop(file_name, None)
+            self._save_validation_data()
+            
+            # 触发强制选中，自动刷新界面
+            self._force_select_file = file_name
+            self._refresh_species_list_logic()
+            
+        except Exception as e:
+            logger.error(f"撤回失败: {e}")
 
     def _update_json_file(self, file_name, new_species=None, new_count=None, new_remark=None):
         """更新JSON文件中的物种信息"""
@@ -3362,8 +3475,13 @@ class SpeciesValidationPage(QWidget):
 
         # 1. 记住当前的选中状态
         current_species = self.current_selected_species
-        current_photo_item = self.species_photo_listbox.currentItem()
-        current_photo_name = current_photo_item.text() if current_photo_item else None
+        force_file = getattr(self, '_force_select_file', None)
+        if force_file:
+            current_photo_name = force_file
+            self._force_select_file = None  # 消费掉标志，避免影响后续的常规刷新
+        else:
+            current_photo_item = self.species_photo_listbox.currentItem()
+            current_photo_name = current_photo_item.text() if current_photo_item else None
         current_photo_row = self.species_photo_listbox.currentRow()
 
         # 2. 重新加载物种数据
