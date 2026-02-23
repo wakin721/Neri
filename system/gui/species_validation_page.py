@@ -3535,6 +3535,8 @@ class SpeciesValidationPage(QWidget):
                 for img in image_files:
                     self.species_photo_listbox.addItem(img)
 
+                self.species_photo_listbox.blockSignals(False)
+
                 # 恢复照片选中
                 if current_photo_name:
                     items = self.species_photo_listbox.findItems(current_photo_name, Qt.MatchFlag.MatchExactly)
@@ -3545,7 +3547,6 @@ class SpeciesValidationPage(QWidget):
                         row = min(current_photo_row, self.species_photo_listbox.count() - 1)
                         if row >= 0:
                             self.species_photo_listbox.setCurrentRow(row)
-                self.species_photo_listbox.blockSignals(False)
 
                 # 更新状态栏
                 if hasattr(self.controller, 'status_bar'):
