@@ -358,6 +358,10 @@ class RoundedButton(QPushButton):
         """返回按钮是否处于激活状态"""
         return self._is_active
 
+    def update_theme(self):
+        """更新主题"""
+        self._update_stylesheet()
+
 
 class ModernFrame(QFrame):
     """现代风格框架 - 自定义主题色版本"""
@@ -1712,6 +1716,12 @@ class PathInputWidget(QWidget):
         self._setup_style()
         if hasattr(self.line_edit, '_setup_style'):
             self.line_edit._setup_style()
+
+        if hasattr(self, 'browse_button'):
+            if hasattr(self.browse_button, 'update_theme'):
+                self.browse_button.update_theme()
+            elif hasattr(self.browse_button, '_update_stylesheet'):
+                self.browse_button._update_stylesheet()
 
         # 更新标签颜色
         from PySide6.QtWidgets import QLabel
