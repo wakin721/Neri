@@ -988,105 +988,104 @@ class CollapsiblePanel(QFrame):
         hover_color = Win11Colors.DARK_HOVER if is_dark else Win11Colors.LIGHT_HOVER
         text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
 
-        if self._is_expanded:
-            self._content_frame.setStyleSheet(f"""
-                QFrame {{
-                    background-color: {content_bg.name()};
-                    border: none;
-                    border-radius: 0px 0px 8px 8px;
-                }}
-                QWidget {{
-                    background-color: transparent;
-                }}
-                QLabel {{
-                    background-color: transparent;
-                    color: {text_color.name()};
-                }}
-                QLineEdit {{
-                    background-color: {content_bg.lighter(105).name()};
-                    border: 1px solid {border_color.name()};
-                    border-radius: 4px;
-                    padding: 6px;
-                    color: {text_color.name()};
-                }}
-                QLineEdit:focus {{
-                    border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                }}
-                QSlider {{
-                    background-color: transparent;
-                }}
-                QCheckBox {{
-                    background-color: transparent;
-                    color: {text_color.name()};
-                }}
-                ModernSwitch {{
-                    background-color: transparent;
-                }}
-                QComboBox {{
-                    background-color: {content_bg.lighter(105).name()};
-                    border: 1px solid {border_color.name()};
-                    border-radius: 4px;
-                    padding: 6px 8px;
-                    color: {text_color.name()};
-                    min-height: 20px;
-                }}
-                QComboBox:hover {{
-                    background-color: {hover_color.name()};
-                    border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                }}
-                QComboBox:focus {{
-                    border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                }}
-                QComboBox::drop-down {{
-                    width: 0px;
-                    border: none;
-                    background-color: transparent;
-                }}
-                QComboBox::down-arrow {{
-                    width: 0px;
-                    height: 0px;
-                    border: none;
-                    background: transparent;
-                }}
-                QComboBox QAbstractItemView {{
-                    background-color: {content_bg.name()};
-                    border: 1px solid {border_color.name()};
-                    border-radius: 4px;
-                    selection-background-color: {hover_color.name()};
-                    selection-color: {text_color.name()};
-                    color: {text_color.name()};
-                    outline: none;
-                }}
-                QComboBox QAbstractItemView::item {{
-                    padding: 8px 12px;
-                    background-color: {content_bg.name()};
-                    color: {text_color.name()};
-                    border: none;
-                }}
-                QComboBox QAbstractItemView::item:hover {{
-                    background-color: {hover_color.name()};
-                }}
-                QComboBox QAbstractItemView::item:selected {{
-                    background-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                    color: {"white" if is_dark else "white"};
-                }}
-                QPushButton {{
-                    background-color: {header_bg.name()};
-                    border: 1px solid {border_color.name()};
-                    border-radius: 4px;
-                    padding: 6px 12px;
-                    color: {text_color.name()};
-                    font-weight: 500;
-                }}
-                QPushButton:hover {{
-                    background-color: {hover_color.name()};
-                    border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                }}
-                QPushButton:pressed {{
-                    background-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
-                    color: white;
-                }}
-            """)
+        self._content_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {content_bg.name()};
+                border: none;
+                border-radius: 0px 0px 8px 8px;
+            }}
+            QWidget {{
+                background-color: transparent;
+            }}
+            QLabel {{
+                background-color: transparent;
+                color: {text_color.name()};
+            }}
+            QLineEdit {{
+                background-color: {content_bg.lighter(105).name()};
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                padding: 6px;
+                color: {text_color.name()};
+            }}
+            QLineEdit:focus {{
+                border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+            }}
+            QSlider {{
+                background-color: transparent;
+            }}
+            QCheckBox {{
+                background-color: transparent;
+                color: {text_color.name()};
+            }}
+            ModernSwitch {{
+                background-color: transparent;
+            }}
+            QComboBox {{
+                background-color: {content_bg.lighter(105).name()};
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                padding: 6px 8px;
+                color: {text_color.name()};
+                min-height: 20px;
+            }}
+            QComboBox:hover {{
+                background-color: {hover_color.name()};
+                border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+            }}
+            QComboBox:focus {{
+                border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+            }}
+            QComboBox::drop-down {{
+                width: 0px;
+                border: none;
+                background-color: transparent;
+            }}
+            QComboBox::down-arrow {{
+                width: 0px;
+                height: 0px;
+                border: none;
+                background: transparent;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {content_bg.name()};
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                selection-background-color: {hover_color.name()};
+                selection-color: {text_color.name()};
+                color: {text_color.name()};
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 8px 12px;
+                background-color: {content_bg.name()};
+                color: {text_color.name()};
+                border: none;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {hover_color.name()};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+                color: {"white" if is_dark else "white"};
+            }}
+            QPushButton {{
+                background-color: {header_bg.name()};
+                border: 1px solid {border_color.name()};
+                border-radius: 4px;
+                padding: 6px 12px;
+                color: {text_color.name()};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color.name()};
+                border-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+            }}
+            QPushButton:pressed {{
+                background-color: {Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()};
+                color: white;
+            }}
+        """)
 
     def _update_indicator_style(self):
         """更新指示器样式"""
@@ -1121,8 +1120,7 @@ class CollapsiblePanel(QFrame):
 
         # 更新各部分样式
         self._update_header_style()
-        if self._is_expanded:
-            self._update_content_style()
+        self._update_content_style()
         self._update_indicator_style()
 
         # 更新文字标签样式
@@ -1135,8 +1133,7 @@ class CollapsiblePanel(QFrame):
             self._icon_label.setStyleSheet("QLabel { background-color: transparent; }")
 
         # 递归更新所有子组件的背景
-        if self._is_expanded:
-            self._update_child_widgets_background(content_bg)
+        self._update_child_widgets_background(content_bg)
 
     def _update_child_widgets_background(self, content_bg):
         """递归更新所有子组件的背景色"""
@@ -1430,11 +1427,23 @@ class ThemeManager:
     """主题管理器，用于统一管理自定义Win11样式"""
 
     @staticmethod
-    def apply_win11_style(app: QApplication):
+    def apply_win11_style(app: QApplication, force_dark: bool = None):
         """应用自定义Win11样式到整个应用程序"""
-        # 检测系统主题
-        palette = app.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        
+        if force_dark is not None:
+            palette = app.palette()
+            if force_dark:
+                # 欺骗其他组件，告诉它们现在是深色背景
+                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30)) 
+            else:
+                # 欺骗其他组件，告诉它们现在是浅色背景
+                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250)) 
+            app.setPalette(palette)
+            is_dark = force_dark
+        else:
+            # 自动模式：检测系统主题
+            palette = app.palette()
+            is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             ThemeManager._apply_dark_theme(app)
@@ -1537,9 +1546,8 @@ class ModernGroupBox(QGroupBox):
 
     def _setup_style(self):
         """设置Win11风格样式"""
-        # 检测当前主题
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             border_color = Win11Colors.DARK_BORDER
@@ -1584,8 +1592,8 @@ class ModernLineEdit(QLineEdit):
 
     def _setup_style(self):
         """设置Win11风格样式"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             bg_color = Win11Colors.DARK_CARD
@@ -1660,8 +1668,8 @@ class PathInputWidget(QWidget):
             label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
 
             # 设置标签颜色和背景
-            palette = self.palette()
-            is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+            app = QApplication.instance()
+            is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
             text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
             label.setStyleSheet(f"color: {text_color.name()}; background-color: transparent;")
 
@@ -1709,8 +1717,8 @@ class PathInputWidget(QWidget):
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label.text() == self.label_text:
-                palette = self.palette()
-                is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+                app = QApplication.instance()
+                is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
                 text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
                 label.setStyleSheet(f"color: {text_color.name()}; background-color: transparent;")
 
@@ -1918,8 +1926,8 @@ class ModernComboBox(QComboBox):
 
     def _setup_style(self):
         """设置Win11风格样式"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             bg_color = Win11Colors.DARK_SURFACE
