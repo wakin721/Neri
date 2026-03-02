@@ -587,6 +587,31 @@ class StartPage(QWidget):
         # 更新按钮样式
         self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)
 
+        if hasattr(self, 'console_output'):
+            app = QApplication.instance()
+            is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+            if is_dark:
+                bg_color = Win11Colors.DARK_CARD
+                text_color = Win11Colors.DARK_TEXT_PRIMARY
+                border_color = Win11Colors.DARK_BORDER
+            else:
+                bg_color = Win11Colors.LIGHT_CARD
+                text_color = Win11Colors.LIGHT_TEXT_PRIMARY
+                border_color = Win11Colors.LIGHT_BORDER
+
+            self.console_output.setStyleSheet(f"""
+                QTextEdit {{
+                    background-color: {bg_color.name()};
+                    color: {text_color.name()};
+                    border: 1px solid {border_color.name()};
+                    border-radius: 6px;
+                    padding: 8px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 10pt;
+                }}
+            """)
+
     def update_quick_settings(self, model_name, stride, video_mode=None, cls_model_name=None):
         """从外部更新快速设置控件状态（不触发信号）"""
         # 1. 更新模型选择
