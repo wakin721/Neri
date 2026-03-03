@@ -1257,18 +1257,29 @@ class ObjectDetectionGUI(QMainWindow):
         else:
             selected_theme = "自动"
 
+        force_dark = None
         if selected_theme == "自动":
             self._apply_system_theme()
         elif selected_theme == "深色":
             self.is_dark_mode = True
             self.accent_color = Win11Colors.DARK_ACCENT
+            force_dark = True
         else:  # "浅色"
             self.is_dark_mode = False
             self.accent_color = Win11Colors.LIGHT_ACCENT
+            force_dark = False
 
-        # 应用主题
-        ThemeManager.apply_win11_style(QApplication.instance())
-        # 在主题更改后设置标题栏颜色
+        # 1. 应用全局主题（传入强制覆盖参数，改变所有底层组件的认知）
+        ThemeManager.apply_win11_style(QApplication.instance(), force_dark=force_dark)
+
+        # 2. 强制通知所有页面和组件重新绘制自己
+        for page in [self.advanced_page, self.start_page, self.preview_page, 
+                     self.species_validation_page, self.about_page, 
+                     self.sidebar, self.status_bar]:
+            if hasattr(page, 'update_theme'):
+                page.update_theme()
+
+        # 3. 更新标题栏和保存设置
         self._set_title_bar_color()
         self._save_current_settings()
 
@@ -1395,7 +1406,9 @@ class ObjectDetectionGUI(QMainWindow):
     def browse_file_path(self):
         """浏览文件路径"""
         folder_selected = QFileDialog.getExistingDirectory(
-            self, "选择图像文件所在文件夹"
+            self, 
+            "选择图像文件所在文件夹",
+            options=QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowDirsOnly
         )
         if folder_selected:
             if hasattr(self.start_page, 'set_file_path'):

@@ -106,15 +106,24 @@ class AdvancedPage(QWidget):
 
     def _apply_win11_style(self):
         """应用Win11风格"""
+        # 必须开启此属性，自定义的 QWidget 子类才能正确应用背景色样式表
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
         palette = self.palette()
         is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
 
         bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
         text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
 
+        # 精确指定 AdvancedPage 的背景，并将 QScrollArea 设为透明以透出底色
         self.setStyleSheet(f"""
-            QWidget {{
+            AdvancedPage {{
                 background-color: {bg_color.name()};
+            }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background-color: transparent;
+            }}
+            QWidget {{
                 color: {text_color.name()};
                 font-family: 'Segoe UI', Arial, sans-serif;
             }}
@@ -1603,7 +1612,11 @@ class AdvancedPage(QWidget):
         else:
             return []
 
-        species_counts = {k: v for k, v in quick_marks_data.items() if k not in ["list", "list_auto", "auto"]}
+        species_counts = {
+            k: v for k, v in quick_marks_data.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+
         sorted_species = sorted(species_counts.items(), key=lambda item: item[1], reverse=True)
         num_to_take = len(quick_marks_data.get("list", []))
         list_auto = [species for species, count in sorted_species[:num_to_take]]
@@ -1935,18 +1948,10 @@ class AdvancedPage(QWidget):
         # 重新应用主题
         self._apply_win11_style()
 
-        # 更新所有自定义组件的主题
-        for component in self.components_to_update:
-            if hasattr(component, 'update_theme'):
-                component.update_theme()
-
-        # 更新所有可折叠面板
-        for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
-                      self.frame_skip_panel, self.frame_ratio_panel, self.pytorch_panel, self.model_panel, self.python_panel,
-                      self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel,
-                      self.export_settings_panel]:
-            if hasattr(panel, 'update_theme'):
-                panel.update_theme()
+        # 遍历当前页面的所有子组件，自动查找到具有 update_theme 方法的自定义组件并更新
+        for widget in self.findChildren(QWidget):
+            if hasattr(widget, 'update_theme') and callable(widget.update_theme):
+                widget.update_theme()
 
     def clear_validation_data(self):
         """清除验证数据"""
