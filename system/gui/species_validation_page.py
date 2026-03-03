@@ -698,8 +698,8 @@ class SpeciesValidationPage(QWidget):
 
     def _apply_theme(self):
         """应用主题样式"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             # Dark theme colors
@@ -1056,6 +1056,10 @@ class SpeciesValidationPage(QWidget):
                         }}
                     """)
 
+        # 刷新图片占位标签的独立样式
+        if hasattr(self, 'species_image_label'):
+            self.species_image_label.setStyleSheet(self._get_placeholder_style())
+
     def _setup_ui(self):
         """设置UI"""
         layout = QVBoxLayout(self)
@@ -1386,26 +1390,28 @@ class SpeciesValidationPage(QWidget):
 
     def _get_placeholder_style(self):
         """获取占位符样式"""
-        is_dark = self.controller.is_dark_mode if hasattr(self.controller, 'is_dark_mode') else False
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
         if is_dark:
-            return """
-                QLabel {
-                    border: 2px dashed #444;
+            return f"""
+                QLabel {{
+                    border: 2px dashed {Win11Colors.DARK_BORDER.name()};
                     border-radius: 8px;
-                    background-color: #2a2a2a;
-                    color: #888;
+                    background-color: {Win11Colors.DARK_SURFACE.name()};
+                    color: {Win11Colors.DARK_TEXT_SECONDARY.name()};
                     font-size: 16px;
-                }
+                }}
             """
         else:
-            return """
-                QLabel {
-                    border: 2px dashed #e0e0e0;
+            return f"""
+                QLabel {{
+                    border: 2px dashed {Win11Colors.LIGHT_BORDER.name()};
                     border-radius: 8px;
-                    background-color: #fafafa;
-                    color: #999999;
+                    background-color: {Win11Colors.LIGHT_SURFACE.name()};
+                    color: {Win11Colors.LIGHT_TEXT_SECONDARY.name()};
                     font-size: 16px;
-                }
+                }}
             """
 
     def _load_species_data(self):
@@ -2549,6 +2555,14 @@ class SpeciesValidationPage(QWidget):
     def update_theme(self):
         """更新主题"""
         self._apply_theme()
+
+        # 遍历并更新所有自定义子组件的主题（如分组框、下拉框、滑块等）
+        for widget in self.findChildren(QWidget):
+            if hasattr(widget, 'update_theme') and callable(widget.update_theme):
+                widget.update_theme()
+            # 兼容只有 _setup_style 方法的组件
+            elif hasattr(widget, '_setup_style') and callable(widget._setup_style):
+                widget._setup_style()
 
     def _mark_as_error_and_save(self, file_name):
         """标记文件为错误并保存验证数据"""
