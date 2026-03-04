@@ -309,6 +309,7 @@ class ImageProcessor:
                     half=use_fp16,
                     iou=iou,
                     conf=conf,
+                    max_det=20,
                     save=False
                 )
 
