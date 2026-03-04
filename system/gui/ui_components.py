@@ -1345,20 +1345,19 @@ class CollapsiblePanel(QFrame):
 
 
 class ThemeManager:
-    """主题管理器，用于统一管理自定义Win11样式"""
-
+    """主题管理器"""
     @staticmethod
     def apply_win11_style(app: QApplication, force_dark: bool = None):
         """应用自定义Win11样式到整个应用程序"""
-        
+
         if force_dark is not None:
             palette = app.palette()
             if force_dark:
                 # 欺骗其他组件，告诉它们现在是深色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30)) 
+                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
             else:
                 # 欺骗其他组件，告诉它们现在是浅色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250)) 
+                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250))
             app.setPalette(palette)
             is_dark = force_dark
         else:
@@ -1372,88 +1371,82 @@ class ThemeManager:
             ThemeManager._apply_light_theme(app)
 
     @staticmethod
+    def _get_scrollbar_style(is_dark):
+        """生成 Material You 风格的滚动条样式"""
+        accent = Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()
+        # 悬停时稍微加亮或变深
+        hover_accent = Win11Colors.DARK_ACCENT.lighter(120).name() if is_dark else Win11Colors.LIGHT_ACCENT.darker(
+            110).name()
+
+        return f"""
+        /* 整个滚动条区域 */
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 12px;
+            margin: 4px 2px 4px 2px;
+        }}
+        QScrollBar:horizontal {{
+            background: transparent;
+            height: 12px;
+            margin: 2px 4px 2px 4px;
+        }}
+
+        /* 滚动条滑块 - 药丸形状 */
+        QScrollBar::handle:vertical {{
+            background: {accent};
+            min-height: 40px;
+            border-radius: 4px; /* 初始状态较细 */
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {accent};
+            min-width: 40px;
+            border-radius: 4px;
+        }}
+
+        /* 悬停状态 - 宽度微增，颜色变化 */
+        QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{
+            background: {hover_accent};
+            border-radius: 4px;
+        }}
+
+        /* 隐藏滚动条上下按钮（Material 风格不需要） */
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0px;
+            height: 0px;
+            background: none;
+        }}
+
+        /* 隐藏轨道背景 */
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: none;
+        }}
+        """
+
+    @staticmethod
     def _apply_light_theme(app: QApplication):
-        """应用自定义亮色主题"""
         style = f"""
         QWidget {{
             background-color: {Win11Colors.LIGHT_BACKGROUND.name()};
             color: {Win11Colors.LIGHT_TEXT_PRIMARY.name()};
-            font-family: "Segoe UI";
+            font-family: "Segoe UI", "PingFang SC";
         }}
-
-        QFrame {{
-            border: none;
-        }}
-
-        QScrollBar:vertical {{
-            background: transparent;
-            width: 12px;
-            border-radius: 6px;
-        }}
-
-        QScrollBar::handle:vertical {{
-            background: {Win11Colors.LIGHT_BORDER.name()};
-            border-radius: 6px;
-            min-height: 20px;
-        }}
-
-        QScrollBar::handle:vertical:hover {{
-            background: {Win11Colors.LIGHT_ACCENT.name()};
-        }}
-
-        QScrollBar::add-line:vertical,
-        QScrollBar::sub-line:vertical {{
-            border: none;
-            background: none;
-        }}
-
-        /* 自定义滚动条样式 */
-        QScrollArea {{
-            border: none;
-        }}
+        {ThemeManager._get_scrollbar_style(False)}
+        QScrollArea {{ border: none; background: transparent; }}
         """
         app.setStyleSheet(style)
 
     @staticmethod
     def _apply_dark_theme(app: QApplication):
-        """应用自定义暗色主题"""
         style = f"""
         QWidget {{
             background-color: {Win11Colors.DARK_BACKGROUND.name()};
             color: {Win11Colors.DARK_TEXT_PRIMARY.name()};
-            font-family: "Segoe UI";
+            font-family: "Segoe UI", "PingFang SC";
         }}
-
-        QFrame {{
-            border: none;
-        }}
-
-        QScrollBar:vertical {{
-            background: transparent;
-            width: 12px;
-            border-radius: 6px;
-        }}
-
-        QScrollBar::handle:vertical {{
-            background: {Win11Colors.DARK_BORDER.name()};
-            border-radius: 6px;
-            min-height: 20px;
-        }}
-
-        QScrollBar::handle:vertical:hover {{
-            background: {Win11Colors.DARK_ACCENT.name()};
-        }}
-
-        QScrollBar::add-line:vertical,
-        QScrollBar::sub-line:vertical {{
-            border: none;
-            background: none;
-        }}
-
-        /* 自定义滚动条样式 */
-        QScrollArea {{
-            border: none;
-        }}
+        {ThemeManager._get_scrollbar_style(True)}
+        QScrollArea {{ border: none; background: transparent; }}
         """
         app.setStyleSheet(style)
 

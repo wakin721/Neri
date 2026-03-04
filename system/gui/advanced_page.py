@@ -19,7 +19,8 @@ import sys
 from system.gui.ui_components import (
     CollapsiblePanel, Win11Colors, RoundedButton,
     ModernSlider, ModernComboBox, SwitchRow,
-    ModernLineEdit, ModernGroupBox, ModernCheckBox
+    ModernLineEdit, ModernGroupBox, ModernCheckBox,
+    ThemeManager
 )
 from system.utils import resource_path
 from system.config import APP_VERSION, NORMAL_FONT
@@ -68,9 +69,9 @@ class AdvancedPage(QWidget):
         self.is_dark_mode = False
 
         # 检测系统主题
-        palette = self.palette()
-        self.is_dark_mode = palette.color(QPalette.ColorRole.Window).lightness() < 128
-
+        app = QApplication.instance()
+        self.is_dark_mode = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        
         # 初始化变量
         self.iou_var = 0.3
         self.conf_var = 0.25
@@ -105,15 +106,17 @@ class AdvancedPage(QWidget):
         QTimer.singleShot(100, self._post_init)
 
     def _apply_win11_style(self):
-        """应用Win11风格"""
-        # 必须开启此属性，自定义的 QWidget 子类才能正确应用背景色样式表
+        """应用Win11风格与Material You滚动条"""
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
         text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
+
+        # 获取滚动条样式
+        scrollbar_style = ThemeManager._get_scrollbar_style(is_dark)
 
         # 精确指定 AdvancedPage 的背景，并将 QScrollArea 设为透明以透出底色
         self.setStyleSheet(f"""
@@ -122,29 +125,40 @@ class AdvancedPage(QWidget):
             }}
             QScrollArea, QScrollArea > QWidget > QWidget {{
                 background-color: transparent;
+                border: none;
             }}
             QWidget {{
                 color: {text_color.name()};
                 font-family: 'Segoe UI', Arial, sans-serif;
             }}
+
+            /* 注入 Material You 滚动条样式 */
+            {scrollbar_style}
         """)
 
     def _create_widgets(self):
         """创建控件"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(20)
+        layout.setContentsMargins(10, 10, 10, 10)
 
         # 创建滚动区域
         scroll_area = QScrollArea(self)
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        # 设置滚动条策略
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # 允许内容在滚动条下方显示（透明轨道效果）
+        scroll_area.viewport().setAutoFillBackground(False)
         layout.addWidget(scroll_area)
 
         # 内容容器
         content_widget = QWidget()
         scroll_area.setWidget(content_widget)
         content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 0, 15, 0)  # 右侧留出空间给滚动条
         content_layout.setSpacing(20)
 
         # 模型参数设置
