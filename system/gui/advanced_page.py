@@ -19,7 +19,8 @@ import sys
 from system.gui.ui_components import (
     CollapsiblePanel, Win11Colors, RoundedButton,
     ModernSlider, ModernComboBox, SwitchRow,
-    ModernLineEdit, ModernGroupBox, ModernCheckBox
+    ModernLineEdit, ModernGroupBox, ModernCheckBox,
+    ThemeManager
 )
 from system.utils import resource_path
 from system.config import APP_VERSION, NORMAL_FONT
@@ -68,9 +69,9 @@ class AdvancedPage(QWidget):
         self.is_dark_mode = False
 
         # 检测系统主题
-        palette = self.palette()
-        self.is_dark_mode = palette.color(QPalette.ColorRole.Window).lightness() < 128
-
+        app = QApplication.instance()
+        self.is_dark_mode = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        
         # 初始化变量
         self.iou_var = 0.3
         self.conf_var = 0.25
@@ -105,37 +106,59 @@ class AdvancedPage(QWidget):
         QTimer.singleShot(100, self._post_init)
 
     def _apply_win11_style(self):
-        """应用Win11风格"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        """应用Win11风格与Material You滚动条"""
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         bg_color = Win11Colors.DARK_BACKGROUND if is_dark else Win11Colors.LIGHT_BACKGROUND
         text_color = Win11Colors.DARK_TEXT_PRIMARY if is_dark else Win11Colors.LIGHT_TEXT_PRIMARY
 
+        # 获取滚动条样式
+        scrollbar_style = ThemeManager._get_scrollbar_style(is_dark)
+
+        # 精确指定 AdvancedPage 的背景，并将 QScrollArea 设为透明以透出底色
         self.setStyleSheet(f"""
-            QWidget {{
+            AdvancedPage {{
                 background-color: {bg_color.name()};
+            }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background-color: transparent;
+                border: none;
+            }}
+            QWidget {{
                 color: {text_color.name()};
                 font-family: 'Segoe UI', Arial, sans-serif;
             }}
+
+            /* 注入 Material You 滚动条样式 */
+            {scrollbar_style}
         """)
 
     def _create_widgets(self):
         """创建控件"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(20)
+        layout.setContentsMargins(10, 10, 10, 10)
 
         # 创建滚动区域
         scroll_area = QScrollArea(self)
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        # 设置滚动条策略
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # 允许内容在滚动条下方显示（透明轨道效果）
+        scroll_area.viewport().setAutoFillBackground(False)
         layout.addWidget(scroll_area)
 
         # 内容容器
         content_widget = QWidget()
         scroll_area.setWidget(content_widget)
         content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 0, 15, 0)  # 右侧留出空间给滚动条
         content_layout.setSpacing(20)
 
         # 模型参数设置
@@ -1603,7 +1626,11 @@ class AdvancedPage(QWidget):
         else:
             return []
 
-        species_counts = {k: v for k, v in quick_marks_data.items() if k not in ["list", "list_auto", "auto"]}
+        species_counts = {
+            k: v for k, v in quick_marks_data.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+
         sorted_species = sorted(species_counts.items(), key=lambda item: item[1], reverse=True)
         num_to_take = len(quick_marks_data.get("list", []))
         list_auto = [species for species, count in sorted_species[:num_to_take]]
@@ -1935,18 +1962,10 @@ class AdvancedPage(QWidget):
         # 重新应用主题
         self._apply_win11_style()
 
-        # 更新所有自定义组件的主题
-        for component in self.components_to_update:
-            if hasattr(component, 'update_theme'):
-                component.update_theme()
-
-        # 更新所有可折叠面板
-        for panel in [self.threshold_panel, self.accel_panel, self.advanced_detect_panel,
-                      self.frame_skip_panel, self.frame_ratio_panel, self.pytorch_panel, self.model_panel, self.python_panel,
-                      self.quick_mark_panel, self.theme_panel, self.cache_panel, self.update_panel,
-                      self.export_settings_panel]:
-            if hasattr(panel, 'update_theme'):
-                panel.update_theme()
+        # 遍历当前页面的所有子组件，自动查找到具有 update_theme 方法的自定义组件并更新
+        for widget in self.findChildren(QWidget):
+            if hasattr(widget, 'update_theme') and callable(widget.update_theme):
+                widget.update_theme()
 
     def clear_validation_data(self):
         """清除验证数据"""

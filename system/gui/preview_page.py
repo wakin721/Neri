@@ -462,8 +462,8 @@ class PreviewPage(QWidget):
 
     def _apply_theme(self):
         """应用当前的主题样式"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
             # Dark theme colors
@@ -551,9 +551,9 @@ class PreviewPage(QWidget):
                             padding: 4px;
                         }}
                         QListWidget::item {{
-                            padding: 6px;
-                            border-radius: 4px;
-                            margin: 1px;
+                            padding: 6px 12px;
+                            border-radius: 12px;
+                            margin: 2px 4px 2px 4px;
                         }}
                         QListWidget::item:hover {{
                             background-color: {list_widget_item_hover_bg_color};
@@ -810,6 +810,16 @@ class PreviewPage(QWidget):
         control_layout.addStretch()
 
         self.detect_button = QPushButton("检测当前图像")
+        # 添加与物种校验界面一致的圆润按钮样式
+        self.detect_button.setStyleSheet("""
+                    QPushButton {
+                        min-height: 15px;
+                        padding: 10px 20px;
+                        font-size: 14px;
+                        font-weight: 600;
+                        border-radius: 12px;
+                    }
+                """)
         self.detect_button.clicked.connect(self.detect_current_image)
         control_layout.addWidget(self.detect_button)
 
@@ -1906,9 +1916,24 @@ class PreviewPage(QWidget):
                 self.toggle_detection_preview(should_show)
 
     def update_theme(self):
-        """更新主题（已修复）"""
+        """更新主题"""
         # 重新应用样式
         self._apply_theme()
+
+        # 强制刷新所有自带独立样式的自定义子组件
+        for child in self.findChildren(ModernGroupBox):
+            if hasattr(child, '_setup_style'):
+                child._setup_style()
+        for child in self.findChildren(ModernComboBox):
+            if hasattr(child, 'update_theme'):
+                child.update_theme()
+        for child in self.findChildren(ModernSlider):
+            if hasattr(child, 'update_theme'):
+                child.update_theme()
+        for child in self.findChildren(SwitchRow):
+            if hasattr(child, 'update_theme'):
+                child.update_theme()
+
         # 更新图片标签的占位符样式
         if not self.image_label.pixmap:
             self.image_label.setStyleSheet(self._get_placeholder_style())

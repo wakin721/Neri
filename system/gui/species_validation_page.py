@@ -24,7 +24,7 @@ import numpy as np
 import shutil
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, get_species_color
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox
+from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox, ThemeManager
 from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
 
@@ -118,7 +118,7 @@ class CorrectionDialog(QDialog):
                             filtered_species_counts[species_name] += 1
 
                 if not filtered_species_counts:
-                    recalculated_info['物种名称'] = "[未校验] 空"
+                    recalculated_info['物种名称'] = "空"
                     recalculated_info['物种数量'] = "空"
                 else:
                     recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
@@ -698,8 +698,11 @@ class SpeciesValidationPage(QWidget):
 
     def _apply_theme(self):
         """应用主题样式"""
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        # 获取 Material You 风格的滚动条样式
+        scrollbar_style = ThemeManager._get_scrollbar_style(is_dark)
 
         if is_dark:
             # Dark theme colors
@@ -742,7 +745,7 @@ class SpeciesValidationPage(QWidget):
             text_edit_border_color = Win11Colors.DARK_BORDER.name()
             label_text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
 
-            # 设置 Win11 风格
+            # 设置 Win11 风格并注入滚动条样式
             self.setStyleSheet(f"""
                         QWidget {{
                             background-color: {bg_color};
@@ -785,9 +788,9 @@ class SpeciesValidationPage(QWidget):
                             padding: 4px;
                         }}
                         QListWidget::item {{
-                            padding: 6px;
-                            border-radius: 4px;
-                            margin: 1px;
+                            padding: 6px 12px;
+                            border-radius: 12px;
+                            margin: 2px 4px 2px 4px;
                         }}
                         QListWidget::item:hover {{
                             background-color: {list_widget_item_hover_bg_color};
@@ -876,6 +879,8 @@ class SpeciesValidationPage(QWidget):
                             color: {label_text_color};
                             font-size: 14px;
                         }}
+
+                        {scrollbar_style}
                     """)
 
         else:
@@ -919,8 +924,7 @@ class SpeciesValidationPage(QWidget):
             text_edit_border_color = Win11Colors.LIGHT_BORDER.name()
             label_text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
 
-        # 设置 Win11 风格
-            # 设置 Win11 风格
+            # 设置 Win11 风格并注入滚动条样式
             self.setStyleSheet(f"""
                         QWidget {{
                             background-color: {bg_color};
@@ -963,9 +967,9 @@ class SpeciesValidationPage(QWidget):
                             padding: 4px;
                         }}
                         QListWidget::item {{
-                            padding: 6px;
-                            border-radius: 4px;
-                            margin: 1px;
+                            padding: 6px 12px;
+                            border-radius: 12px;
+                            margin: 2px 4px 2px 4px;
                         }}
                         QListWidget::item:hover {{
                             background-color: {list_widget_item_hover_bg_color};
@@ -1054,7 +1058,13 @@ class SpeciesValidationPage(QWidget):
                             color: {label_text_color};
                             font-size: 14px;
                         }}
+
+                        {scrollbar_style}
                     """)
+
+        # 刷新图片占位标签的独立样式
+        if hasattr(self, 'species_image_label'):
+            self.species_image_label.setStyleSheet(self._get_placeholder_style())
 
     def _setup_ui(self):
         """设置UI"""
@@ -1132,45 +1142,35 @@ class SpeciesValidationPage(QWidget):
         parent_layout.addWidget(right_panel, 1)
 
     def _create_action_buttons(self, parent_layout):
-        """创建操作按钮区域"""
+        """创建操作按钮区域 (Material You 风格)"""
         action_buttons_group = ModernGroupBox("快速标记")
         action_buttons_layout = QVBoxLayout(action_buttons_group)
-        action_buttons_group.setFixedWidth(110)  # 保持宽度
+        action_buttons_group.setFixedWidth(110)
 
-        # 设置布局的内边距，确保按钮不会太靠近边框
-        action_buttons_layout.setContentsMargins(8, 16, 8, 8)
-        action_buttons_layout.setSpacing(6)
+        # 稍微增加间距以适应圆润的按钮
+        action_buttons_layout.setContentsMargins(6, 6, 6, 8)
+        action_buttons_layout.setSpacing(4)
 
-        correct_button = QPushButton("正确")
-        correct_button.setMaximumWidth(80)
-        correct_button.setMinimumWidth(60)
-        correct_button.setMinimumHeight(28)
-        # 添加自定义样式确保按钮尺寸生效
-        correct_button.setStyleSheet("""
+        # Material You 基础按钮样式 (药丸形状)
+        material_btn_style = """
             QPushButton {
                 max-width: 80px;
                 min-width: 60px;
-                min-height: 28px;
-                padding: 5px 8px;
-                font-size: 12px;
+                min-height: 30px;
+                padding: 4px 8px;
+                font-size: 13px;
+                font-weight: 600;
+                border-radius: 14px;
             }
-        """)
+        """
+
+        correct_button = QPushButton("正确")
+        correct_button.setStyleSheet(material_btn_style)
         correct_button.clicked.connect(lambda: self._mark_and_move_to_next(True))
         action_buttons_layout.addWidget(correct_button)
 
         empty_button = QPushButton("空")
-        empty_button.setMaximumWidth(80)
-        empty_button.setMinimumWidth(60)
-        empty_button.setMinimumHeight(28)
-        empty_button.setStyleSheet("""
-            QPushButton {
-                max-width: 80px;
-                min-width: 60px;
-                min-height: 28px;
-                padding: 5px 8px;
-                font-size: 12px;
-            }
-        """)
+        empty_button.setStyleSheet(material_btn_style)
         empty_button.clicked.connect(lambda: self._mark_and_move_to_next(species_name="空", count="空"))
         action_buttons_layout.addWidget(empty_button)
 
@@ -1179,7 +1179,7 @@ class SpeciesValidationPage(QWidget):
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 删除垂直滚动条
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # 物种按钮容器
         self.species_buttons_frame = QWidget()
@@ -1189,92 +1189,96 @@ class SpeciesValidationPage(QWidget):
         self.species_buttons_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll_area.setWidget(self.species_buttons_frame)
-
-        # 将滚动区域添加到布局中，它会自动填充可用空间
         action_buttons_layout.addWidget(scroll_area)
 
         # 分隔线
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        separator.setStyleSheet("border: none; background-color: rgba(128, 128, 128, 0.3); max-height: 1px; margin: 4px 0px;")
         action_buttons_layout.addWidget(separator)
 
         other_button = QPushButton("其他")
-        other_button.setMaximumWidth(80)
-        other_button.setMinimumWidth(60)
-        other_button.setMinimumHeight(28)
-        other_button.setStyleSheet("""
-            QPushButton {
-                max-width: 80px;
-                min-width: 60px;
-                min-height: 28px;
-                padding: 5px 8px;
-                font-size: 12px;
-            }
-        """)
+        other_button.setStyleSheet(material_btn_style)
         other_button.clicked.connect(self._mark_other_species)
         action_buttons_layout.addWidget(other_button)
 
         parent_layout.addWidget(action_buttons_group)
 
     def _create_quantity_buttons(self, parent_layout):
-        """创建数量按钮区域"""
+        """创建数量按钮区域 (Material You 风格)"""
         self.quantity_buttons_frame = ModernGroupBox("数量")
         quantity_buttons_layout = QVBoxLayout(self.quantity_buttons_frame)
-        self.quantity_buttons_frame.setFixedWidth(80)  # 保持宽度
+        self.quantity_buttons_frame.setFixedWidth(80)
 
-        # 设置布局的内边距和间距
-        quantity_buttons_layout.setContentsMargins(6, 12, 6, 6)  # 保持边距
-        quantity_buttons_layout.setSpacing(3)  # 保持按钮间距
-
-        # 设置布局对齐方式，确保按钮从顶部开始排列
+        quantity_buttons_layout.setContentsMargins(6, 6, 6, 6)
+        quantity_buttons_layout.setSpacing(4)
         quantity_buttons_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # 数量按钮的 Material 样式 (强制锁定高度 30px，圆角 15px)
+        material_qty_style = """
+            QPushButton {
+                max-width: 58px;
+                min-width: 45px;
+                min-height: 25px;
+                max-height: 25px;
+                padding: 4px;
+                font-size: 14px;
+                font-weight: 600;
+                text-align: center;
+                border-radius: 12px;
+            }
+        """
 
         for i in range(1, 11):
             btn = QPushButton(str(i))
-            btn.setMaximumWidth(58)  # 保持宽度
-            btn.setMinimumWidth(45)  # 保持宽度
-            btn.setFixedHeight(32)  # 从28增加到32
-
-            # 为数量按钮设置自定义样式
-            btn.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    height: 32px;
-                    padding: 6px 6px;
-                    font-size: 12px;
-                    font-weight: 500;
-                    text-align: center;
-                }
-            """)
-
-            btn.clicked.connect(lambda checked, num=i: self._on_quantity_button_press(str(num), btn))
+            btn.setStyleSheet(material_qty_style)
+            btn.clicked.connect(lambda checked, num=i, b=btn: self._on_quantity_button_press(str(num), b))
             quantity_buttons_layout.addWidget(btn)
 
         more_button = QPushButton("更多")
-        more_button.setMaximumWidth(58)  # 保持宽度
-        more_button.setMinimumWidth(45)  # 保持宽度
-        more_button.setFixedHeight(32)  # 从28增加到32
-
-        # 为"更多"按钮设置自定义样式
         more_button.setStyleSheet("""
             QPushButton {
                 max-width: 58px;
                 min-width: 45px;
-                height: 32px;
-                padding: 6px 6px;
-                font-size: 11px;
-                font-weight: 500;
+                min-height: 25px;
+                max-height: 25px;
+                padding: 4px;
+                font-size: 13px;
+                font-weight: 600;
                 text-align: center;
+                border-radius: 12px;
             }
         """)
-
         more_button.clicked.connect(lambda: self._on_quantity_button_press("更多", more_button))
         quantity_buttons_layout.addWidget(more_button)
 
-        # 添加弹性空间，将所有按钮推到顶部
         quantity_buttons_layout.addStretch()
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(
+            "border: none; background-color: rgba(128, 128, 128, 0.3); max-height: 1px; margin: 4px 0px;")
+        quantity_buttons_layout.addWidget(separator)
+
+        undo_button = QPushButton()
+        undo_button.setToolTip("撤销上一步操作")
+
+        try:
+            from PySide6.QtGui import QIcon
+            from system.utils import resource_path
+            icon_path = resource_path(os.path.join("res", "icon", "return.svg"))
+            white_icon_pixmap = self._generate_white_icon_pixmap(icon_path, 18)
+            if white_icon_pixmap:
+                undo_button.setIcon(QIcon(white_icon_pixmap))
+            else:
+                undo_button.setText("撤回")
+        except Exception as e:
+            logger.error(f"加载撤回图标失败: {e}")
+            undo_button.setText("撤回")
+
+        undo_button.setStyleSheet(material_qty_style)
+        undo_button.clicked.connect(self._undo_last_action)
+        quantity_buttons_layout.addWidget(undo_button)
 
         parent_layout.addWidget(self.quantity_buttons_frame)
 
@@ -1313,7 +1317,13 @@ class SpeciesValidationPage(QWidget):
 
         # 导出选项区域
         export_options_group = ModernGroupBox("导出选项")
+
+        # 1. 限制导出区域的最大宽度
+        export_options_group.setMaximumWidth(300)
+
         export_layout = QHBoxLayout(export_options_group)
+        export_layout.setContentsMargins(8, 8, 8, 8)  # 稍微收紧内边距
+        export_layout.setSpacing(8)  # 缩小下拉框和按钮之间的间隙
 
         self.format_combo = ModernComboBox()
         self.format_combo.addItems(["CSV", "Excel", "错误照片"])
@@ -1321,7 +1331,18 @@ class SpeciesValidationPage(QWidget):
         self.format_combo.currentTextChanged.connect(self._on_export_format_changed)
         export_layout.addWidget(self.format_combo)
 
+        # 导出按钮 (Material You)
         export_button = QPushButton("导出")
+
+        export_button.setStyleSheet("""
+                    QPushButton {
+                        min-height: 15px;
+                        padding: 12px;  
+                        font-size: 14px;
+                        font-weight: 600;
+                        border-radius: 12px;
+                    }
+                """)
         export_button.clicked.connect(self._dispatch_export)
         export_layout.addWidget(export_button)
 
@@ -1343,26 +1364,28 @@ class SpeciesValidationPage(QWidget):
 
     def _get_placeholder_style(self):
         """获取占位符样式"""
-        is_dark = self.controller.is_dark_mode if hasattr(self.controller, 'is_dark_mode') else False
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
         if is_dark:
-            return """
-                QLabel {
-                    border: 2px dashed #444;
+            return f"""
+                QLabel {{
+                    border: 2px dashed {Win11Colors.DARK_BORDER.name()};
                     border-radius: 8px;
-                    background-color: #2a2a2a;
-                    color: #888;
+                    background-color: {Win11Colors.DARK_SURFACE.name()};
+                    color: {Win11Colors.DARK_TEXT_SECONDARY.name()};
                     font-size: 16px;
-                }
+                }}
             """
         else:
-            return """
-                QLabel {
-                    border: 2px dashed #e0e0e0;
+            return f"""
+                QLabel {{
+                    border: 2px dashed {Win11Colors.LIGHT_BORDER.name()};
                     border-radius: 8px;
-                    background-color: #fafafa;
-                    color: #999999;
+                    background-color: {Win11Colors.LIGHT_SURFACE.name()};
+                    color: {Win11Colors.LIGHT_TEXT_SECONDARY.name()};
                     font-size: 16px;
-                }
+                }}
             """
 
     def _load_species_data(self):
@@ -1540,7 +1563,10 @@ class SpeciesValidationPage(QWidget):
                             final_species_name = ",".join(sorted(parts))
 
                 display_key = final_species_name
-                if final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
+                
+                if final_species_name == "[未校验] 空" and is_validated:
+                    display_key = "[已校验] 空"
+                elif final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
                     if is_validated:
                         display_key = f"[已校验] {final_species_name}"
                     else:
@@ -1929,13 +1955,17 @@ class SpeciesValidationPage(QWidget):
     def _reset_quantity_buttons(self):
         """重置数量按钮样式的辅助函数"""
         if hasattr(self, '_selected_quantity_button') and self._selected_quantity_button:
-            # ... (原有的重置样式代码) ...
-            # 这里可以复用您现有的 styleSheet 字符串
             self._selected_quantity_button.setStyleSheet("""
                 QPushButton {
-                    max-width: 58px; min-width: 45px; height: 32px;
-                    padding: 6px 6px; font-size: 12px; font-weight: 500;
+                    max-width: 58px;
+                    min-width: 45px;
+                    min-height: 25px;
+                    max-height: 25px;
+                    padding: 4px;
+                    font-size: 14px;
+                    font-weight: 600;
                     text-align: center;
+                    border-radius: 12px;
                 }
             """)
             self._selected_quantity_button = None
@@ -1981,6 +2011,8 @@ class SpeciesValidationPage(QWidget):
             return
 
         file_name = selection[0].text()
+
+        self._push_to_undo_stack(file_name)
 
         # "Correct" 和 "Empty" 按钮仍然会立即跳转
         if is_correct is True:
@@ -2050,6 +2082,7 @@ class SpeciesValidationPage(QWidget):
         dialog = CorrectionDialog(self, title="输入其他物种信息", original_info=self.current_species_info)
         # 执行对话框并检查用户是否点击了"确定"
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
+            self._push_to_undo_stack(file_name)
             species_name, species_count, remark = dialog.result
             self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
             # 标记为错误并跳转
@@ -2069,74 +2102,57 @@ class SpeciesValidationPage(QWidget):
         self.species_photo_listbox.setFocus()
 
     def _load_species_buttons(self):
-        """根据自动排序设置，加载快速标记物种按钮"""
-        # 1. 清空现有的物种按钮
+        """根据自动排序设置，加载快速标记物种按钮 (Material You 风格 - 高度25px)"""
         while self.species_buttons_layout.count():
             child = self.species_buttons_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
 
-        # 2. 检查设置管理器是否存在
         if not hasattr(self.controller, 'settings_manager'):
             return
 
-        # 3. 加载快速标记数据
         quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
-
-        # 4. 检查自动排序开关的状态
         use_auto_sort = False
         if hasattr(self.controller, 'advanced_page'):
             use_auto_sort = self.controller.advanced_page.auto_sort_switch_row.isChecked()
 
-        # 5. 根据开关状态选择要显示的列表
         if use_auto_sort and "list_auto" in quick_marks_data:
             species_to_display = quick_marks_data["list_auto"]
         else:
             species_to_display = quick_marks_data.get("list", [])
 
-        # 6. 为列表中的每个物种创建按钮
         for species in species_to_display:
             btn = QPushButton(species)
-            btn.setMaximumWidth(80)  # 使用最大宽度
-            btn.setMinimumWidth(60)  # 设置最小宽度
 
-            # 根据文字长度动态调整高度（稍微减少）
+            # 根据文字长度动态调整字体大小和水平边距，但高度统一锁定为25px
             text_length = len(species)
             if text_length <= 3:
-                # 短文字使用标准高度
-                min_height = 24  # 从28减少到24
-                padding = "3px 6px"
-                font_size = "12px"
+                padding = "2px 8px"
+                font_size = "13px"
             elif text_length <= 6:
-                # 中等长度文字增加高度
-                min_height = 28  # 从32减少到28
-                padding = "4px 6px"
-                font_size = "11px"
+                padding = "2px 6px"
+                font_size = "12px"
             else:
-                # 长文字使用更大高度，允许换行
-                min_height = 34  # 从40减少到34
-                padding = "5px 4px"
-                font_size = "10px"
+                padding = "2px 4px"
+                font_size = "11px"
 
-            btn.setMinimumHeight(min_height)
-
-            # 为动态按钮设置自定义样式
             btn.setStyleSheet(f"""
                 QPushButton {{
                     max-width: 80px;
                     min-width: 60px;
-                    min-height: {min_height}px;
+                    min-height: 30px;
+                    max-height: 30px;
                     padding: {padding};
                     font-size: {font_size};
+                    font-weight: 600;
                     text-align: center;
+                    border-radius: 12px;
                 }}
             """)
 
-            # 对于长文字，设置允许换行
             if text_length > 6:
                 btn.setWordWrap(True)
 
-            # 连接点击信号，传递物种名称
             btn.clicked.connect(lambda checked=False, s=species: self._mark_and_move_to_next(species_name=s))
             self.species_buttons_layout.addWidget(btn)
 
@@ -2147,6 +2163,7 @@ class SpeciesValidationPage(QWidget):
             return
 
         file_name = selection[0].text()
+        self._push_to_undo_stack(file_name)
 
         final_count = count
         if count == "更多":
@@ -2155,35 +2172,23 @@ class SpeciesValidationPage(QWidget):
             if ok:
                 final_count = result
             else:
-                # 取消时也要将焦点设置回照片列表
                 self.species_photo_listbox.setFocus()
                 return
 
-        # 取消上一个数量按钮的选中状态
-        if hasattr(self, '_selected_quantity_button') and self._selected_quantity_button:
-            # 重置之前选中按钮的样式
-            self._selected_quantity_button.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    height: 32px;
-                    padding: 6px 6px;
-                    font-size: 12px;
-                    font-weight: 500;
-                    text-align: center;
-                }
-            """)
+        self._reset_quantity_buttons()
 
-        # 设置新按钮为选中状态
+        # 设置新按钮为选中状态 (高度 30px，圆角 15px)
         btn_widget.setStyleSheet("""
             QPushButton {
                 max-width: 58px;
                 min-width: 45px;
-                height: 32px;
-                padding: 6px 6px;
-                font-size: 12px;
-                font-weight: 500;
+                min-height: 25px;
+                max-height: 25px;
+                padding: 4px;
+                font-size: 14px;
+                font-weight: bold;
                 text-align: center;
+                border-radius: 12px;
                 background-color: #5d3a4f;
                 color: white;
             }
@@ -2193,17 +2198,14 @@ class SpeciesValidationPage(QWidget):
 
         self._mark_as_error_and_save(file_name)
 
-        # 如果物种也已选择，则更新JSON并跳转
         new_species = self._species_marked if self._species_marked is not None else None
         self._update_json_file(file_name, new_species=new_species, new_count=str(self._count_marked))
 
-        # 如果物种也已选择，则移动到下一张图片并刷新列表
         if self._species_marked is not None:
             self._move_to_next_image()
             self.species_photo_listbox.setFocus()
             QTimer.singleShot(50, self._refresh_species_list_logic)
         else:
-            # 仅选择了数量，尚未选择物种，不刷新列表
             self.species_photo_listbox.setFocus()
 
     def _on_confidence_slider_changed(self, value):
@@ -2499,6 +2501,14 @@ class SpeciesValidationPage(QWidget):
         """更新主题"""
         self._apply_theme()
 
+        # 遍历并更新所有自定义子组件的主题（如分组框、下拉框、滑块等）
+        for widget in self.findChildren(QWidget):
+            if hasattr(widget, 'update_theme') and callable(widget.update_theme):
+                widget.update_theme()
+            # 兼容只有 _setup_style 方法的组件
+            elif hasattr(widget, '_setup_style') and callable(widget._setup_style):
+                widget._setup_style()
+
     def _mark_as_error_and_save(self, file_name):
         """标记文件为错误并保存验证数据"""
         if not hasattr(self, 'validation_data'):
@@ -2595,6 +2605,93 @@ class SpeciesValidationPage(QWidget):
             
             # 保存更新后的数据
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
+
+    def _push_to_undo_stack(self, file_name):
+        """将当前文件的状态压入撤回栈"""
+        if not hasattr(self, 'undo_stack'):
+            self.undo_stack = []
+            
+        try:
+            temp_photo_dir = self.controller.get_temp_photo_dir()
+            if not temp_photo_dir: return
+            
+            json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
+            old_json = None
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    old_json = json.load(f)
+                    
+            old_val = self.validation_data.get(file_name)
+                
+            self.undo_stack.append({
+                'file_name': file_name,
+                'json_data': old_json,
+                'validation_data': old_val
+            })
+            
+            # 限制栈大小为 50 步，防止占用过多内存
+            if len(self.undo_stack) > 50:
+                self.undo_stack.pop(0)
+        except Exception as e:
+            logger.error(f"加入撤回栈失败: {e}")
+
+    def _undo_last_action(self):
+        """执行撤回操作并自动刷新界面，并在状态栏提示"""
+        if not hasattr(self, 'undo_stack') or not self.undo_stack:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
+            return
+        
+        try:
+            last_state = self.undo_stack.pop()
+            file_name = last_state['file_name']
+            old_json = last_state['json_data']
+            old_val = last_state['validation_data']
+            
+            temp_photo_dir = self.controller.get_temp_photo_dir()
+            if not temp_photo_dir: return
+            json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
+            
+            # 还原 JSON
+            if old_json is not None:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(old_json, f, ensure_ascii=False, indent=2)
+            
+            # 还原 内存验证状态 并 保存
+            if old_val is not None:
+                self.validation_data[file_name] = old_val
+                self._save_validation_data()
+            else:
+                self.validation_data.pop(file_name, None)
+                # 因为 _save_validation_data() 采用的是 update 增量合并逻辑，
+                # 所以必须手动从 validation.json 中删除该记录，防止僵尸数据被重新读回内存
+                validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+                if os.path.exists(validation_file_path):
+                    try:
+                        with open(validation_file_path, 'r', encoding='utf-8') as f:
+                            disk_data = json.load(f)
+                        
+                        if file_name in disk_data:
+                            disk_data.pop(file_name, None)
+                            with open(validation_file_path, 'w', encoding='utf-8') as f:
+                                json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                    except Exception as e:
+                        logger.error(f"撤回时清理 validation.json 失败: {e}")
+            
+            # 触发强制选中，自动刷新界面
+            self._force_select_file = file_name
+            self._refresh_species_list_logic()
+            
+            if hasattr(self.controller, 'status_bar'):
+                # 获取刷新列表后自带的状态栏文本 (例如: "当前物种共有 X 张照片")
+                current_text = self.controller.status_bar.status_label.text()
+                # 拼接上撤回提示，覆盖回状态栏
+                self.controller.status_bar.status_label.setText(
+                    f"✅ 已成功撤回对 {file_name} 的操作  |  {current_text}"
+                )
+            
+        except Exception as e:
+            logger.error(f"撤回失败: {e}")
 
     def _update_json_file(self, file_name, new_species=None, new_count=None, new_remark=None):
         """更新JSON文件中的物种信息"""
@@ -3362,8 +3459,13 @@ class SpeciesValidationPage(QWidget):
 
         # 1. 记住当前的选中状态
         current_species = self.current_selected_species
-        current_photo_item = self.species_photo_listbox.currentItem()
-        current_photo_name = current_photo_item.text() if current_photo_item else None
+        force_file = getattr(self, '_force_select_file', None)
+        if force_file:
+            current_photo_name = force_file
+            self._force_select_file = None  # 消费掉标志，避免影响后续的常规刷新
+        else:
+            current_photo_item = self.species_photo_listbox.currentItem()
+            current_photo_name = current_photo_item.text() if current_photo_item else None
         current_photo_row = self.species_photo_listbox.currentRow()
 
         # 2. 重新加载物种数据
@@ -3417,6 +3519,8 @@ class SpeciesValidationPage(QWidget):
                 for img in image_files:
                     self.species_photo_listbox.addItem(img)
 
+                self.species_photo_listbox.blockSignals(False)
+
                 # 恢复照片选中
                 if current_photo_name:
                     items = self.species_photo_listbox.findItems(current_photo_name, Qt.MatchFlag.MatchExactly)
@@ -3427,7 +3531,6 @@ class SpeciesValidationPage(QWidget):
                         row = min(current_photo_row, self.species_photo_listbox.count() - 1)
                         if row >= 0:
                             self.species_photo_listbox.setCurrentRow(row)
-                self.species_photo_listbox.blockSignals(False)
 
                 # 更新状态栏
                 if hasattr(self.controller, 'status_bar'):

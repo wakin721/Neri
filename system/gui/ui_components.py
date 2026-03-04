@@ -358,6 +358,10 @@ class RoundedButton(QPushButton):
         """返回按钮是否处于激活状态"""
         return self._is_active
 
+    def update_theme(self):
+        """更新主题"""
+        self._update_stylesheet()
+
 
 class ModernFrame(QFrame):
     """现代风格框架 - 自定义主题色版本"""
@@ -1150,17 +1154,25 @@ class CollapsiblePanel(QFrame):
                 class_name = widget.__class__.__name__
 
                 if class_name in ['QWidget', 'QFrame']:
-                    # 容器组件设置透明背景
+                    # 容器组件设置透明背景（移除拦截限制，清理旧标签）
                     current_style = widget.styleSheet()
-                    if 'background-color' not in current_style:
-                        widget.setStyleSheet(f"{current_style}background-color: transparent;")
+                    current_style = current_style.replace("background-color: transparent;", "")
+                    widget.setStyleSheet(f"{current_style} background-color: transparent;")
 
                 elif class_name == 'QLabel':
-                    # 标签组件透明背景
+                    # 标签组件透明背景（修复二次切换主题不更新颜色的Bug）
                     current_style = widget.styleSheet()
-                    if 'background-color' not in current_style:
+                    # 清理上次注入的主题属性
+                    current_style = current_style.replace("background-color: transparent;", "")
+                    current_style = current_style.replace(f"color: {Win11Colors.LIGHT_TEXT_PRIMARY.name()};", "")
+                    current_style = current_style.replace(f"color: {Win11Colors.DARK_TEXT_PRIMARY.name()};", "")
+
+                    # 避免覆盖特意设置的自定义颜色（如错误警告红字）
+                    if 'color:' not in current_style:
                         widget.setStyleSheet(
-                            f"{current_style}background-color: transparent; color: {text_color.name()};")
+                            f"{current_style} background-color: transparent; color: {text_color.name()};")
+                    else:
+                        widget.setStyleSheet(f"{current_style} background-color: transparent;")
 
                 elif class_name == 'SwitchRow':
                     # 开关行组件
@@ -1170,201 +1182,110 @@ class CollapsiblePanel(QFrame):
                 elif class_name == 'ModernSwitch':
                     # 开关组件保持透明背景，让自定义绘制生效
                     widget.setStyleSheet("ModernSwitch { background-color: transparent; }")
-                    # 更新开关的主题
                     widget.update_theme()
 
-
                 elif class_name == 'QComboBox':
-
                     # 下拉菜单需要特殊处理，确保下拉列表有正确的背景
-
                     widget.setStyleSheet(f"""
-
                         QComboBox {{
-
                             background-color: {content_bg.lighter(105).name()};
-
                             border: 1px solid {border_color.name()};
-
                             border-radius: 4px;
-
                             padding: 6px 8px;
-
                             color: {text_color.name()};
-
                             min-height: 20px;
-
                         }}
-
                         QComboBox:hover {{
-
                             background-color: {hover_color.name()};
-
                             border-color: {accent_color.name()};
-
                         }}
-
                         QComboBox:focus {{
-
                             border-color: {accent_color.name()};
-
                         }}
-
                         QComboBox::drop-down {{
-
                             width: 0px;
-
                             border: none;
-
                             background-color: transparent;
-
                         }}
-
                         QComboBox::down-arrow {{
-
                             width: 0px;
-
                             height: 0px;
-
                             border: none;
-
                             background: transparent;
-
                         }}
-
                         QComboBox QAbstractItemView {{
-
                             background-color: {content_bg.name()};
-
                             border: 1px solid {border_color.name()};
-
                             border-radius: 4px;
-
                             selection-background-color: {hover_color.name()};
-
                             selection-color: {text_color.name()};
-
                             color: {text_color.name()};
-
                             outline: none;
-
                             show-decoration-selected: 1;
-
                         }}
-
                         QComboBox QAbstractItemView::item {{
-
                             padding: 8px 12px;
-
                             background-color: transparent;
-
                             color: {text_color.name()};
-
                             border: none;
-
                             min-height: 20px;
-
                         }}
-
                         QComboBox QAbstractItemView::item:hover {{
-
                             background-color: {hover_color.name()};
-
                         }}
-
                         QComboBox QAbstractItemView::item:selected {{
-
                             background-color: {accent_color.name()};
-
                             color: white;
-
                         }}
-
                     """)
-
                 elif class_name == 'QLineEdit':
-
-                    # 文本输入框处理...
-
+                    # 文本输入框处理
                     widget.setStyleSheet(f"""
-
-                                    QLineEdit {{
-
-                                        background-color: {content_bg.lighter(105).name()};
-
-                                        border: 1px solid {border_color.name()};
-
-                                        border-radius: 4px;
-
-                                        padding: 6px;
-
-                                        color: {text_color.name()};
-
-                                    }}
-
-                                    QLineEdit:focus {{
-
-                                        border-color: {accent_color.name()};
-
-                                    }}
-
-                                """)
-
+                                            QLineEdit {{
+                                                background-color: {content_bg.lighter(105).name()};
+                                                border: 1px solid {border_color.name()};
+                                                border-radius: 4px;
+                                                padding: 6px;
+                                                color: {text_color.name()};
+                                            }}
+                                            QLineEdit:focus {{
+                                                border-color: {accent_color.name()};
+                                            }}
+                                        """)
 
                 elif class_name in ['QSlider', 'QCheckBox']:
-
-                    # 传统复选框和滑块保持透明背景
-
+                    # 传统复选框和滑块保持透明背景（同样清理旧标签避免拦截）
                     current_style = widget.styleSheet()
+                    current_style = current_style.replace("background-color: transparent;", "")
+                    current_style = current_style.replace(f"color: {Win11Colors.LIGHT_TEXT_PRIMARY.name()};", "")
+                    current_style = current_style.replace(f"color: {Win11Colors.DARK_TEXT_PRIMARY.name()};", "")
 
-                    if 'background-color' not in current_style:
+                    if 'color:' not in current_style:
                         widget.setStyleSheet(
-
-                            f"{current_style}background-color: transparent; color: {text_color.name()};")
-
+                            f"{current_style} background-color: transparent; color: {text_color.name()};")
+                    else:
+                        widget.setStyleSheet(f"{current_style} background-color: transparent;")
 
                 elif class_name == 'QPushButton':
-
-                    # 按钮组件处理...
-
-                    current_style = widget.styleSheet()
-
-                    if 'background-color' not in current_style:
-                        widget.setStyleSheet(f"""
-
-                                        QPushButton {{
-
-                                            background-color: {content_bg.lighter(110).name()};
-
-                                            border: 1px solid {border_color.name()};
-
-                                            border-radius: 4px;
-
-                                            padding: 6px 12px;
-
-                                            color: {text_color.name()};
-
-                                            font-weight: 500;
-
-                                        }}
-
-                                        QPushButton:hover {{
-
-                                            background-color: {hover_color.name()};
-
-                                            border-color: {accent_color.name()};
-
-                                        }}
-
-                                        QPushButton:pressed {{
-
-                                            background-color: {accent_color.name()};
-
-                                            color: white;
-
-                                        }}
-
-                                    """)
+                    # 按钮组件处理
+                    widget.setStyleSheet(f"""
+                                            QPushButton {{
+                                                background-color: {content_bg.lighter(110).name()};
+                                                border: 1px solid {border_color.name()};
+                                                border-radius: 4px;
+                                                padding: 6px 12px;
+                                                color: {text_color.name()};
+                                                font-weight: 500;
+                                            }}
+                                            QPushButton:hover {{
+                                                background-color: {hover_color.name()};
+                                                border-color: {accent_color.name()};
+                                            }}
+                                            QPushButton:pressed {{
+                                                background-color: {accent_color.name()};
+                                                color: white;
+                                            }}
+                                        """)
 
                 # 递归处理子组件
                 for child in widget.findChildren(QWidget):
@@ -1424,8 +1345,7 @@ class CollapsiblePanel(QFrame):
 
 
 class ThemeManager:
-    """主题管理器，用于统一管理自定义Win11样式"""
-
+    """主题管理器"""
     @staticmethod
     def apply_win11_style(app: QApplication, force_dark: bool = None):
         """应用自定义Win11样式到整个应用程序"""
@@ -1451,88 +1371,82 @@ class ThemeManager:
             ThemeManager._apply_light_theme(app)
 
     @staticmethod
+    def _get_scrollbar_style(is_dark):
+        """生成 Material You 风格的滚动条样式"""
+        accent = Win11Colors.DARK_ACCENT.name() if is_dark else Win11Colors.LIGHT_ACCENT.name()
+        # 悬停时稍微加亮或变深
+        hover_accent = Win11Colors.DARK_ACCENT.lighter(120).name() if is_dark else Win11Colors.LIGHT_ACCENT.darker(
+            110).name()
+
+        return f"""
+        /* 整个滚动条区域 */
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 12px;
+            margin: 4px 2px 4px 2px;
+        }}
+        QScrollBar:horizontal {{
+            background: transparent;
+            height: 12px;
+            margin: 2px 4px 2px 4px;
+        }}
+
+        /* 滚动条滑块 - 药丸形状 */
+        QScrollBar::handle:vertical {{
+            background: {accent};
+            min-height: 40px;
+            border-radius: 4px; /* 初始状态较细 */
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {accent};
+            min-width: 40px;
+            border-radius: 4px;
+        }}
+
+        /* 悬停状态 - 宽度微增，颜色变化 */
+        QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{
+            background: {hover_accent};
+            border-radius: 4px;
+        }}
+
+        /* 隐藏滚动条上下按钮（Material 风格不需要） */
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0px;
+            height: 0px;
+            background: none;
+        }}
+
+        /* 隐藏轨道背景 */
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: none;
+        }}
+        """
+
+    @staticmethod
     def _apply_light_theme(app: QApplication):
-        """应用自定义亮色主题"""
         style = f"""
         QWidget {{
             background-color: {Win11Colors.LIGHT_BACKGROUND.name()};
             color: {Win11Colors.LIGHT_TEXT_PRIMARY.name()};
-            font-family: "Segoe UI";
+            font-family: "Segoe UI", "PingFang SC";
         }}
-
-        QFrame {{
-            border: none;
-        }}
-
-        QScrollBar:vertical {{
-            background: transparent;
-            width: 12px;
-            border-radius: 6px;
-        }}
-
-        QScrollBar::handle:vertical {{
-            background: {Win11Colors.LIGHT_BORDER.name()};
-            border-radius: 6px;
-            min-height: 20px;
-        }}
-
-        QScrollBar::handle:vertical:hover {{
-            background: {Win11Colors.LIGHT_ACCENT.name()};
-        }}
-
-        QScrollBar::add-line:vertical,
-        QScrollBar::sub-line:vertical {{
-            border: none;
-            background: none;
-        }}
-
-        /* 自定义滚动条样式 */
-        QScrollArea {{
-            border: none;
-        }}
+        {ThemeManager._get_scrollbar_style(False)}
+        QScrollArea {{ border: none; background: transparent; }}
         """
         app.setStyleSheet(style)
 
     @staticmethod
     def _apply_dark_theme(app: QApplication):
-        """应用自定义暗色主题"""
         style = f"""
         QWidget {{
             background-color: {Win11Colors.DARK_BACKGROUND.name()};
             color: {Win11Colors.DARK_TEXT_PRIMARY.name()};
-            font-family: "Segoe UI";
+            font-family: "Segoe UI", "PingFang SC";
         }}
-
-        QFrame {{
-            border: none;
-        }}
-
-        QScrollBar:vertical {{
-            background: transparent;
-            width: 12px;
-            border-radius: 6px;
-        }}
-
-        QScrollBar::handle:vertical {{
-            background: {Win11Colors.DARK_BORDER.name()};
-            border-radius: 6px;
-            min-height: 20px;
-        }}
-
-        QScrollBar::handle:vertical:hover {{
-            background: {Win11Colors.DARK_ACCENT.name()};
-        }}
-
-        QScrollBar::add-line:vertical,
-        QScrollBar::sub-line:vertical {{
-            border: none;
-            background: none;
-        }}
-
-        /* 自定义滚动条样式 */
-        QScrollArea {{
-            border: none;
-        }}
+        {ThemeManager._get_scrollbar_style(True)}
+        QScrollArea {{ border: none; background: transparent; }}
         """
         app.setStyleSheet(style)
 
@@ -1579,6 +1493,10 @@ class ModernGroupBox(QGroupBox):
                 color: {text_color.name()};
             }}
         """)
+
+    def update_theme(self):
+        """更新主题"""
+        self._setup_style()
 
 
 class ModernLineEdit(QLineEdit):
@@ -1712,6 +1630,12 @@ class PathInputWidget(QWidget):
         self._setup_style()
         if hasattr(self.line_edit, '_setup_style'):
             self.line_edit._setup_style()
+
+        if hasattr(self, 'browse_button'):
+            if hasattr(self.browse_button, 'update_theme'):
+                self.browse_button.update_theme()
+            elif hasattr(self.browse_button, '_update_stylesheet'):
+                self.browse_button._update_stylesheet()
 
         # 更新标签颜色
         from PySide6.QtWidgets import QLabel

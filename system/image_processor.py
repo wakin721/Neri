@@ -305,11 +305,10 @@ class ImageProcessor:
                     processed_imgs,
                     augment=augment,
                     agnostic_nms=agnostic_nms,
-                    imgsz=1024,
+                    imgsz=1280,
                     half=use_fp16,
                     iou=iou,
                     conf=conf,
-                    max_det=20,
                     save=False
                 )
 
@@ -583,14 +582,14 @@ class ImageProcessor:
 
             # === 第二步：运行 YOLO 追踪 ===
             # source 直接传入临时视频路径
-            # imgsz=1024 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
+            # imgsz=1280 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
             # vid_stride=1 必须为1，因为我们在第一步已经物理删除了不需要的帧
             results = self.model.track(
                 source=temp_enhanced_video_path,
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
-                imgsz=1024,
+                imgsz=1280,
                 half=use_fp16,
                 iou=iou,
                 conf=conf,

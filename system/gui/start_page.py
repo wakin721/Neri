@@ -87,6 +87,9 @@ class StartPage(QWidget):
         # 底部控制区域
         self._create_bottom_controls(layout)
 
+        # 应用浏览按钮的自定义圆润样式
+        self._apply_browse_button_style()
+
     def _create_basic_settings_group(self, parent_layout):
         """创建基础设置组 (包含路径、模型和跳帧)"""
         # 分组框名称改为 "基础设置"
@@ -380,29 +383,28 @@ class StartPage(QWidget):
             if self.play_icon:
                 self.start_stop_button.setIcon(self._create_colored_pixmap(self.play_icon, icon_color))
 
-
         self.start_stop_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {bg_color};
-                color: {text_color};
-                border: none;
-                border-radius: 8px;
-                padding: 12px 24px;
-                font-size: 14px;
-                font-weight: 600;
-                text-align: center;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-            }}
-            QPushButton:pressed {{
-                background-color: {pressed_color};
-            }}
-            QPushButton:disabled {{
-                background-color: #cccccc;
-                color: #666666;
-            }}
-        """)
+                    QPushButton {{
+                        background-color: {bg_color};
+                        color: {text_color};
+                        border: none;
+                        border-radius: 16px;  
+                        padding: 10px 24px;
+                        font-size: 15px;      
+                        font-weight: bold;
+                        text-align: center;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {hover_color};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: {pressed_color};
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #cccccc;
+                        color: #666666;
+                    }}
+                """)
 
     def _setup_connections(self):
         """设置信号连接"""
@@ -664,3 +666,47 @@ class StartPage(QWidget):
             self.stride_combo.setCurrentText(stride_str)
 
             self.stride_combo.blockSignals(False)
+
+    def _apply_browse_button_style(self):
+        """强制覆盖浏览按钮为统一的药丸风格"""
+        from PySide6.QtWidgets import QPushButton
+
+        # 在路径组件中寻找按钮实体
+        browse_btn = self.file_path_widget.findChild(QPushButton)
+        if not browse_btn:
+            return
+
+        palette = self.palette()
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_ACCENT.name()
+            hover_color = Win11Colors.DARK_ACCENT.lighter(120).name()
+            pressed_color = Win11Colors.DARK_ACCENT.darker(110).name()
+        else:
+            bg_color = Win11Colors.LIGHT_ACCENT.name()
+            hover_color = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            pressed_color = Win11Colors.LIGHT_ACCENT.darker(120).name()
+
+        browse_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: #ffffff;
+                border: none;
+                border-radius: 12px;
+                padding: 10px 16px;
+                min-height: 20px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed_color};
+            }}
+            QPushButton:disabled {{
+                background-color: #cccccc;
+                color: #666666;
+            }}
+        """)
