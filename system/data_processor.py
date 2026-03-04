@@ -133,7 +133,7 @@ class DataProcessor:
                 # 更新最后探测时间
                 species_last_detected[species] = current_time
 
-            img_info['独立探测首只'] = '是' if is_independent else ''
+            img_info['独立探测首只'] = '1' if is_independent else ''
 
         return image_info_list
 
