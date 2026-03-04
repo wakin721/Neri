@@ -551,9 +551,9 @@ class PreviewPage(QWidget):
                             padding: 4px;
                         }}
                         QListWidget::item {{
-                            padding: 6px;
-                            border-radius: 4px;
-                            margin: 1px;
+                            padding: 6px 12px;
+                            border-radius: 12px;
+                            margin: 2px 4px 2px 4px;
                         }}
                         QListWidget::item:hover {{
                             background-color: {list_widget_item_hover_bg_color};
@@ -810,6 +810,16 @@ class PreviewPage(QWidget):
         control_layout.addStretch()
 
         self.detect_button = QPushButton("检测当前图像")
+        # 添加与物种校验界面一致的圆润按钮样式
+        self.detect_button.setStyleSheet("""
+                    QPushButton {
+                        min-height: 15px;
+                        padding: 10px 20px;
+                        font-size: 14px;
+                        font-weight: 600;
+                        border-radius: 12px;
+                    }
+                """)
         self.detect_button.clicked.connect(self.detect_current_image)
         control_layout.addWidget(self.detect_button)
 
