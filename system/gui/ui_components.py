@@ -1349,15 +1349,15 @@ class ThemeManager:
     @staticmethod
     def apply_win11_style(app: QApplication, force_dark: bool = None):
         """应用自定义Win11样式到整个应用程序"""
-
+        
         if force_dark is not None:
             palette = app.palette()
             if force_dark:
                 # 欺骗其他组件，告诉它们现在是深色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30)) 
             else:
                 # 欺骗其他组件，告诉它们现在是浅色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250))
+                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250)) 
             app.setPalette(palette)
             is_dark = force_dark
         else:

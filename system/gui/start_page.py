@@ -614,9 +614,6 @@ class StartPage(QWidget):
                 }}
             """)
 
-        # 主题更新时也重绘浏览按钮
-        self._apply_browse_button_style()
-
     def update_quick_settings(self, model_name, stride, video_mode=None, cls_model_name=None):
         """从外部更新快速设置控件状态（不触发信号）"""
         # 1. 更新模型选择
