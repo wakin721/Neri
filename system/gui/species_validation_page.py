@@ -100,29 +100,33 @@ class CorrectionDialog(QDialog):
         self.remark_edit = QLineEdit()
 
         self.species_name_edit.editingFinished.connect(self._auto_fill_type_from_db)
+        self.species_name_edit.textChanged.connect(self._auto_update_count)
 
         # 如果有原始信息，则预先填充输入框
         if self.original_info:
-            conf_threshold = parent.validation_conf_var if hasattr(parent, 'validation_conf_var') else 0.25
-
             recalculated_info = {}
-            if self.original_info.get('最低置信度') != '人工校验' and '检测框' in self.original_info:
-                boxes_info = self.original_info.get("检测框", [])
-                filtered_species_counts = Counter()
+            if self.original_info.get('最低置信度') != '人工校验':
+                # 【核心修改】直接读取父页面已计算好的标签文本
+                # 这样完美兼容视频(tracks)、图片(检测框)及不同物种独立阈值的结果
+                info_text = parent.species_info_label.text() if hasattr(parent, 'species_info_label') else ""
 
-                for box in boxes_info:
-                    confidence = box.get("置信度", 0)
-                    if confidence >= conf_threshold:
-                        species_name = box.get("物种")
-                        if species_name:
-                            filtered_species_counts[species_name] += 1
+                sp_name = ""
+                sp_count = ""
+                for part in info_text.split(" | "):
+                    part = part.strip()
+                    if part.startswith("物种:"):
+                        sp_name = part.replace("物种:", "").strip()
+                    elif part.startswith("数量:"):
+                        sp_count = part.replace("数量:", "").strip()
 
-                if not filtered_species_counts:
-                    recalculated_info['物种名称'] = "空"
-                    recalculated_info['物种数量'] = "空"
-                else:
-                    recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
-                    recalculated_info['物种数量'] = ",".join(map(str, filtered_species_counts.values()))
+                # 过滤掉无效或占位字符
+                if sp_name in ["[未校验] 空", "[已校验] 空", "未知", "未检测", "需人工检验", ""]:
+                    sp_name = "空"
+                if sp_count in ["0", "未知", ""]:
+                    sp_count = "空"
+
+                recalculated_info['物种名称'] = sp_name
+                recalculated_info['物种数量'] = sp_count
             else:
                 recalculated_info['物种名称'] = self.original_info.get('物种名称', '')
                 recalculated_info['物种数量'] = self.original_info.get('物种数量', '')
@@ -130,6 +134,8 @@ class CorrectionDialog(QDialog):
             self.species_name_edit.setText(recalculated_info.get('物种名称', ''))
             self.species_count_edit.setText(recalculated_info.get('物种数量', ''))
             self.remark_edit.setText(self.original_info.get('备注', ''))
+
+            # 自动触发类型补全
             self._auto_fill_type_from_db()
 
         self.setup_ui()
@@ -168,6 +174,38 @@ class CorrectionDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.resize(400, 200)
+
+    def _auto_update_count(self, text):
+        """根据物种名称的数量，动态同步数量框的数字个数"""
+        current_count = self.species_count_edit.text().strip()
+
+        # 1. 提取当前输入的物种种类数
+        names = [n.strip() for n in text.replace('，', ',').split(',') if n.strip()]
+        num_species = len(names)
+
+        if num_species == 0:
+            self.species_count_edit.setText("")
+            return
+
+        # 2. 解析当前数量框内的数字
+        # 如果当前是 "空" 或者完全空白，视为空列表（这一步实现了直接覆盖"空"）
+        if current_count == "空" or not current_count:
+            current_counts = []
+        else:
+            # 提取已有的数字列表
+            current_counts = [c.strip() for c in current_count.replace('，', ',').split(',') if c.strip()]
+
+        # 3. 对齐数字个数与物种个数
+        if len(current_counts) < num_species:
+            # 如果填写的物种数量多于已有的数字数量，在末尾追加缺少个数的 '1'
+            missing = num_species - len(current_counts)
+            current_counts.extend(["1"] * missing)
+        elif len(current_counts) > num_species:
+            # 如果删除了某个物种名称，则自动截掉尾部多余的数字，保持严格的一一对应
+            current_counts = current_counts[:num_species]
+
+        # 4. 回填到输入框
+        self.species_count_edit.setText(",".join(current_counts))
 
     def _auto_fill_type_from_db(self):
         full_name_str = self.species_name_edit.text().strip().replace('，', ',')
