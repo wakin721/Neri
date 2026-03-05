@@ -1892,7 +1892,7 @@ class SpeciesValidationPage(QWidget):
             self.controller.status_bar.status_label.setText(f"当前物种共有 {photo_count} 张照片")
 
         # 根据选择的物种来决定是否显示置信度滑块
-        if species_name in ["[已校验] 空", "[未校验] 空"]:
+        if species_name in ["[已校验] 空", "[未校验] 空", "空"]:
             self.species_conf_slider.setEnabled(False)
             self.species_conf_label.setText("N/A")
             self.species_selector.setEnabled(False)  # 禁用选择器
@@ -2921,7 +2921,7 @@ class SpeciesValidationPage(QWidget):
                     species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                     confidence = f"{min_conf_val:.2f}"
                 else:
-                    species_name = "[未校验] 空"
+                    species_name = "空"
                     species_count = "0"
                     confidence = "N/A"
 
