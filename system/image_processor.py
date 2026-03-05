@@ -273,7 +273,7 @@ class ImageProcessor:
         def run_batch_process():
             nonlocal batch_results_info
             try:
-                # [修改] 1. 优先使用预加载的数据，否则现场处理
+                # 1. 优先使用预加载的数据，否则现场处理
                 if preloaded_data:
                     valid_indices, processed_imgs, original_imgs_rgb = preloaded_data
                 else:
@@ -299,16 +299,21 @@ class ImageProcessor:
                 if not processed_imgs:
                     return
 
+                import tempfile
+                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs") 
+
                 # 2. 批量运行检测模型
                 # stream=False 确保返回完整列表
                 det_results = self.model(
                     processed_imgs,
                     augment=augment,
                     agnostic_nms=agnostic_nms,
-                    imgsz=1280,
+                    imgsz=1920,
                     half=use_fp16,
                     iou=iou,
                     conf=conf,
+                    project=temp_run_project,
+                    name="detect_log",
                     save=False
                 )
 
@@ -342,7 +347,14 @@ class ImageProcessor:
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
                         # 这里的 batch size 可以根据显存调整，YOLO通常自动处理
-                        cls_results_list = self.cls_model(all_crops, half=use_fp16, save=False)
+                        cls_results_list = self.cls_model(
+                            all_crops, 
+                            half=use_fp16, 
+                            save=False,
+                            project=temp_run_project,
+                            name="cls_log",
+                            exist_ok=True
+                        )
 
                         # 5. 映射回原结果 (Map Back)
                         for i, cls_res in enumerate(cls_results_list):
@@ -582,14 +594,14 @@ class ImageProcessor:
 
             # === 第二步：运行 YOLO 追踪 ===
             # source 直接传入临时视频路径
-            # imgsz=1280 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
+            # imgsz=1920 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
             # vid_stride=1 必须为1，因为我们在第一步已经物理删除了不需要的帧
             results = self.model.track(
                 source=temp_enhanced_video_path,
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
-                imgsz=1280,
+                imgsz=1920,
                 half=use_fp16,
                 iou=iou,
                 conf=conf,
