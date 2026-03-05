@@ -1956,40 +1956,49 @@ class SpeciesValidationPage(QWidget):
     def _reset_quantity_buttons(self):
         """重置数量按钮样式的辅助函数"""
         if hasattr(self, '_selected_quantity_button') and self._selected_quantity_button:
-            self._selected_quantity_button.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    min-height: 25px;
-                    max-height: 25px;
-                    padding: 4px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }
-            """)
-            self._selected_quantity_button = None
+            try:
+                self._selected_quantity_button.setStyleSheet("""
+                    QPushButton {
+                        max-width: 58px;
+                        min-width: 45px;
+                        min-height: 25px;
+                        max-height: 25px;
+                        padding: 4px;
+                        font-size: 14px;
+                        font-weight: 600;
+                        text-align: center;
+                        border-radius: 12px;
+                    }
+                """)
+            except RuntimeError:
+                pass
+            finally:
+                self._selected_quantity_button = None
 
     def _reset_species_buttons(self):
         """重置快速标记物种按钮样式的辅助函数"""
         if hasattr(self, '_selected_species_button') and self._selected_species_button:
-            padding = self._selected_species_button.property("base_padding") or "2px 8px"
-            font_size = self._selected_species_button.property("base_font_size") or "13px"
-            self._selected_species_button.setStyleSheet(f"""
-                QPushButton {{
-                    max-width: 80px;
-                    min-width: 60px;
-                    min-height: 30px;
-                    max-height: 30px;
-                    padding: {padding};
-                    font-size: {font_size};
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }}
-            """)
-            self._selected_species_button = None
+            try:
+                padding = self._selected_species_button.property("base_padding") or "2px 8px"
+                font_size = self._selected_species_button.property("base_font_size") or "13px"
+                self._selected_species_button.setStyleSheet(f"""
+                    QPushButton {{
+                        max-width: 80px;
+                        min-width: 60px;
+                        min-height: 30px;
+                        max-height: 30px;
+                        padding: {padding};
+                        font-size: {font_size};
+                        font-weight: 600;
+                        text-align: center;
+                        border-radius: 12px;
+                    }}
+                """)
+            except RuntimeError:
+                # 如果底层 C++ 对象已被销毁（例如重载列表时），直接忽略
+                pass
+            finally:
+                self._selected_species_button = None
 
     def _display_image(self, image_path):
         """显示图像到标签中"""
@@ -2142,7 +2151,9 @@ class SpeciesValidationPage(QWidget):
         self.species_photo_listbox.setFocus()
 
     def _load_species_buttons(self):
-        """根据自动排序设置，加载快速标记物种按钮 (Material You 风格 - 高度25px)"""
+        """根据自动排序设置，加载快速标记物种按钮 """
+        self._selected_species_button = None
+
         while self.species_buttons_layout.count():
             child = self.species_buttons_layout.takeAt(0)
             if child.widget():
