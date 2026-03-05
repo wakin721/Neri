@@ -1897,6 +1897,7 @@ class SpeciesValidationPage(QWidget):
         self._count_marked = None
         self._stop_video_thread()  # 停止之前的视频线程
         self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
+        self._reset_species_buttons()  # 重置物种按钮样式
         self.current_species_info = {}  # 重置当前信息
 
         # 切换文件时，必须强制清空上一张图片的缓存对象
@@ -1970,6 +1971,26 @@ class SpeciesValidationPage(QWidget):
             """)
             self._selected_quantity_button = None
 
+    def _reset_species_buttons(self):
+        """重置快速标记物种按钮样式的辅助函数"""
+        if hasattr(self, '_selected_species_button') and self._selected_species_button:
+            padding = self._selected_species_button.property("base_padding") or "2px 8px"
+            font_size = self._selected_species_button.property("base_font_size") or "13px"
+            self._selected_species_button.setStyleSheet(f"""
+                QPushButton {{
+                    max-width: 80px;
+                    min-width: 60px;
+                    min-height: 30px;
+                    max-height: 30px;
+                    padding: {padding};
+                    font-size: {font_size};
+                    font-weight: 600;
+                    text-align: center;
+                    border-radius: 12px;
+                }}
+            """)
+            self._selected_species_button = None
+
     def _display_image(self, image_path):
         """显示图像到标签中"""
         try:
@@ -2002,7 +2023,7 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"显示图像失败: {e}")
             self.species_image_label.setText("无法显示图像")
 
-    def _mark_and_move_to_next(self, is_correct=None, species_name=None, count=None):
+    def _mark_and_move_to_next(self, is_correct=None, species_name=None, count=None, btn_widget=None):
         """
         处理标记逻辑并根据条件跳转到下一张图片。
         """
@@ -2011,15 +2032,13 @@ class SpeciesValidationPage(QWidget):
             return
 
         file_name = selection[0].text()
-
         self._push_to_undo_stack(file_name)
 
-        # "Correct" 和 "Empty" 按钮仍然会立即跳转
+        # "Correct" 和 "Empty" 按钮仍然会立即跳转 (因为它们是完整状态)
         if is_correct is True:
             self.validation_data[file_name] = True
             self._save_validation_data()
             self._move_to_next_image()
-            # 将焦点设置回照片列表
             self.species_photo_listbox.setFocus()
             QTimer.singleShot(50, self._refresh_species_list_logic)
             return
@@ -2029,7 +2048,6 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = False
             self._save_validation_data()
             self._move_to_next_image()
-            # 将焦点设置回照片列表
             self.species_photo_listbox.setFocus()
             QTimer.singleShot(50, self._refresh_species_list_logic)
             return
@@ -2037,18 +2055,34 @@ class SpeciesValidationPage(QWidget):
         # 处理物种按钮点击
         if species_name:
             self._species_marked = species_name
+
+            # 【新增逻辑】高亮当前选中的物种按钮
+            if btn_widget:
+                self._reset_species_buttons()
+                padding = btn_widget.property("base_padding") or "2px 8px"
+                font_size = btn_widget.property("base_font_size") or "13px"
+                btn_widget.setStyleSheet(f"""
+                    QPushButton {{
+                        max-width: 80px;
+                        min-width: 60px;
+                        min-height: 30px;
+                        max-height: 30px;
+                        padding: {padding};
+                        font-size: {font_size};
+                        font-weight: bold;
+                        text-align: center;
+                        border-radius: 12px;
+                        background-color: #5d3a4f;
+                        color: white;
+                    }}
+                """)
+                self._selected_species_button = btn_widget
+
             self._increment_quick_mark_count(species_name)
-            # 如果自动排序开启，则刷新按钮列表
-            if hasattr(self.controller,
-                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self._load_species_buttons()
-                self.quick_marks_updated.emit()
 
             new_count_str = None
-            # 如果数量已经选择，则使用它
             if self._count_marked is not None:
                 new_count_str = str(self._count_marked)
-            # 否则，应用求和逻辑
             elif self.current_species_info and '物种数量' in self.current_species_info:
                 count_str = str(self.current_species_info.get('物种数量', ''))
                 if ',' in count_str:
@@ -2062,13 +2096,19 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = False
             self._save_validation_data()
 
-            # 如果数量也已选择，则移动到下一张图片并刷新列表
+            # 【核心修改】如果数量也已选择，则移动到下一张图片并刷新列表
             if self._count_marked is not None:
+                # 只有确认双双选中要跳转时，才重新排序按钮列表，防止高亮的按钮被瞬间刷走
+                if hasattr(self.controller,
+                           'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+                    self._load_species_buttons()
+                    self.quick_marks_updated.emit()
+
                 self._move_to_next_image()
                 self.species_photo_listbox.setFocus()
                 QTimer.singleShot(50, self._refresh_species_list_logic)
             else:
-                # 仅选择了物种，尚未选择数量，不刷新列表
+                # 仅选择了物种，尚未选择数量，不跳转，等待数量输入
                 self.species_photo_listbox.setFocus()
 
     def _mark_other_species(self):
@@ -2136,24 +2176,30 @@ class SpeciesValidationPage(QWidget):
                 padding = "2px 4px"
                 font_size = "11px"
 
+            # 将计算好的样式保存到按钮的自定义属性中，方便恢复
+            btn.setProperty("base_padding", padding)
+            btn.setProperty("base_font_size", font_size)
+
             btn.setStyleSheet(f"""
-                QPushButton {{
-                    max-width: 80px;
-                    min-width: 60px;
-                    min-height: 30px;
-                    max-height: 30px;
-                    padding: {padding};
-                    font-size: {font_size};
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }}
-            """)
+                        QPushButton {{
+                            max-width: 80px;
+                            min-width: 60px;
+                            min-height: 30px;
+                            max-height: 30px;
+                            padding: {padding};
+                            font-size: {font_size};
+                            font-weight: 600;
+                            text-align: center;
+                            border-radius: 12px;
+                        }}
+                    """)
 
             if text_length > 6:
                 btn.setWordWrap(True)
 
-            btn.clicked.connect(lambda checked=False, s=species: self._mark_and_move_to_next(species_name=s))
+            # 将按钮对象 b=btn 传入 lambda 表达式
+            btn.clicked.connect(
+                lambda checked=False, s=species, b=btn: self._mark_and_move_to_next(species_name=s, btn_widget=b))
             self.species_buttons_layout.addWidget(btn)
 
     def _on_quantity_button_press(self, count, btn_widget):
@@ -2201,11 +2247,18 @@ class SpeciesValidationPage(QWidget):
         new_species = self._species_marked if self._species_marked is not None else None
         self._update_json_file(file_name, new_species=new_species, new_count=str(self._count_marked))
 
+        # 【核心修改】如果物种已被选中，则满足条件，执行跳转
         if self._species_marked is not None:
+            if hasattr(self.controller,
+                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+                self._load_species_buttons()
+                self.quick_marks_updated.emit()
+
             self._move_to_next_image()
             self.species_photo_listbox.setFocus()
             QTimer.singleShot(50, self._refresh_species_list_logic)
         else:
+            # 仅选择了数量，尚未选择物种，等待物种输入
             self.species_photo_listbox.setFocus()
 
     def _on_confidence_slider_changed(self, value):
