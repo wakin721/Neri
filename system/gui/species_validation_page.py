@@ -3,9 +3,9 @@ from PySide6.QtWidgets import (
     QListWidget, QLabel, QPushButton, QFrame, QGroupBox,
     QMessageBox, QFileDialog, QInputDialog, QComboBox,
     QSizePolicy, QApplication, QDialog, QLineEdit, QFormLayout,
-    QScrollArea
+    QScrollArea, QCompleter
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl, QStringListModel
 from PySide6.QtGui import (
     QFont, QPalette, QPixmap, QImage, QPainter, QColor,
     QKeySequence, QShortcut, QPainterPath, QDesktopServices
@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 class CorrectionDialog(QDialog):
     """用于修正物种信息的弹窗"""
+
+    _cached_completer_items = None
 
     def __init__(self, parent, title="修正信息", original_info=None):
         super().__init__(parent)
@@ -138,6 +140,8 @@ class CorrectionDialog(QDialog):
             # 自动触发类型补全
             self._auto_fill_type_from_db()
 
+        self._setup_completer()
+
         self.setup_ui()
 
     def setup_ui(self):
@@ -174,6 +178,50 @@ class CorrectionDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.resize(400, 200)
+
+    def _setup_completer(self):
+        """初始化拼音及中文自动补全器"""
+        if CorrectionDialog._cached_completer_items is None:
+            items = []
+            try:
+                import openpyxl
+                if os.path.exists(self.excel_path):
+                    wb = openpyxl.load_workbook(self.excel_path, read_only=True, data_only=True)
+                    sheet = wb.active
+
+                    # 尝试导入拼音库
+                    try:
+                        import pypinyin
+                        has_pypinyin = True
+                    except ImportError:
+                        has_pypinyin = False
+                        logger.warning("未安装 pypinyin，拼音首字母检索将不可用。请运行 pip install pypinyin")
+
+                    # 遍历 Excel 提取物种名
+                    for row in sheet.iter_rows(min_row=2, values_only=True):
+                        name = str(row[1]).strip() if row[1] else ""
+                        if name:
+                            if has_pypinyin:
+                                # 提取首字母，例如 "赤狐" -> "ch"
+                                pinyin_list = pypinyin.pinyin(name, style=pypinyin.Style.FIRST_LETTER, strict=False)
+                                initials = "".join([p[0][0] for p in pinyin_list]).lower()
+                                items.append(f"{name} ({initials})")
+                            else:
+                                items.append(name)
+                    wb.close()
+            except Exception as e:
+                logger.error(f"加载自动补全词库失败: {e}")
+
+            # 去重并保存到类缓存
+            CorrectionDialog._cached_completer_items = list(set(items))
+
+        # 实例化并绑定我们自定义的补全器
+        self.species_completer = MultiSpeciesCompleter(CorrectionDialog._cached_completer_items, self)
+
+        # 当用户从下拉列表中选中一项时，自动触发类型匹配
+        self.species_completer.activated.connect(lambda text: self._auto_fill_type_from_db())
+
+        self.species_name_edit.setCompleter(self.species_completer)
 
     def _auto_update_count(self, text):
         """根据物种名称的数量，动态同步数量框的数字个数"""
@@ -367,6 +415,85 @@ class CorrectionDialog(QDialog):
 
         self.result = (species_name, species_count_str, remark)
         self.accept()
+
+
+class MultiSpeciesCompleter(QCompleter):
+    """支持多物种（逗号分隔）、拼音过滤以及优先级排序的自动补全器"""
+
+    def __init__(self, items, parent=None):
+        super().__init__(items, parent)
+        self.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        # 允许部分匹配 (输入 bm 能匹配到 豹猫 (bm))
+        self.setFilterMode(Qt.MatchFlag.MatchContains)
+
+        # 保存原始列表，并使用 QStringListModel，以便我们能动态刷新词库顺序
+        self.original_items = items
+        self.source_model = QStringListModel(self.original_items, self)
+        self.setModel(self.source_model)
+
+    def pathFromIndex(self, index):
+        # 1. 获取选中的下拉项原始文本 (例如 "豹猫 (bm)")
+        text = self.model().data(index, Qt.ItemDataRole.DisplayRole)
+        # 2. 剥离拼音，只保留真实物种名
+        clean_text = text.split(" (")[0] if " (" in text else text
+
+        # 3. 将新选择的物种名拼接到当前输入框文本的最后一个逗号后面
+        le = self.widget()
+        if le:
+            current_text = le.text()
+            normalized_text = current_text.replace('，', ',')
+            if ',' in normalized_text:
+                parts = normalized_text.split(',')
+                parts[-1] = clean_text
+                return ",".join(parts)
+        return clean_text
+
+    def splitPath(self, path):
+        # 规范化逗号，并获取当前正在搜索的部分
+        normalized_path = path.replace('，', ',')
+        if ',' in normalized_path:
+            search_text = normalized_path.split(',')[-1].strip()
+        else:
+            search_text = normalized_path.strip()
+
+        search_lower = search_text.lower()
+
+        # 根据当前输入内容动态对基础词库进行排序
+        if search_lower:
+            def sort_key(item):
+                item_lower = item.lower()
+                # 安全提取拼音和中文名称
+                if " (" in item_lower and item_lower.endswith(")"):
+                    name, pinyin = item_lower.rsplit(" (", 1)
+                    pinyin = pinyin[:-1]
+                else:
+                    name = item_lower
+                    pinyin = ""
+
+                # 优先级设定（数值越小越靠前）：
+                # 0: 拼音完全匹配 (例如输入 "bl" 匹配 "白鹭 (bl)")
+                if search_lower == pinyin: return 0
+                # 1: 中文完全匹配 (例如输入 "白鹭" 匹配 "白鹭 (bl)")
+                if search_lower == name: return 1
+                # 2: 拼音首字母前缀匹配 (例如输入 "b" 匹配 "白鹭 (bl)")
+                if pinyin.startswith(search_lower): return 2
+                # 3: 中文前缀匹配 (例如输入 "白" 匹配 "白鹭 (bl)")
+                if name.startswith(search_lower): return 3
+                # 4: 拼音包含匹配 (例如输入 "bl" 匹配 "牛背鹭 (nbl)")
+                if search_lower in pinyin: return 4
+                # 5: 中文包含匹配
+                if search_lower in name: return 5
+                # 6: 其他兜底
+                return 6
+
+            # 先按优先级数值排序，如果优先级相同则按原本的首字母顺序(保证排序稳定性)
+            sorted_items = sorted(self.original_items, key=lambda x: (sort_key(x), x))
+            self.source_model.setStringList(sorted_items)
+        else:
+            # 输入为空时恢复默认字母顺序
+            self.source_model.setStringList(sorted(self.original_items))
+
+        return [search_text]
 
 
 class NoArrowKeyListWidget(QListWidget):
