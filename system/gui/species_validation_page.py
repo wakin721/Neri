@@ -1139,6 +1139,13 @@ class SpeciesValidationPage(QWidget):
         photo_list_group = ModernGroupBox("照片文件")
         photo_list_layout = QVBoxLayout(photo_list_group)
         self.species_photo_listbox = QListWidget()
+
+        # 开启多选模式 (支持 Shift 和 Ctrl)
+        self.species_photo_listbox.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        # 开启自定义右键菜单支持
+        self.species_photo_listbox.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.species_photo_listbox.customContextMenuRequested.connect(self._show_photo_context_menu)
+
         self.species_photo_listbox.itemSelectionChanged.connect(self._on_species_photo_selected)
         photo_list_layout.addWidget(self.species_photo_listbox)
         left_layout.addWidget(photo_list_group)
@@ -3024,6 +3031,128 @@ class SpeciesValidationPage(QWidget):
         else:
             # 如果是最后一张，可以选择跳转到下一个物种或显示完成消息
             QMessageBox.information(self, "提示", "当前物种的所有图像已处理完成！")
+
+    def _show_photo_context_menu(self, pos):
+        """显示照片列表的右键菜单"""
+        selected_items = self.species_photo_listbox.selectedItems()
+        if not selected_items:
+            return
+
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+
+        # 菜单的简易暗色/亮色兼容样式
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #dcdcdc;
+                border-radius: 4px;
+                padding: 4px;
+                color: #333333;
+            }
+            QMenu::item {
+                padding: 6px 24px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #5d3a4f;
+                color: white;
+            }
+        """)
+
+        # 动态显示选中了多少项
+        action_correct = menu.addAction(f"标记为正确 ({len(selected_items)}项)")
+        action_empty = menu.addAction(f"标记为空 ({len(selected_items)}项)")
+        action_unverified = menu.addAction(f"改为未校验 ({len(selected_items)}项)")
+
+        action = menu.exec(self.species_photo_listbox.mapToGlobal(pos))
+
+        if action == action_correct:
+            self._bulk_mark_correct(selected_items)
+        elif action == action_empty:
+            self._bulk_mark_empty(selected_items)
+        elif action == action_unverified:
+            self._bulk_mark_unverified(selected_items)
+
+    def _bulk_mark_correct(self, items):
+        """批量标记为正确"""
+        for item in items:
+            file_name = item.text()
+            self._push_to_undo_stack(file_name)
+            self.validation_data[file_name] = True
+
+        self._save_validation_data()
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_empty(self, items):
+        """批量标记为空"""
+        for item in items:
+            file_name = item.text()
+            self._push_to_undo_stack(file_name)
+            self._update_json_file(file_name, new_species="空", new_count="空")
+            self.validation_data[file_name] = False
+
+        self._save_validation_data()
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_unverified(self, items):
+        """批量将状态重置为未校验"""
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        files_to_remove = []
+
+        for item in items:
+            file_name = item.text()
+            self._push_to_undo_stack(file_name)
+            files_to_remove.append(file_name)
+
+            # 1. 从内存状态中移除
+            self.validation_data.pop(file_name, None)
+
+            # 2. 擦除每个文件对应的 JSON 中的人工校验痕迹，让其回归算法原始数据
+            if temp_photo_dir:
+                base_name = os.path.splitext(file_name)[0]
+                json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+                if os.path.exists(json_path):
+                    try:
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            detection_info = json.load(f)
+
+                        changed = False
+                        if detection_info.get('最低置信度') == '人工校验':
+                            # 弹出手动注入的字段
+                            for key in ['最低置信度', '物种名称', '物种数量', '备注', '检测时间']:
+                                if key in detection_info:
+                                    detection_info.pop(key, None)
+                                    changed = True
+
+                        if changed:
+                            with open(json_path, 'w', encoding='utf-8') as f:
+                                json.dump(detection_info, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        logger.error(f"恢复未校验状态失败: {file_name}, {e}")
+
+        # 3. 从硬盘的 validation.json 中彻底移除 (防止原生的 update 逻辑把它又合并回来)
+        if temp_photo_dir and files_to_remove:
+            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            if os.path.exists(validation_file_path):
+                try:
+                    with open(validation_file_path, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+
+                    modified = False
+                    for f_name in files_to_remove:
+                        if f_name in disk_data:
+                            disk_data.pop(f_name, None)
+                            modified = True
+
+                    if modified:
+                        with open(validation_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception as e:
+                    logger.error(f"清理 validation.json 失败: {e}")
+
+        # 统一刷新列表UI
+        QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _update_confidence_label(self, value):
         """更新置信度标签"""
