@@ -122,7 +122,7 @@ class CorrectionDialog(QDialog):
                 # 过滤掉无效或占位字符
                 if sp_name in ["[未校验] 空", "[已校验] 空", "未知", "未检测", "需人工检验", ""]:
                     sp_name = "空"
-                if sp_count in ["0", "未知", ""]:
+                if sp_count in ["空", "未知", ""]:
                     sp_count = "空"
 
                 recalculated_info['物种名称'] = sp_name
@@ -2861,7 +2861,7 @@ class SpeciesValidationPage(QWidget):
 
             # 默认值
             species_name = "未知"
-            species_count = "0"
+            species_count = "空"
             confidence = "N/A"
 
             # === 情况A：人工校验 ===
@@ -2922,7 +2922,7 @@ class SpeciesValidationPage(QWidget):
                     confidence = f"{min_conf_val:.2f}"
                 else:
                     species_name = "空"
-                    species_count = "0"
+                    species_count = "空"
                     confidence = "N/A"
 
             # === 情况C：图片数据 (检测框) ===
@@ -2978,13 +2978,17 @@ class SpeciesValidationPage(QWidget):
                         confidence = f"{min_conf_val:.2f}"
                     else:
                         species_name = "[未校验] 空"
-                        species_count = "0"
+                        species_count = "空"
                         confidence = "N/A"
                 else:
                     # 如果JSON本身没有框数据，回退到读取原始字段
                     species_name = self.current_species_info.get('物种名称', '未知')
                     species_count = self.current_species_info.get('物种数量', '未知')
                     confidence = self.current_species_info.get('最低置信度', '未知')
+
+            # 统一拦截处理：如果置信度为 None 或 "None"、空字符串，则强制转换为 "N/A"
+            if confidence is None or str(confidence).strip().lower() in ["none", ""]:
+                confidence = "N/A"
 
             # 更新 UI 标签
             species_type_str = "空"
