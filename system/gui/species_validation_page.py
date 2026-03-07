@@ -1685,9 +1685,11 @@ class SpeciesValidationPage(QWidget):
             }
         """
 
-        for i in range(1, 11):
+        quantity_values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 25, 50]
+        for i in quantity_values:
             btn = QPushButton(str(i))
             btn.setStyleSheet(material_qty_style)
+            # 绑定点击事件，将对应的数字和按钮对象传过去
             btn.clicked.connect(lambda checked, num=i, b=btn: self._on_quantity_button_press(str(num), b))
             quantity_buttons_layout.addWidget(btn)
 
@@ -2817,25 +2819,27 @@ class SpeciesValidationPage(QWidget):
         # 移除切换，每次点击都直接叠加该数量
         if count != "更多":
             self._selected_quantity_buttons.append(btn_widget)
+        
+
+            # 设置高亮样式
+            btn_widget.setStyleSheet("""
+                QPushButton {
+                    max-width: 58px;
+                    min-width: 45px;
+                    min-height: 25px;
+                    max-height: 25px;
+                    padding: 4px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    text-align: center;
+                    border-radius: 12px;
+                    background-color: #5d3a4f;
+                    color: white;
+                }
+            """)
+        
         self._selected_counts.append(final_count)
-
-        # 设置高亮样式
-        btn_widget.setStyleSheet("""
-            QPushButton {
-                max-width: 58px;
-                min-width: 45px;
-                min-height: 25px;
-                max-height: 25px;
-                padding: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                text-align: center;
-                border-radius: 12px;
-                background-color: #5d3a4f;
-                color: white;
-            }
-        """)
-
+        
         self._mark_as_error_and_save(file_name)
 
         new_count_str = ",".join(self._selected_counts)
