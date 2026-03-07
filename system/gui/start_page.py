@@ -406,6 +406,49 @@ class StartPage(QWidget):
                     }}
                 """)
 
+    def _apply_browse_button_style(self):
+        """强制覆盖浏览按钮为统一的药丸风格"""
+        from PySide6.QtWidgets import QPushButton
+
+        # 在路径组件中寻找按钮实体
+        browse_btn = self.file_path_widget.findChild(QPushButton)
+        if not browse_btn:
+            return
+
+        palette = self.palette()
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_ACCENT.name()
+            hover_color = Win11Colors.DARK_ACCENT.lighter(120).name()
+            pressed_color = Win11Colors.DARK_ACCENT.darker(110).name()
+        else:
+            bg_color = Win11Colors.LIGHT_ACCENT.name()
+            hover_color = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            pressed_color = Win11Colors.LIGHT_ACCENT.darker(120).name()
+
+        browse_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: #ffffff;
+                border: none;
+                border-radius: 16px;  /* 16px 统一圆润风格 */
+                padding: 6px 16px;    /* 内边距适配输入框的高度 */
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed_color};
+            }}
+            QPushButton:disabled {{
+                background-color: #cccccc;
+                color: #666666;
+            }}
+        """)
+
     def _setup_connections(self):
         """设置信号连接"""
         # 路径输入控件
@@ -667,46 +710,3 @@ class StartPage(QWidget):
 
             self.stride_combo.blockSignals(False)
 
-    def _apply_browse_button_style(self):
-        """强制覆盖浏览按钮为统一的药丸风格"""
-        from PySide6.QtWidgets import QPushButton
-
-        # 在路径组件中寻找按钮实体
-        browse_btn = self.file_path_widget.findChild(QPushButton)
-        if not browse_btn:
-            return
-
-        palette = self.palette()
-        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
-
-        if is_dark:
-            bg_color = Win11Colors.DARK_ACCENT.name()
-            hover_color = Win11Colors.DARK_ACCENT.lighter(120).name()
-            pressed_color = Win11Colors.DARK_ACCENT.darker(110).name()
-        else:
-            bg_color = Win11Colors.LIGHT_ACCENT.name()
-            hover_color = Win11Colors.LIGHT_ACCENT.darker(110).name()
-            pressed_color = Win11Colors.LIGHT_ACCENT.darker(120).name()
-
-        browse_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {bg_color};
-                color: #ffffff;
-                border: none;
-                border-radius: 12px;
-                padding: 10px 16px;
-                min-height: 20px;
-                font-size: 14px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-            }}
-            QPushButton:pressed {{
-                background-color: {pressed_color};
-            }}
-            QPushButton:disabled {{
-                background-color: #cccccc;
-                color: #666666;
-            }}
-        """)

@@ -1552,14 +1552,27 @@ class SpeciesValidationPage(QWidget):
     def _create_quantity_buttons(self, parent_layout):
         """创建数量按钮区域 (Material You 风格)"""
         self.quantity_buttons_frame = ModernGroupBox("数量")
-        quantity_buttons_layout = QVBoxLayout(self.quantity_buttons_frame)
+        main_layout = QVBoxLayout(self.quantity_buttons_frame)
         self.quantity_buttons_frame.setFixedWidth(80)
 
-        quantity_buttons_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+
+        # 创建一个 QScrollArea 来容纳数量按钮，防止被挤压
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff) # 隐藏滚动条，保持界面简洁（可用滚轮滚动）
+
+        # 数量按钮容器
+        self.qty_scroll_widget = QWidget()
+        quantity_buttons_layout = QVBoxLayout(self.qty_scroll_widget)
+        quantity_buttons_layout.setContentsMargins(0, 0, 0, 0)
         quantity_buttons_layout.setSpacing(4)
         quantity_buttons_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 数量按钮的 Material 样式 (强制锁定高度 30px，圆角 15px)
+        # 数量按钮的 Material 样式 (强制锁定高度 25px，圆角 12px)
         material_qty_style = """
             QPushButton {
                 max-width: 58px;
@@ -1597,13 +1610,16 @@ class SpeciesValidationPage(QWidget):
         more_button.clicked.connect(lambda: self._on_quantity_button_press("更多", more_button))
         quantity_buttons_layout.addWidget(more_button)
 
-        quantity_buttons_layout.addStretch()
+        # 将装有按钮的容器放入滚动区域，并将滚动区域加入主布局
+        scroll_area.setWidget(self.qty_scroll_widget)
+        main_layout.addWidget(scroll_area)
 
+        # === 底部固定区域（分隔线与撤回按钮） ===
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setStyleSheet(
             "border: none; background-color: rgba(128, 128, 128, 0.3); max-height: 1px; margin: 4px 0px;")
-        quantity_buttons_layout.addWidget(separator)
+        main_layout.addWidget(separator)
 
         undo_button = QPushButton()
         undo_button.setToolTip("撤销上一步操作")
@@ -1611,6 +1627,7 @@ class SpeciesValidationPage(QWidget):
         try:
             from PySide6.QtGui import QIcon
             from system.utils import resource_path
+            import os
             icon_path = resource_path(os.path.join("res", "icon", "return.svg"))
             white_icon_pixmap = self._generate_white_icon_pixmap(icon_path, 18)
             if white_icon_pixmap:
@@ -1623,7 +1640,7 @@ class SpeciesValidationPage(QWidget):
 
         undo_button.setStyleSheet(material_qty_style)
         undo_button.clicked.connect(self._undo_last_action)
-        quantity_buttons_layout.addWidget(undo_button)
+        main_layout.addWidget(undo_button)
 
         parent_layout.addWidget(self.quantity_buttons_frame)
 
@@ -2410,7 +2427,7 @@ class SpeciesValidationPage(QWidget):
         if species_name:
             self._species_marked = species_name
 
-            # 【新增逻辑】高亮当前选中的物种按钮
+            # 高亮当前选中的物种按钮
             if btn_widget:
                 self._reset_species_buttons()
                 padding = btn_widget.property("base_padding") or "2px 8px"
@@ -2437,12 +2454,23 @@ class SpeciesValidationPage(QWidget):
             new_count_str = None
             if self._count_marked is not None:
                 new_count_str = str(self._count_marked)
-            elif self.current_species_info and '物种数量' in self.current_species_info:
-                count_str = str(self.current_species_info.get('物种数量', ''))
-                if ',' in count_str:
+            else:
+                # 提取原有的物种数量，尝试从 JSON 获取，如果没有(如视频)，则从界面解析
+                count_str = str(self.current_species_info.get('物种数量', '')).strip()
+
+                if not count_str or count_str in ['空', '未知']:
+                    info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
+                    for part in info_text.split(" | "):
+                        part = part.strip()
+                        if part.startswith("数量:"):
+                            count_str = part.replace("数量:", "").strip()
+                            break
+
+                if count_str and count_str not in ['空', '未知', '-']:
                     try:
-                        counts = [int(c.strip()) for c in count_str.split(',')]
-                        new_count_str = str(sum(counts))
+                        counts = [int(c.strip()) for c in count_str.replace('，', ',').split(',') if c.strip()]
+                        if counts:
+                            new_count_str = str(sum(counts))
                     except (ValueError, TypeError):
                         new_count_str = None
 
@@ -2450,9 +2478,8 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = False
             self._save_validation_data()
 
-            # 【核心修改】如果数量也已选择，则移动到下一张图片并刷新列表
+            # 只有当用户手动点击过数量按钮 (_count_marked 不为 None) 时，才移动到下一张图片
             if self._count_marked is not None:
-                # 只有确认双双选中要跳转时，才重新排序按钮列表，防止高亮的按钮被瞬间刷走
                 if hasattr(self.controller,
                            'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
                     self._load_species_buttons()
@@ -2462,8 +2489,9 @@ class SpeciesValidationPage(QWidget):
                 self.species_photo_listbox.setFocus()
                 QTimer.singleShot(50, self._refresh_species_list_logic)
             else:
-                # 仅选择了物种，尚未选择数量，不跳转，等待数量输入
+                # 仅选择了物种，保留当前页面并刷新界面显示
                 self.species_photo_listbox.setFocus()
+                self._update_detection_info_display()
 
     def _mark_other_species(self):
         """处理"其他"按钮的逻辑，弹出对话框"""
@@ -2496,7 +2524,7 @@ class SpeciesValidationPage(QWidget):
         self.species_photo_listbox.setFocus()
 
     def _load_species_buttons(self):
-        """根据自动排序设置，加载快速标记物种按钮 """
+        """根据自动排序设置，动态加载快速标记物种按钮，确保近期频次排序不丢失"""
         self._selected_species_button = None
 
         while self.species_buttons_layout.count():
@@ -2512,9 +2540,38 @@ class SpeciesValidationPage(QWidget):
         if hasattr(self.controller, 'advanced_page'):
             use_auto_sort = self.controller.advanced_page.auto_sort_switch_row.isChecked()
 
-        if use_auto_sort and "list_auto" in quick_marks_data:
-            species_to_display = quick_marks_data["list_auto"]
+        if use_auto_sort:
+            # 【核心修复】：动态实时计算近期频次排序，防止切换界面时被旧缓存的 list_auto 覆盖
+            recent_history = quick_marks_data.get("recent_history", [])
+            from collections import Counter
+
+            # 统计近期频次 (反转列表以保证频次相同时，越晚使用的越靠前)
+            recent_counter = Counter(reversed(recent_history))
+            recent_sorted = [item[0] for item in recent_counter.most_common()]
+
+            # 统计总数频次作兜底
+            excluded_keys = {'list', 'list_auto', 'auto', 'recent_history'}
+            total_counts = {k: v for k, v in quick_marks_data.items() if
+                            k not in excluded_keys and isinstance(v, (int, float))}
+            total_sorted = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+            total_sorted_species = [item[0] for item in total_sorted]
+
+            # 获取固定列表的长度作为按钮总数参考（通常为 11 个）
+            target_btn_count = len(quick_marks_data.get("list", []))
+            if target_btn_count == 0:
+                target_btn_count = 11
+
+            # 组合最终列表：优先填充近期常用，空余部分用总数最高的补齐
+            species_to_display = []
+            for sp in recent_sorted:
+                if len(species_to_display) < target_btn_count:
+                    species_to_display.append(sp)
+
+            for sp in total_sorted_species:
+                if len(species_to_display) < target_btn_count and sp not in species_to_display:
+                    species_to_display.append(sp)
         else:
+            # 如果未开启自动排序，则使用固定的 list
             species_to_display = quick_marks_data.get("list", [])
 
         for species in species_to_display:
@@ -2579,7 +2636,7 @@ class SpeciesValidationPage(QWidget):
 
         self._reset_quantity_buttons()
 
-        # 设置新按钮为选中状态 (高度 30px，圆角 15px)
+        # 设置新按钮为选中状态 (高度 25px，圆角 12px)
         btn_widget.setStyleSheet("""
             QPushButton {
                 max-width: 58px;
@@ -2600,10 +2657,31 @@ class SpeciesValidationPage(QWidget):
 
         self._mark_as_error_and_save(file_name)
 
-        new_species = self._species_marked if self._species_marked is not None else None
+        new_species = self._species_marked
+
+        # 如果用户没有手动点击物种按钮，尝试继承原有物种名称（从JSON或界面信息中读取）
+        if new_species is None:
+            sp_name = str(self.current_species_info.get('物种名称', '')).strip()
+
+            if not sp_name or sp_name in ['未知', '空', '[未校验] 空', '[已校验] 空']:
+                info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
+                for part in info_text.split(" | "):
+                    part = part.strip()
+                    if part.startswith("物种:"):
+                        sp_name = part.replace("物种:", "").strip()
+                        break
+
+            # 清理界面状态前缀
+            if sp_name.startswith("[未校验] "):
+                sp_name = sp_name.replace("[未校验] ", "")
+            elif sp_name.startswith("[已校验] "):
+                sp_name = sp_name.replace("[已校验] ", "")
+
+            if sp_name and sp_name not in ['空', '未知', '-', '未检测', '需人工检验']:
+                new_species = sp_name
+
         self._update_json_file(file_name, new_species=new_species, new_count=str(self._count_marked))
 
-        # 【核心修改】如果物种已被选中，则满足条件，执行跳转
         if self._species_marked is not None:
             if hasattr(self.controller,
                        'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
@@ -2614,8 +2692,8 @@ class SpeciesValidationPage(QWidget):
             self.species_photo_listbox.setFocus()
             QTimer.singleShot(50, self._refresh_species_list_logic)
         else:
-            # 仅选择了数量，尚未选择物种，等待物种输入
             self.species_photo_listbox.setFocus()
+            self._update_detection_info_display()
 
     def _on_confidence_slider_changed(self, value):
         """处理置信度滑块值的变化"""
@@ -2957,18 +3035,18 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"保存验证数据失败: {e}")
 
     def _increment_quick_mark_count(self, species_name):
-        """增加快速标记物种的使用次数，并更新 list_auto (基于近期使用+总数兜底)"""
+        """增加快速标记物种的使用次数，并更新历史记录"""
         if hasattr(self.controller, 'settings_manager'):
             quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
             # 1. 确保中文逗号被替换为英文逗号
             normalized_name = species_name.replace('，', ',')
-            
+
             # 2. 按逗号拆分并去除首尾空格
             species_list = [s.strip() for s in normalized_name.split(',') if s.strip()]
-            
+
             if "recent_history" not in quick_marks_data:
                 quick_marks_data["recent_history"] = []
-            
+
             # 3. 对拆分后的每个独立物种分别计数
             for single_species in species_list:
                 # 更新总计数
@@ -2976,43 +3054,16 @@ class SpeciesValidationPage(QWidget):
                     quick_marks_data[single_species] = quick_marks_data.get(single_species, 0) + 1
                 else:
                     quick_marks_data[single_species] = 1
-                
+
                 # 追加到近期记录队列
                 quick_marks_data["recent_history"].append(single_species)
 
+            # 保持近期记录最大长度为 200
             max_recent_len = 200
             if len(quick_marks_data["recent_history"]) > max_recent_len:
                 quick_marks_data["recent_history"] = quick_marks_data["recent_history"][-max_recent_len:]
 
-            # 获取固定列表的长度作为按钮总数参考（通常为 11 个）
-            target_btn_count = len(quick_marks_data.get("list", []))
-            if target_btn_count == 0:
-                target_btn_count = 11
-
-            # A. 统计近期频次 (反转列表以保证频次相同时，越晚使用的越靠前)
-            from collections import Counter
-            recent_counter = Counter(reversed(quick_marks_data["recent_history"]))
-            recent_sorted = [item[0] for item in recent_counter.most_common()]
-
-            # B. 统计总数频次作兜底 (排除非物种的 key)
-            excluded_keys = {'list', 'list_auto', 'auto', 'recent_history'}
-            total_counts = {k: v for k, v in quick_marks_data.items() if k not in excluded_keys and isinstance(v, (int, float))}
-            total_sorted = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
-            total_sorted_species = [item[0] for item in total_sorted]
-
-            # C. 组合最终列表：优先填充近期常用，空余部分用总数最高的补齐
-            new_list_auto = []
-            for sp in recent_sorted:
-                if len(new_list_auto) < target_btn_count:
-                    new_list_auto.append(sp)
-            
-            for sp in total_sorted_species:
-                if len(new_list_auto) < target_btn_count and sp not in new_list_auto:
-                    new_list_auto.append(sp)
-
-            quick_marks_data["list_auto"] = new_list_auto
-            
-            # 保存更新后的数据
+            # 保存更新后的历史记录数据
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
 
     def _push_to_undo_stack(self, file_name):
