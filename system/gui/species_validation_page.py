@@ -30,6 +30,179 @@ from system.metadata_extractor import ImageMetadataExtractor
 
 logger = logging.getLogger(__name__)
 
+
+class ReDetectThread(QThread):
+    """用于重新检测选中文件的独立后台线程"""
+    progress_updated = Signal(int, int, float, float, float)
+    finished = Signal(bool)
+
+    def __init__(self, controller, file_names, source_dir, temp_photo_dir):
+        super().__init__()
+        self.controller = controller
+        self.file_names = file_names
+        self.source_dir = source_dir
+        self.temp_photo_dir = temp_photo_dir
+
+    def run(self):
+        import math
+        import time
+        import os
+        import cv2
+        from system.config import SUPPORTED_IMAGE_EXTENSIONS
+
+        try:
+            # 1. 提取当前高级页面的设置参数
+            use_fp16 = False
+            if hasattr(self.controller, 'advanced_page') and hasattr(self.controller.advanced_page, 'get_use_fp16'):
+                use_fp16 = self.controller.advanced_page.get_use_fp16()
+
+            iou = self.controller.advanced_page.iou_var if hasattr(self.controller, 'advanced_page') else 0.3
+            conf = self.controller.advanced_page.conf_var if hasattr(self.controller, 'advanced_page') else 0.25
+            augment = self.controller.advanced_page.use_augment_var if hasattr(self.controller,
+                                                                               'advanced_page') else False
+            agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var if hasattr(self.controller,
+                                                                                         'advanced_page') else False
+            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1) if hasattr(self.controller,
+                                                                                                'advanced_page') else 1
+            batch_size = getattr(self.controller.advanced_page, 'batch_size_var', 16) if hasattr(self.controller,
+                                                                                                 'advanced_page') else 16
+
+            video_mode_setting = "全部识别"
+            if hasattr(self.controller, 'start_page') and hasattr(self.controller.start_page, 'video_mode_combo'):
+                video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
+
+            # 2. 区分图片和视频，并预先计算总工作量(用于进度条)
+            total_work_units = 0
+            file_unit_map = {}
+            images = []
+            videos = []
+
+            SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')
+
+            for f in self.file_names:
+                f_lower = f.lower()
+                f_path = os.path.join(self.source_dir, f)
+                if f_lower.endswith(SUPPORTED_VIDEO_EXTENSIONS):
+                    videos.append(f)
+                    units = 1
+                    if video_mode_setting == "快速识别":
+                        units = 3
+                    else:
+                        try:
+                            cap = cv2.VideoCapture(f_path)
+                            if cap.isOpened():
+                                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                units = math.ceil(frames / vid_stride) if frames > 0 else 1
+                            cap.release()
+                        except Exception:
+                            pass
+                    file_unit_map[f] = units
+                    total_work_units += units
+                elif f_lower.endswith(SUPPORTED_IMAGE_EXTENSIONS):
+                    images.append(f)
+                    file_unit_map[f] = 1
+                    total_work_units += 1
+
+            processed_units = 0
+            start_time = time.time()
+
+            # 3. 对选中的图片进行批量处理
+            image_batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
+            for batch in image_batches:
+                batch_paths = [os.path.join(self.source_dir, f) for f in batch]
+                batch_results = self.controller.image_processor.detect_batch_species(
+                    batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                )
+
+                for i, f_name in enumerate(batch):
+                    species_info = batch_results[i]
+                    detect_results = species_info.get('detect_results')
+                    self.controller.image_processor.save_detection_info_json(
+                        detect_results, f_name, species_info, self.temp_photo_dir
+                    )
+                    processed_units += 1
+                    elapsed = time.time() - start_time
+                    speed = processed_units / elapsed if elapsed > 0 else 0
+                    remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
+                    self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
+
+            # 4. 对选中的视频进行处理
+            for vid in videos:
+                vid_path = os.path.join(self.source_dir, vid)
+                if video_mode_setting == "快速识别":
+                    cap = cv2.VideoCapture(vid_path)
+                    if cap.isOpened():
+                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        sample_points = [
+                            int(total_frames * 1 / 4), int(total_frames * 1 / 2), int(total_frames * 3 / 4)
+                        ]
+                        temp_frames_map = []
+                        for i, point in enumerate(sample_points):
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                            ret, frame = cap.read()
+                            if ret:
+                                frame_temp_path = os.path.join(self.temp_photo_dir, f"temp_frame_{vid}_{i}.jpg")
+                                cv2.imwrite(frame_temp_path, frame)
+                                temp_frames_map.append({'path': frame_temp_path, 'point': point})
+                        cap.release()
+
+                        if temp_frames_map:
+                            batch_paths = [item['path'] for item in temp_frames_map]
+                            batch_results = self.controller.image_processor.detect_batch_species(
+                                batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                            )
+
+                            best_detect_results = None
+                            best_species_info = None
+                            max_detections_in_frame = -1
+
+                            for idx, species_info_frame in enumerate(batch_results):
+                                results = species_info_frame.get('detect_results', [])
+                                current_frame_detection_count = sum(
+                                    1 for r in results if hasattr(r, 'boxes') and r.boxes is not None for _ in r.boxes)
+                                if current_frame_detection_count > max_detections_in_frame:
+                                    max_detections_in_frame = current_frame_detection_count
+                                    best_detect_results = results
+                                    best_species_info = species_info_frame
+
+                                if os.path.exists(temp_frames_map[idx]['path']):
+                                    os.remove(temp_frames_map[idx]['path'])
+
+                                processed_units += 1
+                                elapsed = time.time() - start_time
+                                speed = processed_units / elapsed if elapsed > 0 else 0
+                                remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
+                                self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
+
+                            if best_detect_results is not None:
+                                self.controller.image_processor.save_detection_info_json(
+                                    best_detect_results, vid, best_species_info, self.temp_photo_dir
+                                )
+                            else:
+                                self.controller.image_processor.save_detection_info_json(
+                                    [], vid, {'detect_results': []}, self.temp_photo_dir
+                                )
+                else:
+                    def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
+                        nonlocal processed_units
+                        current_total_done = processed_units + frame_idx
+                        elapsed = time.time() - start_time
+                        speed = current_total_done / elapsed if elapsed > 0 else 0
+                        remain = (total_work_units - current_total_done) / speed if speed > 0 else float('inf')
+                        self.progress_updated.emit(current_total_done, total_work_units, elapsed, remain, speed)
+
+                    self.controller.image_processor.detect_video_species(
+                        vid_path, self.temp_photo_dir, use_fp16, iou, conf, augment, agnostic_nms,
+                        status_callback=video_log_callback, vid_stride=vid_stride, temp_video_dir=self.temp_photo_dir
+                    )
+                    processed_units += file_unit_map[vid]
+
+            self.finished.emit(True)
+        except Exception as e:
+            logger.error(f"ReDetectThread 报错: {e}", exc_info=True)
+            self.finished.emit(False)
+
+
 class CorrectionDialog(QDialog):
     """用于修正物种信息的弹窗"""
 
@@ -3192,6 +3365,9 @@ class SpeciesValidationPage(QWidget):
         action_empty = menu.addAction(f"标记为空 ({len(selected_items)}项)")
         action_unverified = menu.addAction(f"改为未校验 ({len(selected_items)}项)")
 
+        # 重新检测选项
+        action_redetect = menu.addAction(f"重新检测 ({len(selected_items)}项)")
+
         action = menu.exec(self.species_photo_listbox.mapToGlobal(pos))
 
         if action == action_correct:
@@ -3200,6 +3376,9 @@ class SpeciesValidationPage(QWidget):
             self._bulk_mark_empty(selected_items)
         elif action == action_unverified:
             self._bulk_mark_unverified(selected_items)
+        # 点击重新检测后调用新的处理函数
+        elif action == action_redetect:
+            self._bulk_redetect(selected_items)
 
     def _bulk_mark_correct(self, items):
         """批量标记为正确"""
@@ -3279,6 +3458,82 @@ class SpeciesValidationPage(QWidget):
                     logger.error(f"清理 validation.json 失败: {e}")
 
         # 统一刷新列表UI
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_redetect(self, items):
+        """批量重新检测选中的文件"""
+        file_names = [item.text() for item in items]
+        source_dir = self.controller.start_page.get_file_path()
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+
+        if not source_dir or not temp_photo_dir:
+            return
+
+        # 推入撤回栈以便日后恢复
+        for file_name in file_names:
+            self._push_to_undo_stack(file_name)
+
+        # 禁用列表控件防止检测期间被点击扰乱状态
+        self.species_photo_listbox.setEnabled(False)
+        self.species_listbox.setEnabled(False)
+
+        # 激活底部进度条界面
+        self.controller.status_bar.show_progress()
+        self.controller.status_bar.status_label.setText(f"正在重新检测 {len(file_names)} 个文件...")
+
+        # 启动后台独立检测线程
+        self.redetect_thread = ReDetectThread(self.controller, file_names, source_dir, temp_photo_dir)
+        self.redetect_thread.progress_updated.connect(self.controller.status_bar.update_progress)
+        # 利用 lambda 传递已选文件列表给回调
+        self.redetect_thread.finished.connect(lambda success: self._on_redetect_finished(success, file_names))
+        self.redetect_thread.start()
+
+    def _on_redetect_finished(self, success, file_names):
+        """重新检测完成后的后置处理"""
+        # 恢复底部进度条状态及界面控件
+        self.controller.status_bar.hide_progress()
+        self.species_photo_listbox.setEnabled(True)
+        self.species_listbox.setEnabled(True)
+
+        if success:
+            self.controller.status_bar.status_label.setText("✅ 选定文件重新检测完成")
+        else:
+            self.controller.status_bar.status_label.setText("❌ 重新检测过程出现错误，请查看日志")
+
+        # 重测完成后，必须抹除掉这些文件以前带有的人工检验标志(以便界面上恢复到自动判断的状态)
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        files_to_remove = []
+
+        for file_name in file_names:
+            files_to_remove.append(file_name)
+            # 清除内存状态
+            self.validation_data.pop(file_name, None)
+
+        # 彻底移除本地 validation.json 中的标记，防止自动合并时老数据又被合并回来
+        if temp_photo_dir and files_to_remove:
+            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            if os.path.exists(validation_file_path):
+                try:
+                    with open(validation_file_path, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+
+                    modified = False
+                    for f_name in files_to_remove:
+                        if f_name in disk_data:
+                            disk_data.pop(f_name, None)
+                            modified = True
+
+                    if modified:
+                        with open(validation_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception as e:
+                    logger.error(f"清理 validation.json 失败: {e}")
+
+        # 设置重新选中标记 (如果有之前选择的文件在这个列表里，界面刷新后会自动保持选中)
+        if len(file_names) > 0:
+            self._force_select_file = file_names[0]
+
+        # 重新加载左侧列表和对应显示
         QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _update_confidence_label(self, value):
