@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl, QStringListModel
 from PySide6.QtGui import (
     QFont, QPalette, QPixmap, QImage, QPainter, QColor,
-    QKeySequence, QShortcut, QPainterPath, QDesktopServices
+    QKeySequence, QShortcut, QPainterPath, QDesktopServices,
+    QIntValidator
 )
 from PySide6.QtSvg import QSvgRenderer
 import openpyxl
@@ -201,6 +202,103 @@ class ReDetectThread(QThread):
         except Exception as e:
             logger.error(f"ReDetectThread 报错: {e}", exc_info=True)
             self.finished.emit(False)
+
+
+class QuantityInputDialog(QDialog):
+    """自定义 Material You 风格的数量输入弹窗"""
+    def __init__(self, parent=None, title="输入数量", prompt="请输入物种的数量 (1-999):", default_value=1):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.result_value = default_value
+
+        # Material You 风格样式 (与 CorrectionDialog 保持一致)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #dbbcc2;
+                border: 1px solid #5d3a4f;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #5d3a4f;
+                font-size: 15px;
+                font-weight: bold;
+                background-color: transparent;
+            }
+            QLineEdit {
+                padding: 8px 12px;
+                border: 2px solid #5d3a4f;
+                border-radius: 8px;
+                background-color: #ffffff;
+                font-size: 14px;
+                color: #5d3a4f;
+            }
+            QLineEdit:focus {
+                border-color: #7a5f6f;
+                background-color: #fdfbfb;
+            }
+            QPushButton {
+                background-color: #5d3a4f;
+                color: #dbbcc2;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7a5f6f;
+            }
+            QPushButton:pressed {
+                background-color: #4a2f3f;
+            }
+            QPushButton#cancelButton {
+                background-color: #8c7f84;
+                color: white;
+            }
+            QPushButton#cancelButton:hover {
+                background-color: #a09398;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 20)
+
+        self.prompt_label = QLabel(prompt)
+        layout.addWidget(self.prompt_label)
+
+        # 限制只能输入 1 到 999 的数字
+        self.input_field = QLineEdit(str(default_value))
+        self.input_field.setValidator(QIntValidator(1, 999, self))
+        # 默认全选文本，方便用户直接覆盖输入
+        self.input_field.selectAll()
+        layout.addWidget(self.input_field)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.clicked.connect(self.accept_input)
+        self.ok_btn.setDefault(True)
+
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setObjectName("cancelButton")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.resize(300, 150)
+
+    def accept_input(self):
+        text = self.input_field.text().strip()
+        if text and text.isdigit() and int(text) > 0:
+            self.result_value = int(text)
+            self.accept()
+        else:
+            self.input_field.setFocus()
 
 
 class CorrectionDialog(QDialog):
@@ -2256,8 +2354,15 @@ class SpeciesValidationPage(QWidget):
 
         # 2. 原有清理工作
         self._stop_video_thread()  # 停止之前的视频线程
-        self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
-        self._reset_species_buttons()  # 重置物种按钮样式
+
+        # [修改] 判断是否是由撤回操作引发的刷新
+        if getattr(self, '_is_undoing', False):
+            self._is_undoing = False
+            self._restore_button_styles()  # 恢复撤回栈中保留的半截按钮样式
+        else:
+            self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
+            self._reset_species_buttons()  # 重置物种按钮样式
+
         self.current_species_info = {}  # 重置当前信息
 
         # 切换文件时，必须强制清空上一张图片的缓存对象
@@ -2360,6 +2465,66 @@ class SpeciesValidationPage(QWidget):
                     pass
         self._selected_species_buttons = []
         self._selected_species_names = []
+
+    def _restore_button_styles(self):
+        """根据恢复的数组重新高亮物种和数量按钮"""
+        self._selected_species_buttons = []
+        if hasattr(self, 'species_buttons_layout'):
+            for i in range(self.species_buttons_layout.count()):
+                btn = self.species_buttons_layout.itemAt(i).widget()
+                if isinstance(btn, QPushButton):
+                    padding = btn.property("base_padding") or "2px 8px"
+                    font_size = btn.property("base_font_size") or "13px"
+
+                    # 恢复普通样式
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px;
+                            padding: {padding}; font-size: {font_size}; font-weight: 600;
+                            text-align: center; border-radius: 12px;
+                        }}
+                    """)
+
+                    # 如果在恢复的列表中，重新高亮
+                    if btn.text() in getattr(self, '_selected_species_names', []):
+                        self._selected_species_buttons.append(btn)
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px;
+                                padding: {padding}; font-size: {font_size}; font-weight: bold;
+                                text-align: center; border-radius: 12px;
+                                background-color: #5d3a4f; color: white;
+                            }}
+                        """)
+
+        self._selected_quantity_buttons = []
+        if hasattr(self, 'qty_scroll_widget'):
+            for btn in self.qty_scroll_widget.findChildren(QPushButton):
+                if btn.text() == "更多":
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                            padding: 4px; font-size: 13px; font-weight: 600; text-align: center; border-radius: 12px;
+                        }
+                    """)
+                else:
+                    # 恢复普通样式
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                            padding: 4px; font-size: 14px; font-weight: 600; text-align: center; border-radius: 12px;
+                        }
+                    """)
+                    # 如果在恢复的列表中，重新高亮
+                    if btn.text() in getattr(self, '_selected_counts', []):
+                        self._selected_quantity_buttons.append(btn)
+                        btn.setStyleSheet("""
+                            QPushButton {
+                                max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                                padding: 4px; font-size: 14px; font-weight: bold; text-align: center; border-radius: 12px;
+                                background-color: #5d3a4f; color: white;
+                            }
+                        """)
 
     def _do_auto_advance(self):
         """满足个数匹配条件后自动跳转的通用逻辑"""
@@ -2642,53 +2807,34 @@ class SpeciesValidationPage(QWidget):
 
         final_count = str(count)
         if count == "更多":
-            from PySide6.QtWidgets import QInputDialog
-            result, ok = QInputDialog.getInt(self, "输入数量", "请输入物种的数量:", 1, 1, 999, 1)
-            if ok:
-                final_count = str(result)
+            dialog = QuantityInputDialog(self, title="输入数量", prompt="请输入物种的数量:", default_value=1)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                final_count = str(dialog.result_value)
             else:
                 self.species_photo_listbox.setFocus()
                 return
 
-        # 切换按钮选中状态 (Toggle)
-        if btn_widget in self._selected_quantity_buttons and count != "更多":
-            self._selected_quantity_buttons.remove(btn_widget)
-            if final_count in self._selected_counts:
-                self._selected_counts.remove(final_count)
-            # 恢复默认样式
-            btn_widget.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    min-height: 25px;
-                    max-height: 25px;
-                    padding: 4px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }
-            """)
-        else:
-            if count != "更多":
-                self._selected_quantity_buttons.append(btn_widget)
-            self._selected_counts.append(final_count)
-            # 设置高亮样式
-            btn_widget.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    min-height: 25px;
-                    max-height: 25px;
-                    padding: 4px;
-                    font-size: 14px;
-                    font-weight: bold;
-                    text-align: center;
-                    border-radius: 12px;
-                    background-color: #5d3a4f;
-                    color: white;
-                }
-            """)
+        # 移除切换，每次点击都直接叠加该数量
+        if count != "更多":
+            self._selected_quantity_buttons.append(btn_widget)
+        self._selected_counts.append(final_count)
+
+        # 设置高亮样式
+        btn_widget.setStyleSheet("""
+            QPushButton {
+                max-width: 58px;
+                min-width: 45px;
+                min-height: 25px;
+                max-height: 25px;
+                padding: 4px;
+                font-size: 14px;
+                font-weight: bold;
+                text-align: center;
+                border-radius: 12px;
+                background-color: #5d3a4f;
+                color: white;
+            }
+        """)
 
         self._mark_as_error_and_save(file_name)
 
@@ -3100,25 +3246,27 @@ class SpeciesValidationPage(QWidget):
         """将当前文件的状态压入撤回栈"""
         if not hasattr(self, 'undo_stack'):
             self.undo_stack = []
-            
+
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir: return
-            
+
             json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
             old_json = None
             if os.path.exists(json_path):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     old_json = json.load(f)
-                    
+
             old_val = self.validation_data.get(file_name)
-                
+
             self.undo_stack.append({
                 'file_name': file_name,
                 'json_data': old_json,
-                'validation_data': old_val
+                'validation_data': old_val,
+                'selected_species_names': list(getattr(self, '_selected_species_names', [])),
+                'selected_counts': list(getattr(self, '_selected_counts', []))
             })
-            
+
             # 限制栈大小为 50 步，防止占用过多内存
             if len(self.undo_stack) > 50:
                 self.undo_stack.pop(0)
@@ -3131,55 +3279,56 @@ class SpeciesValidationPage(QWidget):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
             return
-        
+
         try:
             last_state = self.undo_stack.pop()
             file_name = last_state['file_name']
             old_json = last_state['json_data']
             old_val = last_state['validation_data']
-            
+
+            # [新增] 恢复按钮数组，并打上撤回标志位以便恢复高亮样式
+            self._selected_species_names = last_state.get('selected_species_names', [])
+            self._selected_counts = last_state.get('selected_counts', [])
+            self._is_undoing = True
+
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir: return
             json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
-            
+
             # 还原 JSON
             if old_json is not None:
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(old_json, f, ensure_ascii=False, indent=2)
-            
+
             # 还原 内存验证状态 并 保存
             if old_val is not None:
                 self.validation_data[file_name] = old_val
                 self._save_validation_data()
             else:
                 self.validation_data.pop(file_name, None)
-                # 因为 _save_validation_data() 采用的是 update 增量合并逻辑，
-                # 所以必须手动从 validation.json 中删除该记录，防止僵尸数据被重新读回内存
                 validation_file_path = os.path.join(temp_photo_dir, "validation.json")
                 if os.path.exists(validation_file_path):
                     try:
                         with open(validation_file_path, 'r', encoding='utf-8') as f:
                             disk_data = json.load(f)
-                        
+
                         if file_name in disk_data:
                             disk_data.pop(file_name, None)
                             with open(validation_file_path, 'w', encoding='utf-8') as f:
                                 json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
                     except Exception as e:
                         logger.error(f"撤回时清理 validation.json 失败: {e}")
-            
+
             # 触发强制选中，自动刷新界面
             self._force_select_file = file_name
             self._refresh_species_list_logic()
-            
+
             if hasattr(self.controller, 'status_bar'):
-                # 获取刷新列表后自带的状态栏文本 (例如: "当前物种共有 X 张照片")
                 current_text = self.controller.status_bar.status_label.text()
-                # 拼接上撤回提示，覆盖回状态栏
                 self.controller.status_bar.status_label.setText(
-                    f"✅ 已成功撤回对 {file_name} 的操作  |  {current_text}"
+                    f"✅ 已成功撤回上一步操作  |  {current_text}"
                 )
-            
+
         except Exception as e:
             logger.error(f"撤回失败: {e}")
 
