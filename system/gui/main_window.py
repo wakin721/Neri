@@ -944,7 +944,7 @@ class ObjectDetectionGUI(QMainWindow):
     def _setup_window(self):
         """设置窗口"""
         self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(1100, 750)
+        self.setMinimumSize(1050, 650)
         self.resize(1100, 750)
 
         # 居中显示
