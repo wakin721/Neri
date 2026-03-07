@@ -3518,7 +3518,7 @@ class SpeciesValidationPage(QWidget):
                         species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                         confidence = f"{min_conf_val:.2f}"
                     else:
-                        species_name = "[未校验] 空"
+                        species_name = "空"
                         species_count = "空"
                         confidence = "N/A"
                 else:
