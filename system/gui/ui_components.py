@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
-    QRect, QSize, Signal, Property, QParallelAnimationGroup, QPoint
+    QRect, QRectF, QSize, Signal, Property, QParallelAnimationGroup, QPoint,
+    QObject, QEvent
 )
 from PySide6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics,
@@ -2006,52 +2007,101 @@ class ModernSlider(QSlider):
         self.update()
 
 
-class ModernComboBox(QComboBox):
-    """现代化下拉框组件 - Material You 风格 (增强圆角版本)"""
+class _DropdownPainter(QObject):
+    """
+    为 ModernComboBox 弹出窗口提供真实圆角绘制。
+
+    原理：拦截弹出窗口（popup window）的 Paint 事件，
+    手动绘制圆角背景 + 边框，并返回 True 消费该事件，
+    阻止系统默认的矩形背景覆盖圆角效果。
+    列表项的 Paint 事件属于子组件，不受影响，仍正常绘制。
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # 1. 核心逻辑：获取下拉列表的窗口并设置透明
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.WinIdChange, QEvent.Type.Show, QEvent.Type.WindowActivate):
+            try:
+                obj.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+                obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            except Exception:
+                pass
+            return False  # ← 明确返回 bool
+
+        if event.type() == QEvent.Type.Paint:
+            try:
+                app = QApplication.instance()
+                is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+                bg_color = Win11Colors.DARK_CARD if is_dark else Win11Colors.LIGHT_CARD
+                border_color = Win11Colors.DARK_ACCENT if is_dark else Win11Colors.LIGHT_ACCENT
+
+                painter = QPainter(obj)
+                if not painter.isActive():  # ← 防止绑定无效设备时抛出异常
+                    return True
+
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                rect = QRectF(obj.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+                path = QPainterPath()
+                path.addRoundedRect(rect, 16, 16)
+                painter.fillPath(path, bg_color)
+                painter.setPen(QPen(border_color, 2.0))
+                painter.drawPath(path)
+                painter.end()
+            except Exception:
+                pass  # 出现任何异常时静默处理，但仍返回 True 消费事件
+
+            return True  # ← 无论是否抛出异常，都明确返回 bool
+
+        return False  # ← 所有其他事件，明确返回 bool
+
+
+class ModernComboBox(QComboBox):
+    """现代化下拉框组件 - Material You 风格（真实圆角弹出框版本）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
         view = self.view()
         view_window = view.window()
 
-        # 移除默认边框和阴影，设置透明背景
         view_window.setWindowFlags(
             Qt.WindowType.Popup |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.NoDropShadowWindowHint
         )
         view_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        view_window.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)  # ← 新增：彻底关闭系统背景/阴影
 
-        # 2. 关键优化：必须让 viewport 也透明，否则圆角处会出现黑色底块
+        view.setAutoFillBackground(False)
+        view.viewport().setAutoFillBackground(False)
         view.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        view.viewport().setStyleSheet("background: transparent;")
+
+        self._dropdown_painter = _DropdownPainter(self)
+        view_window.installEventFilter(self._dropdown_painter)
 
         self._setup_style()
 
     def _setup_style(self):
-        """设置 Material You 风格样式 - 增强圆角与边框"""
+        """设置 ComboBox 按钮本体 + 列表项样式"""
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
-            bg_color = Win11Colors.DARK_SURFACE
+            bg_color     = Win11Colors.DARK_SURFACE
             border_color = Win11Colors.DARK_BORDER
-            text_color = Win11Colors.DARK_TEXT_PRIMARY
-            focus_color = Win11Colors.DARK_ACCENT
-            hover_color = Win11Colors.DARK_HOVER
-            list_bg = Win11Colors.DARK_CARD
+            text_color   = Win11Colors.DARK_TEXT_PRIMARY
+            focus_color  = Win11Colors.DARK_ACCENT
+            hover_color  = Win11Colors.DARK_HOVER
         else:
-            bg_color = Win11Colors.LIGHT_SURFACE
+            bg_color     = Win11Colors.LIGHT_SURFACE
             border_color = Win11Colors.LIGHT_BORDER
-            text_color = Win11Colors.LIGHT_TEXT_PRIMARY
-            focus_color = Win11Colors.LIGHT_ACCENT
-            hover_color = Win11Colors.LIGHT_HOVER
-            list_bg = Win11Colors.LIGHT_CARD
+            text_color   = Win11Colors.LIGHT_TEXT_PRIMARY
+            focus_color  = Win11Colors.LIGHT_ACCENT
+            hover_color  = Win11Colors.LIGHT_HOVER
 
         self.setStyleSheet(f"""
-            /* 主体按钮样式 */
+            /* ── 按钮本体 ── */
             QComboBox {{
                 background-color: {bg_color.name()};
                 border: 2px solid {border_color.name()};
@@ -2063,12 +2113,8 @@ class ModernComboBox(QComboBox):
                 font-size: 14px;
                 font-weight: 500;
             }}
-            QComboBox:hover {{
-                background-color: {hover_color.name()};
-            }}
-            QComboBox:focus {{
-                border-color: {focus_color.name()};
-            }}
+            QComboBox:hover  {{ background-color: {hover_color.name()}; }}
+            QComboBox:focus  {{ border-color: {focus_color.name()}; }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
@@ -2076,22 +2122,20 @@ class ModernComboBox(QComboBox):
                 border: none;
             }}
 
-            /* 下拉列表容器样式 - 这里的关键是 margin 和 border-radius */
+            /* ── 弹出列表：背景透明，由 _DropdownPainter 提供圆角背景 ── */
             QComboBox QAbstractItemView {{
-                background-color: {list_bg.name()};
-                border: 2px solid {focus_color.name()}; /* 使用主题色作为边框更加醒目 */
-                border-radius: 16px;        /* 增加为 16px 的大圆角 */
-                margin-top: 4px;            /* 与上方按钮保持微小间距，防止圆角被裁剪 */
+                background-color: transparent;
+                border: none;
                 padding: 6px;
                 outline: none;
                 color: {text_color.name()};
             }}
-
             QComboBox QAbstractItemView::item {{
-                padding: 10px 28px;
-                border-radius: 10px;        /* 列表项也要有一定的圆角，保持设计语言统一 */
-                margin: 2px 4px;
+                padding: 5px 16px;        /* 原为 10px 28px，缩小上下内边距 */
+                border-radius: 10px;
+                margin: 1px 4px;          /* 原为 2px 4px，同步缩小垂直间距 */
                 background-color: transparent;
+                min-height: 18px;         /* 原为 24px，降低最小高度 */
             }}
             QComboBox QAbstractItemView::item:hover {{
                 background-color: {hover_color.name()};
@@ -2102,9 +2146,69 @@ class ModernComboBox(QComboBox):
             }}
         """)
 
+    def showPopup(self):
+        """覆写弹出方法，确保每次弹出时阴影标志都生效"""
+        view_window = self.view().window()
+        view_window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+        view_window.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        view_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)  # 补充：确保背景彻底透明
+
+        super().showPopup()
+
+        # ── super().showPopup() 之后 HWND 才稳定，在此彻底压制 Windows 系统阴影 ──
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                hwnd = int(view_window.winId())
+
+                # 1. 禁用 DWM 非客户区渲染 (处理部分 Windows 版本的阴影)
+                DWMWA_NCRENDERING_POLICY = 2
+                DWMNCRP_DISABLED = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_NCRENDERING_POLICY,
+                    ctypes.byref(DWMNCRP_DISABLED),
+                    ctypes.sizeof(DWMNCRP_DISABLED)
+                )
+
+                # 2. 移除 Windows 传统菜单的 CS_DROPSHADOW 样式 (解决图中深色直角阴影的关键)
+                GCL_STYLE = -26
+                CS_DROPSHADOW = 0x00020000
+                user32 = ctypes.windll.user32
+
+                # 兼容 32 位和 64 位系统 API
+                if ctypes.sizeof(ctypes.c_void_p) == 8:
+                    GetClassLong = user32.GetClassLongPtrW
+                    GetClassLong.argtypes = [wintypes.HWND, ctypes.c_int]
+                    GetClassLong.restype = ctypes.c_void_p
+
+                    SetClassLong = user32.SetClassLongPtrW
+                    SetClassLong.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                    SetClassLong.restype = ctypes.c_void_p
+                else:
+                    GetClassLong = user32.GetClassLongW
+                    GetClassLong.argtypes = [wintypes.HWND, ctypes.c_int]
+                    GetClassLong.restype = ctypes.c_long
+
+                    SetClassLong = user32.SetClassLongW
+                    SetClassLong.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+                    SetClassLong.restype = ctypes.c_long
+
+                # 获取当前样式并剥离 CS_DROPSHADOW
+                style = GetClassLong(hwnd, GCL_STYLE)
+                if style is not None and (style & CS_DROPSHADOW):
+                    SetClassLong(hwnd, GCL_STYLE, style & ~CS_DROPSHADOW)
+
+            except Exception:
+                pass
+
     def update_theme(self):
         """更新主题"""
         self._setup_style()
+        # 强制弹出窗口重绘，使过滤器用新主题色重绘
+        self.view().window().update()
 
 
 class ModernCheckBox(QCheckBox):

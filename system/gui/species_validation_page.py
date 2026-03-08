@@ -1042,6 +1042,26 @@ class NoArrowKeyListWidget(QListWidget):
             super().keyPressEvent(event)
 
 
+class KeepSelectionListWidget(QListWidget):
+    """一个防止点击空白处丢失选中状态的 QListWidget"""
+
+    def mousePressEvent(self, event):
+        # 获取当前鼠标点击位置的 item
+        item = self.itemAt(event.pos())
+
+        # 如果没有点击到任何 item（即点击了空白区域）
+        if not item:
+            # 如果是右键点击，我们手动发射呼出菜单的信号
+            if event.button() == Qt.MouseButton.RightButton:
+                self.customContextMenuRequested.emit(event.pos())
+
+            # 直接返回，不再向下传递事件。彻底阻止 Qt 底层清空选中状态！
+            return
+
+        # 如果点击到了具体的照片 item，按常规处理
+        super().mousePressEvent(event)
+
+
 class VideoPlayerThread(QThread):
     """
     视频播放线程：读取视频流，绘制检测框（支持中文），并发送 QPixmap。
@@ -1797,7 +1817,7 @@ class SpeciesValidationPage(QWidget):
         # 照片文件列表
         photo_list_group = ModernGroupBox("照片文件")
         photo_list_layout = QVBoxLayout(photo_list_group)
-        self.species_photo_listbox = QListWidget()
+        self.species_photo_listbox = KeepSelectionListWidget()
 
         # 开启多选模式 (支持 Shift 和 Ctrl)
         self.species_photo_listbox.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
