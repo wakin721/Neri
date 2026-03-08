@@ -3324,7 +3324,7 @@ class SpeciesValidationPage(QWidget):
                         logger.error(f"撤回时清理 validation.json 失败: {e}")
 
             # 触发强制选中，自动刷新界面
-            self._force_select_file = file_name
+            self._force_select_files = [file_name]
             self._refresh_species_list_logic()
 
             if hasattr(self.controller, 'status_bar'):
@@ -3575,29 +3575,40 @@ class SpeciesValidationPage(QWidget):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
 
-        # 菜单的简易暗色/亮色兼容样式
+        # 替换为 Material You 风格样式
         menu.setStyleSheet("""
             QMenu {
-                background-color: #ffffff;
-                border: 1px solid #dcdcdc;
-                border-radius: 4px;
-                padding: 4px;
-                color: #333333;
+                background-color: #fdfbfb;
+                border: 1px solid #5d3a4f;
+                border-radius: 12px;
+                padding: 6px;
+                color: #5d3a4f;
+                font-size: 14px;
+                font-weight: 500;
             }
             QMenu::item {
-                padding: 6px 24px;
-                border-radius: 4px;
+                padding: 8px 28px;
+                border-radius: 8px;
+                margin: 2px 4px;
             }
             QMenu::item:selected {
                 background-color: #5d3a4f;
-                color: white;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: rgba(93, 58, 79, 0.2); /* 半透明的 #5d3a4f */
+                margin: 4px 8px;
             }
         """)
 
         # 动态显示选中了多少项
         action_correct = menu.addAction(f"标记为正确 ({len(selected_items)}项)")
         action_empty = menu.addAction(f"标记为空 ({len(selected_items)}项)")
+        action_other = menu.addAction(f"标注为其他 ({len(selected_items)}项)")
         action_unverified = menu.addAction(f"改为未校验 ({len(selected_items)}项)")
+
+        menu.addSeparator()
 
         # 重新检测选项
         action_redetect = menu.addAction(f"重新检测 ({len(selected_items)}项)")
@@ -3608,32 +3619,75 @@ class SpeciesValidationPage(QWidget):
             self._bulk_mark_correct(selected_items)
         elif action == action_empty:
             self._bulk_mark_empty(selected_items)
+        elif action == action_other:
+            self._bulk_mark_other(selected_items)
         elif action == action_unverified:
             self._bulk_mark_unverified(selected_items)
+
         # 点击重新检测后调用新的处理函数
         elif action == action_redetect:
             self._bulk_redetect(selected_items)
 
     def _bulk_mark_correct(self, items):
         """批量标记为正确"""
+        file_names = []
         for item in items:
             file_name = item.text()
+            file_names.append(file_name)
             self._push_to_undo_stack(file_name)
             self.validation_data[file_name] = True
 
         self._save_validation_data()
+        self._force_select_files = file_names
         QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _bulk_mark_empty(self, items):
         """批量标记为空"""
+        file_names = []
         for item in items:
             file_name = item.text()
+            file_names.append(file_name)
             self._push_to_undo_stack(file_name)
             self._update_json_file(file_name, new_species="空", new_count="空")
             self.validation_data[file_name] = False
 
         self._save_validation_data()
+        self._force_select_files = file_names
         QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_other(self, items):
+        """批量标注为其他物种"""
+        # 弹窗让用户输入统一的物种信息
+        dialog = CorrectionDialog(self, title=f"批量输入其他物种信息 ({len(items)}项)",
+                                  original_info=self.current_species_info)
+
+        # 执行对话框并检查用户是否点击了"确定"
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
+            species_name, species_count, remark = dialog.result
+
+            file_names = []
+            # 遍历并更新所有选中的项目
+            for item in items:
+                file_name = item.text()
+                file_names.append(file_name)
+                self._push_to_undo_stack(file_name)
+                self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
+                self.validation_data[file_name] = False  # 标记为错误(人工修正)
+
+            # 批量保存验证数据
+            self._save_validation_data()
+            self._increment_quick_mark_count(species_name)
+
+            self._force_select_files = file_names
+
+            # 如果自动排序开启，则刷新快捷按钮列表
+            if hasattr(self.controller,
+                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+                self._load_species_buttons()
+                self.quick_marks_updated.emit()
+
+            # 统一刷新左侧列表和 UI
+            QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _bulk_mark_unverified(self, items):
         """批量将状态重置为未校验"""
@@ -3642,8 +3696,8 @@ class SpeciesValidationPage(QWidget):
 
         for item in items:
             file_name = item.text()
-            self._push_to_undo_stack(file_name)
             files_to_remove.append(file_name)
+            self._push_to_undo_stack(file_name)
 
             # 1. 从内存状态中移除
             self.validation_data.pop(file_name, None)
@@ -3691,6 +3745,7 @@ class SpeciesValidationPage(QWidget):
                 except Exception as e:
                     logger.error(f"清理 validation.json 失败: {e}")
 
+        self._force_select_files = files_to_remove
         # 统一刷新列表UI
         QTimer.singleShot(50, self._refresh_species_list_logic)
 
@@ -3765,7 +3820,7 @@ class SpeciesValidationPage(QWidget):
 
         # 设置重新选中标记 (如果有之前选择的文件在这个列表里，界面刷新后会自动保持选中)
         if len(file_names) > 0:
-            self._force_select_file = file_names[0]
+            self._force_select_files = file_names
 
         # 重新加载左侧列表和对应显示
         QTimer.singleShot(50, self._refresh_species_list_logic)
@@ -4310,13 +4365,24 @@ class SpeciesValidationPage(QWidget):
 
         # 1. 记住当前的选中状态
         current_species = self.current_selected_species
-        force_file = getattr(self, '_force_select_file', None)
-        if force_file:
-            current_photo_name = force_file
-            self._force_select_file = None  # 消费掉标志，避免影响后续的常规刷新
+
+        # 使用列表支持多选恢复
+        force_files = getattr(self, '_force_select_files', None)
+        current_photo_names = []
+        if force_files:
+            current_photo_names = force_files
+            self._force_select_files = None  # 消费掉标志，避免影响后续的常规刷新
         else:
-            current_photo_item = self.species_photo_listbox.currentItem()
-            current_photo_name = current_photo_item.text() if current_photo_item else None
+            # 兼容旧的单选标志位
+            force_file = getattr(self, '_force_select_file', None)
+            if force_file:
+                current_photo_names = [force_file]
+                self._force_select_file = None
+            else:
+                selected_items = self.species_photo_listbox.selectedItems()
+                if selected_items:
+                    current_photo_names = [item.text() for item in selected_items]
+
         current_photo_row = self.species_photo_listbox.currentRow()
 
         # 2. 重新加载物种数据
@@ -4330,13 +4396,16 @@ class SpeciesValidationPage(QWidget):
             target_item = None
 
             # 优先通过照片名反查新的分组 (这样可以跟随照片的状态跳跃，例如从未校验跳到已校验)
-            if current_photo_name:
-                for idx in range(self.species_listbox.count()):
-                    item = self.species_listbox.item(idx)
-                    item_text = item.text()
-                    map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
-                    if current_photo_name in self.species_image_map.get(map_key, []):
-                        target_item = item
+            if current_photo_names:
+                for current_photo_name in current_photo_names:
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if current_photo_name in self.species_image_map.get(map_key, []):
+                            target_item = item
+                            break
+                    if target_item:
                         break
 
             # 如果没找到（照片可能被移除了），尝试找回原来的物种名
@@ -4369,23 +4438,38 @@ class SpeciesValidationPage(QWidget):
                 self.species_photo_listbox.clear()
                 for img in image_files:
                     self.species_photo_listbox.addItem(img)
-
                 self.species_photo_listbox.blockSignals(False)
 
-                # 恢复照片选中
-                if current_photo_name:
-                    items = self.species_photo_listbox.findItems(current_photo_name, Qt.MatchFlag.MatchExactly)
-                    if items:
-                        self.species_photo_listbox.setCurrentItem(items[0])
-                        self.species_photo_listbox.scrollToItem(items[0])
+                # 恢复照片选中 (多选逻辑)
+                if current_photo_names:
+                    first_item_found = None
+                    # 阻断信号，避免多次触发选中事件引发UI频繁重绘
+                    self.species_photo_listbox.blockSignals(True)
+
+                    for photo_name in current_photo_names:
+                        items = self.species_photo_listbox.findItems(photo_name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            item = items[0]
+                            item.setSelected(True)
+                            if not first_item_found:
+                                first_item_found = item
+
+                    if first_item_found:
+                        self.species_photo_listbox.scrollToItem(first_item_found)
                     else:
                         row = min(current_photo_row, self.species_photo_listbox.count() - 1)
                         if row >= 0:
                             self.species_photo_listbox.setCurrentRow(row)
 
+                    self.species_photo_listbox.blockSignals(False)
+
+                    # 触发一次事件更新右侧信息界面 (以最后选中的或第一个找到的为准)
+                    self._on_species_photo_selected()
+
                 # 更新状态栏
                 if hasattr(self.controller, 'status_bar'):
                     self.controller.status_bar.status_label.setText(f"当前物种共有 {len(image_files)} 张照片")
+
         self.species_photo_listbox.setFocus()
 
     def reload_and_apply_conf(self):
