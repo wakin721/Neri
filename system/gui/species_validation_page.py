@@ -204,6 +204,133 @@ class ReDetectThread(QThread):
             self.finished.emit(False)
 
 
+class ValidationExportThread(QThread):
+    """用于后台处理和导出数据的独立线程，防止界面卡死"""
+    progress_updated = Signal(int, int, float, float, float)
+    finished = Signal(bool, str)
+
+    def __init__(self, temp_dir, source_dir, output_path, file_format, confidence_settings, columns_to_export, min_frame_ratio, supported_video_exts):
+        super().__init__()
+        self.temp_dir = temp_dir
+        self.source_dir = source_dir
+        self.output_path = output_path
+        self.file_format = file_format
+        self.confidence_settings = confidence_settings
+        self.columns_to_export = columns_to_export
+        self.min_frame_ratio = min_frame_ratio
+        self.supported_video_exts = supported_video_exts
+
+    def run(self):
+        import time
+        import os
+        import json
+        from datetime import datetime
+        from system.metadata_extractor import ImageMetadataExtractor
+        from system.config import SUPPORTED_IMAGE_EXTENSIONS
+        from system.data_processor import DataProcessor
+
+        start_time = time.time()
+        try:
+            json_files = [f for f in os.listdir(self.temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
+            total_files = len(json_files)
+            # 总工作量设定为：读取JSON(1倍) + 处理和生成表格(1倍)
+            total_work = total_files * 2
+
+            all_image_data = []
+            earliest_date = None
+            processed_units = 0
+
+            # --- 阶段 1: 读取所有 JSON 文件 ---
+            for json_file in json_files:
+                json_path = os.path.join(self.temp_dir, json_file)
+                image_filename_base = os.path.splitext(json_file)[0]
+                found_path = None
+                is_video = False
+
+                search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
+                if self.supported_video_exts:
+                    search_extensions.extend(list(self.supported_video_exts))
+
+                for ext in search_extensions:
+                    temp_path = os.path.join(self.source_dir, image_filename_base + ext)
+                    if os.path.exists(temp_path):
+                        found_path = temp_path
+                        if self.supported_video_exts and ext.lower() in self.supported_video_exts:
+                            is_video = True
+                        break
+
+                if not found_path:
+                    processed_units += 1
+                    continue
+
+                try:
+                    metadata = {}
+                    if is_video:
+                        metadata['文件名'] = os.path.basename(found_path)
+                        metadata['格式'] = os.path.splitext(found_path)[1].replace('.', '').upper()
+                        mtime = os.path.getmtime(found_path)
+                        dt_obj = datetime.fromtimestamp(mtime)
+                        metadata['拍摄日期'] = dt_obj.strftime("%Y-%m-%d")
+                        metadata['拍摄时间'] = dt_obj.strftime("%H:%M:%S")
+                        metadata['拍摄日期对象'] = dt_obj
+                    else:
+                        metadata, _ = ImageMetadataExtractor.extract_metadata(found_path, os.path.basename(found_path))
+
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        json_data = json.load(f)
+
+                    metadata.update(json_data)
+                    all_image_data.append(metadata)
+
+                    date_taken = metadata.get('拍摄日期对象')
+                    if date_taken:
+                        if earliest_date is None or date_taken < earliest_date:
+                            earliest_date = date_taken
+                except Exception as e:
+                    pass # 忽略单文件错误，继续处理
+
+                # 刷新进度
+                processed_units += 1
+                elapsed = time.time() - start_time
+                speed = processed_units / elapsed if elapsed > 0 else 0
+                remain = (total_work - processed_units) / speed if speed > 0 else 0
+                self.progress_updated.emit(processed_units, total_work, elapsed, remain, speed)
+
+            if not all_image_data:
+                self.finished.emit(False, "未能成功读取到任何有效数据，无法导出。")
+                return
+
+            # --- 阶段 2: 数据预处理 ---
+            processed_data = DataProcessor.process_independent_detection(
+                all_image_data, self.confidence_settings, min_frame_ratio=self.min_frame_ratio
+            )
+            if earliest_date:
+                processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
+
+            # --- 阶段 3: 执行导出 ---
+            def progress_cb(current, total):
+                # 映射到总进度的后半段
+                current_total = total_files + current
+                elapsed = time.time() - start_time
+                speed = current_total / elapsed if elapsed > 0 else 0
+                remain = (total_work - current_total) / speed if speed > 0 else 0
+                self.progress_updated.emit(current_total, total_work, elapsed, remain, speed)
+
+            success = DataProcessor.export_to_excel(
+                processed_data, self.output_path, self.confidence_settings,
+                file_format=self.file_format, columns_to_export=self.columns_to_export,
+                min_frame_ratio=self.min_frame_ratio, progress_callback=progress_cb
+            )
+
+            if success:
+                self.finished.emit(True, self.output_path)
+            else:
+                self.finished.emit(False, "导出文件时发生错误，请查看日志文件获取详情。")
+
+        except Exception as e:
+            self.finished.emit(False, f"导出过程中发生异常: {str(e)}")
+
+
 class QuantityInputDialog(QDialog):
     """自定义 Material You 风格的数量输入弹窗"""
     def __init__(self, parent=None, title="输入数量", prompt="请输入物种的数量 (1-999):", default_value=1):
@@ -1794,9 +1921,9 @@ class SpeciesValidationPage(QWidget):
         export_layout.addWidget(self.format_combo)
 
         # 导出按钮 (Material You)
-        export_button = QPushButton("导出")
+        self.export_button = QPushButton("导出")
 
-        export_button.setStyleSheet("""
+        self.export_button.setStyleSheet("""
                     QPushButton {
                         min-height: 15px;
                         padding: 12px;  
@@ -1805,8 +1932,8 @@ class SpeciesValidationPage(QWidget):
                         border-radius: 12px;
                     }
                 """)
-        export_button.clicked.connect(self._dispatch_export)
-        export_layout.addWidget(export_button)
+        self.export_button.clicked.connect(self._dispatch_export)
+        export_layout.addWidget(self.export_button)
 
         bottom_layout.addWidget(export_options_group)
         parent_layout.addWidget(bottom_area_frame)
@@ -2919,7 +3046,7 @@ class SpeciesValidationPage(QWidget):
         self._list_refresh_timer.start()
 
     def _export_validation_data(self):
-        """从校验页面的数据导出为表格文件（Excel或CSV）"""
+        """配置并启动后台线程进行数据导出"""
         temp_dir = self.controller.get_temp_photo_dir()
         source_dir = self.controller.start_page.get_file_path()
 
@@ -2932,7 +3059,6 @@ class SpeciesValidationPage(QWidget):
             QMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
             return
 
-        # 根据下拉框选择确定文件类型
         file_format = self.export_format_var.lower()
         if file_format == 'excel':
             file_types = "Excel 文件 (*.xlsx);;所有文件 (*.*)"
@@ -2941,140 +3067,63 @@ class SpeciesValidationPage(QWidget):
             file_types = "CSV 文件 (*.csv);;所有文件 (*.*)"
             file_extension = ".csv"
         else:
-            return  # 如果格式未知则不执行操作
+            return
 
-        # 1. 提取文件夹名称 (使用 normpath 去除可能的末尾斜杠，然后取 basename)
         folder_name = os.path.basename(os.path.normpath(source_dir))
-
-        # 2. 生成时间戳
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        # 3. 拼接文件名: 文件夹名_validation_data_时间戳.后缀
         default_filename = f"{folder_name}_validation_data_{timestamp}{file_extension}"
-
-        # 4. 组合完整路径，使保存对话框默认打开源目录
         default_save_path = os.path.join(source_dir, default_filename)
 
-        # 弹出文件保存对话框
-        output_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "选择表格保存位置",
-            default_save_path,
-            file_types
-        )
-
+        output_path, _ = QFileDialog.getSaveFileName(self, "选择表格保存位置", default_save_path, file_types)
         if not output_path:
             return
 
-        # 加载置信度配置文件
-        confidence_settings = self.controller.settings_manager.load_confidence_settings()
-        if not confidence_settings:
-            confidence_settings = {}
+        # 准备导出所需的所有参数
+        confidence_settings = self.controller.settings_manager.load_confidence_settings() or {}
+        min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var if hasattr(self.controller, 'advanced_page') else 0.0
+        columns_to_export = self.controller.advanced_page.get_selected_export_columns() if hasattr(self.controller, 'advanced_page') else None
 
-        all_image_data = []
-        earliest_date = None
+        # 锁定 UI 防止重复点击
+        self.export_button.setEnabled(False)
+        self.format_combo.setEnabled(False)
+        self.controller.status_bar.show_progress()
+        self.controller.status_bar.status_label.setText(f"正在读取文件并导出 {file_format.upper()}，请稍候...")
 
-        for json_file in json_files:
-            json_path = os.path.join(temp_dir, json_file)
-            image_filename_base = os.path.splitext(json_file)[0]
-
-            found_path = None
-            is_video = False
-
-            # 1. 构建搜索列表：合并图片和视频扩展名
-            search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
-            if hasattr(self, 'SUPPORTED_VIDEO_EXTENSIONS'):
-                search_extensions.extend(list(self.SUPPORTED_VIDEO_EXTENSIONS))
-
-            # 2. 查找对应的源文件
-            for ext in search_extensions:
-                temp_path = os.path.join(source_dir, image_filename_base + ext)
-                if os.path.exists(temp_path):
-                    found_path = temp_path
-                    # 判断是否为视频
-                    if hasattr(self, 'SUPPORTED_VIDEO_EXTENSIONS') and ext.lower() in self.SUPPORTED_VIDEO_EXTENSIONS:
-                        is_video = True
-                    break
-
-            if not found_path:
-                logger.warning(f"找不到原始文件: {image_filename_base}")
-                continue
-
-            try:
-                metadata = {}
-
-                # 3. 根据文件类型提取元数据
-                if is_video:
-                    # 视频：手动构建基础元数据
-                    metadata['文件名'] = os.path.basename(found_path)
-                    metadata['格式'] = os.path.splitext(found_path)[1].replace('.', '').upper()
-
-                    # 使用文件修改时间作为拍摄时间
-                    mtime = os.path.getmtime(found_path)
-                    dt_obj = datetime.fromtimestamp(mtime)
-                    metadata['拍摄日期'] = dt_obj.strftime("%Y-%m-%d")
-                    metadata['拍摄时间'] = dt_obj.strftime("%H:%M:%S")
-                    metadata['拍摄日期对象'] = dt_obj  # 用于后续排序和独立探测计算
-                else:
-                    # 图片：使用元数据提取器（支持EXIF）
-                    metadata, _ = ImageMetadataExtractor.extract_metadata(found_path, os.path.basename(found_path))
-
-                # 4. 加载JSON检测结果
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-
-                metadata.update(json_data)
-                all_image_data.append(metadata)
-
-                date_taken = metadata.get('拍摄日期对象')
-                if date_taken:
-                    if earliest_date is None or date_taken < earliest_date:
-                        earliest_date = date_taken
-            except Exception as e:
-                logger.error(f"处理文件 {json_file} 时出错: {e}")
-
-        if not all_image_data:
-            QMessageBox.critical(self, "错误", "未能成功处理任何数据，无法导出。")
-            return
-
-        # 获取检测过滤比例
-        min_frame_ratio = 0.0
-        if hasattr(self.controller, 'advanced_page'):
-            min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var
-
-        # 处理数据 (传递 min_frame_ratio)
-        processed_data = DataProcessor.process_independent_detection(
-            all_image_data,
-            confidence_settings,
-            min_frame_ratio=min_frame_ratio
-        )
-
-        if earliest_date:
-            processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
-
-        # 从高级设置页面获取用户选择的导出列
-        columns_to_export = self.controller.advanced_page.get_selected_export_columns()
-
-        # 导出文件 (传递 min_frame_ratio)
-        success = DataProcessor.export_to_excel(
-            processed_data,
-            output_path,
-            confidence_settings,
+        # 创建并启动后台导出线程
+        self.export_thread = ValidationExportThread(
+            temp_dir=temp_dir,
+            source_dir=source_dir,
+            output_path=output_path,
             file_format=file_format,
+            confidence_settings=confidence_settings,
             columns_to_export=columns_to_export,
-            min_frame_ratio=min_frame_ratio
+            min_frame_ratio=min_frame_ratio,
+            supported_video_exts=getattr(self, 'SUPPORTED_VIDEO_EXTENSIONS', ())
         )
+        # 连接进度条信号
+        self.export_thread.progress_updated.connect(self.controller.status_bar.update_progress)
+        self.export_thread.finished.connect(self._on_export_finished)
+        self.export_thread.start()
+
+    def _on_export_finished(self, success, result_message_or_path):
+        """导出线程结束的回调"""
+        # 恢复 UI 和进度条
+        self.controller.status_bar.hide_progress()
+        self.export_button.setEnabled(True)
+        self.format_combo.setEnabled(True)
 
         if success:
-            reply = QMessageBox.question(self, "成功", f"数据已成功导出到:\n{output_path}\n\n是否立即打开文件？",
+            self.controller.status_bar.status_label.setText("✅ 数据导出成功")
+            reply = QMessageBox.question(self, "成功", f"数据已成功导出到:\n{result_message_or_path}\n\n是否立即打开文件？",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 try:
-                    os.startfile(output_path)
+                    os.startfile(result_message_or_path)
                 except Exception as e:
                     QMessageBox.critical(self, "错误", f"无法打开文件: {e}")
         else:
-            QMessageBox.critical(self, "导出失败", "导出文件时发生错误，请查看日志文件获取详情。")
+            self.controller.status_bar.status_label.setText("❌ 数据导出失败")
+            QMessageBox.critical(self, "导出失败", result_message_or_path)
 
     def _export_error_images(self):
         """导出被标记为错误的照片"""
