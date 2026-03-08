@@ -141,8 +141,6 @@ class ProcessingThread(QThread):
             all_images_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
             all_videos_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
 
-            # 构建全局执行列表：[所有图片..., 所有视频...]
-            # 这是实际的处理顺序，resume_from 索引必须基于此列表
             full_execution_list = all_images_global + all_videos_global
 
             # 记录总文件数
@@ -163,15 +161,19 @@ class ProcessingThread(QThread):
             total_work_units = 0  # 总工作量（帧数+图片数）
             file_unit_map = {}  # 记录每个文件对应的工作量
 
-            for f in full_execution_list:  # [修改] 遍历 full_execution_list 确保顺序一致
-                f_path = os.path.join(self.file_path, f)
+            # 1. 提取视频处理逻辑为独立的辅助函数
+            def calculate_file_units(f_name):
+                f_path = os.path.join(self.file_path, f_name)
                 units = 1
-                if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
-                    # 如果是快速识别模式，每个视频算作1个工作单位，不再统计总帧数
+
+                # 转换元组以支持 endswith
+                video_exts = tuple(SUPPORTED_VIDEO_EXTENSIONS)
+                if f_name.lower().endswith(video_exts):
                     if video_mode_setting == "快速识别":
                         units = 3
                     else:
                         try:
+                            # 仅在后台线程中初始化 cv2.VideoCapture
                             cap = cv2.VideoCapture(f_path)
                             if cap.isOpened():
                                 frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -179,7 +181,18 @@ class ProcessingThread(QThread):
                             cap.release()
                         except Exception:
                             units = 1
+                return f_name, units
 
+            # 2. 使用线程池并发扫描，极大缓解 I/O 瓶颈
+            # 对于 I/O 密集型任务，可以适当调高 worker 数量
+            max_workers = min(32, (os.cpu_count() or 1) * 4)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # executor.map 会自动保持返回结果与 full_execution_list 顺序一致
+                results = executor.map(calculate_file_units, full_execution_list)
+
+            # 3. 收集并发执行的结果
+            for f, units in results:
                 file_unit_map[f] = units
                 total_work_units += units
 
