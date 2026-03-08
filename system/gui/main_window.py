@@ -595,9 +595,15 @@ class ProcessingThread(QThread):
                             # 输出视频处理完成日志
                             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             display_img_path = os.path.normpath(img_path)
+
+                            # 获取检测结果并动态判断颜色
+                            vid_result_str = image_info.get('物种名称', '未知')
+                            vid_log_color = "#ffaa00" if (
+                                        not vid_result_str or vid_result_str in ["空", "未知"]) else "#00ff00"
+
                             log_message = (
                                 f"[INFO] {current_time} {display_img_path} [视频] | "
-                                f"检测结果:[{image_info.get('物种名称', '未知')}] | "
+                                f"检测结果:[{vid_result_str}] | "
                                 f"耗时:{detection_time:.1f}ms"
                             )
                             self.console_log.emit(log_message, vid_log_color)
@@ -947,7 +953,7 @@ class ObjectDetectionGUI(QMainWindow):
     def _setup_window(self):
         """设置窗口"""
         self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(1050, 650)
+        self.setMinimumSize(1050, 660)
         self.resize(1100, 750)
 
         # 居中显示
