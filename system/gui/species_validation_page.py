@@ -25,9 +25,10 @@ import numpy as np
 import shutil
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, get_species_color
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox, ThemeManager
+from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox, ThemeManager, MaterialMessageBox
 from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
+from system.utils import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -339,53 +340,218 @@ class QuantityInputDialog(QDialog):
         self.setWindowModality(Qt.ApplicationModal)
         self.result_value = default_value
 
-        # Material You 风格样式 (与 CorrectionDialog 保持一致)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #dbbcc2;
-                border: 1px solid #5d3a4f;
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            input_bg = Win11Colors.DARK_SURFACE.name()
+            input_focus_border = Win11Colors.DARK_ACCENT.name()
+            input_focus_bg = Win11Colors.DARK_BACKGROUND.name()
+            btn_bg = Win11Colors.DARK_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.DARK_ACCENT.lighter(120).name()
+            btn_pressed = Win11Colors.DARK_ACCENT.darker(110).name()
+            cancel_bg = Win11Colors.DARK_SURFACE.name()
+            cancel_text = Win11Colors.DARK_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.DARK_HOVER.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            input_bg = "#ffffff"
+            input_focus_border = Win11Colors.LIGHT_ACCENT.name()
+            input_focus_bg = "#fdfbfb"
+            btn_bg = Win11Colors.LIGHT_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            btn_pressed = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            cancel_bg = Win11Colors.LIGHT_SURFACE.name()
+            cancel_text = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.LIGHT_HOVER.name()
+
+        # 动态主题样式
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
                 border-radius: 8px;
-            }
-            QLabel {
-                color: #5d3a4f;
+            }}
+            QLabel {{
+                color: {text_color};
                 font-size: 15px;
                 font-weight: bold;
                 background-color: transparent;
-            }
-            QLineEdit {
+            }}
+            QLineEdit {{
                 padding: 8px 12px;
-                border: 2px solid #5d3a4f;
+                border: 2px solid {border_color};
                 border-radius: 8px;
-                background-color: #ffffff;
+                background-color: {input_bg};
                 font-size: 14px;
-                color: #5d3a4f;
-            }
-            QLineEdit:focus {
-                border-color: #7a5f6f;
-                background-color: #fdfbfb;
-            }
-            QPushButton {
-                background-color: #5d3a4f;
-                color: #dbbcc2;
+                color: {text_color};
+            }}
+            QLineEdit:focus {{
+                border-color: {input_focus_border};
+                background-color: {input_focus_bg};
+            }}
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
                 border: none;
                 padding: 8px 20px;
                 border-radius: 8px;
                 font-size: 14px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7a5f6f;
-            }
-            QPushButton:pressed {
-                background-color: #4a2f3f;
-            }
-            QPushButton#cancelButton {
-                background-color: #8c7f84;
-                color: white;
-            }
-            QPushButton#cancelButton:hover {
-                background-color: #a09398;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {btn_pressed};
+            }}
+            QPushButton#cancelButton {{
+                background-color: {cancel_bg};
+                color: {cancel_text};
+                border: 1px solid {border_color};
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: {cancel_hover};
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 20)
+
+        self.prompt_label = QLabel(prompt)
+        layout.addWidget(self.prompt_label)
+
+        # 限制只能输入 1 到 999 的数字
+        self.input_field = QLineEdit(str(default_value))
+        self.input_field.setValidator(QIntValidator(1, 999, self))
+        # 默认全选文本，方便用户直接覆盖输入
+        self.input_field.selectAll()
+        layout.addWidget(self.input_field)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.clicked.connect(self.accept_input)
+        self.ok_btn.setDefault(True)
+
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setObjectName("cancelButton")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.resize(300, 150)
+
+    def accept_input(self):
+        text = self.input_field.text().strip()
+        if text and text.isdigit() and int(text) > 0:
+            self.result_value = int(text)
+            self.accept()
+        else:
+            self.input_field.setFocus()
+
+
+class QuantityInputDialog(QDialog):
+    """自定义 Material You 风格的数量输入弹窗"""
+    def __init__(self, parent=None, title="输入数量", prompt="请输入物种的数量 (1-999):", default_value=1):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.result_value = default_value
+
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            input_bg = Win11Colors.DARK_SURFACE.name()
+            input_focus_border = Win11Colors.DARK_ACCENT.name()
+            input_focus_bg = Win11Colors.DARK_BACKGROUND.name()
+            btn_bg = Win11Colors.DARK_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.DARK_ACCENT.lighter(120).name()
+            btn_pressed = Win11Colors.DARK_ACCENT.darker(110).name()
+            cancel_bg = Win11Colors.DARK_SURFACE.name()
+            cancel_text = Win11Colors.DARK_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.DARK_HOVER.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            input_bg = "#ffffff"
+            input_focus_border = Win11Colors.LIGHT_ACCENT.name()
+            input_focus_bg = "#fdfbfb"
+            btn_bg = Win11Colors.LIGHT_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            btn_pressed = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            cancel_bg = Win11Colors.LIGHT_SURFACE.name()
+            cancel_text = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.LIGHT_HOVER.name()
+
+        # 动态主题样式
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                color: {text_color};
+                font-size: 15px;
+                font-weight: bold;
+                background-color: transparent;
+            }}
+            QLineEdit {{
+                padding: 8px 12px;
+                border: 2px solid {border_color};
+                border-radius: 8px;
+                background-color: {input_bg};
+                font-size: 14px;
+                color: {text_color};
+            }}
+            QLineEdit:focus {{
+                border-color: {input_focus_border};
+                background-color: {input_focus_bg};
+            }}
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
+                border: none;
+                padding: 8px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {btn_pressed};
+            }}
+            QPushButton#cancelButton {{
+                background-color: {cancel_bg};
+                color: {cancel_text};
+                border: 1px solid {border_color};
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: {cancel_hover};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -441,57 +607,89 @@ class CorrectionDialog(QDialog):
         self.result = None
         self.original_info = original_info
 
-        # 设置新的颜色主题
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #dbbcc2;
-                border: 1px solid #5d3a4f;
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            input_bg = Win11Colors.DARK_SURFACE.name()
+            input_focus_border = Win11Colors.DARK_ACCENT.name()
+            btn_bg = Win11Colors.DARK_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.DARK_ACCENT.lighter(120).name()
+            btn_pressed = Win11Colors.DARK_ACCENT.darker(110).name()
+            cancel_bg = Win11Colors.DARK_SURFACE.name()
+            cancel_text = Win11Colors.DARK_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.DARK_HOVER.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            input_bg = "#ffffff"
+            input_focus_border = Win11Colors.LIGHT_ACCENT.name()
+            btn_bg = Win11Colors.LIGHT_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            btn_pressed = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            cancel_bg = Win11Colors.LIGHT_SURFACE.name()
+            cancel_text = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.LIGHT_HOVER.name()
+
+        # 动态设置新的颜色主题
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
                 border-radius: 8px;
-            }
-            QLabel {
-                color: #5d3a4f;
+            }}
+            QLabel {{
+                color: {text_color};
                 font-size: 14px;
-                background-color: #dbbcc2;
-            }
-            QLineEdit {
+                background-color: transparent;
+            }}
+            QLineEdit {{
                 padding: 8px;
-                border: 2px solid #5d3a4f;
+                border: 2px solid {border_color};
                 border-radius: 6px;
-                background-color: #ffffff;
+                background-color: {input_bg};
                 font-size: 14px;
-                color: #5d3a4f;
-            }
-            QLineEdit:focus {
-                border-color: #5d3a4f;
-            }
-            QPushButton {
-                background-color: #5d3a4f;
-                color: #dbbcc2;
+                color: {text_color};
+            }}
+            QLineEdit:focus {{
+                border-color: {input_focus_border};
+            }}
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
                 border: none;
                 padding: 8px 16px;
                 border-radius: 6px;
                 font-size: 14px;
                 font-weight: 500;
-            }
-            QPushButton:hover {
-                background-color: #7a5f6f;
-            }
-            QPushButton:pressed {
-                background-color: #4a2f3f;
-            }
-            QPushButton#cancelButton {
-                background-color: #8c7f84;
-            }
-            QPushButton#cancelButton:hover {
-                background-color: #a09398;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {btn_pressed};
+            }}
+            QPushButton#cancelButton {{
+                background-color: {cancel_bg};
+                color: {cancel_text};
+                border: 1px solid {border_color};
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: {cancel_hover};
+            }}
         """)
 
         try:
-            self.excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
+            self.db_path = resource_path(os.path.join("res", "species_database.db"))
         except NameError:
-            # 兼容未导入 resource_path 的情况
-            self.excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
+            self.db_path = os.path.join("res", "species_database.db")
 
         # 初始化输入框
         self.species_name_edit = QLineEdit()
@@ -499,14 +697,14 @@ class CorrectionDialog(QDialog):
         self.species_type_edit = QLineEdit()
         self.remark_edit = QLineEdit()
 
-        self.species_name_edit.editingFinished.connect(self._auto_fill_type_from_db)
+        self.species_name_edit.textChanged.connect(self._auto_fill_type_from_db)
         self.species_name_edit.textChanged.connect(self._auto_update_count)
 
         # 如果有原始信息，则预先填充输入框
         if self.original_info:
             recalculated_info = {}
             if self.original_info.get('最低置信度') != '人工校验':
-                # 【核心修改】直接读取父页面已计算好的标签文本
+                # 直接读取父页面已计算好的标签文本
                 # 这样完美兼容视频(tracks)、图片(检测框)及不同物种独立阈值的结果
                 info_text = parent.species_info_label.text() if hasattr(parent, 'species_info_label') else ""
 
@@ -578,16 +776,16 @@ class CorrectionDialog(QDialog):
         self.resize(400, 200)
 
     def _setup_completer(self):
-        """初始化拼音及中文自动补全器"""
+        """初始化拼音及中文自动补全器 (使用 SQLite)"""
         if CorrectionDialog._cached_completer_items is None:
             items = []
             try:
-                import openpyxl
-                if os.path.exists(self.excel_path):
-                    wb = openpyxl.load_workbook(self.excel_path, read_only=True, data_only=True)
-                    sheet = wb.active
+                import sqlite3
+                if os.path.exists(self.db_path):
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 中文名 FROM species WHERE 中文名 IS NOT NULL AND 中文名 != ''")
 
-                    # 尝试导入拼音库
                     try:
                         import pypinyin
                         has_pypinyin = True
@@ -595,30 +793,23 @@ class CorrectionDialog(QDialog):
                         has_pypinyin = False
                         logger.warning("未安装 pypinyin，拼音首字母检索将不可用。请运行 pip install pypinyin")
 
-                    # 遍历 Excel 提取物种名
-                    for row in sheet.iter_rows(min_row=2, values_only=True):
-                        name = str(row[1]).strip() if row[1] else ""
+                    for row in cursor.fetchall():
+                        name = str(row[0]).strip()
                         if name:
                             if has_pypinyin:
-                                # 提取首字母，例如 "赤狐" -> "ch"
                                 pinyin_list = pypinyin.pinyin(name, style=pypinyin.Style.FIRST_LETTER, strict=False)
                                 initials = "".join([p[0][0] for p in pinyin_list]).lower()
                                 items.append(f"{name} ({initials})")
                             else:
                                 items.append(name)
-                    wb.close()
+                    conn.close()
             except Exception as e:
                 logger.error(f"加载自动补全词库失败: {e}")
 
-            # 去重并保存到类缓存
             CorrectionDialog._cached_completer_items = list(set(items))
 
-        # 实例化并绑定我们自定义的补全器
         self.species_completer = MultiSpeciesCompleter(CorrectionDialog._cached_completer_items, self)
-
-        # 当用户从下拉列表中选中一项时，自动触发类型匹配
         self.species_completer.activated.connect(lambda text: self._auto_fill_type_from_db())
-
         self.species_name_edit.setCompleter(self.species_completer)
 
     def _auto_update_count(self, text):
@@ -653,120 +844,66 @@ class CorrectionDialog(QDialog):
         # 4. 回填到输入框
         self.species_count_edit.setText(",".join(current_counts))
 
-    def _auto_fill_type_from_db(self):
+    def _auto_fill_type_from_db(self, text=None):
         full_name_str = self.species_name_edit.text().strip().replace('，', ',')
+        # 如果名称被清空，同时清空物种类型
         if not full_name_str:
+            self.species_type_edit.setText("")
             return
 
         species_names = [n.strip() for n in full_name_str.split(',') if n.strip()]
         found_types = []
 
-        # 调用父类 (SpeciesValidationPage) 的缓存查询逻辑
+        # 调用父类 (SpeciesValidationPage) 的数据库查询逻辑 (直接查库，不再走缓存)
         for name in species_names:
-            sType = self.parent._get_species_info_with_cache(name)
-            found_types.append(sType)
+            sType = self.parent._get_species_info_from_db(name)
+            # 保证数量对齐，没查到就显示"空"
+            found_types.append(sType if sType else "空")
 
-        if any(found_types):
-            combined_type = ",".join(found_types)
-            self.species_type_edit.setText(combined_type)
+        # 实时组合并回填
+        combined_type = ",".join(found_types)
+        self.species_type_edit.setText(combined_type)
 
-    def _update_excel_db(self, name_str, type_str):
-        """更新或新增 Excel 中的物种类型，并同步更新 JSON 缓存"""
+    def _update_sqlite_db(self, name_str, type_str):
+        """更新或新增 SQLite 中的物种类型"""
         if not name_str or not type_str:
             return
 
-        # 拆分名称和类型
         names = [n.strip() for n in name_str.replace('，', ',').split(',') if n.strip()]
         types = [t.strip() for t in type_str.replace('，', ',').split(',') if t.strip()]
 
-        # 只有当名称数量和类型数量一致时，才进行拆分更新
         if len(names) != len(types):
-            logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新名录。")
+            logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新数据库。")
             return
 
-        # --- 1. 更新 Excel 文件 ---
-        if os.path.exists(self.excel_path):
+        # --- 更新 SQLite 数据库 ---
+        if os.path.exists(self.db_path):
             try:
-                workbook = openpyxl.load_workbook(self.excel_path)
-                sheet = workbook.active
-
-                # 获取当前Excel中的所有物种所在行映射 {name: row_index}
-                existing_rows = {}
-                for idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
-                    cell_b = row[1]  # B列
-                    if cell_b.value:
-                        existing_rows[str(cell_b.value).strip()] = idx
-
-                max_row = sheet.max_row
+                import sqlite3
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
                 updated_any = False
 
-                # 遍历每一对 (物种, 类型) 进行 Excel 更新
                 for s_name, s_type in zip(names, types):
                     if not s_name or not s_type:
                         continue
 
-                    if s_name in existing_rows:
-                        # [情况1] 存在：更新 P 列
-                        row_idx = existing_rows[s_name]
-                        cell_p = sheet.cell(row=row_idx, column=16)  # P列
-                        current_val = str(cell_p.value).strip() if cell_p.value else ""
-
-                        if current_val != s_type:
-                            cell_p.value = s_type
-                            updated_any = True
-                            logger.info(f"更新物种名录Excel: {s_name} -> {s_type}")
+                    # 检查是否存在
+                    cursor.execute("SELECT 1 FROM species WHERE 中文名=?", (s_name,))
+                    if cursor.fetchone():
+                        cursor.execute("UPDATE species SET 物种类型=? WHERE 中文名=?", (s_type, s_name))
+                        logger.info(f"更新物种数据库: {s_name} -> {s_type}")
                     else:
-                        # [情况2] 不存在：新增一行
-                        max_row += 1
-                        sheet.cell(row=max_row, column=2).value = s_name  # B列
-                        sheet.cell(row=max_row, column=16).value = s_type  # P列
-                        existing_rows[s_name] = max_row
-                        updated_any = True
-                        logger.info(f"新增物种到名录Excel: {s_name} -> {s_type}")
+                        cursor.execute("INSERT INTO species (中文名, 物种类型) VALUES (?, ?)", (s_name, s_type))
+                        logger.info(f"新增物种到数据库: {s_name} -> {s_type}")
+                    updated_any = True
 
                 if updated_any:
-                    workbook.save(self.excel_path)
-                    logger.info("Excel 数据库已成功保存。")
-
-                workbook.close()
-
-            except PermissionError:
-                QMessageBox.warning(self, "保存失败", "无法更新物种名录文件，请检查文件是否已在Excel中打开。")
+                    conn.commit()
+                    logger.info("数据库已成功保存。")
+                conn.close()
             except Exception as e:
-                logger.error(f"更新物种名录Excel失败: {e}")
-
-        # --- 2. 同步更新 JSON 缓存文件 (temp/species_db_cache.json) ---
-        try:
-            cache_path = os.path.join("temp", "species_db_cache.json")
-            cache_data = {}
-
-            # 2.1 读取现有缓存
-            if os.path.exists(cache_path):
-                try:
-                    with open(cache_path, 'r', encoding='utf-8') as f:
-                        cache_data = json.load(f)
-                except json.JSONDecodeError:
-                    cache_data = {}  # 如果文件损坏，则重新开始
-
-            # 2.2 更新字典数据
-            for s_name, s_type in zip(names, types):
-                if s_name and s_type:
-                    cache_data[s_name] = s_type
-
-                    # 同时更新父页面的内存缓存，确保界面即时生效
-                    if hasattr(self.parent, 'species_cache'):
-                        self.parent.species_cache[s_name] = s_type
-
-            # 2.3 写入文件
-            # 确保存储目录存在
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=4)
-
-            logger.info(f"已同步更新物种缓存到: {cache_path}")
-
-        except Exception as e:
-            logger.error(f"同步更新JSON缓存失败: {e}")
+                logger.error(f"更新物种数据库失败: {e}")
 
     def accept_input(self):
         # 将中文逗号替换为英文逗号
@@ -777,7 +914,7 @@ class CorrectionDialog(QDialog):
 
         # 校验物种名称
         if not species_name:
-            QMessageBox.warning(self, "输入错误", "物种名称不能为空。")
+            MaterialMessageBox.warning(self, "输入错误", "物种名称不能为空。")
             return
 
         if not species_count_str:
@@ -797,7 +934,7 @@ class CorrectionDialog(QDialog):
                 if not all(c > 0 for c in counts):
                     raise ValueError("数量必须是正整数。")
             except ValueError:
-                QMessageBox.warning(
+                MaterialMessageBox.warning(
                     self,
                     "输入格式错误",
                     "物种数量必须为以下格式之一：\n\n"
@@ -809,7 +946,7 @@ class CorrectionDialog(QDialog):
 
         if species_type:
             # 在后台线程或直接执行更新操作
-            self._update_excel_db(species_name, species_type)
+            self._update_sqlite_db(species_name, species_type)
 
         self.result = (species_name, species_count_str, remark)
         self.accept()
@@ -1198,9 +1335,6 @@ class SpeciesValidationPage(QWidget):
 
         # 启用事件过滤器以支持点击暂停
         self.species_image_label.installEventFilter(self)
-
-        self.species_cache_file = os.path.join("temp", "species_db_cache.json")
-        self.species_cache = self._load_species_cache()
 
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
@@ -1978,7 +2112,11 @@ class SpeciesValidationPage(QWidget):
             """
 
     def _load_species_data(self):
-        """加载物种数据（动态计算物种归属）"""
+        """拦截外部直接调用的加载方法，强制使用带有状态恢复的刷新逻辑，以在切换界面时保持选中状态"""
+        self._refresh_species_list_logic()
+
+    def _load_species_data_core(self):
+        """核心加载物种数据逻辑（动态计算物种归属）"""
         photo_dir = self.controller.get_temp_photo_dir()
         source_dir = self.controller.start_page.get_file_path()
 
@@ -2484,7 +2622,7 @@ class SpeciesValidationPage(QWidget):
         # 2. 原有清理工作
         self._stop_video_thread()  # 停止之前的视频线程
 
-        # [修改] 判断是否是由撤回操作引发的刷新
+        # 判断是否是由撤回操作引发的刷新
         if getattr(self, '_is_undoing', False):
             self._is_undoing = False
             self._restore_button_styles()  # 恢复撤回栈中保留的半截按钮样式
@@ -3051,12 +3189,12 @@ class SpeciesValidationPage(QWidget):
         source_dir = self.controller.start_page.get_file_path()
 
         if not temp_dir or not os.path.exists(temp_dir) or not source_dir:
-            QMessageBox.critical(self, "错误", "无法找到临时文件或源文件路径，请确保已进行批处理并且路径设置正确。")
+            MaterialMessageBox.critical(self, "错误", "无法找到临时文件或源文件路径，请确保已进行批处理并且路径设置正确。")
             return
 
         json_files = [f for f in os.listdir(temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
         if not json_files:
-            QMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
+            MaterialMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
             return
 
         file_format = self.export_format_var.lower()
@@ -3114,28 +3252,28 @@ class SpeciesValidationPage(QWidget):
 
         if success:
             self.controller.status_bar.status_label.setText("✅ 数据导出成功")
-            reply = QMessageBox.question(self, "成功", f"数据已成功导出到:\n{result_message_or_path}\n\n是否立即打开文件？",
+            reply = MaterialMessageBox.question(self, "成功", f"数据已成功导出到:\n{result_message_or_path}\n\n是否立即打开文件？",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 try:
                     os.startfile(result_message_or_path)
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"无法打开文件: {e}")
+                    MaterialMessageBox.critical(self, "错误", f"无法打开文件: {e}")
         else:
             self.controller.status_bar.status_label.setText("❌ 数据导出失败")
-            QMessageBox.critical(self, "导出失败", result_message_or_path)
+            MaterialMessageBox.critical(self, "导出失败", result_message_or_path)
 
     def _export_error_images(self):
         """导出被标记为错误的照片"""
         try:
             source_dir = self.controller.start_page.get_file_path()
             if not source_dir or not os.path.exists(source_dir):
-                QMessageBox.warning(self, "错误", "源图像目录未设置或不存在。")
+                MaterialMessageBox.warning(self, "错误", "源图像目录未设置或不存在。")
                 return
 
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir or not os.path.exists(temp_photo_dir):
-                QMessageBox.warning(self, "错误", "临时目录不存在，无法检查JSON文件。")
+                MaterialMessageBox.warning(self, "错误", "临时目录不存在，无法检查JSON文件。")
                 return
 
             # Get destination directory
@@ -3178,14 +3316,14 @@ class SpeciesValidationPage(QWidget):
                     logger.error(f"处理JSON文件 {json_file} 时出错: {e}")
 
             if copied_count > 0:
-                QMessageBox.information(self, "成功",
+                MaterialMessageBox.information(self, "成功",
                                         f"已成功导出 {copied_count} 张错误照片到:\n{error_dir}")
             else:
-                QMessageBox.information(self, "提示", "没有错误照片可供导出。")
+                MaterialMessageBox.information(self, "提示", "没有错误照片可供导出。")
 
         except Exception as e:
             logger.error(f"导出错误照片失败: {e}")
-            QMessageBox.critical(self, "导出失败", f"导出错误照片时发生错误: {e}")
+            MaterialMessageBox.critical(self, "导出失败", f"导出错误照片时发生错误: {e}")
 
     def _dispatch_export(self):
         """根据下拉框的选择来分派导出任务"""
@@ -3195,7 +3333,7 @@ class SpeciesValidationPage(QWidget):
         elif export_type in ["Excel", "CSV"]:
             self._export_validation_data()
         else:
-            QMessageBox.warning(self, "错误", f"未知的导出格式: {export_type}")
+            MaterialMessageBox.warning(self, "错误", f"未知的导出格式: {export_type}")
 
     def get_settings(self):
         """获取设置"""
@@ -3329,8 +3467,7 @@ class SpeciesValidationPage(QWidget):
     def _undo_last_action(self):
         """执行撤回操作并自动刷新界面，并在状态栏提示"""
         if not hasattr(self, 'undo_stack') or not self.undo_stack:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
+            MaterialMessageBox.information(self, "提示", "没有可撤回的操作记录。")
             return
 
         try:
@@ -3589,8 +3726,8 @@ class SpeciesValidationPage(QWidget):
                 for name in names:
                     name = name.strip()
                     if name:
-                        # 利用缓存获取类型，若无则自动查Excel并更新缓存
-                        sType = self._get_species_info_with_cache(name)
+                        # 直接查 SQLite 数据库
+                        sType = self._get_species_info_from_db(name)
                         type_list.append(sType if sType else "空")
 
                 if type_list:
@@ -3612,8 +3749,14 @@ class SpeciesValidationPage(QWidget):
         if next_row < self.species_photo_listbox.count():
             self.species_photo_listbox.setCurrentRow(next_row)
         else:
-            # 如果是最后一张，可以选择跳转到下一个物种或显示完成消息
-            QMessageBox.information(self, "提示", "当前物种的所有图像已处理完成！")
+            # 如果当前已经是列表最后一张
+            # 判断列表中是否还有其他照片（总数 > 1 说明除了当前这张，还有别的没处理完）
+            if self.species_photo_listbox.count() > 1:
+                # 循环跳转回当前分组的第一张照片
+                self.species_photo_listbox.setCurrentRow(0)
+            else:
+                # 真正完全没有其他照片了，才显示完成提示
+                MaterialMessageBox.information(self, "提示", "当前物种的所有图像已处理完成！")
 
     def _show_photo_context_menu(self, pos):
         """显示照片列表的右键菜单"""
@@ -3624,31 +3767,46 @@ class SpeciesValidationPage(QWidget):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
 
-        # 替换为 Material You 风格样式
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #fdfbfb;
-                border: 1px solid #5d3a4f;
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            accent_color = Win11Colors.DARK_ACCENT.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            accent_color = Win11Colors.LIGHT_ACCENT.name()
+
+        # 动态应用 Material You 风格样式
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
                 border-radius: 12px;
                 padding: 6px;
-                color: #5d3a4f;
+                color: {text_color};
                 font-size: 14px;
                 font-weight: 500;
-            }
-            QMenu::item {
+            }}
+            QMenu::item {{
                 padding: 8px 28px;
                 border-radius: 8px;
                 margin: 2px 4px;
-            }
-            QMenu::item:selected {
-                background-color: #5d3a4f;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent_color};
                 color: #ffffff;
-            }
-            QMenu::separator {
+            }}
+            QMenu::separator {{
                 height: 1px;
-                background-color: rgba(93, 58, 79, 0.2); /* 半透明的 #5d3a4f */
+                background-color: {border_color};
                 margin: 4px 8px;
-            }
+            }}
         """)
 
         # 动态显示选中了多少项
@@ -4415,6 +4573,13 @@ class SpeciesValidationPage(QWidget):
         # 1. 记住当前的选中状态
         current_species = self.current_selected_species
 
+        # 记住当前左侧确切选中的完整分组名
+        current_group_exact = None
+        current_item = self.species_listbox.currentItem()
+        if current_item:
+            current_group_exact = current_item.text().split(' (')[
+                0] if ' (' in current_item.text() else current_item.text()
+
         # 使用列表支持多选恢复
         force_files = getattr(self, '_force_select_files', None)
         current_photo_names = []
@@ -4437,15 +4602,15 @@ class SpeciesValidationPage(QWidget):
         # 2. 重新加载物种数据
         # 暂时阻断信号，避免在 clear() 和 addItem() 期间触发不必要的闪烁
         self.species_listbox.blockSignals(True)
-        self._load_species_data()
+        self._load_species_data_core()
         self.species_listbox.blockSignals(False)
 
         # 3. 尝试恢复物种选中状态
         if current_species:
             target_item = None
 
-            # 优先通过照片名反查新的分组 (这样可以跟随照片的状态跳跃，例如从未校验跳到已校验)
-            if current_photo_names:
+            # 策略A：如果是批量操作 (有 force_files 标志)，优先追踪照片跳转到新分组
+            if force_files and current_photo_names:
                 for current_photo_name in current_photo_names:
                     for idx in range(self.species_listbox.count()):
                         item = self.species_listbox.item(idx)
@@ -4457,7 +4622,30 @@ class SpeciesValidationPage(QWidget):
                     if target_item:
                         break
 
-            # 如果没找到（照片可能被移除了），尝试找回原来的物种名
+            # 策略B：如果是快速标记等普通操作，坚决优先保持在原本的确切分组（例如 "[未校验] 马"）
+            if not target_item and current_group_exact:
+                for idx in range(self.species_listbox.count()):
+                    item = self.species_listbox.item(idx)
+                    item_text = item.text()
+                    map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                    if map_key == current_group_exact:
+                        target_item = item
+                        break
+
+            # 策略C：如果原分组因为被你标完了而消失了，或者以上都没找到，则降级尝试追踪当前焦点照片的去向
+            if not target_item and current_photo_names:
+                for current_photo_name in current_photo_names:
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if current_photo_name in self.species_image_map.get(map_key, []):
+                            target_item = item
+                            break
+                    if target_item:
+                        break
+
+            # 策略D：终极兜底，尝试按前缀找回原来的物种大类
             if not target_item:
                 for prefix in ["[未校验] ", "[已校验] ", ""]:
                     search_key = f"{prefix}{current_species}"
@@ -4505,6 +4693,8 @@ class SpeciesValidationPage(QWidget):
 
                     if first_item_found:
                         self.species_photo_listbox.scrollToItem(first_item_found)
+
+                        self.species_photo_listbox.setCurrentItem(first_item_found)
                     else:
                         row = min(current_photo_row, self.species_photo_listbox.count() - 1)
                         if row >= 0:
@@ -4530,177 +4720,35 @@ class SpeciesValidationPage(QWidget):
         self._load_species_conf()
 
         # 2. 刷新下拉框和滑块状态
-        # _on_species_selector_changed 会根据当前选中的物种 (或 global)
-        # 从 controller.confidence_settings 中取出最新值并更新滑块和 self.species_conf_var
         self._on_species_selector_changed()
 
-        # 3. 如果当前有加载图片/视频，立即重绘检测框和信息
-        if self.current_species_info:
-            # 更新文本信息
-            self._update_detection_info_display()
+        # 3. 核心修复：强制调用带状态恢复的列表刷新逻辑。
+        self._refresh_species_list_logic()
 
-            # 更新图片显示的框 (如果是图片模式)
-            if hasattr(self, 'species_validation_original_image') and self.species_validation_original_image:
-                self._display_image_with_detection_boxes(
-                    self.species_validation_original_image,
-                    self.current_species_info,
-                    self.species_conf_var
-                )
+        # 4. 如果当前有加载视频且正在运行，需单独更新其阈值并刷新 (图片重绘已在上一条的选中恢复逻辑中自动处理)
+        if self.video_thread and self.video_thread.isRunning():
+            self.video_thread.conf_threshold = self.species_conf_var
+            if self.video_thread.paused:
+                self.video_thread.refresh_frame()
 
-            # 更新视频显示的阈值 (如果是视频模式且正在运行)
-            if self.video_thread and self.video_thread.isRunning():
-                self.video_thread.conf_threshold = self.species_conf_var
-                if self.video_thread.paused:
-                    self.video_thread.refresh_frame()
-
-    def _load_species_cache(self):
-        """启动时加载临时物种缓存，并预加载 quick_mark.json 中使用频率最高的200种物种"""
-        cache = {}
-
-        # 1. 尝试加载现有缓存
-        if os.path.exists(self.species_cache_file):
-            try:
-                with open(self.species_cache_file, 'r', encoding='utf-8') as f:
-                    cache = json.load(f)
-            except Exception as e:
-                logger.error(f"加载物种缓存失败: {e}")
-
-        # 2. 从 quick_mark.json 同步高频物种
-        try:
-            # 获取 quick_mark.json 路径
-            qm_path = os.path.join("temp", "quick_mark.json")
-            # 如果能通过 controller 获取更准确的路径则使用，否则使用默认
-            if hasattr(self.controller, 'settings_manager') and hasattr(self.controller.settings_manager,
-                                                                        'settings_dir'):
-                qm_path = os.path.join(self.controller.settings_manager.settings_dir, "quick_mark.json")
-
-            if os.path.exists(qm_path):
-                with open(qm_path, 'r', encoding='utf-8') as f:
-                    qm_data = json.load(f)
-
-                # 提取计数 (排除非物种key)
-                excluded_keys = {'list', 'list_auto', 'auto'}
-                species_counts = {k: v for k, v in qm_data.items() if
-                                  k not in excluded_keys and isinstance(v, (int, float))}
-
-                # 按使用次数降序排序，取前200名
-                top_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)[:200]
-                missing_species = [name for name, count in top_species if name not in cache]
-
-                # 如果有缺失的物种，从Excel批量读取
-                if missing_species:
-                    logger.info(f"发现 {len(missing_species)} 个高频物种未在缓存中，正在从Excel同步...")
-
-                    # 获取 Excel 路径，尝试兼容 resource_path
-                    try:
-                        from system.utils import resource_path
-                        excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
-                    except ImportError:
-                        excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
-
-                    if os.path.exists(excel_path):
-                        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-                        sheet = wb.active
-
-                        missing_set = set(missing_species)
-
-                        # 遍历 Excel 查找缺失物种 (B列为中文名, P列为类型)
-                        for row in sheet.iter_rows(min_row=2, values_only=True):
-                            if not missing_set:
-                                break
-
-                            # 获取物种名 (B列, 索引1)
-                            name = str(row[1]).strip() if row[1] else ""
-                            if name in missing_set:
-                                # 获取物种类型 (P列, 索引15)
-                                type_str = str(row[15]).strip() if (len(row) > 15 and row[15]) else ""
-                                cache[name] = type_str
-                                missing_set.remove(name)
-
-                        wb.close()
-
-                        # 对于在Excel中未找到的物种，设为空字符串，防止下次重复无效查询
-                        for name in missing_set:
-                            cache[name] = "空"
-
-                        # 将更新后的缓存保存回磁盘
-                        try:
-                            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
-                            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
-                                json.dump(cache, f, ensure_ascii=False, indent=4)
-                        except Exception as e:
-                            logger.error(f"保存预加载缓存失败: {e}")
-
-                        logger.info("高频物种缓存同步完成")
-        except Exception as e:
-            logger.error(f"同步高频物种缓存失败: {e}")
-
-        return cache
-
-    def _save_species_cache(self):
-        """保存物种缓存到临时文件"""
-        try:
-            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
-            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.species_cache, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"保存物种缓存失败: {e}")
-
-    def _get_species_info_with_cache(self, species_name):
-        """从缓存读取，若无则查Excel并更新缓存，同时处理200条清理逻辑"""
+    def _get_species_info_from_db(self, species_name):
+        """直接从 SQLite 查询物种类型"""
         if not species_name:
             return "空"
 
-        # 1. 命中缓存直接返回
-        if species_name in self.species_cache:
-            return self.species_cache[species_name]
-
-        # 2. 未命中，从 Excel 中查询
         species_type = "空"
         try:
-            excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
-            if os.path.exists(excel_path):
-                # 这里的逻辑参考原代码中的 openpyxl 查询
-                wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-                sheet = wb.active
-                for row in sheet.iter_rows(min_row=2, values_only=True):
-                    if row[1] and str(row[1]).strip() == species_name:
-                        species_type = str(row[15]) if len(row) > 15 and row[15] else ""
-                        break
-                wb.close()
+            db_path = resource_path(os.path.join("res", "species_database.db"))
+            if os.path.exists(db_path):
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT 物种类型 FROM species WHERE 中文名=?", (species_name,))
+                row = cursor.fetchone()
+                if row:
+                    species_type = str(row[0]).strip() if row[0] else ""
+                conn.close()
         except Exception as e:
-            logger.error(f"查询Excel失败: {e}")
+            logger.error(f"查询数据库失败: {e}")
 
-        # 3. 检查缓存容量，执行清理逻辑
-        if len(self.species_cache) >= 200:
-            self._prune_species_cache()
-
-        # 4. 更新缓存
-        self.species_cache[species_name] = species_type
-        self._save_species_cache()
         return species_type
-
-    def _prune_species_cache(self):
-        """当超过200种时，根据 quick_mark.json 中的使用次数删除最少使用的50种"""
-        try:
-            qm_path = os.path.join("temp", "quick_mark.json")
-            usage_counts = {}
-            if os.path.exists(qm_path):
-                with open(qm_path, 'r', encoding='utf-8') as f:
-                    usage_counts = json.load(f)
-
-            # 找出缓存中所有物种在 quick_mark 中的次数，没有记录的视为 0
-            cache_items = []
-            for name in self.species_cache.keys():
-                count = usage_counts.get(name, 0)
-                cache_items.append((name, count))
-
-            # 按使用次数升序排序，取前50个
-            to_delete = sorted(cache_items, key=lambda x: x[1])[:50]
-
-            for name, _ in to_delete:
-                del self.species_cache[name]
-
-            logger.info(f"物种缓存已清理，删除了使用次数最少的 {len(to_delete)} 种")
-        except Exception as e:
-            logger.error(f"清理物种缓存失败: {e}")
