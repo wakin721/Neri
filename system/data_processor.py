@@ -140,7 +140,7 @@ class DataProcessor:
     @staticmethod
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
                         file_format: str = 'excel', columns_to_export: Optional[List[str]] = None,
-                        min_frame_ratio: float = 0.0) -> bool:
+                        min_frame_ratio: float = 0.0, progress_callback=None) -> bool:
         """将图像信息导出为Excel或CSV文件 (增加候选物种过滤逻辑)"""
         if not image_info_list:
             logger.warning("没有数据可导出")
@@ -206,8 +206,14 @@ class DataProcessor:
         personnel_names = {"人", "牧民", "人员"}
 
         try:
+            total_items = len(image_info_list)  # 获取总数
+
             # 在导出前根据置信度阈值更新数据
-            for info in image_info_list:
+            for idx, info in enumerate(image_info_list):
+                # ===== 触发进度条回调 =====
+                if progress_callback:
+                    progress_callback(idx + 1, total_items)
+
                 # --- 为新列初始化 ---
                 info['学名'], info['目名'], info['目拉丁名'], info['科名'], info['科拉丁名'], info['属名'], info[
                     '属拉丁名'] = [''] * 7
