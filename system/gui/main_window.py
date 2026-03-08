@@ -600,13 +600,16 @@ class ProcessingThread(QThread):
                                 f"检测结果:[{image_info.get('物种名称', '未知')}] | "
                                 f"耗时:{detection_time:.1f}ms"
                             )
-                            self.console_log.emit(log_message, "#00ff00")
+                            self.console_log.emit(log_message, vid_log_color)
                             QThread.msleep(5)
 
                             excel_data.append(image_info)
 
-                            # [修改] 视频处理完成后，累加该视频的总帧数到已完成工作量
+                            # 视频处理完成后，累加该视频的总帧数到已完成工作量
                             processed_work_units += file_unit_map.get(filename, 1)
+
+                            # 必须增加已处理文件数量，否则视频索引和缓存保存会卡住
+                            processed_files_count += 1
 
                     elif task_type == 'batch':
                         batch_filenames = task_data
