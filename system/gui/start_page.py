@@ -407,13 +407,18 @@ class StartPage(QWidget):
                 """)
 
     def _apply_browse_button_style(self):
-        """强制覆盖浏览按钮为统一的药丸风格"""
+        """强制覆盖浏览按钮为更高的大圆角矩形风格"""
         from PySide6.QtWidgets import QPushButton
+        from PySide6.QtGui import QFont
 
         # 在路径组件中寻找按钮实体
         browse_btn = self.file_path_widget.findChild(QPushButton)
         if not browse_btn:
             return
+
+        # 统一字体并增加按钮高度
+        browse_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        browse_btn.setMinimumHeight(42)  # 增加高度，提供更大的触控面积
 
         palette = self.palette()
         is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
@@ -432,10 +437,11 @@ class StartPage(QWidget):
                 background-color: {bg_color};
                 color: #ffffff;
                 border: none;
-                border-radius: 16px;  /* 16px 统一圆润风格 */
-                padding: 6px 16px;    /* 内边距适配输入框的高度 */
+                border-radius: 12px;  /* 12px 形成完美的现代大圆角矩形 */
+                padding: 8px 24px;    /* 增加水平和垂直内边距，使文字更居中舒展 */
                 font-size: 14px;
                 font-weight: bold;
+                text-align: center;
             }}
             QPushButton:hover {{
                 background-color: {hover_color};
@@ -628,6 +634,9 @@ class StartPage(QWidget):
         for child in self.findChildren(ModernComboBox):
             if hasattr(child, 'update_theme'):
                 child.update_theme()
+
+        # 确保主题切换时，浏览按钮的 Material You 颜色也会同步更新
+        self._apply_browse_button_style()
 
         # 更新按钮样式
         self._update_button_style(self.controller.is_processing if hasattr(self.controller, 'is_processing') else False)
