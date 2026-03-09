@@ -1011,14 +1011,21 @@ class CollapsiblePanel(QFrame):
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
 
+        # 修复 Header 向下伸展：强制主布局靠上对齐。
+        # 这样在收起动画期间，即使外部父容器还没来得及缩小，
+        # 内部多出的空隙也会留在底部，绝对不会去拉伸 Header。
+        self._main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
         self._create_header()
 
         self._content_frame = QFrame()
+        self._content_frame.setMinimumHeight(0)
+        # 修复默认展开状态：强制初始的最大高度为0
         self._content_frame.setMaximumHeight(0)
         self._content_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._content_frame.setFrameStyle(QFrame.Shape.NoFrame)
 
-        # ── 新增：透明度特效层 ──────────────────────────────────────
+        # ── 透明度特效层 ──────────────────────────────────────
         from PySide6.QtWidgets import QGraphicsOpacityEffect
         self._opacity_effect = QGraphicsOpacityEffect(self._content_frame)
         self._opacity_effect.setOpacity(0.0)
@@ -1032,6 +1039,9 @@ class CollapsiblePanel(QFrame):
 
     def _create_header(self):
         self._header_frame = QFrame()
+
+        self._header_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
         self._header_frame.setCursor(Qt.CursorShape.PointingHandCursor)
         self._header_frame.mousePressEvent = self._on_header_clicked
 
@@ -1089,28 +1099,31 @@ class CollapsiblePanel(QFrame):
         if self._is_expanded:
             return
 
-        # 允许中途反向：停止当前动画，从当前状态继续
         if self._anim_group.state() == QParallelAnimationGroup.State.Running:
             self._anim_group.stop()
 
         self._is_expanded = True
         self._update_header_style()
-        self._update_content_style()
 
-        # 计算目标高度
-        self._content_frame.setMaximumHeight(16777215)
-        self._content_frame.adjustSize()
-        target_height = self._content_frame.sizeHint().height()
-        self._content_frame.setMaximumHeight(
-            int(self._content_frame.maximumHeight())
-            if self._content_frame.maximumHeight() < 16777215
-            else 0
-        )
+        # 【新增】：在动画开始前锁死 Header 的最小高度
+        # 确保在布局引擎由于空间不足而“恐慌”时，绝对无法压缩 Header
+        if self._header_frame.minimumHeight() == 0:
+            self._header_frame.setMinimumHeight(self._header_frame.sizeHint().height())
+
+        # 1. 记录当前高度（兼容动画中途打断的情况）
+        current_h = self._content_frame.maximumHeight()
+        if current_h >= 16777215:
+            current_h = self._content_frame.height()
+
+        # 2. 直接通过内部布局获取目标高度！
+        # 不再来回修改 maximumHeight，彻底切断 Qt 强制同步重绘的触发条件
+        target_height = self._content_layout.sizeHint().height()
 
         # 展开：先快后慢（OutQuart）
         self._height_animation.setEasingCurve(QEasingCurve.Type.OutQuart)
-        self._height_animation.setStartValue(self._content_frame.maximumHeight())
+        self._height_animation.setStartValue(current_h)
         self._height_animation.setEndValue(target_height)
+        # ─── 修改的部分结束 ──────────────────────────────────────────
 
         self._opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._opacity_animation.setStartValue(self._opacity_effect.opacity())
@@ -1120,6 +1133,7 @@ class CollapsiblePanel(QFrame):
         self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
         self._rotation_animation.setEndValue(180.0)
 
+        self._is_animating = True
         self._anim_group.start()
         self.toggled.emit(True)
 
@@ -1132,9 +1146,10 @@ class CollapsiblePanel(QFrame):
 
         self._is_expanded = False
 
+        # 注意：这里结合了上一条回复中建议的 current_h = self._content_frame.height() 修复
         current_h = self._content_frame.maximumHeight()
         if current_h >= 16777215:
-            current_h = self._content_frame.sizeHint().height()
+            current_h = self._content_frame.height()  # 修改为使用实际渲染高度
         self._content_frame.setMaximumHeight(current_h)
 
         # 收起：平滑减速（OutCubic）
@@ -1150,6 +1165,8 @@ class CollapsiblePanel(QFrame):
         self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
         self._rotation_animation.setEndValue(0.0)
 
+        # 新增：标记动画正在进行中，防止重复点击
+        self._is_animating = True
         self._anim_group.start()
         self._update_header_style()
         self.toggled.emit(False)
@@ -1160,6 +1177,7 @@ class CollapsiblePanel(QFrame):
             self._content_frame.setMaximumHeight(0)
         else:
             self._content_frame.setMaximumHeight(16777215)
+            self._update_content_style()
 
     def toggle(self):
         """切换展开/收起状态"""
