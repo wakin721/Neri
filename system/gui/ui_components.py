@@ -263,7 +263,7 @@ class MaterialMessageBox(QDialog):
             QLabel {{
                 color: {text_color};
                 font-size: 15px;
-                font-weight: bold;
+                font-weight: normal;
                 background-color: transparent;
             }}
             QPushButton {{
@@ -271,7 +271,7 @@ class MaterialMessageBox(QDialog):
                 color: {btn_text};
                 border: none;
                 padding: 8px 20px;
-                border-radius: 8px;
+                border-radius: 12px;
                 font-size: 14px;
                 font-weight: bold;
                 min-width: 60px;
@@ -298,6 +298,8 @@ class MaterialMessageBox(QDialog):
 
         # 提示文本 (支持自动换行)
         self.msg_label = QLabel(text)
+        self.msg_label.setTextFormat(Qt.TextFormat.MarkdownText)
+        self.msg_label.setOpenExternalLinks(True)
         self.msg_label.setWordWrap(True)
         layout.addWidget(self.msg_label)
 
@@ -429,12 +431,12 @@ class SwitchRow(QWidget):
 
 
 class RoundedButton(QPushButton):
-    """Win11 风格圆角按钮 - 自定义主题色版本"""
+    """Material You (M3) 风格药丸按钮"""
 
     def __init__(self, text: str = "", parent: QWidget = None):
         super().__init__(text, parent)
         self._is_active = False
-        self._corner_radius = 6  # Win11 标准圆角
+        self._corner_radius = 14
         self._animation_duration = 150
         self._setup_ui()
         self._setup_animations()
@@ -442,17 +444,16 @@ class RoundedButton(QPushButton):
     def _setup_ui(self):
         """设置UI样式"""
         self.setMinimumSize(120, 36)
-        self.setFont(QFont("Segoe UI", 10))
+        self.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium)) # 稍微提升字重
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # 设置样式表
         self._update_stylesheet()
 
-        # 添加微妙的阴影效果
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(8)
-        shadow.setColor(QColor(0, 0, 0, 25))
-        shadow.setOffset(0, 2)
+        shadow.setBlurRadius(6)
+        shadow.setColor(QColor(0, 0, 0, 15))
+        shadow.setOffset(0, 1)
         self.setGraphicsEffect(shadow)
 
     def _setup_animations(self):
@@ -466,46 +467,44 @@ class RoundedButton(QPushButton):
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
+        # 核心修改：直接使用 Accent 作为按钮背景色，并调整文字对比度
         if is_dark:
-            bg_color = Win11Colors.DARK_SURFACE
-            text_color = Win11Colors.DARK_TEXT_PRIMARY
-            hover_color = Win11Colors.DARK_HOVER
-            accent_color = Win11Colors.DARK_ACCENT
+            base_bg = Win11Colors.DARK_ACCENT      # #5d3a4f
+            text_color = QColor(255, 255, 255)     # 深色背景配白字
+            hover_bg = base_bg.lighter(120)
+            pressed_bg = base_bg.darker(110)
+            disabled_bg = QColor(60, 60, 60)
+            disabled_text = QColor(120, 120, 120)
         else:
-            bg_color = Win11Colors.LIGHT_CARD
-            text_color = Win11Colors.LIGHT_TEXT_PRIMARY
-            hover_color = Win11Colors.LIGHT_HOVER
-            accent_color = Win11Colors.LIGHT_ACCENT
+            base_bg = Win11Colors.LIGHT_ACCENT     # #dbbcc2
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY # 浅色背景配深色字保证可读性
+            hover_bg = base_bg.darker(105)
+            pressed_bg = base_bg.darker(115)
+            disabled_bg = QColor(230, 230, 230)
+            disabled_text = QColor(150, 150, 150)
 
-        active_bg = accent_color if self._is_active else bg_color
-        active_text = QColor(255, 255, 255) if self._is_active else text_color
-
-        # 为激活状态计算更好的悬停色
-        hover_active_color = accent_color.lighter(120) if self._is_active else hover_color
-        pressed_active_color = accent_color.darker(110) if self._is_active else hover_color.darker(105)
+        active_bg = pressed_bg if self._is_active else base_bg
 
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: {active_bg.name()};
-                color: {active_text.name()};
-                border: 1px solid {"transparent" if self._is_active else Win11Colors.LIGHT_BORDER.name() if not is_dark else Win11Colors.DARK_BORDER.name()};
+                color: {text_color.name()};
+                border: none;
                 border-radius: {self._corner_radius}px;
                 padding: 8px 16px;
-                font-weight: {"600" if self._is_active else "400"};
+                font-weight: {"600" if self._is_active else "500"};
             }}
             QPushButton:hover {{
-                background-color: {hover_active_color.name()};
+                background-color: {hover_bg.name()};
             }}
             QPushButton:pressed {{
-                background-color: {pressed_active_color.name()};
+                background-color: {pressed_bg.name()};
+            }}
+            QPushButton:disabled {{
+                background-color: {disabled_bg.name()};
+                color: {disabled_text.name()};
             }}
         """)
-
-    def set_active(self, active: bool = True):
-        """设置按钮激活状态"""
-        if self._is_active != active:
-            self._is_active = active
-            self._update_stylesheet()
 
     def is_active(self) -> bool:
         """返回按钮是否处于激活状态"""
@@ -1475,28 +1474,56 @@ class CollapsiblePanel(QFrame):
                 else:
                     widget.setStyleSheet(f"{current_style} background-color: transparent;")
 
-            elif class_name == 'QPushButton':
-                widget.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {content_bg.lighter(110).name()};
-                        border: 1px solid {border_color.name()};
-                        border-radius: 12px;
-                        padding: 8px 16px;
-                        color: {text_color.name()};
-                        font-weight: 500;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {hover_color.name()};
-                        border-color: {accent_color.name()};
-                    }}
-                    QPushButton:pressed {{
-                        background-color: {accent_color.name()};
-                        color: white;
-                    }}
-                """)
 
-            # 遇到包含内部复杂结构的组件，停止递归，避免破坏组件内部样式
-            if class_name in ['QComboBox', 'ModernComboBox', 'QLineEdit', 'QSlider', 'QCheckBox', 'QPushButton', 'ModernSwitch', 'SwitchRow']:
+            elif class_name == 'QPushButton':
+
+                # 核心修改：使用主题色作为面板内普通按钮的背景
+
+                if is_dark:
+
+                    btn_bg = Win11Colors.DARK_ACCENT
+
+                    btn_text = QColor(255, 255, 255)
+
+                    btn_hover = btn_bg.lighter(120)
+
+                    btn_pressed = btn_bg.darker(110)
+
+                    disabled_bg = QColor(60, 60, 60)
+
+                    disabled_text = QColor(120, 120, 120)
+
+                else:
+                    btn_bg = Win11Colors.LIGHT_ACCENT
+                    btn_text = Win11Colors.LIGHT_TEXT_PRIMARY
+                    btn_hover = btn_bg.darker(105)
+                    btn_pressed = btn_bg.darker(115)
+                    disabled_bg = QColor(230, 230, 230)
+                    disabled_text = QColor(150, 150, 150)
+                widget.setStyleSheet(f"""
+                                QPushButton {{
+                                    background-color: {btn_bg.name()};
+                                    border: none;
+                                    border-radius: 18px;
+                                    padding: 8px 16px;
+                                    color: {btn_text.name()};
+                                    font-weight: 500;
+                                }}
+                                QPushButton:hover {{
+                                    background-color: {btn_hover.name()};
+                                }}
+                                QPushButton:pressed {{
+                                    background-color: {btn_pressed.name()};
+                                }}
+                                QPushButton:disabled {{
+                                    background-color: {disabled_bg.name()};
+                                    color: {disabled_text.name()};
+                                }}
+                            """)
+
+            if class_name in ['QComboBox', 'ModernComboBox', 'QLineEdit', 'ModernLineEdit', 'QSlider', 'ModernSlider',
+                              'QCheckBox', 'ModernCheckBox', 'QPushButton', 'RoundedButton', 'ModernSwitch',
+                              'SwitchRow']:
                 return
 
             # 使用 children() 获取直系子组件，避免 findChildren 造成的深层破坏和重复计算
