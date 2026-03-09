@@ -2157,10 +2157,10 @@ class SpeciesValidationPage(QWidget):
         # ── 排序并填充左侧列表框（与原逻辑完全一致）───────────────────
         def sort_priority(name):
             if name == "需人工检验": return 0
-            if name.startswith("[未校验]"): return 1
             if name == "[未校验] 空": return 2
-            if name.startswith("[已校验]"): return 3
+            if name.startswith("[未校验]"): return 1
             if name == "[已校验] 空": return 4
+            if name.startswith("[已校验]"): return 3
             if name == "未检测": return 5
             return 6
 
@@ -2757,6 +2757,12 @@ class SpeciesValidationPage(QWidget):
             self.validation_data[file_name] = False
             self._save_validation_data()
 
+            if new_species_str is not None:
+                self.current_species_info['物种名称'] = new_species_str
+                self.current_species_info['最低置信度'] = '人工校验'
+            if new_count_str is not None:
+                self.current_species_info['物种数量'] = new_count_str
+
             # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
             if len(self._selected_species_names) > 0 and len(self._selected_species_names) == len(self._selected_counts):
                 self._do_auto_advance()
@@ -2956,6 +2962,12 @@ class SpeciesValidationPage(QWidget):
                 new_species_str = sp_name
 
         self._update_json_file(file_name, new_species=new_species_str, new_count=new_count_str)
+
+        if new_species_str is not None:
+            self.current_species_info['物种名称'] = new_species_str
+            self.current_species_info['最低置信度'] = '人工校验'
+        if new_count_str is not None:
+            self.current_species_info['物种数量'] = new_count_str
 
         # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
         if len(self._selected_counts) > 0 and len(self._selected_counts) == len(self._selected_species_names):
