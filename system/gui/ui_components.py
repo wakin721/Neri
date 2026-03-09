@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout,
     QPushButton, QProgressBar, QApplication, QGraphicsDropShadowEffect,
     QSizePolicy, QSpacerItem, QCheckBox, QLineEdit, QGroupBox,
-    QSlider, QComboBox, QDialog
+    QSlider, QComboBox, QDialog, QStyledItemDelegate
 )
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
@@ -2517,3 +2517,305 @@ class ModernCheckBox(QCheckBox):
     def update_theme(self):
         self._update_stylesheet()
         self.setChecked(self.isChecked())
+
+
+class MarqueeButton(QPushButton):
+    """文字超出按钮宽度时自动向左滚动显示的按钮"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._scroll_offset = 0
+        self._pause_ticks = 0
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setInterval(35)
+        self._scroll_timer.timeout.connect(self._tick)
+
+    def _text_width(self):
+        return self.fontMetrics().horizontalAdvance(self.text())
+
+    def _avail_width(self):
+        return max(1, self.width() - 16)
+
+    def _check_and_start(self):
+        if self._text_width() > self._avail_width():
+            self._scroll_offset = 0
+            self._pause_ticks = 25
+            if not self._scroll_timer.isActive():
+                self._scroll_timer.start()
+        else:
+            self._scroll_timer.stop()
+            self._scroll_offset = 0
+            self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(50, self._check_and_start)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._check_and_start()
+
+    def _tick(self):
+        if self._pause_ticks > 0:
+            self._pause_ticks -= 1
+            # 新增：当末尾的暂停倒计时结束时，直接重置回开头，并再次短暂暂停
+            if self._pause_ticks == 0 and self._scroll_offset > 0:
+                self._scroll_offset = 0
+                self._pause_ticks = 25
+                self.update()
+            return
+
+        max_offset = self._text_width() - self._avail_width()
+        if max_offset <= 0:
+            self._scroll_timer.stop()
+            self._scroll_offset = 0
+            self.update()
+            return
+
+        # 完美循环逻辑：步进 -> 触顶 -> 暂停 -> 重置
+        if self._scroll_offset < max_offset:
+            self._scroll_offset += 1
+        else:
+            self._scroll_offset = max_offset
+            self._pause_ticks = 40  # 触顶后进入40帧的停顿
+
+        self.update()
+
+    def _reset_to_start(self):
+        self._scroll_offset = 0
+        self._pause_ticks = 25
+        self.update()
+
+    def paintEvent(self, event):
+        from PySide6.QtWidgets import QStyleOptionButton, QStyle
+        if self._text_width() <= self._avail_width():
+            super().paintEvent(event)
+            return
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 画按钮背景/边框，不含文字
+        opt.text = ""
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, opt, painter, self)
+        # 获取文字区域并裁剪
+        text_rect = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, opt, self)
+        painter.setClipRect(text_rect)
+        painter.setFont(self.font())
+        color = opt.palette.buttonText().color() if self.isEnabled() else opt.palette.mid().color()
+        painter.setPen(color)
+        draw_rect = text_rect.adjusted(-self._scroll_offset, 0, self._text_width(), 0)
+        painter.drawText(draw_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+        painter.end()
+
+    def changeEvent(self, event):
+        """监听样式和字体变化，字体加粗可能导致文字超宽，需要重新计算"""
+        super().changeEvent(event)
+        # 如果字体改变了（通过 QSS 加粗引发），重新检测是否需要滚动
+        if event.type() in [QEvent.Type.FontChange, QEvent.Type.StyleChange]:
+            self._check_and_start()
+
+
+class ScrollingListDelegate(QStyledItemDelegate):
+    """支持文字超长时：未选中/未悬浮显示省略号，选中/悬浮时自动滚动显示的列表委托"""
+
+    def __init__(self, list_widget):
+        super().__init__(list_widget)
+        self._lw = list_widget
+        self._hovered_row = -1
+
+        # 使用字典按 item 的内存地址 (id) 独立跟踪多项的滚动状态
+        # 结构： {id(item): {'offset': 0, 'pause_ticks': 20, 'waiting_for_reset': False, 'item': item}}
+        self._scroll_states = {}
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(35)
+        self._timer.timeout.connect(self._tick)
+
+        list_widget.viewport().setMouseTracking(True)
+        list_widget.viewport().installEventFilter(self)
+        list_widget.destroyed.connect(self._on_lw_destroyed)
+
+        # 监听列表项的选中状态变化
+        list_widget.itemSelectionChanged.connect(self._update_active_rows)
+
+        self._lw_alive = True
+
+    def _on_lw_destroyed(self):
+        self._lw_alive = False
+        self._timer.stop()
+        self._lw = None
+
+    def _is_valid(self):
+        return self._lw_alive and self._lw is not None
+
+    def eventFilter(self, obj, event):
+        if not self._is_valid():
+            return False
+        try:
+            if obj == self._lw.viewport():
+                if event.type() == QEvent.Type.MouseMove:
+                    pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+                    item = self._lw.itemAt(pos)
+                    self._set_hovered_row(self._lw.row(item) if item else -1)
+                elif event.type() == QEvent.Type.Leave:
+                    self._set_hovered_row(-1)
+        except RuntimeError:
+            self._lw_alive = False
+        return super().eventFilter(obj, event)
+
+    def _set_hovered_row(self, row):
+        if not self._is_valid():
+            return
+        if row == self._hovered_row:
+            return
+        self._hovered_row = row
+        self._update_active_rows()
+
+        if row >= 0:
+            self._lw.update(self._lw.model().index(row, 0))
+
+    def _update_active_rows(self):
+        """核心：更新当前需要滚动的激活项（选中 + 悬浮）"""
+        if not self._is_valid():
+            return
+
+        # 修复：使用字典映射 id -> item，彻底避免把 QListWidgetItem 放入 set 中引发 unhashable 错误
+        active_items_map = {}
+
+        # 1. 获取悬浮项
+        if self._hovered_row >= 0:
+            hovered_item = self._lw.item(self._hovered_row)
+            if hovered_item:
+                active_items_map[id(hovered_item)] = hovered_item
+
+        # 2. 获取所有选中项
+        for item in self._lw.selectedItems():
+            active_items_map[id(item)] = item
+
+        # 3. 提取所有激活项的 ID 集合，并初始化新激活项的状态
+        active_ids = set(active_items_map.keys())
+        for item_id, item in active_items_map.items():
+            if item_id not in self._scroll_states:
+                self._scroll_states[item_id] = {'offset': 0, 'pause_ticks': 20, 'waiting_for_reset': False, 'item': item}
+
+        # 4. 移除不再激活的项（恢复省略号）
+        for item_id in list(self._scroll_states.keys()):
+            if item_id not in active_ids:
+                item_to_update = self._scroll_states[item_id]['item']
+                del self._scroll_states[item_id]
+                try:
+                    # 获取底层的对象来刷新 UI
+                    row = self._lw.row(item_to_update)
+                    if row >= 0:
+                        self._lw.update(self._lw.model().index(row, 0))  # 重绘以显示省略号
+                except RuntimeError:
+                    pass
+
+        # 控制定时器启停
+        if self._scroll_states:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def _tick(self):
+        """每一帧推进各激活项的动画偏移"""
+        if not self._is_valid():
+            self._timer.stop()
+            return
+
+        try:
+            for item_id, state in list(self._scroll_states.items()):
+                item = state['item']
+                row = self._lw.row(item)
+
+                if row < 0:
+                    del self._scroll_states[item_id]
+                    continue
+
+                if state['pause_ticks'] > 0:
+                    state['pause_ticks'] -= 1
+                    if state['pause_ticks'] == 0 and state['waiting_for_reset']:
+                        state['offset'] = 0
+                        state['pause_ticks'] = 20
+                        state['waiting_for_reset'] = False
+                        self._lw.update(self._lw.model().index(row, 0))
+                    continue
+
+                fm = self._lw.fontMetrics()
+
+                # 修复核心：换回稳定的 viewport().width()，避免 visualItemRect 的判定误差
+                max_offset = fm.horizontalAdvance(item.text()) - (self._lw.viewport().width() - 32)
+
+                if max_offset <= 0:
+                    state['offset'] = 0
+                    continue
+
+                # 完美平滑滚动：步进 -> 触达最大值 -> 打上标记并暂停
+                if state['offset'] < max_offset:
+                    state['offset'] += 1
+                else:
+                    state['offset'] = max_offset
+                    state['pause_ticks'] = 40
+                    state['waiting_for_reset'] = True
+
+                self._lw.update(self._lw.model().index(row, 0))
+        except RuntimeError:
+            self._lw_alive = False
+            self._timer.stop()
+
+    def paint(self, painter, option, index):
+        if not self._is_valid():
+            super().paint(painter, option, index)
+            return
+        try:
+            item = self._lw.item(index.row())
+            if not item:
+                super().paint(painter, option, index)
+                return
+
+            text = item.text()
+            fm = option.fontMetrics
+            avail_width = option.rect.width() - 32
+
+            # 使用 id(item) 来检查状态
+            item_id = id(item)
+            is_active = item_id in self._scroll_states
+
+            # ===== 核心判断 =====
+            if fm.horizontalAdvance(text) <= avail_width or not is_active:
+                super().paint(painter, option, index)
+                return
+
+            # ===== 激活状态且文字超出，自行绘制滚动 =====
+            from PySide6.QtWidgets import QApplication, QStyle
+            painter.save()
+
+            # 1. 绘制带有圆角的背景/焦点框（复用QSS样式）
+            QApplication.style().drawPrimitive(
+                QStyle.PrimitiveElement.PE_PanelItemViewItem, option, painter, self._lw)
+
+            # 2. 获取该项独立的滚动偏移 (使用 id(item) 作为键)
+            state = self._scroll_states.get(item_id, {'offset': 0})
+            offset = state.get('offset', 0)
+
+            # 3. 裁剪避免文字画出边界
+            painter.setClipRect(option.rect.adjusted(16, 0, -16, 0))
+
+            # 4. 根据选中状态设定文字颜色
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.setPen(option.palette.highlightedText().color())
+            else:
+                painter.setPen(option.palette.text().color())
+
+            painter.setFont(option.font)
+
+            # 5. 应用滚动偏移量并绘制文字
+            draw_rect = option.rect.adjusted(16 - offset, 0, fm.horizontalAdvance(text), 0)
+            painter.drawText(draw_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+            painter.restore()
+
+        except RuntimeError:
+            self._lw_alive = False
+            super().paint(painter, option, index)

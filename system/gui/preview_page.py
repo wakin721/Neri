@@ -29,7 +29,7 @@ from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
 from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS, get_species_color
 from system.utils import resource_path
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow, ModernComboBox
+from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow, ModernComboBox, ScrollingListDelegate
 
 
 
@@ -779,6 +779,10 @@ class PreviewPage(QWidget):
 
         self.file_listbox = QListWidget()
         self.file_listbox.setMinimumWidth(180)
+        self.file_listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.file_listbox.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self._file_scroll_delegate = ScrollingListDelegate(self.file_listbox)
+        self.file_listbox.setItemDelegate(self._file_scroll_delegate)
         self.file_listbox.itemSelectionChanged.connect(self.on_file_selected)
         list_layout.addWidget(self.file_listbox)
 
