@@ -57,8 +57,8 @@ class ModernSwitch(QCheckBox):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self._animation_duration = 200
-        self._thumb_position = 0.0   # 0.0=左 1.0=右
-        self._thumb_scale   = 0.0   # 0.0=小(关闭) 1.0=大(开启)
+        self._thumb_position = 0.0  # 0.0=左 1.0=右
+        self._thumb_scale = 0.0  # 0.0=小(关闭) 1.0=大(开启)
 
         self._setup_animations()
         self._update_stylesheet()
@@ -121,21 +121,21 @@ class ModernSwitch(QCheckBox):
 
         # ── 颜色定义 ───────────────────────────────────────────────
         if is_dark:
-            accent          = Win11Colors.DARK_ACCENT       # 轨道开启填充 / 关闭滑块色
-            track_off_fill  = Win11Colors.DARK_SURFACE      # 关闭态轨道填充
-            track_border    = Win11Colors.DARK_BORDER       # 关闭态轨道边框
-            thumb_on_color  = Win11Colors.DARK_TEXT_PRIMARY # 开启态滑块（白）
+            accent = Win11Colors.DARK_ACCENT  # 轨道开启填充 / 关闭滑块色
+            track_off_fill = Win11Colors.DARK_SURFACE  # 关闭态轨道填充
+            track_border = Win11Colors.DARK_BORDER  # 关闭态轨道边框
+            thumb_on_color = Win11Colors.DARK_TEXT_PRIMARY  # 开启态滑块（白）
             thumb_off_color = Win11Colors.DARK_TEXT_SECONDARY
         else:
-            accent          = Win11Colors.LIGHT_ACCENT
-            track_off_fill  = Win11Colors.LIGHT_SURFACE
-            track_border    = Win11Colors.LIGHT_BORDER
-            thumb_on_color  = Win11Colors.LIGHT_CARD        # 开启态滑块（白）
+            accent = Win11Colors.LIGHT_ACCENT
+            track_off_fill = Win11Colors.LIGHT_SURFACE
+            track_border = Win11Colors.LIGHT_BORDER
+            thumb_on_color = Win11Colors.LIGHT_CARD  # 开启态滑块（白）
             thumb_off_color = Win11Colors.LIGHT_TEXT_SECONDARY
 
         w, h = self.width(), self.height()
-        track_r = h / 2          # 轨道圆角（完整胶囊）
-        border_w = 2             # 关闭态边框宽度
+        track_r = h / 2  # 轨道圆角（完整胶囊）
+        border_w = 2  # 关闭态边框宽度
 
         # ── 绘制轨道 ───────────────────────────────────────────────
         from PySide6.QtCore import QRectF
@@ -161,18 +161,18 @@ class ModernSwitch(QCheckBox):
                                         -border_w / 2, -border_w / 2)
             inner_path = QPainterPath()
             inner_path.addRoundedRect(inner, track_r - border_w / 2,
-                                               track_r - border_w / 2)
+                                      track_r - border_w / 2)
             painter.drawPath(inner_path)
 
         # ── 滑块尺寸（关闭=小 开启=大）────────────────────────────
-        thumb_min = h * 0.40   # 关闭态直径
-        thumb_max = h * 0.72   # 开启态直径
-        thumb_d   = thumb_min + self._thumb_scale * (thumb_max - thumb_min)
-        thumb_r   = thumb_d / 2
+        thumb_min = h * 0.40  # 关闭态直径
+        thumb_max = h * 0.72  # 开启态直径
+        thumb_d = thumb_min + self._thumb_scale * (thumb_max - thumb_min)
+        thumb_r = thumb_d / 2
 
         # 运动范围：从左侧内边距到右侧内边距
-        margin   = (h - thumb_max) / 2        # 保证最大滑块不超出轨道
-        travel   = w - 2 * margin - thumb_max  # 可移动距离
+        margin = (h - thumb_max) / 2  # 保证最大滑块不超出轨道
+        travel = w - 2 * margin - thumb_max  # 可移动距离
         thumb_cx = margin + thumb_r + self._thumb_position * travel
         thumb_cy = h / 2
 
@@ -182,9 +182,9 @@ class ModernSwitch(QCheckBox):
         thumb_path.addEllipse(thumb_rect)
 
         # 滑块颜色：关闭→主题色，开启→白色，中间插值
-        r = int(thumb_off_color.red()   + self._thumb_scale * (thumb_on_color.red()   - thumb_off_color.red()))
+        r = int(thumb_off_color.red() + self._thumb_scale * (thumb_on_color.red() - thumb_off_color.red()))
         g = int(thumb_off_color.green() + self._thumb_scale * (thumb_on_color.green() - thumb_off_color.green()))
-        b = int(thumb_off_color.blue()  + self._thumb_scale * (thumb_on_color.blue()  - thumb_off_color.blue()))
+        b = int(thumb_off_color.blue() + self._thumb_scale * (thumb_on_color.blue() - thumb_off_color.blue()))
         thumb_color = QColor(r, g, b)
 
         painter.setPen(Qt.PenStyle.NoPen)
@@ -201,7 +201,7 @@ class ModernSwitch(QCheckBox):
         super().setChecked(checked)
         # 直接跳到目标状态，不使用动画
         self._thumb_position = 1.0 if checked else 0.0
-        self._thumb_scale    = 1.0 if checked else 0.0
+        self._thumb_scale = 1.0 if checked else 0.0
         self.update()
 
     # track_opacity 保留以防外部代码引用
@@ -444,7 +444,7 @@ class RoundedButton(QPushButton):
     def _setup_ui(self):
         """设置UI样式"""
         self.setMinimumSize(120, 36)
-        self.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium)) # 稍微提升字重
+        self.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))  # 稍微提升字重
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # 设置样式表
@@ -469,14 +469,14 @@ class RoundedButton(QPushButton):
 
         # 核心修改：直接使用 Accent 作为按钮背景色，并调整文字对比度
         if is_dark:
-            base_bg = Win11Colors.DARK_ACCENT      # #5d3a4f
-            text_color = QColor(255, 255, 255)     # 深色背景配白字
+            base_bg = Win11Colors.DARK_ACCENT  # #5d3a4f
+            text_color = QColor(255, 255, 255)  # 深色背景配白字
             hover_bg = base_bg.lighter(120)
             pressed_bg = base_bg.darker(110)
             disabled_bg = QColor(60, 60, 60)
             disabled_text = QColor(120, 120, 120)
         else:
-            base_bg = Win11Colors.LIGHT_ACCENT     # #dbbcc2
+            base_bg = Win11Colors.LIGHT_ACCENT  # #dbbcc2
             text_color = QColor(255, 255, 255)  # 浅色背景配深色字保证可读性
             hover_bg = base_bg.darker(105)
             pressed_bg = base_bg.darker(115)
@@ -1007,13 +1007,12 @@ class CollapsiblePanel(QFrame):
         self._setup_animations()
 
     def _setup_ui(self):
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
 
         # 修复 Header 向下伸展：强制主布局靠上对齐。
-        # 这样在收起动画期间，即使外部父容器还没来得及缩小，
-        # 内部多出的空隙也会留在底部，绝对不会去拉伸 Header。
         self._main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._create_header()
@@ -1074,25 +1073,26 @@ class CollapsiblePanel(QFrame):
         self._main_layout.addWidget(self._header_frame)
 
     def _setup_animations(self):
-        self._animation_duration = 300  # M3 标准时长
+        self._animation_duration = 300
 
-        # 高度动画
         self._height_animation = QPropertyAnimation(self._content_frame, b"maximumHeight")
         self._height_animation.setDuration(self._animation_duration)
 
-        # 透明度动画
         self._opacity_animation = QPropertyAnimation(self._opacity_effect, b"opacity")
         self._opacity_animation.setDuration(self._animation_duration)
 
-        # 指示器旋转动画
         self._rotation_animation = QPropertyAnimation(self._toggle_indicator, b"rotation")
         self._rotation_animation.setDuration(self._animation_duration)
 
-        # 并行动画组
+        # 新增：面板自身最小高度动画，驱动外部空间同步伸缩
+        self._panel_height_animation = QPropertyAnimation(self, b"minimumHeight")
+        self._panel_height_animation.setDuration(self._animation_duration)
+
         self._anim_group = QParallelAnimationGroup()
         self._anim_group.addAnimation(self._height_animation)
         self._anim_group.addAnimation(self._opacity_animation)
         self._anim_group.addAnimation(self._rotation_animation)
+        self._anim_group.addAnimation(self._panel_height_animation)  # 加入并行组
         self._anim_group.finished.connect(self._on_animation_finished)
 
     def expand(self):
@@ -1103,27 +1103,28 @@ class CollapsiblePanel(QFrame):
             self._anim_group.stop()
 
         self._is_expanded = True
-        self._update_header_style()
 
-        # 【新增】：在动画开始前锁死 Header 的最小高度
-        # 确保在布局引擎由于空间不足而“恐慌”时，绝对无法压缩 Header
-        if self._header_frame.minimumHeight() == 0:
-            self._header_frame.setMinimumHeight(self._header_frame.sizeHint().height())
-
-        # 1. 记录当前高度（兼容动画中途打断的情况）
         current_h = self._content_frame.maximumHeight()
         if current_h >= 16777215:
             current_h = self._content_frame.height()
 
-        # 2. 直接通过内部布局获取目标高度！
-        # 不再来回修改 maximumHeight，彻底切断 Qt 强制同步重绘的触发条件
-        target_height = self._content_layout.sizeHint().height()
+        self._update_header_style()
+        self._update_content_style()
+        self._content_frame.setMaximumHeight(current_h)
 
-        # 展开：先快后慢（OutQuart）
+        # 强制刷新样式，确保 sizeHint() 返回的是 stylesheet 变更后的准确值
+        self._header_frame.ensurePolished()
+        self._content_frame.ensurePolished()
+
+        target_height = self._content_layout.sizeHint().height()
+        header_height = self._header_frame.sizeHint().height()
+        full_height = header_height + target_height
+
+        self.setMinimumHeight(full_height)
+
         self._height_animation.setEasingCurve(QEasingCurve.Type.OutQuart)
         self._height_animation.setStartValue(current_h)
         self._height_animation.setEndValue(target_height)
-        # ─── 修改的部分结束 ──────────────────────────────────────────
 
         self._opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._opacity_animation.setStartValue(self._opacity_effect.opacity())
@@ -1132,6 +1133,9 @@ class CollapsiblePanel(QFrame):
         self._rotation_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
         self._rotation_animation.setEndValue(180.0)
+
+        self._panel_height_animation.setStartValue(full_height)
+        self._panel_height_animation.setEndValue(full_height)
 
         self._is_animating = True
         self._anim_group.start()
@@ -1146,13 +1150,13 @@ class CollapsiblePanel(QFrame):
 
         self._is_expanded = False
 
-        # 注意：这里结合了上一条回复中建议的 current_h = self._content_frame.height() 修复
         current_h = self._content_frame.maximumHeight()
         if current_h >= 16777215:
-            current_h = self._content_frame.height()  # 修改为使用实际渲染高度
+            current_h = self._content_frame.height()
         self._content_frame.setMaximumHeight(current_h)
 
-        # 收起：平滑减速（OutCubic）
+        header_height = self._header_frame.sizeHint().height()
+
         self._height_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._height_animation.setStartValue(current_h)
         self._height_animation.setEndValue(0)
@@ -1165,19 +1169,23 @@ class CollapsiblePanel(QFrame):
         self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
         self._rotation_animation.setEndValue(0.0)
 
-        # 新增：标记动画正在进行中，防止重复点击
+        # 收起：面板高度同步从完整高度收缩到仅剩 header
+        self._panel_height_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._panel_height_animation.setStartValue(self.minimumHeight())
+        self._panel_height_animation.setEndValue(header_height)
+
+        self._update_header_style()
         self._is_animating = True
         self._anim_group.start()
-        self._update_header_style()
         self.toggled.emit(False)
 
     def _on_animation_finished(self):
         self._is_animating = False
         if not self._is_expanded:
             self._content_frame.setMaximumHeight(0)
+            self.setMinimumHeight(0)  # 动画已平滑到 header_height，此时再清除约束不会有跳变
         else:
             self._content_frame.setMaximumHeight(16777215)
-            self._update_content_style()
 
     def toggle(self):
         """切换展开/收起状态"""
@@ -1611,18 +1619,19 @@ class CollapsiblePanel(QFrame):
 
 class ThemeManager:
     """主题管理器"""
+
     @staticmethod
     def apply_win11_style(app: QApplication, force_dark: bool = None):
         """应用自定义Win11样式到整个应用程序"""
-        
+
         if force_dark is not None:
             palette = app.palette()
             if force_dark:
                 # 欺骗其他组件，告诉它们现在是深色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30)) 
+                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
             else:
                 # 欺骗其他组件，告诉它们现在是浅色背景
-                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250)) 
+                palette.setColor(QPalette.ColorRole.Window, QColor(250, 250, 250))
             app.setPalette(palette)
             is_dark = force_dark
         else:
@@ -1737,7 +1746,7 @@ class ModernGroupBox(QGroupBox):
             border_color = Win11Colors.LIGHT_BORDER
             text_color = Win11Colors.LIGHT_TEXT_PRIMARY
             title_bg_color = Win11Colors.LIGHT_SURFACE
-            accent_color = Win11Colors.LIGHT_ACCENT # 引入主题色
+            accent_color = Win11Colors.LIGHT_ACCENT  # 引入主题色
 
         self.setStyleSheet(f"""
             QGroupBox {{
@@ -1784,19 +1793,19 @@ class ModernLineEdit(QLineEdit):
 
         # 调整颜色映射以贴合 Material You
         if is_dark:
-            bg_color = Win11Colors.DARK_SURFACE        # 使用 Surface 色作为背景
+            bg_color = Win11Colors.DARK_SURFACE  # 使用 Surface 色作为背景
             border_color = Win11Colors.DARK_BORDER
             text_color = Win11Colors.DARK_TEXT_PRIMARY
             focus_color = Win11Colors.DARK_ACCENT
             placeholder_color = Win11Colors.DARK_TEXT_SECONDARY
-            hover_bg = Win11Colors.DARK_HOVER          # 引入悬停色
+            hover_bg = Win11Colors.DARK_HOVER  # 引入悬停色
         else:
-            bg_color = Win11Colors.LIGHT_SURFACE       # 使用 Surface 色作为背景
+            bg_color = Win11Colors.LIGHT_SURFACE  # 使用 Surface 色作为背景
             border_color = Win11Colors.LIGHT_BORDER
             text_color = Win11Colors.LIGHT_TEXT_PRIMARY
             focus_color = Win11Colors.LIGHT_ACCENT
             placeholder_color = Win11Colors.LIGHT_TEXT_SECONDARY
-            hover_bg = Win11Colors.LIGHT_HOVER         # 引入悬停色
+            hover_bg = Win11Colors.LIGHT_HOVER  # 引入悬停色
 
         self.setStyleSheet(f"""
             QLineEdit {{
@@ -1982,16 +1991,16 @@ class ModernSlider(QSlider):
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
-            track_bg       = Win11Colors.DARK_SURFACE
-            accent         = Win11Colors.DARK_ACCENT
-            state_layer    = QColor(accent.red(), accent.green(), accent.blue(), 30)
+            track_bg = Win11Colors.DARK_SURFACE
+            accent = Win11Colors.DARK_ACCENT
+            state_layer = QColor(accent.red(), accent.green(), accent.blue(), 30)
         else:
-            track_bg       = Win11Colors.LIGHT_SURFACE
-            accent         = Win11Colors.LIGHT_ACCENT
-            state_layer    = QColor(accent.red(), accent.green(), accent.blue(), 40)
+            track_bg = Win11Colors.LIGHT_SURFACE
+            accent = Win11Colors.LIGHT_ACCENT
+            state_layer = QColor(accent.red(), accent.green(), accent.blue(), 40)
 
         rect = self.rect()
-        tm   = self._thumb_radius  # 轨道两端留白
+        tm = self._thumb_radius  # 轨道两端留白
 
         # ── 1. 轨道背景 ────────────────────────────────────────────
         from PySide6.QtCore import QRectF
@@ -2070,7 +2079,7 @@ class ModernSlider(QSlider):
 
     def _update_value_from_position(self, x):
         track_width = self.width() - 2 * self._thumb_radius
-        relative_x  = x - self._thumb_radius
+        relative_x = x - self._thumb_radius
         if track_width > 0:
             ratio = max(0.0, min(1.0, relative_x / track_width))
             self.setValue(int(self.minimum() + ratio * (self.maximum() - self.minimum())))
@@ -2170,17 +2179,17 @@ class ModernComboBox(QComboBox):
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
-            bg_color     = Win11Colors.DARK_SURFACE
+            bg_color = Win11Colors.DARK_SURFACE
             border_color = Win11Colors.DARK_BORDER
-            text_color   = Win11Colors.DARK_TEXT_PRIMARY
-            focus_color  = Win11Colors.DARK_ACCENT
-            hover_color  = Win11Colors.DARK_HOVER
+            text_color = Win11Colors.DARK_TEXT_PRIMARY
+            focus_color = Win11Colors.DARK_ACCENT
+            hover_color = Win11Colors.DARK_HOVER
         else:
-            bg_color     = Win11Colors.LIGHT_SURFACE
+            bg_color = Win11Colors.LIGHT_SURFACE
             border_color = Win11Colors.LIGHT_BORDER
-            text_color   = Win11Colors.LIGHT_TEXT_PRIMARY
-            focus_color  = Win11Colors.LIGHT_ACCENT
-            hover_color  = Win11Colors.LIGHT_HOVER
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY
+            focus_color = Win11Colors.LIGHT_ACCENT
+            hover_color = Win11Colors.LIGHT_HOVER
 
         self.setStyleSheet(f"""
             /* ── 按钮本体 ── */
@@ -2306,9 +2315,9 @@ class ModernCheckBox(QCheckBox):
         self.setMinimumHeight(32)
 
         # 动画属性初始值
-        self._bg_color      = QColor("transparent")
-        self._check_progress = 0.0   # 0.0=未绘制  1.0=完整勾
-        self._state_layer_r  = 0.0   # 状态层半径
+        self._bg_color = QColor("transparent")
+        self._check_progress = 0.0  # 0.0=未绘制  1.0=完整勾
+        self._state_layer_r = 0.0  # 状态层半径
 
         self._animation_duration = 200
         self._setup_animations()
@@ -2367,23 +2376,23 @@ class ModernCheckBox(QCheckBox):
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
         if is_dark:
             return {
-                "border":       Win11Colors.DARK_BORDER,
-                "checked_bg":   Win11Colors.DARK_ACCENT,
-                "text":         Win11Colors.DARK_TEXT_PRIMARY,
-                "checkmark":    Win11Colors.DARK_TEXT_PRIMARY,
-                "state_layer":  QColor(Win11Colors.DARK_ACCENT.red(),
-                                       Win11Colors.DARK_ACCENT.green(),
-                                       Win11Colors.DARK_ACCENT.blue(), 30),
+                "border": Win11Colors.DARK_BORDER,
+                "checked_bg": Win11Colors.DARK_ACCENT,
+                "text": Win11Colors.DARK_TEXT_PRIMARY,
+                "checkmark": Win11Colors.DARK_TEXT_PRIMARY,
+                "state_layer": QColor(Win11Colors.DARK_ACCENT.red(),
+                                      Win11Colors.DARK_ACCENT.green(),
+                                      Win11Colors.DARK_ACCENT.blue(), 30),
             }
         else:
             return {
-                "border":       Win11Colors.LIGHT_BORDER,
-                "checked_bg":   Win11Colors.LIGHT_ACCENT,
-                "text":         Win11Colors.LIGHT_TEXT_PRIMARY,
-                "checkmark":    Win11Colors.LIGHT_TEXT_PRIMARY,
-                "state_layer":  QColor(Win11Colors.LIGHT_ACCENT.red(),
-                                       Win11Colors.LIGHT_ACCENT.green(),
-                                       Win11Colors.LIGHT_ACCENT.blue(), 40),
+                "border": Win11Colors.LIGHT_BORDER,
+                "checked_bg": Win11Colors.LIGHT_ACCENT,
+                "text": Win11Colors.LIGHT_TEXT_PRIMARY,
+                "checkmark": Win11Colors.LIGHT_TEXT_PRIMARY,
+                "state_layer": QColor(Win11Colors.LIGHT_ACCENT.red(),
+                                      Win11Colors.LIGHT_ACCENT.green(),
+                                      Win11Colors.LIGHT_ACCENT.blue(), 40),
             }
 
     def _animate_state_change(self, state):
@@ -2408,7 +2417,7 @@ class ModernCheckBox(QCheckBox):
         """直接设置状态，跳过动画"""
         super().setChecked(checked)
         colors = self._get_theme_colors()
-        self._bg_color       = colors["checked_bg"] if checked else QColor("transparent")
+        self._bg_color = colors["checked_bg"] if checked else QColor("transparent")
         self._check_progress = 1.0 if checked else 0.0
         self.update()
 
@@ -2418,12 +2427,12 @@ class ModernCheckBox(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         colors = self._get_theme_colors()
-        rect    = self.rect()
+        rect = self.rect()
         box_size = 18
-        box_x    = 0
-        box_y    = (rect.height() - box_size) // 2
-        cx       = box_x + box_size / 2
-        cy       = box_y + box_size / 2
+        box_x = 0
+        box_y = (rect.height() - box_size) // 2
+        cx = box_x + box_size / 2
+        cy = box_y + box_size / 2
 
         # ── 1. 状态层（hover / press 光晕）────────────────────────
         if self._state_layer_r > 0:
@@ -2434,7 +2443,7 @@ class ModernCheckBox(QCheckBox):
 
         # ── 2. 复选框背景 ─────────────────────────────────────────
         box_rect = QRectF(box_x, box_y, box_size, box_size)
-        box_r    = 6.0
+        box_r = 6.0
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(self._bg_color))
@@ -2455,13 +2464,13 @@ class ModernCheckBox(QCheckBox):
         # ── 4. 勾选路径（逐笔绘出动画）──────────────────────────
         if self._check_progress > 0:
             # M3 checkmark 两段：短段(起点→拐点) 长段(拐点→终点)
-            p1 = QPointF(box_x + 4,  cy)
+            p1 = QPointF(box_x + 4, cy)
             p2 = QPointF(box_x + 7.5, box_y + box_size - 4.5)
             p3 = QPointF(box_x + box_size - 3.5, box_y + 4)
 
-            seg1_len = ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2) ** 0.5
-            seg2_len = ((p3.x()-p2.x())**2 + (p3.y()-p2.y())**2) ** 0.5
-            total    = seg1_len + seg2_len
+            seg1_len = ((p2.x() - p1.x()) ** 2 + (p2.y() - p1.y()) ** 2) ** 0.5
+            seg2_len = ((p3.x() - p2.x()) ** 2 + (p3.y() - p2.y()) ** 2) ** 0.5
+            total = seg1_len + seg2_len
             progress_px = self._check_progress * total
 
             check_pen = QPen(colors["checkmark"], 2)
@@ -2715,7 +2724,8 @@ class ScrollingListDelegate(QStyledItemDelegate):
         active_ids = set(active_items_map.keys())
         for item_id, item in active_items_map.items():
             if item_id not in self._scroll_states:
-                self._scroll_states[item_id] = {'offset': 0, 'pause_ticks': 20, 'waiting_for_reset': False, 'item': item}
+                self._scroll_states[item_id] = {'offset': 0, 'pause_ticks': 20, 'waiting_for_reset': False,
+                                                'item': item}
 
         # 4. 移除不再激活的项（恢复省略号）
         for item_id in list(self._scroll_states.keys()):
