@@ -70,8 +70,8 @@ class StartPage(QWidget):
     def _setup_ui(self):
         """设置UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(20)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
         # 基础设置组 (原路径设置 + 快速设置)
         self._create_basic_settings_group(layout)
@@ -437,7 +437,7 @@ class StartPage(QWidget):
                 background-color: {bg_color};
                 color: #ffffff;
                 border: none;
-                border-radius: 12px;  /* 12px 形成完美的现代大圆角矩形 */
+                border-radius: 16px;  /* 12px 形成完美的现代大圆角矩形 */
                 padding: 8px 24px;    /* 增加水平和垂直内边距，使文字更居中舒展 */
                 font-size: 14px;
                 font-weight: bold;

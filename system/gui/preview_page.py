@@ -31,8 +31,36 @@ from system.config import NORMAL_FONT, SUPPORTED_IMAGE_EXTENSIONS, get_species_c
 from system.utils import resource_path
 from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, SwitchRow, ModernComboBox
 
+
+
 logger = logging.getLogger(__name__)
 
+def _load_detection_from_db_or_json(base_name: str, temp_dir: str) -> dict:
+    """
+    优先从 SQLite 读取检测数据，回退到 JSON 文件。
+    不抛出异常，失败时返回空字典。
+    """
+    if not temp_dir:
+        return {}
+    try:
+        from system.detection_db import get_db_path, get_detection
+        db_path = get_db_path(temp_dir)
+        if os.path.exists(db_path):
+            data = get_detection(db_path, base_name)
+            if data is not None:
+                return data
+    except Exception as e:
+        logger.debug(f"DB 读取失败，回退 JSON: {e}")
+
+    # 回退：读取 JSON 文件
+    json_path = os.path.join(temp_dir, f"{base_name}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"JSON 读取失败: {e}")
+    return {}
 
 class DetectionWorker(QThread):
     """检测工作线程"""
@@ -72,17 +100,14 @@ class DetectionWorker(QThread):
 
             if current_detection_results:
                 temp_photo_dir = self.controller.get_temp_photo_dir()
-                # 保存JSON文件
-                json_path = self.controller.image_processor.save_detection_info_json(
+                self.controller.image_processor.save_detection_info_json(
                     current_detection_results, self.filename, species_info, temp_photo_dir
                 )
-
-                # 从刚保存的JSON中读回数据
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    loaded_detection_info = json.load(f)
-
-                # 发射完成信号
+                base_name = os.path.splitext(self.filename)[0]
+                # 直接从 DB（或 JSON 备份）读回，无需再 open 文件
+                loaded_detection_info = _load_detection_from_db_or_json(base_name, temp_photo_dir)
                 self.detection_completed.emit(loaded_detection_info, self.filename)
+
             else:
                 # 没有检测结果
                 self.detection_completed.emit({}, self.filename)
@@ -178,11 +203,13 @@ class VideoPlayerThread(QThread):
     playback_finished = Signal()
     pause_state_changed = Signal(bool)
 
-    def __init__(self, video_path, json_path, conf_map, draw_boxes=True, min_frame_ratio=0.0, start_frame=0,
-                 parent=None):
+    def __init__(self, video_path, json_path, conf_map, draw_boxes=True,
+                 min_frame_ratio=0.0, start_frame=0,
+                 detection_data=None, parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.json_path = json_path
+        self.detection_data = detection_data
 
         # 确保 conf_map 是字典，如果为空则给默认值
         self.conf_map = conf_map if conf_map else {"global": 0.25}
@@ -288,7 +315,16 @@ class VideoPlayerThread(QThread):
         """Converts Track-ID based JSON to Frame-Index based dictionary with Filtering and Species Unification"""
         parsed_frames = {'frames': {}, 'stride': 1}
 
-        if not self.json_path or not os.path.exists(self.json_path):
+        if self.detection_data:
+            data = self.detection_data
+        elif self.json_path and os.path.exists(self.json_path):
+            try:
+                with open(self.json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.error(f"JSON Parse Error: {e}")
+                return parsed_frames
+        else:
             return parsed_frames
 
         try:
@@ -723,8 +759,8 @@ class PreviewPage(QWidget):
         """创建预览页面的所有控件"""
         # 主布局
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
         # 直接创建图像预览内容，不使用标签页
         self._create_image_preview_content(layout)
@@ -1037,12 +1073,10 @@ class PreviewPage(QWidget):
 
             # 更新下拉框
             self.current_preview_info = {}
-            if json_path and os.path.exists(json_path):
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        self.current_preview_info = json.load(f)
-                except:
-                    pass
+            if temp_dir:
+                base_name = os.path.splitext(os.path.basename(current_file))[0]
+                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
+
             self._update_species_selector_items()
             # 即使 JSON 不存在，VideoPlayerThread 内部也会安全处理（读取不到数据则不画框），
             self._start_video_detection_thread(current_file, json_path, draw_boxes=checked, start_frame=start_frame)
@@ -1061,9 +1095,10 @@ class PreviewPage(QWidget):
                 return
 
             # Load JSON if not already loaded
-            if not self.current_preview_info and os.path.exists(json_path):
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    self.current_preview_info = json.load(f)
+            if not self.current_preview_info:
+                temp_dir = self.controller.get_temp_photo_dir()
+                base_name = os.path.splitext(os.path.basename(current_file))[0]
+                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
 
             if self.current_preview_info:
                 # 更新下拉框内容
@@ -1522,6 +1557,8 @@ class PreviewPage(QWidget):
                             except ValueError:
                                 c_conf = 0.0
 
+                        c_thresh = self.species_conf_map.get(c_name, self.species_conf_map.get("global", 0.25))
+
                         if c_conf >= c_thresh:
                             final_name = c_name
                             final_conf = c_conf
@@ -1760,9 +1797,9 @@ class PreviewPage(QWidget):
                     json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
 
                     # 如果JSON文件存在，读取完整信息
-                    if os.path.exists(json_path):
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            self.current_preview_info = json.load(f)
+                    loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+                    if loaded:
+                        self.current_preview_info = loaded
 
             # 更新检测信息显示
             self._update_detection_info(self.current_preview_info)
@@ -1836,18 +1873,12 @@ class PreviewPage(QWidget):
                         json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
 
                         # 等待JSON文件生成（最多等待2秒）
-                        wait_count = 0
-                        while not os.path.exists(json_path) and wait_count < 20:
-                            QTimer.singleShot(100, lambda: None)  # 等待100ms
-                            QApplication.processEvents()  # 处理事件循环
-                            wait_count += 1
-
-                        if os.path.exists(json_path):
-                            try:
-                                with open(json_path, 'r', encoding='utf-8') as f:
-                                    self.current_preview_info = json.load(f)
-                            except Exception as e:
-                                logger.error(f"读取JSON文件失败: {e}")
+                        temp_photo_dir = self.controller.get_temp_photo_dir()
+                        if temp_photo_dir:
+                            base_name, _ = os.path.splitext(filename)
+                            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+                            if loaded:
+                                self.current_preview_info = loaded
 
                 # 更新检测信息显示
                 self._update_detection_info(self.current_preview_info)
@@ -2064,19 +2095,13 @@ class PreviewPage(QWidget):
             # 标记是否加载了有效的检测结果
             has_detections = False
 
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        self.current_preview_info = json.load(f)
-                    self._update_detection_info(self.current_preview_info)
-                    has_detections = True
-                except Exception as e:
-                    logger.error(f"加载 {json_path} 文件失败: {e}")
+            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+            if loaded:
+                self.current_preview_info = loaded
+                self._update_detection_info(self.current_preview_info)
+                has_detections = True
 
-            # === 修复：无论是否有检测结果，都强制更新物种选择器 ===
-            # 这样当切换到无结果的图片时，列表会被重置为仅包含 Global
             self._update_species_selector_items()
-            # ====================================================
 
             # 如果已勾选显示检测结果且有检测数据,则绘制检测框
             if has_detections and self.show_detection_checkbox.isChecked():
@@ -2169,12 +2194,8 @@ class PreviewPage(QWidget):
 
             # === 修复开始：在加载视频时，立即读取 JSON 并更新下拉框 ===
             self.current_preview_info = {}
-            if json_path and os.path.exists(json_path):
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        self.current_preview_info = json.load(f)
-                except Exception as e:
-                    logger.error(f"加载视频JSON失败: {e}")
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
 
             # 立即更新物种选择器
             self._update_species_selector_items()
@@ -2281,10 +2302,9 @@ class PreviewPage(QWidget):
 
     def _start_video_detection_thread(self, video_path, json_path, draw_boxes=True, start_frame=0):
         """Starts the OpenCV QThread for video"""
-        self._stop_video_detection_thread()
-        self._is_video_paused = False
-
-        conf = self.preview_conf_slider.value() / 100.0
+        temp_dir = self.controller.get_temp_photo_dir()
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        preloaded_data = _load_detection_from_db_or_json(base_name, temp_dir) or None
 
         # 获取过滤比例设置
         min_ratio = 0.0
@@ -2297,7 +2317,8 @@ class PreviewPage(QWidget):
             self.species_conf_map,
             draw_boxes=draw_boxes,
             min_frame_ratio=min_ratio,
-            start_frame=start_frame  # <--- 传递起始帧
+            start_frame=start_frame,
+            detection_data=preloaded_data,
         )
 
         self.video_thread.frame_ready.connect(self._on_video_frame_ready)
@@ -2475,11 +2496,10 @@ class PreviewPage(QWidget):
                          f"拍摄日期: {date_str}    尺寸: {width}x{height}px    文件大小: {file_size_kb:.1f} KB")
 
             # 2. 处理检测结果
-            if os.path.exists(json_path):
-                # 如果没有缓存或路径变了，才重新加载 JSON，否则使用内存中的 self.current_preview_info 可能会更快
-                # 这里为了数据一致性，还是读取文件或使用传入的 json_path
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            temp_dir = self.controller.get_temp_photo_dir()
+            data = _load_detection_from_db_or_json(base_name, temp_dir)
+            if data:
 
                 total_frames = data.get('total_frames_processed', 1)
                 tracks = data.get('tracks', {})
@@ -2537,8 +2557,7 @@ class PreviewPage(QWidget):
                 # 获取检测时间 (优先读取JSON里记录的时间)
                 detect_time = data.get('检测时间', '')
                 if not detect_time:
-                    json_mtime = os.path.getmtime(json_path)
-                    detect_time = datetime.fromtimestamp(json_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    detect_time = "未知"
 
                 # 检查 JSON 外层是否直接指定了人工校验（专门处理无目标的视频）
                 root_conf = str(data.get("最低置信度", ""))
@@ -2555,7 +2574,7 @@ class PreviewPage(QWidget):
                     else:
                         result_text = f"\n检测结果: | {res_str} | 最低置信度: {min_confidence:.3f} | 检测于: {detect_time}"
                 else:
-                    # 【修改】如果没有任何有效轨迹，但被标记为人工校验为空
+                    # 如果没有任何有效轨迹，但被标记为人工校验为空
                     if is_root_manual:
                         empty_name = data.get("物种名称", "无目标")
                         result_text = f"\n检测结果: | {empty_name} | 最低置信度: 人工校验 | 检测于: {detect_time}"
