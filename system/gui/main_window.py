@@ -36,7 +36,7 @@ from system.gui.preview_page import PreviewPage
 from system.gui.species_validation_page import SpeciesValidationPage
 from system.gui.advanced_page import AdvancedPage
 from system.gui.about_page import AboutPage
-from system.gui.ui_components import InfoBar, Win11Colors, ThemeManager
+from system.gui.ui_components import InfoBar, Win11Colors, ThemeManager, MaterialMessageBox
 
 if platform.system() == "Windows":
     import ctypes
@@ -832,7 +832,7 @@ class ProcessingThread(QThread):
                     excel_data = DataProcessor.calculate_working_days(excel_data, earliest_date)
                 self._delete_processing_cache()
                 self.status_message.emit("处理完成！")
-                QTimer.singleShot(0, lambda: QMessageBox.information(None, "成功", "图像处理完成！"))
+                QTimer.singleShot(0, lambda: MaterialMessageBox.information(None, "成功", "图像处理完成！"))
 
             self.processing_complete.emit(not stopped_manually)
 
@@ -841,7 +841,7 @@ class ProcessingThread(QThread):
             logger.error(f"处理过程中发生错误: {e}", exc_info=True)
             self.console_log.emit(f"[WARN] {current_time} 处理过程发生严重错误: {str(e)}", "#ff0000")
             QThread.msleep(10)
-            QTimer.singleShot(0, lambda: QMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
+            QTimer.singleShot(0, lambda: MaterialMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
             self.processing_complete.emit(False)
         finally:
             gc.collect()
@@ -1189,7 +1189,7 @@ class ObjectDetectionGUI(QMainWindow):
         """后期初始化"""
         # 检查模型
         if not self.image_processor.model:
-            QMessageBox.critical(
+            MaterialMessageBox.critical(
                 self, "错误",
                 "未找到有效的模型文件(.pt)。请在res/model目录中放入至少一个模型文件。"
             )
@@ -1270,7 +1270,7 @@ class ObjectDetectionGUI(QMainWindow):
             update_thread.start()
         except Exception as e:
             logger.error(f"启动更新检查失败: {e}")
-            QMessageBox.critical(self, "错误", f"无法开始更新检查: {e}")
+            MaterialMessageBox.critical(self, "错误", f"无法开始更新检查: {e}")
 
     def change_theme(self):
         """更改主题"""
@@ -1462,7 +1462,7 @@ class ObjectDetectionGUI(QMainWindow):
             if self.current_page == "preview":
                 self._show_page("preview")
         else:
-            QMessageBox.critical(
+            MaterialMessageBox.critical(
                 self, "路径错误",
                 f"提供的图像文件路径不存在或不是一个文件夹:\n'{folder_selected}'"
             )
@@ -1482,7 +1482,7 @@ class ObjectDetectionGUI(QMainWindow):
 - **使用数据增强:** 在测试时使用数据增强（TTA），通过对输入图像进行多种变换并综合结果，可能会提高准确性，但会显著降低处理速度。
 - **使用类别无关NMS:** 在所有类别上一起执行NMS，对于检测多种相互重叠的物种可能有用。
     """
-        QMessageBox.information(self, "参数说明", help_text.strip())
+        MaterialMessageBox.information(self, "参数说明", help_text.strip())
 
     def get_temp_photo_dir(self, update=False):
         """获取临时图片目录"""
@@ -1507,10 +1507,9 @@ class ObjectDetectionGUI(QMainWindow):
     def clear_image_cache(self):
         """清除图像缓存"""
         cache_dir = os.path.join(self.settings_manager.base_dir, "temp", "photo")
-        reply = QMessageBox.question(
+        reply = MaterialMessageBox.question(
             self, "确认清除缓存",
             f"是否清空图片缓存？\n\n此操作将删除以下文件夹及其所有内容：\n{cache_dir}\n\n注意：这不会影响您的原始图片或已保存的结果。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
 
         if reply == QMessageBox.StandardButton.Yes:
@@ -1518,11 +1517,11 @@ class ObjectDetectionGUI(QMainWindow):
                 try:
                     shutil.rmtree(cache_dir)
                     os.makedirs(cache_dir, exist_ok=True)
-                    QMessageBox.information(self, "成功", "图片缓存已成功清除。")
+                    MaterialMessageBox.information(self, "成功", "图片缓存已成功清除。")
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"清除缓存时发生错误：\n{e}")
+                    MaterialMessageBox.critical(self, "错误", f"清除缓存时发生错误：\n{e}")
             else:
-                QMessageBox.information(self, "提示", "缓存目录不存在，无需清除。")
+                MaterialMessageBox.information(self, "提示", "缓存目录不存在，无需清除。")
 
     def toggle_processing_state(self):
         """切换处理状态"""
@@ -1542,10 +1541,9 @@ class ObjectDetectionGUI(QMainWindow):
                     processed = cache_data.get('processed_files', 0)
                     total = cache_data.get('total_files', 0)
                     file_path = cache_data.get('file_path', '')
-                    reply = QMessageBox.question(
+                    reply = MaterialMessageBox.question(
                         self, "发现未完成任务",
                         f"检测到上次有未完成的任务，是否继续？\n已处理：{processed}/{total} at {file_path}",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                     )
                     if reply == QMessageBox.StandardButton.Yes:
                         self._load_cache_data_from_file(cache_data)
@@ -1686,10 +1684,9 @@ class ObjectDetectionGUI(QMainWindow):
 
         if not is_already_stopping:
             # === 第一次点击 ===
-            reply = QMessageBox.question(
+            reply = MaterialMessageBox.question(
                 self, "停止确认",
                 "确定要停止吗？\n\n点击【是】将等待当前正在处理的图片/视频完成后再停止。\n(进度将包含当前文件)",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
 
             if reply == QMessageBox.StandardButton.Yes:
@@ -1700,10 +1697,9 @@ class ObjectDetectionGUI(QMainWindow):
 
         else:
             # === 第二次点击 ===
-            reply = QMessageBox.question(
+            reply = MaterialMessageBox.question(
                 self, "强制停止",
                 "检测到已发出停止请求。\n\n是否【强制立即退出】？\n(注意：当前正在处理的文件进度将丢失，进度将回滚到上一个文件)",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
 
             if reply == QMessageBox.StandardButton.Yes:
@@ -1714,7 +1710,7 @@ class ObjectDetectionGUI(QMainWindow):
     def _validate_inputs(self, file_path: str) -> bool:
         """验证输入参数 """
         if not file_path or not os.path.isdir(file_path):
-            QMessageBox.critical(self, "错误", "请提供有效的源文件夹路径。")
+            MaterialMessageBox.critical(self, "错误", "请提供有效的源文件夹路径。")
             return False
         return True
 
@@ -1845,10 +1841,9 @@ class ObjectDetectionGUI(QMainWindow):
     def closeEvent(self, event):
         """关闭事件"""
         if self.is_processing:
-            reply = QMessageBox.question(
+            reply = MaterialMessageBox.question(
                 self, "确认退出",
                 "图像处理正在进行中，确定要退出吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.No:
                 event.ignore()
@@ -1909,7 +1904,7 @@ class ObjectDetectionGUI(QMainWindow):
     def prompt_for_update(self, remote_version, download_url, release_notes):
         """弹窗询问用户是否更新，并在主线程中安全地启动下载。"""
         if not download_url:
-            QMessageBox.critical(self, "更新错误", "找不到新版本的下载链接。")
+            MaterialMessageBox.critical(self, "更新错误", "找不到新版本的下载链接。")
             return
 
         # 创建自定义 Dialog
