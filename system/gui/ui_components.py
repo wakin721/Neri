@@ -49,31 +49,30 @@ class Win11Colors:
 
 
 class ModernSwitch(QCheckBox):
-    """现代化开关组件 - Win11风格"""
+    """Material You (M3) 风格开关组件"""
 
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
-        self.setFixedSize(50, 24)
+        self.setFixedSize(60, 30)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # 动画属性
         self._animation_duration = 200
-        self._track_opacity = 1.0
-        self._thumb_position = 0.0
+        self._thumb_position = 0.0   # 0.0=左 1.0=右
+        self._thumb_scale   = 0.0   # 0.0=小(关闭) 1.0=大(开启)
 
         self._setup_animations()
         self._update_stylesheet()
 
     def _setup_animations(self):
-        """设置动画"""
-        self._position_animation = QPropertyAnimation(self, b"thumb_position")
-        self._position_animation.setDuration(self._animation_duration)
-        self._position_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._pos_anim = QPropertyAnimation(self, b"thumb_position")
+        self._pos_anim.setDuration(self._animation_duration)
+        self._pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        self._opacity_animation = QPropertyAnimation(self, b"track_opacity")
-        self._opacity_animation.setDuration(self._animation_duration)
-        self._opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scale_anim = QPropertyAnimation(self, b"thumb_scale")
+        self._scale_anim.setDuration(self._animation_duration)
+        self._scale_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+    # ── 动画属性 ──────────────────────────────────────────────────
     @Property(float)
     def thumb_position(self):
         return self._thumb_position
@@ -84,118 +83,137 @@ class ModernSwitch(QCheckBox):
         self.update()
 
     @Property(float)
-    def track_opacity(self):
-        return self._track_opacity
+    def thumb_scale(self):
+        return self._thumb_scale
 
-    @track_opacity.setter
-    def track_opacity(self, value):
-        self._track_opacity = value
+    @thumb_scale.setter
+    def thumb_scale(self, value):
+        self._thumb_scale = value
         self.update()
 
     def _update_stylesheet(self):
-        """更新样式"""
-        # 隐藏原始复选框样式
         self.setStyleSheet("""
-            QCheckBox {
-                background: transparent;
-                spacing: 0px;
-            }
-            QCheckBox::indicator {
-                width: 0px;
-                height: 0px;
-            }
+            QCheckBox { background: transparent; spacing: 0px; }
+            QCheckBox::indicator { width: 0px; height: 0px; }
         """)
 
     def nextCheckState(self):
-        """处理状态切换"""
         super().nextCheckState()
         self._animate_to_state()
 
     def _animate_to_state(self):
-        """动画到当前状态"""
-        if self.isChecked():
-            # 切换到开启状态
-            self._position_animation.setStartValue(self._thumb_position)
-            self._position_animation.setEndValue(1.0)
-        else:
-            # 切换到关闭状态
-            self._position_animation.setStartValue(self._thumb_position)
-            self._position_animation.setEndValue(0.0)
+        target = 1.0 if self.isChecked() else 0.0
 
-        self._position_animation.start()
+        self._pos_anim.setStartValue(self._thumb_position)
+        self._pos_anim.setEndValue(target)
+        self._pos_anim.start()
+
+        self._scale_anim.setStartValue(self._thumb_scale)
+        self._scale_anim.setEndValue(target)
+        self._scale_anim.start()
 
     def paintEvent(self, event):
-        """自定义绘制"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 获取主题颜色
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
+        # ── 颜色定义 ───────────────────────────────────────────────
         if is_dark:
-            track_color_off = Win11Colors.DARK_BORDER
-            track_color_on = Win11Colors.DARK_ACCENT
-            thumb_color = QColor(255, 255, 255)
-            shadow_color = QColor(0, 0, 0, 0)
+            accent          = Win11Colors.DARK_ACCENT       # 轨道开启填充 / 关闭滑块色
+            track_off_fill  = Win11Colors.DARK_SURFACE      # 关闭态轨道填充
+            track_border    = Win11Colors.DARK_BORDER       # 关闭态轨道边框
+            thumb_on_color  = Win11Colors.DARK_TEXT_PRIMARY # 开启态滑块（白）
+            thumb_off_color = Win11Colors.DARK_TEXT_SECONDARY
         else:
-            track_color_off = Win11Colors.LIGHT_BORDER
-            track_color_on = Win11Colors.LIGHT_ACCENT
-            thumb_color = QColor(255, 255, 255)
-            shadow_color = QColor(0, 0, 0, 0)
+            accent          = Win11Colors.LIGHT_ACCENT
+            track_off_fill  = Win11Colors.LIGHT_SURFACE
+            track_border    = Win11Colors.LIGHT_BORDER
+            thumb_on_color  = Win11Colors.LIGHT_CARD        # 开启态滑块（白）
+            thumb_off_color = Win11Colors.LIGHT_TEXT_SECONDARY
 
-        # 计算尺寸
-        rect = self.rect()
-        track_width = rect.width()
-        track_height = rect.height()
-        track_radius = track_height // 2
-        thumb_radius = track_radius - 2
+        w, h = self.width(), self.height()
+        track_r = h / 2          # 轨道圆角（完整胶囊）
+        border_w = 2             # 关闭态边框宽度
 
-        # 绘制轨道
-        track_rect = QRect(0, 0, track_width, track_height)
+        # ── 绘制轨道 ───────────────────────────────────────────────
+        from PySide6.QtCore import QRectF
+        track_rect = QRectF(0, 0, w, h)
         track_path = QPainterPath()
-        track_path.addRoundedRect(track_rect, track_radius, track_radius)
+        track_path.addRoundedRect(track_rect, track_r, track_r)
 
-        # 根据状态混合颜色
         if self.isChecked():
-            current_color = track_color_on
+            # 开启：实心填充
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(accent))
+            painter.drawPath(track_path)
         else:
-            current_color = track_color_off
+            # 关闭：填充 surface + 2px 边框描边
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(track_off_fill))
+            painter.drawPath(track_path)
 
-        painter.fillPath(track_path, current_color)
+            pen = QPen(track_border, border_w)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            inner = track_rect.adjusted(border_w / 2, border_w / 2,
+                                        -border_w / 2, -border_w / 2)
+            inner_path = QPainterPath()
+            inner_path.addRoundedRect(inner, track_r - border_w / 2,
+                                               track_r - border_w / 2)
+            painter.drawPath(inner_path)
 
-        # 计算滑块位置
-        thumb_x = int(2 + self._thumb_position * (track_width - 2 * thumb_radius - 4))
-        thumb_y = 2
+        # ── 滑块尺寸（关闭=小 开启=大）────────────────────────────
+        thumb_min = h * 0.40   # 关闭态直径
+        thumb_max = h * 0.72   # 开启态直径
+        thumb_d   = thumb_min + self._thumb_scale * (thumb_max - thumb_min)
+        thumb_r   = thumb_d / 2
 
-        # 绘制滑块阴影
-        shadow_rect = QRect(thumb_x + 1, thumb_y + 1, thumb_radius * 2, thumb_radius * 2)
-        shadow_path = QPainterPath()
-        shadow_path.addEllipse(shadow_rect)
-        painter.fillPath(shadow_path, shadow_color)
+        # 运动范围：从左侧内边距到右侧内边距
+        margin   = (h - thumb_max) / 2        # 保证最大滑块不超出轨道
+        travel   = w - 2 * margin - thumb_max  # 可移动距离
+        thumb_cx = margin + thumb_r + self._thumb_position * travel
+        thumb_cy = h / 2
 
-        # 绘制滑块
-        thumb_rect = QRect(thumb_x, thumb_y, thumb_radius * 2, thumb_radius * 2)
+        thumb_rect = QRectF(thumb_cx - thumb_r, thumb_cy - thumb_r,
+                            thumb_d, thumb_d)
         thumb_path = QPainterPath()
         thumb_path.addEllipse(thumb_rect)
-        painter.fillPath(thumb_path, thumb_color)
+
+        # 滑块颜色：关闭→主题色，开启→白色，中间插值
+        r = int(thumb_off_color.red()   + self._thumb_scale * (thumb_on_color.red()   - thumb_off_color.red()))
+        g = int(thumb_off_color.green() + self._thumb_scale * (thumb_on_color.green() - thumb_off_color.green()))
+        b = int(thumb_off_color.blue()  + self._thumb_scale * (thumb_on_color.blue()  - thumb_off_color.blue()))
+        thumb_color = QColor(r, g, b)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(thumb_color))
+        painter.drawPath(thumb_path)
 
     def mousePressEvent(self, event):
-        """鼠标点击事件"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.toggle()
             self._animate_to_state()
         super().mousePressEvent(event)
 
     def setChecked(self, checked):
-        """设置选中状态"""
         super().setChecked(checked)
-        # 直接设置位置，不使用动画
+        # 直接跳到目标状态，不使用动画
         self._thumb_position = 1.0 if checked else 0.0
+        self._thumb_scale    = 1.0 if checked else 0.0
         self.update()
 
+    # track_opacity 保留以防外部代码引用
+    @Property(float)
+    def track_opacity(self):
+        return 1.0
+
+    @track_opacity.setter
+    def track_opacity(self, value):
+        pass
+
     def update_theme(self):
-        """更新主题"""
         self._update_stylesheet()
         self.update()
 
@@ -928,6 +946,51 @@ class SpeedProgressBar(QFrame):
         self.update()
 
 
+class _RotatingChevron(QWidget):
+    """可旋转的 chevron 指示器，用于 CollapsiblePanel"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self._rotation = 0.0
+
+    @Property(float)
+    def rotation(self):
+        return self._rotation
+
+    @rotation.setter
+    def rotation(self, value):
+        self._rotation = value
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        color = Win11Colors.DARK_ACCENT if is_dark else Win11Colors.LIGHT_ACCENT
+
+        # 绕中心旋转
+        cx, cy = self.width() / 2, self.height() / 2
+        painter.translate(cx, cy)
+        painter.rotate(self._rotation)
+        painter.translate(-cx, -cy)
+
+        # 绘制 chevron（向下的 "∨"）
+        pen = QPen(color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        path = QPainterPath()
+        path.moveTo(6, 9)
+        path.lineTo(12, 15)
+        path.lineTo(18, 9)
+        painter.drawPath(path)
+
+
 class CollapsiblePanel(QFrame):
     """现代化可折叠面板组件 - Material You 风格版本"""
 
@@ -945,55 +1008,48 @@ class CollapsiblePanel(QFrame):
         self._setup_animations()
 
     def _setup_ui(self):
-        """设置UI"""
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
 
-        # 创建头部
         self._create_header()
 
-        # 创建内容区域
         self._content_frame = QFrame()
-        self._content_frame.setFixedHeight(0)  # 初始高度为0
+        self._content_frame.setMaximumHeight(0)
         self._content_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-
-        # 设置内容区域无边框但有背景色
         self._content_frame.setFrameStyle(QFrame.Shape.NoFrame)
+
+        # ── 新增：透明度特效层 ──────────────────────────────────────
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        self._opacity_effect = QGraphicsOpacityEffect(self._content_frame)
+        self._opacity_effect.setOpacity(0.0)
+        self._content_frame.setGraphicsEffect(self._opacity_effect)
 
         self._content_layout = QVBoxLayout(self._content_frame)
         self._content_layout.setContentsMargins(20, 10, 20, 20)
 
         self._main_layout.addWidget(self._content_frame)
-
-        # 应用样式
         self._update_styles()
 
     def _create_header(self):
-        """创建头部区域"""
         self._header_frame = QFrame()
         self._header_frame.setCursor(Qt.CursorShape.PointingHandCursor)
         self._header_frame.mousePressEvent = self._on_header_clicked
 
         header_layout = QHBoxLayout(self._header_frame)
-        # Material You: 增加头部的上下边距，提供更好的触摸/点击区域
         header_layout.setContentsMargins(16, 16, 16, 16)
 
-        # 图标
         if self._icon:
             self._icon_label = QLabel(self._icon)
             font_name = "Segoe UI Emoji" if platform.system() == "Windows" else "Apple Color Emoji"
             self._icon_label.setFont(QFont(font_name, 16))
             header_layout.addWidget(self._icon_label)
 
-        # 标题容器
         title_container = QVBoxLayout()
         title_container.setSpacing(2)
-
         self._title_label = QLabel(self._title)
         self._title_label.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
         title_container.addWidget(self._title_label)
-
         if self._subtitle:
             self._subtitle_label = QLabel(self._subtitle)
             self._subtitle_label.setFont(QFont("Segoe UI", 9))
@@ -1002,94 +1058,109 @@ class CollapsiblePanel(QFrame):
         header_layout.addLayout(title_container)
         header_layout.addStretch()
 
-        # 展开/收起指示器
-        self._toggle_indicator = QLabel("▼")
-        self._toggle_indicator.setFont(QFont("Segoe UI", 12))
+        # ── 新增：自定义可旋转指示器 ────────────────────────────────
+        self._toggle_indicator = _RotatingChevron()
         header_layout.addWidget(self._toggle_indicator)
 
         self._main_layout.addWidget(self._header_frame)
 
     def _setup_animations(self):
-        """设置动画"""
+        self._animation_duration = 300  # M3 标准时长
+
+        # 高度动画
         self._height_animation = QPropertyAnimation(self._content_frame, b"maximumHeight")
         self._height_animation.setDuration(self._animation_duration)
-        self._height_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        # 连接动画完成信号
-        self._height_animation.finished.connect(self._on_animation_finished)
+        # 透明度动画
+        self._opacity_animation = QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._opacity_animation.setDuration(self._animation_duration)
 
-    def _on_animation_finished(self):
-        """动画完成回调"""
-        self._is_animating = False
+        # 指示器旋转动画
+        self._rotation_animation = QPropertyAnimation(self._toggle_indicator, b"rotation")
+        self._rotation_animation.setDuration(self._animation_duration)
 
-        if not self._is_expanded:
-            # 折叠完成后立即设置最终状态
-            self._content_frame.setFixedHeight(0)
-            self._content_frame.setMaximumHeight(0)
-            # 立即更新样式
-            self._update_header_style()
-        else:
-            # 展开完成，设置为自动高度
-            self._content_frame.setMaximumHeight(16777215)
+        # 并行动画组
+        self._anim_group = QParallelAnimationGroup()
+        self._anim_group.addAnimation(self._height_animation)
+        self._anim_group.addAnimation(self._opacity_animation)
+        self._anim_group.addAnimation(self._rotation_animation)
+        self._anim_group.finished.connect(self._on_animation_finished)
 
     def expand(self):
-        """展开面板"""
-        if self._is_expanded or self._is_animating:
+        if self._is_expanded:
             return
 
-        self._is_expanded = True
-        self._is_animating = True
+        # 允许中途反向：停止当前动画，从当前状态继续
+        if self._anim_group.state() == QParallelAnimationGroup.State.Running:
+            self._anim_group.stop()
 
-        # 先更新头部样式为展开状态
+        self._is_expanded = True
         self._update_header_style()
+        self._update_content_style()
 
         # 计算目标高度
         self._content_frame.setMaximumHeight(16777215)
         self._content_frame.adjustSize()
         target_height = self._content_frame.sizeHint().height()
+        self._content_frame.setMaximumHeight(
+            int(self._content_frame.maximumHeight())
+            if self._content_frame.maximumHeight() < 16777215
+            else 0
+        )
 
-        # 设置起始状态
-        self._content_frame.setFixedHeight(0)
-        self._content_frame.setMaximumHeight(0)
-
-        # 启动动画
-        self._height_animation.setStartValue(0)
+        # 展开：先快后慢（OutQuart）
+        self._height_animation.setEasingCurve(QEasingCurve.Type.OutQuart)
+        self._height_animation.setStartValue(self._content_frame.maximumHeight())
         self._height_animation.setEndValue(target_height)
-        self._height_animation.start()
 
-        # 更新指示器
-        self._toggle_indicator.setText("▲")
-        self._update_indicator_style()
+        self._opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._opacity_animation.setStartValue(self._opacity_effect.opacity())
+        self._opacity_animation.setEndValue(1.0)
 
-        # 立即更新内容区域样式
-        self._update_content_style()
+        self._rotation_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
+        self._rotation_animation.setEndValue(180.0)
 
+        self._anim_group.start()
         self.toggled.emit(True)
 
     def collapse(self):
-        """收起面板"""
-        if not self._is_expanded or self._is_animating:
+        if not self._is_expanded:
             return
 
+        if self._anim_group.state() == QParallelAnimationGroup.State.Running:
+            self._anim_group.stop()
+
         self._is_expanded = False
-        self._is_animating = True
 
-        # 获取当前高度
-        current_height = self._content_frame.height()
-        if current_height <= 0:
-            current_height = self._content_frame.sizeHint().height()
-            self._content_frame.setFixedHeight(current_height)
+        current_h = self._content_frame.maximumHeight()
+        if current_h >= 16777215:
+            current_h = self._content_frame.sizeHint().height()
+        self._content_frame.setMaximumHeight(current_h)
 
-        # 启动动画
-        self._height_animation.setStartValue(current_height)
+        # 收起：平滑减速（OutCubic）
+        self._height_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._height_animation.setStartValue(current_h)
         self._height_animation.setEndValue(0)
-        self._height_animation.start()
 
-        # 更新指示器
-        self._toggle_indicator.setText("▼")
-        self._update_indicator_style()
+        self._opacity_animation.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._opacity_animation.setStartValue(self._opacity_effect.opacity())
+        self._opacity_animation.setEndValue(0.0)
 
+        self._rotation_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._rotation_animation.setStartValue(self._toggle_indicator.rotation)
+        self._rotation_animation.setEndValue(0.0)
+
+        self._anim_group.start()
+        self._update_header_style()
         self.toggled.emit(False)
+
+    def _on_animation_finished(self):
+        self._is_animating = False
+        if not self._is_expanded:
+            self._content_frame.setMaximumHeight(0)
+        else:
+            self._content_frame.setMaximumHeight(16777215)
 
     def toggle(self):
         """切换展开/收起状态"""
@@ -1234,10 +1305,7 @@ class CollapsiblePanel(QFrame):
 
     def _update_indicator_style(self):
         """更新指示器样式"""
-        app = QApplication.instance()
-        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
-        indicator_color = Win11Colors.DARK_ACCENT if is_dark else Win11Colors.LIGHT_ACCENT
-        self._toggle_indicator.setStyleSheet(f"color: {indicator_color.name()}; background-color: transparent;")
+        self._toggle_indicator.update()
 
     def _update_styles(self):
         """更新样式 - 使用自定义主题色"""
@@ -1814,195 +1882,164 @@ class PathInputWidget(QWidget):
 
 
 class ModernSlider(QSlider):
-    """现代化滑块组件 - WinUI 3 风格，带悬停和拖动动画"""
+    """Material You (M3) 风格滑块组件"""
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self.setMinimumHeight(40)
         self.setFixedHeight(40)
 
-        # 状态变量
         self._is_dragging = False
         self._is_hovering = False
 
-        # 尺寸定义
-        self._track_height = 4
-        self._thumb_radius = 10  # 外圈半径
-        self._thumb_border_width = 2
+        # 轨道
+        self._track_height = 6
 
-        # 根据新要求调整内圈动画半径
-        self._inner_radius_default = 6  # 正常状态
-        self._inner_radius_hover = 8  # 悬停状态
-        self._inner_radius_pressed = 5  # 拖动状态
+        # 滑块主体半径（固定，不随状态变化）
+        self._thumb_radius = 10
 
-        self._animated_inner_radius = self._inner_radius_default
+        # 状态层半径：0=隐藏  hover=20  pressed=16
+        self._state_layer_radius = 0.0
 
         self._setup_style()
         self._setup_animation()
 
+    # ── 动画属性：状态层半径 ──────────────────────────────────────
     @Property(float)
-    def innerRadius(self):
-        return self._animated_inner_radius
+    def statLayerRadius(self):
+        return self._state_layer_radius
 
-    @innerRadius.setter
-    def innerRadius(self, value):
-        self._animated_inner_radius = value
+    @statLayerRadius.setter
+    def statLayerRadius(self, value):
+        self._state_layer_radius = value
         self.update()
 
     def _setup_animation(self):
-        """设置内圈半径动画"""
-        self._radius_animation = QPropertyAnimation(self, b"innerRadius")
-        # 统一使用更快的动画时长，让所有状态反馈都更“清脆”
-        self._radius_animation.setDuration(150)
-        # OutCubic 曲线（先快后慢）比 InOut 曲线更适合提供快速的交互反馈
-        self._radius_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._layer_anim = QPropertyAnimation(self, b"statLayerRadius")
+        self._layer_anim.setDuration(150)
+        self._layer_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def _setup_style(self):
-        """设置基础样式 - 隐藏默认外观"""
-        # 隐藏原始的QSlider样式，以便完全自定义绘制
         self.setStyleSheet("QSlider { background: transparent; border: none; }")
 
+    def _animate_layer_to(self, target):
+        if self._layer_anim.state() == QPropertyAnimation.State.Running:
+            self._layer_anim.stop()
+        self._layer_anim.setStartValue(self._state_layer_radius)
+        self._layer_anim.setEndValue(float(target))
+        self._layer_anim.start()
+
     def paintEvent(self, event):
-        """自定义绘制"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 获取当前主题颜色 - 修正：使用 QApplication 的全局 palette
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
         if is_dark:
-            track_bg = Win11Colors.DARK_SURFACE
-            progress_color = Win11Colors.DARK_ACCENT
-            thumb_color = QColor(255, 255, 255)
-            thumb_border = Win11Colors.DARK_BORDER
+            track_bg       = Win11Colors.DARK_SURFACE
+            accent         = Win11Colors.DARK_ACCENT
+            state_layer    = QColor(accent.red(), accent.green(), accent.blue(), 30)
         else:
-            # 为浅色模式添加颜色定义
-            track_bg = Win11Colors.LIGHT_SURFACE
-            progress_color = Win11Colors.LIGHT_ACCENT
-            thumb_color = QColor(255, 255, 255)
-            thumb_border = Win11Colors.LIGHT_BORDER
+            track_bg       = Win11Colors.LIGHT_SURFACE
+            accent         = Win11Colors.LIGHT_ACCENT
+            state_layer    = QColor(accent.red(), accent.green(), accent.blue(), 40)
 
-        # --- 1. 绘制轨道 ---
         rect = self.rect()
-        track_margin = self._thumb_radius
-        track_rect = QRect(
-            track_margin,
-            (rect.height() - self._track_height) // 2,
-            rect.width() - 2 * track_margin,
-            self._track_height
-        )
+        tm   = self._thumb_radius  # 轨道两端留白
+
+        # ── 1. 轨道背景 ────────────────────────────────────────────
+        from PySide6.QtCore import QRectF
+        th = self._track_height
+        tr = QRectF(tm, (rect.height() - th) / 2,
+                    rect.width() - 2 * tm, th)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(track_bg))
-        painter.drawRoundedRect(track_rect, self._track_height / 2, self._track_height / 2)
+        painter.drawRoundedRect(tr, th / 2, th / 2)
 
-        # --- 2. 绘制进度 ---
-        if self.maximum() > self.minimum():
-            ratio = (self.value() - self.minimum()) / (self.maximum() - self.minimum())
-        else:
-            ratio = 0
+        # ── 2. 进度填充 ────────────────────────────────────────────
+        ratio = ((self.value() - self.minimum()) /
+                 (self.maximum() - self.minimum())
+                 if self.maximum() > self.minimum() else 0)
 
         if ratio > 0:
-            progress_width = int(track_rect.width() * ratio)
-            progress_rect = QRect(
-                track_rect.x(), track_rect.y(),
-                progress_width, track_rect.height()
+            pr = QRectF(tr.x(), tr.y(), tr.width() * ratio, th)
+            painter.setBrush(QBrush(accent))
+            painter.drawRoundedRect(pr, th / 2, th / 2)
+
+        # ── 3. 滑块位置 ────────────────────────────────────────────
+        cx = tm + ratio * tr.width()
+        cy = rect.height() / 2
+
+        # 状态层（hover / press 时展开的半透明光晕）
+        if self._state_layer_radius > 0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(state_layer))
+            sr = self._state_layer_radius
+            painter.drawEllipse(
+                QRectF(cx - sr, cy - sr, sr * 2, sr * 2)
             )
-            painter.setBrush(QBrush(progress_color))
-            painter.drawRoundedRect(progress_rect, self._track_height / 2, self._track_height / 2)
 
-        # --- 3. 绘制滑块 ---
-        thumb_x = track_margin + ratio * track_rect.width()
-        thumb_y = rect.height() / 2
-        thumb_center_point = QPoint(int(thumb_x), int(thumb_y))
-
-        # 绘制外圈（边框和背景）
-        painter.setPen(QPen(thumb_border, 1))
-        painter.setBrush(QBrush(thumb_color))
-        painter.drawEllipse(thumb_center_point, self._thumb_radius, self._thumb_radius)
-
-        # 绘制内圈（根据状态变化）
-        current_inner_radius = self._animated_inner_radius
-        if self._is_dragging:
-            current_inner_radius = self._inner_radius_pressed  # 拖动时，使用最小半径
-
+        # 滑块主体：M3 实心主题色圆
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(progress_color))
-        painter.drawEllipse(thumb_center_point, current_inner_radius, current_inner_radius)
+        painter.setBrush(QBrush(accent))
+        r = self._thumb_radius
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
 
+    # ── 交互事件 ────────────────────────────────────────────────────
     def mousePressEvent(self, event):
-        """鼠标按下事件"""
         if event.button() == Qt.MouseButton.LeftButton:
-            # 1. 标记拖动状态已开始
             self._is_dragging = True
-
-            # 2. 触发“按下”动画，此时滑块的值和位置不发生改变
-            self._animate_radius_to(self._inner_radius_pressed)
-
-            # 3. 接受事件，阻止 QSlider 的默认点击行为（即立即跳转到点击位置）
+            self._animate_layer_to(16)
             event.accept()
         else:
-            # 对于其他鼠标按钮，继续使用父类的默认行为
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """鼠标移动事件"""
         if self._is_dragging:
             self._update_value_from_position(event.position().x())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """鼠标释放事件"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = False
-            # 检查鼠标是否仍在组件上，以决定恢复到悬停还是默认状态
             if self.underMouse():
                 self._is_hovering = True
-                self._animate_radius_to(self._inner_radius_hover)
+                self._animate_layer_to(20)
             else:
                 self._is_hovering = False
-                self._animate_radius_to(self._inner_radius_default)
-            # update() 会在动画过程中被调用，这里不需要手动调用
+                self._animate_layer_to(0)
         super().mouseReleaseEvent(event)
 
-
     def enterEvent(self, event):
-        """鼠标进入事件"""
-        super().enterEvent(event) # 调用父类实现
+        super().enterEvent(event)
         self._is_hovering = True
-        # 仅当没有在拖动时，才触发悬停动画
         if not self._is_dragging:
-            self._animate_radius_to(self._inner_radius_hover)
+            self._animate_layer_to(20)
 
     def leaveEvent(self, event):
-        """鼠标离开事件"""
-        super().leaveEvent(event) # 调用父类实现
+        super().leaveEvent(event)
         self._is_hovering = False
-        # 仅当没有在拖动时，才触发离开动画
         if not self._is_dragging:
-            self._animate_radius_to(self._inner_radius_default)
-
-    def _animate_radius_to(self, target_radius):
-        """启动半径动画到目标值"""
-        if self._radius_animation.state() == QPropertyAnimation.State.Running:
-            self._radius_animation.stop()
-
-        self._radius_animation.setStartValue(self._animated_inner_radius)
-        self._radius_animation.setEndValue(target_radius)
-        self._radius_animation.start()
+            self._animate_layer_to(0)
 
     def _update_value_from_position(self, x):
-        """根据鼠标位置更新值"""
         track_width = self.width() - 2 * self._thumb_radius
-        relative_x = x - self._thumb_radius
-
+        relative_x  = x - self._thumb_radius
         if track_width > 0:
-            ratio = max(0, min(1, relative_x / track_width))
-            new_value = self.minimum() + ratio * (self.maximum() - self.minimum())
-            self.setValue(int(new_value))
+            ratio = max(0.0, min(1.0, relative_x / track_width))
+            self.setValue(int(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
+    # innerRadius 保留以防外部引用
+    @Property(float)
+    def innerRadius(self):
+        return 0.0
+
+    @innerRadius.setter
+    def innerRadius(self, value):
+        pass
 
     def update_theme(self):
-        """更新主题"""
         self._setup_style()
         self.update()
 
@@ -2209,6 +2246,10 @@ class ModernComboBox(QComboBox):
         self._setup_style()
         # 强制弹出窗口重绘，使过滤器用新主题色重绘
         self.view().window().update()
+
+    def wheelEvent(self, event):
+        # 禁用滚轮切换选项，但允许事件继续传递给父级（如滚动区域）
+        event.ignore()
 
 
 class ModernCheckBox(QCheckBox):
