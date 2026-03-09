@@ -3,9 +3,9 @@ from PySide6.QtWidgets import (
     QListWidget, QLabel, QPushButton, QFrame, QGroupBox,
     QMessageBox, QFileDialog, QInputDialog, QComboBox,
     QSizePolicy, QApplication, QDialog, QLineEdit, QFormLayout,
-    QScrollArea, QCompleter
+    QScrollArea, QCompleter, QStyledItemDelegate
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl, QStringListModel
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl, QStringListModel, QItemSelectionModel
 from PySide6.QtGui import (
     QFont, QPalette, QPixmap, QImage, QPainter, QColor,
     QKeySequence, QShortcut, QPainterPath, QDesktopServices,
@@ -27,7 +27,7 @@ import shutil
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, get_species_color
 from system.gui.ui_components import (
     Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox,
-    ThemeManager, MaterialMessageBox, ModernLineEdit
+    ThemeManager, MaterialMessageBox, ModernLineEdit, ScrollingListDelegate, MarqueeButton
 )
 from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
@@ -1640,14 +1640,23 @@ class SpeciesValidationPage(QWidget):
         species_list_group = ModernGroupBox("物种列表")
         species_list_layout = QVBoxLayout(species_list_group)
         self.species_listbox = NoArrowKeyListWidget()
+        self.species_listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.species_listbox.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.species_listbox.itemClicked.connect(self._on_species_selected)
         species_list_layout.addWidget(self.species_listbox)
         left_layout.addWidget(species_list_group)
+        self._species_scroll_delegate = ScrollingListDelegate(self.species_listbox)
+        self.species_listbox.setItemDelegate(self._species_scroll_delegate)
 
         # 照片文件列表
         photo_list_group = ModernGroupBox("照片文件")
         photo_list_layout = QVBoxLayout(photo_list_group)
         self.species_photo_listbox = KeepSelectionListWidget()
+        self.species_photo_listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.species_photo_listbox.setResizeMode(QListWidget.ResizeMode.Adjust)
+        # 挂载滚动委托，文件名超出宽度时悬停自动滚动
+        self._photo_scroll_delegate = ScrollingListDelegate(self.species_photo_listbox)
+        self.species_photo_listbox.setItemDelegate(self._photo_scroll_delegate)
 
         # 开启多选模式 (支持 Shift 和 Ctrl)
         self.species_photo_listbox.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -1674,7 +1683,7 @@ class SpeciesValidationPage(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
 
         # 图片显示区域
-        self.species_image_display_frame = ModernGroupBox("图片显示") # <--- 修改
+        self.species_image_display_frame = ModernGroupBox("图片显示")
         image_display_layout = QVBoxLayout(self.species_image_display_frame)
 
         self.species_image_label = QLabel("请从左侧列表选择物种和图像")
@@ -2175,7 +2184,7 @@ class SpeciesValidationPage(QWidget):
     def _update_species_selector_items(self):
         """
         根据当前的检测结果更新下拉框内容。
-        包含：候选项分析、视频轨迹投票、智能默认选中
+        包含：候选项分析、视频轨迹投票、智能默认选中、人工校验优先
         """
         # 暂时阻断信号，防止清空时触发 change 事件
         self.species_selector.blockSignals(True)
@@ -2216,8 +2225,21 @@ class SpeciesValidationPage(QWidget):
 
         global_thresh = conf_settings.get("global", 0.25)
 
+        # 【新增】标识是否为人工校验以及其校验的具体名称
+        is_manual_validated = False
+        manual_species_names = []
+
         # 从当前 JSON 数据中提取所有物种
         if self.current_species_info:
+            # 【新增】检查是否为人工校验，将其物种名也加入 found_species 保证下拉框里有它
+            if self.current_species_info.get('最低置信度') == '人工校验':
+                is_manual_validated = True
+                raw_manual_name = self.current_species_info.get('物种名称', '')
+                if raw_manual_name and raw_manual_name not in ["空", "未知"]:
+                    manual_species_names = [p.strip() for p in raw_manual_name.replace('，', ',').split(',') if p.strip()]
+                    for sp in manual_species_names:
+                        found_species.add(sp)
+
             # --- 情况 A: 处理图片 JSON 结构 ---
             boxes = self.current_species_info.get("检测框", [])
             if not boxes:
@@ -2321,17 +2343,24 @@ class SpeciesValidationPage(QWidget):
         # === 核心逻辑：确定最终选中的目标 ===
         target_species_name = None
 
-        # [新增] 策略0：优先保持刷新前的选择（防止调整置信度时跳变）
-        # 只有当该物种依然在下拉框中有效时才保持
+        # 策略0：优先保持刷新前的选择（防止调整置信度时跳变）
         preserved = getattr(self, '_preserve_dropdown_selection', None)
         if preserved and self.species_selector.findData(preserved) != -1:
             target_species_name = preserved
 
         if not target_species_name:
-            # 策略1：优先选择“有效且置信度最高”的物种
+            # 【新增】策略1：如果是人工校验的照片，优先选中人工校验出来的物种（多物种时选第一个有效的）
+            if is_manual_validated and manual_species_names:
+                for sp in manual_species_names:
+                    if self.species_selector.findData(sp) != -1:
+                        target_species_name = sp
+                        break
+
+        if not target_species_name:
+            # 策略2：优先选择“有效且置信度最高”的物种（AI原判断）
             if best_valid_species_name:
                 target_species_name = best_valid_species_name
-            # 策略2：如果所有物种都被过滤了，选择“绝对置信度最高”的物种
+            # 策略3：如果所有物种都被过滤了，选择“绝对置信度最高”的物种
             elif best_absolute_species_name:
                 target_species_name = best_absolute_species_name
 
@@ -2853,7 +2882,7 @@ class SpeciesValidationPage(QWidget):
             species_to_display = quick_marks_data.get("list", [])
 
         for species in species_to_display:
-            btn = QPushButton(species)
+            btn = MarqueeButton(species)
 
             # 根据文字长度动态调整字体大小和水平边距，但高度统一锁定为25px
             text_length = len(species)
@@ -2884,9 +2913,6 @@ class SpeciesValidationPage(QWidget):
                             border-radius: 12px;
                         }}
                     """)
-
-            if text_length > 6:
-                btn.setWordWrap(True)
 
             # 将按钮对象 b=btn 传入 lambda 表达式
             btn.clicked.connect(
@@ -3324,6 +3350,13 @@ class SpeciesValidationPage(QWidget):
             if old_json is not None:
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(old_json, f, ensure_ascii=False, indent=2)
+
+                try:
+                    from system.detection_db import get_db_path, update_detection
+                    base_name = os.path.splitext(file_name)[0]
+                    update_detection(get_db_path(temp_photo_dir), base_name, old_json)
+                except Exception as db_err:
+                    logger.warning(f"撤回时同步 SQLite 失败: {db_err}")
 
             # 还原 内存验证状态 并 保存
             if old_val is not None:
@@ -4508,6 +4541,9 @@ class SpeciesValidationPage(QWidget):
                 self.species_listbox.scrollToItem(target_item)
                 self.species_listbox.blockSignals(False)
 
+                if hasattr(self, '_species_scroll_delegate'):
+                    self._species_scroll_delegate._update_active_rows()
+
                 # 手动恢复照片列表
                 item_text = target_item.text()
                 map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
@@ -4520,33 +4556,29 @@ class SpeciesValidationPage(QWidget):
                     self.species_photo_listbox.addItem(img)
                 self.species_photo_listbox.blockSignals(False)
 
+                if hasattr(self, '_photo_scroll_delegate'):
+                    self._photo_scroll_delegate._update_active_rows()
+
                 # 恢复照片选中 (多选逻辑)
                 if current_photo_names:
+                    # 1. 先找出需要被设为当前焦点（CurrentItem）的第一项
                     first_item_found = None
-                    # 阻断信号，避免多次触发选中事件引发UI频繁重绘
-                    self.species_photo_listbox.blockSignals(True)
-
                     for photo_name in current_photo_names:
                         items = self.species_photo_listbox.findItems(photo_name, Qt.MatchFlag.MatchExactly)
                         if items:
-                            item = items[0]
-                            item.setSelected(True)
-                            if not first_item_found:
-                                first_item_found = item
+                            first_item_found = items[0]
+                            break
 
+                    # 2. 优先设置 CurrentItem（此时 Qt 底层无论怎么重置现有多选状态都没关系）
                     if first_item_found:
+                        self.species_photo_listbox.setCurrentItem(first_item_found)
                         self.species_photo_listbox.scrollToItem(first_item_found)
 
-                        self.species_photo_listbox.setCurrentItem(first_item_found)
-                    else:
-                        row = min(current_photo_row, self.species_photo_listbox.count() - 1)
-                        if row >= 0:
-                            self.species_photo_listbox.setCurrentRow(row)
-
-                    self.species_photo_listbox.blockSignals(False)
-
-                    # 触发一次事件更新右侧信息界面 (以最后选中的或第一个找到的为准)
-                    self._on_species_photo_selected()
+                    # 3. 最后遍历所有需要选中的项，安全地将其强行设为选中状态
+                    for photo_name in current_photo_names:
+                        items = self.species_photo_listbox.findItems(photo_name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            items[0].setSelected(True)
 
                 # 更新状态栏
                 if hasattr(self.controller, 'status_bar'):
