@@ -477,7 +477,7 @@ class RoundedButton(QPushButton):
             disabled_text = QColor(120, 120, 120)
         else:
             base_bg = Win11Colors.LIGHT_ACCENT     # #dbbcc2
-            text_color = Win11Colors.LIGHT_TEXT_PRIMARY # 浅色背景配深色字保证可读性
+            text_color = QColor(255, 255, 255)  # 浅色背景配深色字保证可读性
             hover_bg = base_bg.darker(105)
             pressed_bg = base_bg.darker(115)
             disabled_bg = QColor(230, 230, 230)
@@ -2784,13 +2784,19 @@ class ScrollingListDelegate(QStyledItemDelegate):
             is_active = item_id in self._scroll_states
 
             # ===== 核心判断 =====
-            if fm.horizontalAdvance(text) <= avail_width or not is_active:
+            # 无论文字是否超出宽度，只要处于激活状态（悬停/选中），
+            # 就统一使用自定义绘制，以此保证短文本也能拥有相同的悬停浮动（偏移）效果。
+            if not is_active:
                 super().paint(painter, option, index)
                 return
 
-            # ===== 激活状态且文字超出，自行绘制滚动 =====
+            # ===== 激活状态，自行绘制 =====
             from PySide6.QtWidgets import QApplication, QStyle
             painter.save()
+
+            # 手动补齐悬停状态，确保底层样式能准确渲染悬停背景色
+            if self._hovered_row == index.row():
+                option.state |= QStyle.StateFlag.State_MouseOver
 
             # 1. 绘制带有圆角的背景/焦点框（复用QSS样式）
             QApplication.style().drawPrimitive(
@@ -2798,7 +2804,10 @@ class ScrollingListDelegate(QStyledItemDelegate):
 
             # 2. 获取该项独立的滚动偏移 (使用 id(item) 作为键)
             state = self._scroll_states.get(item_id, {'offset': 0})
-            offset = state.get('offset', 0)
+
+            # 判断文字是否真超长，未超长的短文本强制偏移量为0，只应用边距浮动效果
+            is_truncated = fm.horizontalAdvance(text) > avail_width
+            offset = state.get('offset', 0) if is_truncated else 0
 
             # 3. 裁剪避免文字画出边界
             painter.setClipRect(option.rect.adjusted(16, 0, -16, 0))
