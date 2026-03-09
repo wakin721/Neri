@@ -33,6 +33,8 @@ from system.gui.main_window import ObjectDetectionGUI
 from system.config import APP_TITLE
 from system.settings_manager import SettingsManager
 from system.utils import resource_path
+# 导入自定义的 Material You 风格弹窗 (请根据你的实际目录结构调整导入路径)
+from system.gui.ui_components import MaterialMessageBox
 
 
 def check_cuda_available():
@@ -46,26 +48,23 @@ def check_cuda_available():
 
 def show_cuda_warning():
     """显示CUDA警告"""
-    msg_box = QMessageBox()
-    msg_box.setWindowTitle("CUDA检测")
-    msg_box.setIcon(QMessageBox.Icon.Warning)
-    msg_box.setText("未检测到CUDA/ROCm，请检查是否正确安装对应PyTorch版本。")
-    msg_box.setInformativeText("程序将使用CPU模式运行，处理速度可能较慢。")
-    msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-    msg_box.exec()
+    # 使用 MaterialMessageBox 替换 QMessageBox
+    MaterialMessageBox.warning(
+        None,
+        "CUDA检测",
+        "未检测到CUDA/ROCm，请检查是否正确安装对应PyTorch版本。\n\n程序将使用CPU模式运行，处理速度可能较慢。"
+    )
 
 
 def ask_resume_processing():
     """询问是否恢复处理"""
-    msg_box = QMessageBox()
-    msg_box.setWindowTitle("发现未完成任务")
-    msg_box.setIcon(QMessageBox.Icon.Question)
-    msg_box.setText("检测到上次有未完成的处理任务")
-    msg_box.setInformativeText("是否从上次进度继续处理？")
-    msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-    msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-    return msg_box.exec() == QMessageBox.StandardButton.Yes
+    # 使用 MaterialMessageBox 替换 QMessageBox
+    result = MaterialMessageBox.question(
+        None,
+        "发现未完成任务",
+        "检测到上次有未完成的处理任务\n\n是否从上次进度继续处理？"
+    )
+    return result == QMessageBox.StandardButton.Yes
 
 
 def main():
@@ -136,15 +135,12 @@ def main():
 
     except Exception as e:
         logger.error(f"启动应用程序失败: {e}")
-        # 显示错误消息
-        error_msg = QMessageBox()
-        error_msg.setWindowTitle("启动错误")
-        error_msg.setIcon(QMessageBox.Icon.Critical)
-        error_msg.setText("应用程序启动失败")
-        error_msg.setInformativeText(f"错误详情：{str(e)}")
-        error_msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        error_msg.exec()
-
+        # 显示错误消息：使用 MaterialMessageBox 替换 QMessageBox
+        MaterialMessageBox.critical(
+            None,
+            "启动错误",
+            f"应用程序启动失败\n\n错误详情：{str(e)}"
+        )
         return 1
 
 

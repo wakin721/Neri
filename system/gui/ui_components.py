@@ -2253,39 +2253,24 @@ class ModernComboBox(QComboBox):
 
 
 class ModernCheckBox(QCheckBox):
-    """现代化复选框 - WinUI 3 风格"""
+    """Material You (M3) 风格复选框"""
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(28)
+        self.setMinimumHeight(32)
 
-        self._bg_color = QColor("transparent")
-        self._check_opacity = 0.0  # 0.0 to 1.0
+        # 动画属性初始值
+        self._bg_color      = QColor("transparent")
+        self._check_progress = 0.0   # 0.0=未绘制  1.0=完整勾
+        self._state_layer_r  = 0.0   # 状态层半径
 
-        # 动画属性
-        self._animation_duration = 180
-        self._bg_color_anim = QPropertyAnimation(self, b"backgroundColor")
-        self._check_opacity_anim = QPropertyAnimation(self, b"checkOpacity")
-
-        self._bg_color = QColor("transparent")
-        self._check_opacity = 0.0  # 0.0 to 1.0
-
+        self._animation_duration = 200
         self._setup_animations()
         self._update_stylesheet()
-
         self.stateChanged.connect(self._animate_state_change)
 
-    def _setup_animations(self):
-        """设置动画"""
-        # 背景颜色动画
-        self._bg_color_anim.setDuration(self._animation_duration)
-        self._bg_color_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        # 勾选标记透明度动画
-        self._check_opacity_anim.setDuration(self._animation_duration)
-        self._check_opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
+    # ── 动画属性 ──────────────────────────────────────────────────
     @Property(QColor)
     def backgroundColor(self):
         return self._bg_color
@@ -2296,155 +2281,212 @@ class ModernCheckBox(QCheckBox):
         self.update()
 
     @Property(float)
-    def checkOpacity(self):
-        return self._check_opacity
+    def checkProgress(self):
+        return self._check_progress
 
-    @checkOpacity.setter
-    def checkOpacity(self, opacity):
-        self._check_opacity = opacity
+    @checkProgress.setter
+    def checkProgress(self, v):
+        self._check_progress = max(0.0, min(1.0, v))
         self.update()
 
+    @Property(float)
+    def stateLayerRadius(self):
+        return self._state_layer_r
+
+    @stateLayerRadius.setter
+    def stateLayerRadius(self, v):
+        self._state_layer_r = v
+        self.update()
+
+    def _setup_animations(self):
+        self._bg_anim = QPropertyAnimation(self, b"backgroundColor")
+        self._bg_anim.setDuration(self._animation_duration)
+        self._bg_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._check_anim = QPropertyAnimation(self, b"checkProgress")
+        self._check_anim.setDuration(self._animation_duration)
+        self._check_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._layer_anim = QPropertyAnimation(self, b"stateLayerRadius")
+        self._layer_anim.setDuration(150)
+        self._layer_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
     def _update_stylesheet(self):
-        """更新样式 - 隐藏默认指示器"""
         self.setStyleSheet("""
-            QCheckBox {
-                spacing: 8px; /* 文本和复选框之间的间距 */
-                background: transparent;
-            }
-            QCheckBox::indicator {
-                width: 0px;
-                height: 0px;
-            }
+            QCheckBox { spacing: 10px; background: transparent; }
+            QCheckBox::indicator { width: 0px; height: 0px; }
         """)
 
     def _get_theme_colors(self):
-        """获取当前主题的颜色"""
         app = QApplication.instance()
         is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
-
         if is_dark:
             return {
-                "border": Win11Colors.DARK_BORDER,
-                "hover_bg": QColor(255, 255, 255, 15),
-                "checked_bg": Win11Colors.DARK_ACCENT,
-                "checked_hover_bg": Win11Colors.DARK_ACCENT.lighter(120),
-                "text": Win11Colors.DARK_TEXT_PRIMARY,
-                "checkmark": QColor(255, 255, 255)
+                "border":       Win11Colors.DARK_BORDER,
+                "checked_bg":   Win11Colors.DARK_ACCENT,
+                "text":         Win11Colors.DARK_TEXT_PRIMARY,
+                "checkmark":    Win11Colors.DARK_TEXT_PRIMARY,
+                "state_layer":  QColor(Win11Colors.DARK_ACCENT.red(),
+                                       Win11Colors.DARK_ACCENT.green(),
+                                       Win11Colors.DARK_ACCENT.blue(), 30),
             }
         else:
             return {
-                "border": Win11Colors.LIGHT_BORDER,
-                "hover_bg": QColor(0, 0, 0, 10),
-                "checked_bg": Win11Colors.LIGHT_ACCENT,
-                "checked_hover_bg": Win11Colors.LIGHT_ACCENT.darker(105),
-                "text": Win11Colors.LIGHT_TEXT_PRIMARY,
-                "checkmark": QColor(255, 255, 255)
+                "border":       Win11Colors.LIGHT_BORDER,
+                "checked_bg":   Win11Colors.LIGHT_ACCENT,
+                "text":         Win11Colors.LIGHT_TEXT_PRIMARY,
+                "checkmark":    Win11Colors.LIGHT_TEXT_PRIMARY,
+                "state_layer":  QColor(Win11Colors.LIGHT_ACCENT.red(),
+                                       Win11Colors.LIGHT_ACCENT.green(),
+                                       Win11Colors.LIGHT_ACCENT.blue(), 40),
             }
 
     def _animate_state_change(self, state):
-        """根据状态启动动画"""
         colors = self._get_theme_colors()
+        checked = (state == Qt.CheckState.Checked.value)
 
-        if state == Qt.CheckState.Checked.value:
-            # 勾选动画
-            self._bg_color_anim.setStartValue(self.backgroundColor)
-            self._bg_color_anim.setEndValue(colors["checked_bg"])
-            self._check_opacity_anim.setStartValue(self._check_opacity)
-            self._check_opacity_anim.setEndValue(1.0)
-        else:
-            # 取消勾选动画
-            self._bg_color_anim.setStartValue(self.backgroundColor)
-            # 目标颜色取决于是否悬停
-            target_bg = colors["hover_bg"] if self.underMouse() else QColor("transparent")
-            self._bg_color_anim.setEndValue(target_bg)
-            self._check_opacity_anim.setStartValue(self._check_opacity)
-            self._check_opacity_anim.setEndValue(0.0)
+        # 背景色过渡
+        self._bg_anim.stop()
+        self._bg_anim.setStartValue(self._bg_color)
+        self._bg_anim.setEndValue(
+            colors["checked_bg"] if checked else QColor("transparent")
+        )
+        self._bg_anim.start()
 
-        group = QParallelAnimationGroup(self)
-        group.addAnimation(self._bg_color_anim)
-        group.addAnimation(self._check_opacity_anim)
-        group.start()
+        # 勾选路径进度
+        self._check_anim.stop()
+        self._check_anim.setStartValue(self._check_progress)
+        self._check_anim.setEndValue(1.0 if checked else 0.0)
+        self._check_anim.start()
 
     def setChecked(self, checked):
-        """设置选中状态，跳过动画"""
+        """直接设置状态，跳过动画"""
         super().setChecked(checked)
         colors = self._get_theme_colors()
-        if checked:
-            self._bg_color = colors["checked_bg"]
-            self._check_opacity = 1.0
-        else:
-            self._bg_color = QColor("transparent")
-            self._check_opacity = 0.0
+        self._bg_color       = colors["checked_bg"] if checked else QColor("transparent")
+        self._check_progress = 1.0 if checked else 0.0
         self.update()
 
     def paintEvent(self, event):
-        """自定义绘制事件"""
+        from PySide6.QtCore import QRectF, QPointF
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         colors = self._get_theme_colors()
+        rect    = self.rect()
+        box_size = 18
+        box_x    = 0
+        box_y    = (rect.height() - box_size) // 2
+        cx       = box_x + box_size / 2
+        cy       = box_y + box_size / 2
 
-        # --- 绘制复选框 ---
-        rect = self.rect()
-        box_size = 20
-        box_y = (rect.height() - box_size) // 2
-        box_rect = QRect(0, box_y, box_size, box_size)
-        box_radius = 4
+        # ── 1. 状态层（hover / press 光晕）────────────────────────
+        if self._state_layer_r > 0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(colors["state_layer"]))
+            sr = self._state_layer_r
+            painter.drawEllipse(QRectF(cx - sr, cy - sr, sr * 2, sr * 2))
 
-        # 绘制背景
+        # ── 2. 复选框背景 ─────────────────────────────────────────
+        box_rect = QRectF(box_x, box_y, box_size, box_size)
+        box_r    = 6.0
+
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(self.backgroundColor))
-        painter.drawRoundedRect(box_rect, box_radius, box_radius)
+        painter.setBrush(QBrush(self._bg_color))
+        painter.drawRoundedRect(box_rect, box_r, box_r)
 
-        # 绘制边框
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        pen = QPen(colors["border"], 2)
-        painter.setPen(pen)
-        painter.drawRoundedRect(box_rect.adjusted(1, 1, -1, -1), box_radius, box_radius)
+        # ── 3. 边框（仅未选中时显示）─────────────────────────────
+        if self._check_progress < 1.0:
+            border_alpha = int(255 * (1.0 - self._check_progress))
+            border_color = QColor(colors["border"])
+            border_color.setAlpha(border_alpha)
+            pen = QPen(border_color, 2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(
+                box_rect.adjusted(1, 1, -1, -1), box_r, box_r
+            )
 
-        # --- 绘制勾选标记 ---
-        if self._check_opacity > 0:
-            painter.setOpacity(self._check_opacity)
+        # ── 4. 勾选路径（逐笔绘出动画）──────────────────────────
+        if self._check_progress > 0:
+            # M3 checkmark 两段：短段(起点→拐点) 长段(拐点→终点)
+            p1 = QPointF(box_x + 4,  cy)
+            p2 = QPointF(box_x + 7.5, box_y + box_size - 4.5)
+            p3 = QPointF(box_x + box_size - 3.5, box_y + 4)
+
+            seg1_len = ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2) ** 0.5
+            seg2_len = ((p3.x()-p2.x())**2 + (p3.y()-p2.y())**2) ** 0.5
+            total    = seg1_len + seg2_len
+            progress_px = self._check_progress * total
+
             check_pen = QPen(colors["checkmark"], 2)
             check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(check_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            # 定义勾选路径
-            path = QPainterPath()
-            path.moveTo(box_rect.x() + 5, box_rect.y() + 10)
-            path.lineTo(box_rect.x() + 9, box_rect.y() + 14)
-            path.lineTo(box_rect.x() + 15, box_rect.y() + 6)
-            painter.drawPath(path)
+            if progress_px <= seg1_len:
+                # 仅绘制第一段的一部分
+                t = progress_px / seg1_len
+                mid = QPointF(p1.x() + t * (p2.x() - p1.x()),
+                              p1.y() + t * (p2.y() - p1.y()))
+                path = QPainterPath()
+                path.moveTo(p1)
+                path.lineTo(mid)
+                painter.drawPath(path)
+            else:
+                # 第一段完整 + 第二段部分
+                t = (progress_px - seg1_len) / seg2_len
+                end = QPointF(p2.x() + t * (p3.x() - p2.x()),
+                              p2.y() + t * (p3.y() - p2.y()))
+                path = QPainterPath()
+                path.moveTo(p1)
+                path.lineTo(p2)
+                path.lineTo(end)
+                painter.drawPath(path)
 
-        painter.setOpacity(1.0) # 重置透明度
+        # ── 5. 文本 ───────────────────────────────────────────────
+        if self.text():
+            text_rect = rect.adjusted(box_size + 10, 0, 0, 0)
+            painter.setPen(QPen(colors["text"]))
+            font = self.font()
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, self.text())
 
-        # --- 绘制文本 ---
-        text_rect = rect.adjusted(box_size + 8, 0, 0, 0)
-        font = self.font()
-        font.setPointSize(10)
-        painter.setFont(font)
-        painter.setPen(QPen(colors["text"]))
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, self.text())
-
+    # ── 状态层交互 ────────────────────────────────────────────────
+    def _animate_layer(self, target):
+        self._layer_anim.stop()
+        self._layer_anim.setStartValue(self._state_layer_r)
+        self._layer_anim.setEndValue(float(target))
+        self._layer_anim.start()
 
     def enterEvent(self, event):
-        """鼠标进入事件"""
         super().enterEvent(event)
-        if not self.isChecked():
-            colors = self._get_theme_colors()
-            self._bg_color_anim.setStartValue(self.backgroundColor)
-            self._bg_color_anim.setEndValue(colors["hover_bg"])
-            self._bg_color_anim.start()
+        self._animate_layer(18)
 
     def leaveEvent(self, event):
-        """鼠标离开事件"""
         super().leaveEvent(event)
-        if not self.isChecked():
-            self._bg_color_anim.setStartValue(self.backgroundColor)
-            self._bg_color_anim.setEndValue(QColor("transparent"))
-            self._bg_color_anim.start()
+        self._animate_layer(0)
+
+    def mousePressEvent(self, event):
+        self._animate_layer(14)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._animate_layer(18 if self.underMouse() else 0)
+        super().mouseReleaseEvent(event)
+
+    # checkOpacity 保留兼容
+    @Property(float)
+    def checkOpacity(self):
+        return self._check_progress
+
+    @checkOpacity.setter
+    def checkOpacity(self, v):
+        self._check_progress = v
+        self.update()
 
     def update_theme(self):
-        """更新主题"""
-        self.setChecked(self.isChecked()) # 更新颜色
+        self._update_stylesheet()
+        self.setChecked(self.isChecked())
