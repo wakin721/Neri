@@ -3879,11 +3879,26 @@ class SpeciesValidationPage(QWidget):
 
         # 彻底移除本地 validation.json 中的标记，防止自动合并时老数据又被合并回来
         if temp_photo_dir and files_to_remove:
-            from system.detection_db import get_db_path, delete_validation_bulk
+            # 👇 这里补充导入 update_detection
+            from system.detection_db import get_db_path, delete_validation_bulk, update_detection
 
             db_path = get_db_path(temp_photo_dir)
             if os.path.exists(db_path):
                 delete_validation_bulk(db_path, files_to_remove)
+
+                # ==========================================
+                # 👇 【新增修复】：将重测后磁盘上最新的 JSON 数据强制同步更新到 SQLite 数据库中
+                for f_name in file_names:
+                    base_name = os.path.splitext(f_name)[0]
+                    json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+                    if os.path.exists(json_path):
+                        try:
+                            with open(json_path, 'r', encoding='utf-8') as f:
+                                new_detection_info = json.load(f)
+                            # 覆盖更新 SQLite 缓存中的旧检测结果
+                            update_detection(db_path, base_name, new_detection_info)
+                        except Exception as e:
+                            logger.error(f"同步重测结果到 SQLite 失败: {f_name}, {e}")
 
             # 同时保持 validation.json 同步（可选，兼容性用）
             validation_file_path = os.path.join(temp_photo_dir, "validation.json")

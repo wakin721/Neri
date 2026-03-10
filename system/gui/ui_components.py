@@ -815,11 +815,20 @@ class SpeedProgressBar(QFrame):
         progress_ratio = self._progress / max(self._total, 1)
         progress_width = draw_rect.width() * progress_ratio
 
-        if progress_width > 4:  # 只有当进度条有一定宽度时才绘制
-            progress_rect = QRectF(draw_rect.x(), draw_rect.y(), progress_width, draw_rect.height())
+        if progress_width > 0.5:  # 放宽限制，只要有进度就画
+            painter.save()  # 保存画笔状态
+
+            # 1. 划定“裁剪区域”：只允许在当前进度的宽度范围内显示
+            clip_rect = QRectF(draw_rect.x(), draw_rect.y(), progress_width, draw_rect.height())
+            painter.setClipRect(clip_rect)
+
+            # 2. 绘制一个与【背景同宽】的完整圆角矩形
+            # 因为被裁剪了，实际上用户只能看到宽度为 progress_width 的那一部分
             progress_path = QPainterPath()
-            progress_path.addRoundedRect(progress_rect, 16, 16)
+            progress_path.addRoundedRect(draw_rect, 16, 16)
             painter.fillPath(progress_path, self._accent_color)
+
+            painter.restore()  # 恢复画笔状态
 
         # 绘制文本信息
         self._draw_progress_text(painter, rect, int(progress_width), text_color, progress_text_color)
