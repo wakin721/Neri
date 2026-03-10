@@ -140,7 +140,7 @@ class DataProcessor:
     @staticmethod
     def export_to_excel(image_info_list: List[Dict], output_path: str, confidence_settings: Dict[str, float],
                         file_format: str = 'excel', columns_to_export: Optional[List[str]] = None,
-                        min_frame_ratio: float = 0.0) -> bool:
+                        min_frame_ratio: float = 0.0, progress_callback=None) -> bool:
         """将图像信息导出为Excel或CSV文件 (增加候选物种过滤逻辑)"""
         if not image_info_list:
             logger.warning("没有数据可导出")
@@ -161,53 +161,56 @@ class DataProcessor:
 
         # --- 加载生物物种名录 ---
         species_info_map = {}
-        species_list_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
-        if os.path.exists(species_list_path):
-            logger.info(f"正在从 {species_list_path} 加载物种名录...")
-            try:
-                df_species = pd.read_excel(species_list_path)
-                # 定义列名映射 (key: Excel中的列名, value: 我们希望的列名)
-                column_mapping = {
-                    'A': '学名', 'B': '中文名', 'H': '纲',
-                    'I': '目拉丁名', 'J': '目中文名', 'K': '科拉丁名',
-                    'L': '科中文名', 'M': '属拉丁名', 'N': '属中文名',
-                    'P': '物种类型'
-                }
+        species_db_path = resource_path(os.path.join("res", "species_database.db"))
 
-                df_species.columns = [chr(65 + i) for i in range(len(df_species.columns))]
+        if os.path.exists(species_db_path):
+            logger.info(f"正在从 {species_db_path} 加载物种名录...")
+            try:
+                import sqlite3
+                import pandas as pd
+                conn = sqlite3.connect(species_db_path)
+
+                # 直接通过 SQL 查询所有需要的列
+                query = "SELECT 中文名, 学名, 纲, 目中文名, 目拉丁名, 科中文名, 科拉丁名, 属中文名, 属拉丁名, 物种类型 FROM species"
+                df_species = pd.read_sql_query(query, conn)
+                conn.close()
 
                 for _, row in df_species.iterrows():
-                    # 获取并清洗中文名 (去除前后空格)
-                    chinese_name = row.get('B')
+                    chinese_name = row.get('中文名')
                     if pd.notna(chinese_name) and str(chinese_name).strip():
-                        # 清洗所有字段的数据
                         cleaned_name = str(chinese_name).strip()
                         species_info_map[cleaned_name] = {
-                            '学名': str(row.get('A', '')).strip(),
-                            '纲': str(row.get('H', '')).strip(),
-                            '目名': str(row.get('J', '')).strip(),
-                            '目拉丁名': str(row.get('I', '')).strip(),
-                            '科名': str(row.get('L', '')).strip(),
-                            '科拉丁名': str(row.get('K', '')).strip(),
-                            '属名': str(row.get('N', '')).strip(),
-                            '属拉丁名': str(row.get('M', '')).strip(),
-                            '物种类型': str(row.get('P', '')).strip()
+                            '学名': str(row.get('学名', '')).strip(),
+                            '纲': str(row.get('纲', '')).strip(),
+                            '目名': str(row.get('目中文名', '')).strip(),
+                            '目拉丁名': str(row.get('目拉丁名', '')).strip(),
+                            '科名': str(row.get('科中文名', '')).strip(),
+                            '科拉丁名': str(row.get('科拉丁名', '')).strip(),
+                            '属名': str(row.get('属中文名', '')).strip(),
+                            '属拉丁名': str(row.get('属拉丁名', '')).strip(),
+                            '物种类型': str(row.get('物种类型', '')).strip()
                         }
 
                 if species_info_map:
                     logger.info(f"成功加载 {len(species_info_map)} 条物种信息。")
                 else:
-                    logger.warning("物种名录已加载，但未能提取任何物种信息，请检查Excel文件内容和格式。")
+                    logger.warning("物种名录已加载，但未能提取任何物种信息，请检查数据库表内容。")
             except Exception as e:
-                logger.error(f"加载或处理物种名录失败: {e}", exc_info=True)
+                logger.error(f"加载或处理物种数据库失败: {e}", exc_info=True)
         else:
-            logger.warning(f"未找到物种名录文件: {species_list_path}，分类信息将为空。")
+            logger.warning(f"未找到物种数据库文件: {species_db_path}，分类信息将为空。")
 
         personnel_names = {"人", "牧民", "人员"}
 
         try:
+            total_items = len(image_info_list)  # 获取总数
+
             # 在导出前根据置信度阈值更新数据
-            for info in image_info_list:
+            for idx, info in enumerate(image_info_list):
+                # ===== 触发进度条回调 =====
+                if progress_callback:
+                    progress_callback(idx + 1, total_items)
+
                 # --- 为新列初始化 ---
                 info['学名'], info['目名'], info['目拉丁名'], info['科名'], info['科拉丁名'], info['属名'], info[
                     '属拉丁名'] = [''] * 7

@@ -41,7 +41,7 @@ class ModernNavigationButton(QWidget):
         self._is_active = False
         self._is_hovered = False
         self._is_collapsed = True  # 默认折叠状态
-        self._corner_radius = 6
+        self._corner_radius = 14
         self._animation_duration = 150
 
         # 设置基本属性
@@ -96,29 +96,25 @@ class ModernNavigationButton(QWidget):
         return get_theme_aware_color(False, True)
 
     def _update_colors(self):
-        """更新颜色方案 - 根据主题自动适应"""
+        """更新颜色方案 - 使用 Win11Colors 统一色彩系统"""
         is_dark = self._is_dark_theme()
 
         if is_dark:
-            # 深色主题配色
-            self._bg_normal = QColor(255, 255, 255, 0)  # 透明背景
-            self._bg_hover = QColor(255, 255, 255, 15)  # 微妙的白色悬停
-            self._bg_active = QColor(0x5d, 0x3a, 0x4f)  # 选中颜色 #5d3a4f
-            self._text_normal = QColor(255, 255, 255, 220)  # 普通文字（白色半透明）
-            self._text_active = QColor(255, 255, 255)  # 选中文字（白色）
-            self._icon_normal = QColor(255, 255, 255, 180)  # 普通图标（白色半透明）
-            self._icon_active = QColor(255, 255, 255)  # 选中图标（白色）
-            self._indicator_color = QColor(208, 183, 204)  # 指示器颜色（白色）
+            self._bg_normal = QColor(0, 0, 0, 0)
+            self._bg_hover = Win11Colors.DARK_HOVER  # #3a2a30
+            self._bg_active = Win11Colors.DARK_ACCENT  # #5d3a4f
+            self._text_normal = Win11Colors.DARK_TEXT_SECONDARY  # rgba柔和白
+            self._text_active = Win11Colors.DARK_TEXT_PRIMARY  # 纯白
+            self._icon_normal = Win11Colors.DARK_TEXT_SECONDARY
+            self._icon_active = Win11Colors.DARK_TEXT_PRIMARY
         else:
-            # 浅色主题配色
-            self._bg_normal = QColor(0, 0, 0, 0)  # 透明背景
-            self._bg_hover = QColor(0, 0, 0, 15)  # 微妙的黑色悬停
-            self._bg_active = QColor(226, 216, 219)  # 选中颜色 #dbbcc1
-            self._text_normal = QColor(0, 0, 0, 200)  # 普通文字（黑色半透明）
-            self._text_active = QColor(0, 0, 0)  # 选中文字（黑色）
-            self._icon_normal = QColor(0, 0, 0, 160)  # 普通图标（黑色半透明）
-            self._icon_active = QColor(0, 0, 0)  # 选中图标（黑色）
-            self._indicator_color = QColor(119, 81, 104)  # 指示器颜色（黑色）
+            self._bg_normal = QColor(0, 0, 0, 0)
+            self._bg_hover = Win11Colors.LIGHT_HOVER  # #f0eaec
+            self._bg_active = Win11Colors.LIGHT_ACCENT  # #dbbcc2
+            self._text_normal = Win11Colors.LIGHT_TEXT_SECONDARY
+            self._text_active = Win11Colors.LIGHT_TEXT_PRIMARY
+            self._icon_normal = Win11Colors.LIGHT_TEXT_SECONDARY
+            self._icon_active = Win11Colors.LIGHT_TEXT_PRIMARY
 
         self.update()
 
@@ -185,14 +181,12 @@ class ModernNavigationButton(QWidget):
         super().mousePressEvent(event)
 
     def paintEvent(self, event):
-        """绘制事件 - 自动适应主题颜色"""
+        """绘制事件 - Material You 胶囊风格"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 获取绘制区域
         rect = self.rect().adjusted(4, 2, -4, -2)
 
-        # 确定颜色
         if self._is_active:
             bg_color = self._bg_active
             text_color = self._text_active
@@ -206,70 +200,44 @@ class ModernNavigationButton(QWidget):
             text_color = self._text_normal
             icon_color = self._icon_normal
 
-        # 绘制背景
-        if bg_color.alpha() > 0 or self._is_active:
+        # 绘制胶囊背景（激活或悬停时）
+        if bg_color.alpha() > 0:
             painter.setBrush(QBrush(bg_color))
             painter.setPen(Qt.PenStyle.NoPen)
             path = QPainterPath()
             path.addRoundedRect(rect, self._corner_radius, self._corner_radius)
             painter.drawPath(path)
 
-        # 绘制激活指示器（左侧条）- 距离左边缘0px，在按钮内部
-        if self._is_active:
-            indicator_rect = QRect(rect.x(), rect.y() + 8, 3, rect.height() - 16)
-            painter.setBrush(QBrush(self._indicator_color))
-            painter.setPen(Qt.PenStyle.NoPen)
-            indicator_path = QPainterPath()
-            indicator_path.addRoundedRect(indicator_rect, 1.5, 1.5)
-            painter.drawPath(indicator_path)
+        # ← 原来左侧指示条的绘制代码全部删除
 
-        # 绘制SVG图标或回退到文字图标
+        # 绘制 SVG 图标
         if self._icon_pixmap:
-            # 使用SVG图标
             colored_icon = self._create_colored_pixmap(self._icon_pixmap, icon_color)
             if colored_icon:
                 if self._is_collapsed:
-                    # 折叠状态：图标居中
                     icon_x = rect.center().x() - 10
                     icon_y = rect.center().y() - 10
                 else:
-                    # 展开状态：图标在左侧，为指示器留出空间
-                    if self._is_active:
-                        icon_x = rect.x() + 22
-                    else:
-                        icon_x = rect.x() + 20
+                    icon_x = rect.x() + 20
                     icon_y = rect.center().y() - 10
-
                 painter.drawPixmap(icon_x, icon_y, colored_icon)
         elif self._icon_text:
-            # 回退到文字图标
             painter.setPen(QPen(icon_color))
             icon_font = QFont("Segoe UI Symbol", 16)
             painter.setFont(icon_font)
-
             if self._is_collapsed:
-                # 折叠状态：图标居中
-                icon_rect = rect
-                painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, self._icon_text)
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._icon_text)
             else:
-                # 展开状态：图标在左侧，为指示器留出空间
-                if self._is_active:
-                    icon_rect = QRect(rect.x() + 18, rect.y(), 24, rect.height())
-                else:
-                    icon_rect = QRect(rect.x() + 16, rect.y(), 24, rect.height())
+                icon_rect = QRect(rect.x() + 16, rect.y(), 24, rect.height())
                 painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, self._icon_text)
 
-        # 绘制文本（仅在展开状态）
+        # 绘制文本（仅展开状态）
         if not self._is_collapsed and self._text:
             painter.setPen(QPen(text_color))
-            text_font = QFont("Segoe UI", 9, QFont.Weight.Medium if self._is_active else QFont.Weight.Normal)
+            text_font = QFont("Segoe UI", 9,
+                              QFont.Weight.DemiBold if self._is_active else QFont.Weight.Normal)
             painter.setFont(text_font)
-
-            # 如果是激活状态，为指示器留出更多空间
-            if self._is_active:
-                text_rect = rect.adjusted(50, 0, -16, 0)
-            else:
-                text_rect = rect.adjusted(48, 0, -16, 0)
+            text_rect = rect.adjusted(48, 0, -16, 0)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, self._text)
 
     def update_theme(self):
@@ -442,15 +410,13 @@ class ModernSeparator(QFrame):
         return get_theme_aware_color(False, True)
 
     def _update_style(self):
-        """更新样式"""
+        """更新样式 - 使用 Win11Colors 边框色"""
         is_dark = self._is_dark_theme()
 
         if is_dark:
-            # 深色主题 - 使用微妙的白色分隔线
-            border_color = "rgba(255, 255, 255, 20)"
+            border_color = Win11Colors.DARK_BORDER.name()  # #42323a
         else:
-            # 浅色主题 - 使用微妙的黑色分隔线
-            border_color = "rgba(0, 0, 0, 20)"
+            border_color = Win11Colors.LIGHT_BORDER.name()  # #e2d8db
 
         self.setStyleSheet(f"""
             QFrame {{
@@ -842,15 +808,13 @@ class Sidebar(QWidget):
             self.version_label.show()
 
     def _apply_theme(self):
-        """应用主题 - 根据系统主题自动切换背景颜色"""
+        """应用主题 - 使用 Win11Colors 统一背景色"""
         is_dark = self._is_dark_theme()
 
         if is_dark:
-            # 深色主题 - 使用原有的深色背景
-            bg_color = "#261c20"
+            bg_color = Win11Colors.DARK_SURFACE.name()  # #261c20
         else:
-            # 浅色主题 - 使用浅色背景，可以根据需要调整
-            bg_color = "#f5f5f5"  # 浅灰色背景
+            bg_color = Win11Colors.LIGHT_SURFACE.name()  # #f7f3f4
 
         self.setStyleSheet(f"""
             Sidebar {{

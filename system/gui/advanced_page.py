@@ -139,7 +139,8 @@ class AdvancedPage(QWidget):
     def _create_widgets(self):
         """创建控件"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        # 1. 统一外边距为 15
+        layout.setContentsMargins(15, 15, 15, 15)
 
         # 创建滚动区域
         scroll_area = QScrollArea(self)
@@ -158,8 +159,10 @@ class AdvancedPage(QWidget):
         content_widget = QWidget()
         scroll_area.setWidget(content_widget)
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(10, 0, 15, 0)  # 右侧留出空间给滚动条
-        content_layout.setSpacing(20)
+        # 2. 清除内部叠加边距，右侧留5px缓冲给滚动条即可，防止视觉凹陷
+        content_layout.setContentsMargins(0, 0, 5, 0)
+        # 3. 统一分组框之间的间距为 15
+        content_layout.setSpacing(15)
 
         # 模型参数设置
         model_params_group = ModernGroupBox("模型参数设置")
@@ -184,6 +187,7 @@ class AdvancedPage(QWidget):
         content_layout.addWidget(software_settings_group)
         self.software_settings_layout = QVBoxLayout(software_settings_group)
         self._create_software_settings_content()
+
 
     def _create_model_params_content(self):
         """创建模型参数设置内容"""

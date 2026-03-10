@@ -3,12 +3,13 @@ from PySide6.QtWidgets import (
     QListWidget, QLabel, QPushButton, QFrame, QGroupBox,
     QMessageBox, QFileDialog, QInputDialog, QComboBox,
     QSizePolicy, QApplication, QDialog, QLineEdit, QFormLayout,
-    QScrollArea
+    QScrollArea, QCompleter, QStyledItemDelegate
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QRectF, QPoint, QUrl, QStringListModel, QItemSelectionModel
 from PySide6.QtGui import (
     QFont, QPalette, QPixmap, QImage, QPainter, QColor,
-    QKeySequence, QShortcut, QPainterPath, QDesktopServices
+    QKeySequence, QShortcut, QPainterPath, QDesktopServices,
+    QIntValidator
 )
 from PySide6.QtSvg import QSvgRenderer
 import openpyxl
@@ -24,14 +25,434 @@ import numpy as np
 import shutil
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, get_species_color
-from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox, ThemeManager
+from system.gui.ui_components import (
+    Win11Colors, ModernSlider, ModernGroupBox, ModernComboBox,
+    ThemeManager, MaterialMessageBox, ModernLineEdit, ScrollingListDelegate, MarqueeButton
+)
 from system.data_processor import DataProcessor
 from system.metadata_extractor import ImageMetadataExtractor
+from system.utils import resource_path
 
 logger = logging.getLogger(__name__)
 
+
+class ReDetectThread(QThread):
+    """用于重新检测选中文件的独立后台线程"""
+    progress_updated = Signal(int, int, float, float, float)
+    finished = Signal(bool)
+
+    def __init__(self, controller, file_names, source_dir, temp_photo_dir):
+        super().__init__()
+        self.controller = controller
+        self.file_names = file_names
+        self.source_dir = source_dir
+        self.temp_photo_dir = temp_photo_dir
+
+    def run(self):
+        import math
+        import time
+        import os
+        import cv2
+        from system.config import SUPPORTED_IMAGE_EXTENSIONS
+
+        try:
+            # 1. 提取当前高级页面的设置参数
+            use_fp16 = False
+            if hasattr(self.controller, 'advanced_page') and hasattr(self.controller.advanced_page, 'get_use_fp16'):
+                use_fp16 = self.controller.advanced_page.get_use_fp16()
+
+            iou = self.controller.advanced_page.iou_var if hasattr(self.controller, 'advanced_page') else 0.3
+            conf = self.controller.advanced_page.conf_var if hasattr(self.controller, 'advanced_page') else 0.25
+            augment = self.controller.advanced_page.use_augment_var if hasattr(self.controller,
+                                                                               'advanced_page') else False
+            agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var if hasattr(self.controller,
+                                                                                         'advanced_page') else False
+            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1) if hasattr(self.controller,
+                                                                                                'advanced_page') else 1
+            batch_size = getattr(self.controller.advanced_page, 'batch_size_var', 16) if hasattr(self.controller,
+                                                                                                 'advanced_page') else 16
+
+            video_mode_setting = "全部识别"
+            if hasattr(self.controller, 'start_page') and hasattr(self.controller.start_page, 'video_mode_combo'):
+                video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
+
+            # 2. 区分图片和视频，并预先计算总工作量(用于进度条)
+            total_work_units = 0
+            file_unit_map = {}
+            images = []
+            videos = []
+
+            SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')
+
+            for f in self.file_names:
+                f_lower = f.lower()
+                f_path = os.path.join(self.source_dir, f)
+                if f_lower.endswith(SUPPORTED_VIDEO_EXTENSIONS):
+                    videos.append(f)
+                    units = 1
+                    if video_mode_setting == "快速识别":
+                        units = 3
+                    else:
+                        try:
+                            cap = cv2.VideoCapture(f_path)
+                            if cap.isOpened():
+                                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                units = math.ceil(frames / vid_stride) if frames > 0 else 1
+                            cap.release()
+                        except Exception:
+                            pass
+                    file_unit_map[f] = units
+                    total_work_units += units
+                elif f_lower.endswith(SUPPORTED_IMAGE_EXTENSIONS):
+                    images.append(f)
+                    file_unit_map[f] = 1
+                    total_work_units += 1
+
+            processed_units = 0
+            start_time = time.time()
+
+            # 3. 对选中的图片进行批量处理
+            image_batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
+            for batch in image_batches:
+                batch_paths = [os.path.join(self.source_dir, f) for f in batch]
+                batch_results = self.controller.image_processor.detect_batch_species(
+                    batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                )
+
+                for i, f_name in enumerate(batch):
+                    species_info = batch_results[i]
+                    detect_results = species_info.get('detect_results')
+                    self.controller.image_processor.save_detection_info_json(
+                        detect_results, f_name, species_info, self.temp_photo_dir
+                    )
+                    processed_units += 1
+                    elapsed = time.time() - start_time
+                    speed = processed_units / elapsed if elapsed > 0 else 0
+                    remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
+                    self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
+
+            # 4. 对选中的视频进行处理
+            for vid in videos:
+                vid_path = os.path.join(self.source_dir, vid)
+                if video_mode_setting == "快速识别":
+                    cap = cv2.VideoCapture(vid_path)
+                    if cap.isOpened():
+                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        sample_points = [
+                            int(total_frames * 1 / 4), int(total_frames * 1 / 2), int(total_frames * 3 / 4)
+                        ]
+                        temp_frames_map = []
+                        for i, point in enumerate(sample_points):
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                            ret, frame = cap.read()
+                            if ret:
+                                frame_temp_path = os.path.join(self.temp_photo_dir, f"temp_frame_{vid}_{i}.jpg")
+                                cv2.imwrite(frame_temp_path, frame)
+                                temp_frames_map.append({'path': frame_temp_path, 'point': point})
+                        cap.release()
+
+                        if temp_frames_map:
+                            batch_paths = [item['path'] for item in temp_frames_map]
+                            batch_results = self.controller.image_processor.detect_batch_species(
+                                batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                            )
+
+                            best_detect_results = None
+                            best_species_info = None
+                            max_detections_in_frame = -1
+
+                            for idx, species_info_frame in enumerate(batch_results):
+                                results = species_info_frame.get('detect_results', [])
+                                current_frame_detection_count = sum(
+                                    1 for r in results if hasattr(r, 'boxes') and r.boxes is not None for _ in r.boxes)
+                                if current_frame_detection_count > max_detections_in_frame:
+                                    max_detections_in_frame = current_frame_detection_count
+                                    best_detect_results = results
+                                    best_species_info = species_info_frame
+
+                                if os.path.exists(temp_frames_map[idx]['path']):
+                                    os.remove(temp_frames_map[idx]['path'])
+
+                                processed_units += 1
+                                elapsed = time.time() - start_time
+                                speed = processed_units / elapsed if elapsed > 0 else 0
+                                remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
+                                self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
+
+                            if best_detect_results is not None:
+                                self.controller.image_processor.save_detection_info_json(
+                                    best_detect_results, vid, best_species_info, self.temp_photo_dir
+                                )
+                            else:
+                                self.controller.image_processor.save_detection_info_json(
+                                    [], vid, {'detect_results': []}, self.temp_photo_dir
+                                )
+                else:
+                    def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
+                        nonlocal processed_units
+                        current_total_done = processed_units + frame_idx
+                        elapsed = time.time() - start_time
+                        speed = current_total_done / elapsed if elapsed > 0 else 0
+                        remain = (total_work_units - current_total_done) / speed if speed > 0 else float('inf')
+                        self.progress_updated.emit(current_total_done, total_work_units, elapsed, remain, speed)
+
+                    self.controller.image_processor.detect_video_species(
+                        vid_path, self.temp_photo_dir, use_fp16, iou, conf, augment, agnostic_nms,
+                        status_callback=video_log_callback, vid_stride=vid_stride, temp_video_dir=self.temp_photo_dir
+                    )
+                    processed_units += file_unit_map[vid]
+
+            self.finished.emit(True)
+        except Exception as e:
+            logger.error(f"ReDetectThread 报错: {e}", exc_info=True)
+            self.finished.emit(False)
+
+
+class ValidationExportThread(QThread):
+    """用于后台处理和导出数据的独立线程，防止界面卡死"""
+    progress_updated = Signal(int, int, float, float, float)
+    finished = Signal(bool, str)
+
+    def __init__(self, temp_dir, source_dir, output_path, file_format, confidence_settings, columns_to_export, min_frame_ratio, supported_video_exts):
+        super().__init__()
+        self.temp_dir = temp_dir
+        self.source_dir = source_dir
+        self.output_path = output_path
+        self.file_format = file_format
+        self.confidence_settings = confidence_settings
+        self.columns_to_export = columns_to_export
+        self.min_frame_ratio = min_frame_ratio
+        self.supported_video_exts = supported_video_exts
+
+    def run(self):
+        import time
+        import os
+        import json
+        from datetime import datetime
+        from system.metadata_extractor import ImageMetadataExtractor
+        from system.config import SUPPORTED_IMAGE_EXTENSIONS
+        from system.data_processor import DataProcessor
+
+        start_time = time.time()
+        try:
+            json_files = [f for f in os.listdir(self.temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
+            total_files = len(json_files)
+            # 总工作量设定为：读取JSON(1倍) + 处理和生成表格(1倍)
+            total_work = total_files * 2
+
+            all_image_data = []
+            earliest_date = None
+            processed_units = 0
+
+            # --- 阶段 1: 读取所有 JSON 文件 ---
+            for json_file in json_files:
+                json_path = os.path.join(self.temp_dir, json_file)
+                image_filename_base = os.path.splitext(json_file)[0]
+                found_path = None
+                is_video = False
+
+                search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
+                if self.supported_video_exts:
+                    search_extensions.extend(list(self.supported_video_exts))
+
+                for ext in search_extensions:
+                    temp_path = os.path.join(self.source_dir, image_filename_base + ext)
+                    if os.path.exists(temp_path):
+                        found_path = temp_path
+                        if self.supported_video_exts and ext.lower() in self.supported_video_exts:
+                            is_video = True
+                        break
+
+                if not found_path:
+                    processed_units += 1
+                    continue
+
+                try:
+                    metadata = {}
+                    if is_video:
+                        metadata['文件名'] = os.path.basename(found_path)
+                        metadata['格式'] = os.path.splitext(found_path)[1].replace('.', '').upper()
+                        mtime = os.path.getmtime(found_path)
+                        dt_obj = datetime.fromtimestamp(mtime)
+                        metadata['拍摄日期'] = dt_obj.strftime("%Y-%m-%d")
+                        metadata['拍摄时间'] = dt_obj.strftime("%H:%M:%S")
+                        metadata['拍摄日期对象'] = dt_obj
+                    else:
+                        metadata, _ = ImageMetadataExtractor.extract_metadata(found_path, os.path.basename(found_path))
+
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        json_data = json.load(f)
+
+                    metadata.update(json_data)
+                    all_image_data.append(metadata)
+
+                    date_taken = metadata.get('拍摄日期对象')
+                    if date_taken:
+                        if earliest_date is None or date_taken < earliest_date:
+                            earliest_date = date_taken
+                except Exception as e:
+                    pass # 忽略单文件错误，继续处理
+
+                # 刷新进度
+                processed_units += 1
+                elapsed = time.time() - start_time
+                speed = processed_units / elapsed if elapsed > 0 else 0
+                remain = (total_work - processed_units) / speed if speed > 0 else 0
+                self.progress_updated.emit(processed_units, total_work, elapsed, remain, speed)
+
+            if not all_image_data:
+                self.finished.emit(False, "未能成功读取到任何有效数据，无法导出。")
+                return
+
+            # --- 阶段 2: 数据预处理 ---
+            processed_data = DataProcessor.process_independent_detection(
+                all_image_data, self.confidence_settings, min_frame_ratio=self.min_frame_ratio
+            )
+            if earliest_date:
+                processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
+
+            # --- 阶段 3: 执行导出 ---
+            def progress_cb(current, total):
+                # 映射到总进度的后半段
+                current_total = total_files + current
+                elapsed = time.time() - start_time
+                speed = current_total / elapsed if elapsed > 0 else 0
+                remain = (total_work - current_total) / speed if speed > 0 else 0
+                self.progress_updated.emit(current_total, total_work, elapsed, remain, speed)
+
+            success = DataProcessor.export_to_excel(
+                processed_data, self.output_path, self.confidence_settings,
+                file_format=self.file_format, columns_to_export=self.columns_to_export,
+                min_frame_ratio=self.min_frame_ratio, progress_callback=progress_cb
+            )
+
+            if success:
+                self.finished.emit(True, self.output_path)
+            else:
+                self.finished.emit(False, "导出文件时发生错误，请查看日志文件获取详情。")
+
+        except Exception as e:
+            self.finished.emit(False, f"导出过程中发生异常: {str(e)}")
+
+
+class QuantityInputDialog(QDialog):
+    """自定义 Material You 风格的数量输入弹窗"""
+    def __init__(self, parent=None, title="输入数量", prompt="请输入物种的数量 (1-999):", default_value=1):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.result_value = default_value
+
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            btn_bg = Win11Colors.DARK_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.DARK_ACCENT.lighter(120).name()
+            btn_pressed = Win11Colors.DARK_ACCENT.darker(110).name()
+            cancel_bg = Win11Colors.DARK_SURFACE.name()
+            cancel_text = Win11Colors.DARK_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.DARK_HOVER.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            btn_bg = Win11Colors.LIGHT_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            btn_pressed = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            cancel_bg = Win11Colors.LIGHT_SURFACE.name()
+            cancel_text = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.LIGHT_HOVER.name()
+
+        # 动态主题样式 (移除了 QLineEdit 的硬编码样式，交由 ModernLineEdit 自身处理)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                color: {text_color};
+                font-size: 15px;
+                font-weight: bold;
+                background-color: transparent;
+            }}
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
+                border: none;
+                padding: 8px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {btn_pressed};
+            }}
+            QPushButton#cancelButton {{
+                background-color: {cancel_bg};
+                color: {cancel_text};
+                border: 1px solid {border_color};
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: {cancel_hover};
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 20)
+
+        self.prompt_label = QLabel(prompt)
+        layout.addWidget(self.prompt_label)
+
+        # 限制只能输入 1 到 999 的数字，替换为 ModernLineEdit
+        self.input_field = ModernLineEdit()
+        self.input_field.setText(str(default_value))
+        self.input_field.setValidator(QIntValidator(1, 999, self))
+        # 默认全选文本，方便用户直接覆盖输入
+        self.input_field.selectAll()
+        layout.addWidget(self.input_field)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.clicked.connect(self.accept_input)
+        self.ok_btn.setDefault(True)
+
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setObjectName("cancelButton")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.resize(300, 150)
+
+    def accept_input(self):
+        text = self.input_field.text().strip()
+        if text and text.isdigit() and int(text) > 0:
+            self.result_value = int(text)
+            self.accept()
+        else:
+            self.input_field.setFocus()
+
+
 class CorrectionDialog(QDialog):
     """用于修正物种信息的弹窗"""
+
+    _cached_completer_items = None
 
     def __init__(self, parent, title="修正信息", original_info=None):
         super().__init__(parent)
@@ -41,88 +462,110 @@ class CorrectionDialog(QDialog):
         self.result = None
         self.original_info = original_info
 
-        # 设置新的颜色主题
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #dbbcc2;
-                border: 1px solid #5d3a4f;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #5d3a4f;
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            btn_bg = Win11Colors.DARK_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.DARK_ACCENT.lighter(120).name()
+            btn_pressed = Win11Colors.DARK_ACCENT.darker(110).name()
+            cancel_bg = Win11Colors.DARK_SURFACE.name()
+            cancel_text = Win11Colors.DARK_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.DARK_HOVER.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            btn_bg = Win11Colors.LIGHT_ACCENT.name()
+            btn_text = "#ffffff"
+            btn_hover = Win11Colors.LIGHT_ACCENT.darker(110).name()
+            btn_pressed = Win11Colors.LIGHT_ACCENT.darker(120).name()
+            cancel_bg = Win11Colors.LIGHT_SURFACE.name()
+            cancel_text = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            cancel_hover = Win11Colors.LIGHT_HOVER.name()
+
+        # 动态设置新的颜色主题
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 12px;
+            }}
+            QLabel {{
+                color: {text_color};
                 font-size: 14px;
-                background-color: #dbbcc2;
-            }
-            QLineEdit {
-                padding: 8px;
-                border: 2px solid #5d3a4f;
-                border-radius: 6px;
-                background-color: #ffffff;
-                font-size: 14px;
-                color: #5d3a4f;
-            }
-            QLineEdit:focus {
-                border-color: #5d3a4f;
-            }
-            QPushButton {
-                background-color: #5d3a4f;
-                color: #dbbcc2;
+                background-color: transparent;
+            }}
+            QPushButton {{
+                background-color: {btn_bg};
+                color: {btn_text};
                 border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
+                padding: 6px 20px;
+                border-radius: 16px;  /* Material You 药丸形圆角 */
+                min-height: 32px;     /* 保证按钮有足够的高度 */
                 font-size: 14px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background-color: #7a5f6f;
-            }
-            QPushButton:pressed {
-                background-color: #4a2f3f;
-            }
-            QPushButton#cancelButton {
-                background-color: #8c7f84;
-            }
-            QPushButton#cancelButton:hover {
-                background-color: #a09398;
-            }
+                font-weight: 600;     /* 字体稍微加粗 */
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {btn_pressed};
+            }}
+            QPushButton#cancelButton {{
+                background-color: {cancel_bg};
+                color: {cancel_text};
+                border: 1px solid {border_color};
+                border-radius: 16px;  /* 取消按钮同样应用圆角 */
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: {cancel_hover};
+            }}
         """)
 
         try:
-            self.excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
+            self.db_path = resource_path(os.path.join("res", "species_database.db"))
         except NameError:
-            # 兼容未导入 resource_path 的情况
-            self.excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
+            self.db_path = os.path.join("res", "species_database.db")
 
-        # 初始化输入框
-        self.species_name_edit = QLineEdit()
-        self.species_count_edit = QLineEdit()
-        self.species_type_edit = QLineEdit()
-        self.remark_edit = QLineEdit()
+        # 初始化输入框 - 替换为 ModernLineEdit
+        self.species_name_edit = ModernLineEdit()
+        self.species_count_edit = ModernLineEdit()
+        self.species_type_edit = ModernLineEdit()
+        self.remark_edit = ModernLineEdit()
 
-        self.species_name_edit.editingFinished.connect(self._auto_fill_type_from_db)
+        self.species_name_edit.textChanged.connect(self._auto_fill_type_from_db)
+        self.species_name_edit.textChanged.connect(self._auto_update_count)
 
         # 如果有原始信息，则预先填充输入框
         if self.original_info:
-            conf_threshold = parent.validation_conf_var if hasattr(parent, 'validation_conf_var') else 0.25
-
             recalculated_info = {}
-            if self.original_info.get('最低置信度') != '人工校验' and '检测框' in self.original_info:
-                boxes_info = self.original_info.get("检测框", [])
-                filtered_species_counts = Counter()
+            if self.original_info.get('最低置信度') != '人工校验':
+                # 直接读取父页面已计算好的标签文本
+                info_text = parent.species_info_label.text() if hasattr(parent, 'species_info_label') else ""
 
-                for box in boxes_info:
-                    confidence = box.get("置信度", 0)
-                    if confidence >= conf_threshold:
-                        species_name = box.get("物种")
-                        if species_name:
-                            filtered_species_counts[species_name] += 1
+                sp_name = ""
+                sp_count = ""
+                for part in info_text.split(" | "):
+                    part = part.strip()
+                    if part.startswith("物种:"):
+                        sp_name = part.replace("物种:", "").strip()
+                    elif part.startswith("数量:"):
+                        sp_count = part.replace("数量:", "").strip()
 
-                if not filtered_species_counts:
-                    recalculated_info['物种名称'] = "空"
-                    recalculated_info['物种数量'] = "空"
-                else:
-                    recalculated_info['物种名称'] = ",".join(filtered_species_counts.keys())
-                    recalculated_info['物种数量'] = ",".join(map(str, filtered_species_counts.values()))
+                # 过滤掉无效或占位字符
+                if sp_name in ["[未校验] 空", "[已校验] 空", "未知", "未检测", "需人工检验", ""]:
+                    sp_name = "空"
+                if sp_count in ["空", "未知", ""]:
+                    sp_count = "空"
+
+                recalculated_info['物种名称'] = sp_name
+                recalculated_info['物种数量'] = sp_count
             else:
                 recalculated_info['物种名称'] = self.original_info.get('物种名称', '')
                 recalculated_info['物种数量'] = self.original_info.get('物种数量', '')
@@ -130,8 +573,11 @@ class CorrectionDialog(QDialog):
             self.species_name_edit.setText(recalculated_info.get('物种名称', ''))
             self.species_count_edit.setText(recalculated_info.get('物种数量', ''))
             self.remark_edit.setText(self.original_info.get('备注', ''))
+
+            # 自动触发类型补全
             self._auto_fill_type_from_db()
 
+        self._setup_completer()
         self.setup_ui()
 
     def setup_ui(self):
@@ -167,133 +613,136 @@ class CorrectionDialog(QDialog):
 
         layout.addLayout(button_layout)
 
-        self.resize(400, 200)
+        self.resize(396, 250)  # 稍微加高一点以适应有内边距的 ModernLineEdit
 
-    def _auto_fill_type_from_db(self):
+    def _setup_completer(self):
+        """初始化拼音及中文自动补全器 (使用 SQLite)"""
+        if CorrectionDialog._cached_completer_items is None:
+            items = []
+            try:
+                import sqlite3
+                if os.path.exists(self.db_path):
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 中文名 FROM species WHERE 中文名 IS NOT NULL AND 中文名 != ''")
+
+                    try:
+                        import pypinyin
+                        has_pypinyin = True
+                    except ImportError:
+                        has_pypinyin = False
+                        logger.warning("未安装 pypinyin，拼音首字母检索将不可用。请运行 pip install pypinyin")
+
+                    for row in cursor.fetchall():
+                        name = str(row[0]).strip()
+                        if name:
+                            if has_pypinyin:
+                                pinyin_list = pypinyin.pinyin(name, style=pypinyin.Style.FIRST_LETTER, strict=False)
+                                initials = "".join([p[0][0] for p in pinyin_list]).lower()
+                                items.append(f"{name} ({initials})")
+                            else:
+                                items.append(name)
+                    conn.close()
+            except Exception as e:
+                logger.error(f"加载自动补全词库失败: {e}")
+
+            CorrectionDialog._cached_completer_items = list(set(items))
+
+        self.species_completer = MultiSpeciesCompleter(CorrectionDialog._cached_completer_items, self)
+        self.species_completer.activated.connect(lambda text: self._auto_fill_type_from_db())
+        self.species_name_edit.setCompleter(self.species_completer)
+
+    def _auto_update_count(self, text):
+        """根据物种名称的数量，动态同步数量框的数字个数"""
+        current_count = self.species_count_edit.text().strip()
+
+        # 1. 提取当前输入的物种种类数
+        names = [n.strip() for n in text.replace('，', ',').split(',') if n.strip()]
+        num_species = len(names)
+
+        if num_species == 0:
+            self.species_count_edit.setText("")
+            return
+
+        # 2. 解析当前数量框内的数字
+        if current_count == "空" or not current_count:
+            current_counts = []
+        else:
+            current_counts = [c.strip() for c in current_count.replace('，', ',').split(',') if c.strip()]
+
+        # 3. 对齐数字个数与物种个数
+        if len(current_counts) < num_species:
+            missing = num_species - len(current_counts)
+            current_counts.extend(["1"] * missing)
+        elif len(current_counts) > num_species:
+            current_counts = current_counts[:num_species]
+
+        # 4. 回填到输入框
+        self.species_count_edit.setText(",".join(current_counts))
+
+    def _auto_fill_type_from_db(self, text=None):
         full_name_str = self.species_name_edit.text().strip().replace('，', ',')
         if not full_name_str:
+            self.species_type_edit.setText("")
             return
 
         species_names = [n.strip() for n in full_name_str.split(',') if n.strip()]
         found_types = []
 
-        # 调用父类 (SpeciesValidationPage) 的缓存查询逻辑
         for name in species_names:
-            sType = self.parent._get_species_info_with_cache(name)
-            found_types.append(sType)
+            sType = self.parent._get_species_info_from_db(name)
+            found_types.append(sType if sType else "空")
 
-        if any(found_types):
-            combined_type = ",".join(found_types)
-            self.species_type_edit.setText(combined_type)
+        combined_type = ",".join(found_types)
+        self.species_type_edit.setText(combined_type)
 
-    def _update_excel_db(self, name_str, type_str):
-        """更新或新增 Excel 中的物种类型，并同步更新 JSON 缓存"""
+    def _update_sqlite_db(self, name_str, type_str):
+        """更新或新增 SQLite 中的物种类型"""
         if not name_str or not type_str:
             return
 
-        # 拆分名称和类型
         names = [n.strip() for n in name_str.replace('，', ',').split(',') if n.strip()]
         types = [t.strip() for t in type_str.replace('，', ',').split(',') if t.strip()]
 
-        # 只有当名称数量和类型数量一致时，才进行拆分更新
         if len(names) != len(types):
-            logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新名录。")
+            logger.warning(f"物种数量({len(names)})与类型数量({len(types)})不匹配，跳过自动更新数据库。")
             return
 
-        # --- 1. 更新 Excel 文件 ---
-        if os.path.exists(self.excel_path):
+        if os.path.exists(self.db_path):
             try:
-                workbook = openpyxl.load_workbook(self.excel_path)
-                sheet = workbook.active
-
-                # 获取当前Excel中的所有物种所在行映射 {name: row_index}
-                existing_rows = {}
-                for idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
-                    cell_b = row[1]  # B列
-                    if cell_b.value:
-                        existing_rows[str(cell_b.value).strip()] = idx
-
-                max_row = sheet.max_row
+                import sqlite3
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
                 updated_any = False
 
-                # 遍历每一对 (物种, 类型) 进行 Excel 更新
                 for s_name, s_type in zip(names, types):
                     if not s_name or not s_type:
                         continue
 
-                    if s_name in existing_rows:
-                        # [情况1] 存在：更新 P 列
-                        row_idx = existing_rows[s_name]
-                        cell_p = sheet.cell(row=row_idx, column=16)  # P列
-                        current_val = str(cell_p.value).strip() if cell_p.value else ""
-
-                        if current_val != s_type:
-                            cell_p.value = s_type
-                            updated_any = True
-                            logger.info(f"更新物种名录Excel: {s_name} -> {s_type}")
+                    cursor.execute("SELECT 1 FROM species WHERE 中文名=?", (s_name,))
+                    if cursor.fetchone():
+                        cursor.execute("UPDATE species SET 物种类型=? WHERE 中文名=?", (s_type, s_name))
+                        logger.info(f"更新物种数据库: {s_name} -> {s_type}")
                     else:
-                        # [情况2] 不存在：新增一行
-                        max_row += 1
-                        sheet.cell(row=max_row, column=2).value = s_name  # B列
-                        sheet.cell(row=max_row, column=16).value = s_type  # P列
-                        existing_rows[s_name] = max_row
-                        updated_any = True
-                        logger.info(f"新增物种到名录Excel: {s_name} -> {s_type}")
+                        cursor.execute("INSERT INTO species (中文名, 物种类型) VALUES (?, ?)", (s_name, s_type))
+                        logger.info(f"新增物种到数据库: {s_name} -> {s_type}")
+                    updated_any = True
 
                 if updated_any:
-                    workbook.save(self.excel_path)
-                    logger.info("Excel 数据库已成功保存。")
-
-                workbook.close()
-
-            except PermissionError:
-                QMessageBox.warning(self, "保存失败", "无法更新物种名录文件，请检查文件是否已在Excel中打开。")
+                    conn.commit()
+                    logger.info("数据库已成功保存。")
+                conn.close()
             except Exception as e:
-                logger.error(f"更新物种名录Excel失败: {e}")
-
-        # --- 2. 同步更新 JSON 缓存文件 (temp/species_db_cache.json) ---
-        try:
-            cache_path = os.path.join("temp", "species_db_cache.json")
-            cache_data = {}
-
-            # 2.1 读取现有缓存
-            if os.path.exists(cache_path):
-                try:
-                    with open(cache_path, 'r', encoding='utf-8') as f:
-                        cache_data = json.load(f)
-                except json.JSONDecodeError:
-                    cache_data = {}  # 如果文件损坏，则重新开始
-
-            # 2.2 更新字典数据
-            for s_name, s_type in zip(names, types):
-                if s_name and s_type:
-                    cache_data[s_name] = s_type
-
-                    # 同时更新父页面的内存缓存，确保界面即时生效
-                    if hasattr(self.parent, 'species_cache'):
-                        self.parent.species_cache[s_name] = s_type
-
-            # 2.3 写入文件
-            # 确保存储目录存在
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=4)
-
-            logger.info(f"已同步更新物种缓存到: {cache_path}")
-
-        except Exception as e:
-            logger.error(f"同步更新JSON缓存失败: {e}")
+                logger.error(f"更新物种数据库失败: {e}")
 
     def accept_input(self):
-        # 将中文逗号替换为英文逗号
         species_name = self.species_name_edit.text().strip().replace('，', ',')
         species_count_str = self.species_count_edit.text().strip().replace('，', ',')
         remark = self.remark_edit.text().strip()
         species_type = self.species_type_edit.text().strip()
 
-        # 校验物种名称
         if not species_name:
-            QMessageBox.warning(self, "输入错误", "物种名称不能为空。")
+            MaterialMessageBox.warning(self, "输入错误", "物种名称不能为空。")
             return
 
         if not species_count_str:
@@ -306,14 +755,13 @@ class CorrectionDialog(QDialog):
             else:
                 species_count_str = '1'
 
-        # 检查物种数量格式
         if species_count_str.lower() != '空':
             try:
                 counts = [int(c.strip()) for c in species_count_str.split(',')]
                 if not all(c > 0 for c in counts):
                     raise ValueError("数量必须是正整数。")
             except ValueError:
-                QMessageBox.warning(
+                MaterialMessageBox.warning(
                     self,
                     "输入格式错误",
                     "物种数量必须为以下格式之一：\n\n"
@@ -324,11 +772,89 @@ class CorrectionDialog(QDialog):
                 return
 
         if species_type:
-            # 在后台线程或直接执行更新操作
-            self._update_excel_db(species_name, species_type)
+            self._update_sqlite_db(species_name, species_type)
 
         self.result = (species_name, species_count_str, remark)
         self.accept()
+
+
+class MultiSpeciesCompleter(QCompleter):
+    """支持多物种（逗号分隔）、拼音过滤以及优先级排序的自动补全器"""
+
+    def __init__(self, items, parent=None):
+        super().__init__(items, parent)
+        self.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        # 允许部分匹配 (输入 bm 能匹配到 豹猫 (bm))
+        self.setFilterMode(Qt.MatchFlag.MatchContains)
+
+        # 保存原始列表，并使用 QStringListModel，以便我们能动态刷新词库顺序
+        self.original_items = items
+        self.source_model = QStringListModel(self.original_items, self)
+        self.setModel(self.source_model)
+
+    def pathFromIndex(self, index):
+        # 1. 获取选中的下拉项原始文本 (例如 "豹猫 (bm)")
+        text = self.model().data(index, Qt.ItemDataRole.DisplayRole)
+        # 2. 剥离拼音，只保留真实物种名
+        clean_text = text.split(" (")[0] if " (" in text else text
+
+        # 3. 将新选择的物种名拼接到当前输入框文本的最后一个逗号后面
+        le = self.widget()
+        if le:
+            current_text = le.text()
+            normalized_text = current_text.replace('，', ',')
+            if ',' in normalized_text:
+                parts = normalized_text.split(',')
+                parts[-1] = clean_text
+                return ",".join(parts)
+        return clean_text
+
+    def splitPath(self, path):
+        # 规范化逗号，并获取当前正在搜索的部分
+        normalized_path = path.replace('，', ',')
+        if ',' in normalized_path:
+            search_text = normalized_path.split(',')[-1].strip()
+        else:
+            search_text = normalized_path.strip()
+
+        search_lower = search_text.lower()
+
+        # 根据当前输入内容动态对基础词库进行排序
+        if search_lower:
+            def sort_key(item):
+                item_lower = item.lower()
+                # 安全提取拼音和中文名称
+                if " (" in item_lower and item_lower.endswith(")"):
+                    name, pinyin = item_lower.rsplit(" (", 1)
+                    pinyin = pinyin[:-1]
+                else:
+                    name = item_lower
+                    pinyin = ""
+
+                # 优先级设定（数值越小越靠前）：
+                # 0: 拼音完全匹配 (例如输入 "bl" 匹配 "白鹭 (bl)")
+                if search_lower == pinyin: return 0
+                # 1: 中文完全匹配 (例如输入 "白鹭" 匹配 "白鹭 (bl)")
+                if search_lower == name: return 1
+                # 2: 拼音首字母前缀匹配 (例如输入 "b" 匹配 "白鹭 (bl)")
+                if pinyin.startswith(search_lower): return 2
+                # 3: 中文前缀匹配 (例如输入 "白" 匹配 "白鹭 (bl)")
+                if name.startswith(search_lower): return 3
+                # 4: 拼音包含匹配 (例如输入 "bl" 匹配 "牛背鹭 (nbl)")
+                if search_lower in pinyin: return 4
+                # 5: 中文包含匹配
+                if search_lower in name: return 5
+                # 6: 其他兜底
+                return 6
+
+            # 先按优先级数值排序，如果优先级相同则按原本的首字母顺序(保证排序稳定性)
+            sorted_items = sorted(self.original_items, key=lambda x: (sort_key(x), x))
+            self.source_model.setStringList(sorted_items)
+        else:
+            # 输入为空时恢复默认字母顺序
+            self.source_model.setStringList(sorted(self.original_items))
+
+        return [search_text]
 
 
 class NoArrowKeyListWidget(QListWidget):
@@ -340,6 +866,26 @@ class NoArrowKeyListWidget(QListWidget):
         else:
             # 对于其他按键，保持默认行为
             super().keyPressEvent(event)
+
+
+class KeepSelectionListWidget(QListWidget):
+    """一个防止点击空白处丢失选中状态的 QListWidget"""
+
+    def mousePressEvent(self, event):
+        # 获取当前鼠标点击位置的 item
+        item = self.itemAt(event.pos())
+
+        # 如果没有点击到任何 item（即点击了空白区域）
+        if not item:
+            # 如果是右键点击，我们手动发射呼出菜单的信号
+            if event.button() == Qt.MouseButton.RightButton:
+                self.customContextMenuRequested.emit(event.pos())
+
+            # 直接返回，不再向下传递事件。彻底阻止 Qt 底层清空选中状态！
+            return
+
+        # 如果点击到了具体的照片 item，按常规处理
+        super().mousePressEvent(event)
 
 
 class VideoPlayerThread(QThread):
@@ -603,10 +1149,10 @@ class SpeciesValidationPage(QWidget):
         self.validation_data = getattr(controller.preview_page, 'validation_data', {})
 
         # 标记相关变量
-        self._species_marked = None
-        self._count_marked = None
-        self._selected_species_button = None
-        self._selected_quantity_button = None
+        self._selected_species_names = []
+        self._selected_counts = []
+        self._selected_species_buttons = []
+        self._selected_quantity_buttons = []
 
         self.species_validation_original_image = None
 
@@ -635,9 +1181,6 @@ class SpeciesValidationPage(QWidget):
 
         # 启用事件过滤器以支持点击暂停
         self.species_image_label.installEventFilter(self)
-
-        self.species_cache_file = os.path.join("temp", "species_db_cache.json")
-        self.species_cache = self._load_species_cache()
 
     def _on_auto_sort_changed(self, checked):
         """当自动排序开关状态改变时，重新加载物种按钮"""
@@ -1069,12 +1612,14 @@ class SpeciesValidationPage(QWidget):
     def _setup_ui(self):
         """设置UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
         # 创建主要内容区域
         main_frame = QFrame()
         main_layout = QHBoxLayout(main_frame)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(10)
         layout.addWidget(main_frame)
 
         # 左侧面板
@@ -1087,20 +1632,38 @@ class SpeciesValidationPage(QWidget):
         """创建左侧面板"""
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_panel.setFixedWidth(220)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        left_panel.setFixedWidth(200)
 
         # 物种列表
         species_list_group = ModernGroupBox("物种列表")
         species_list_layout = QVBoxLayout(species_list_group)
         self.species_listbox = NoArrowKeyListWidget()
+        self.species_listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.species_listbox.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.species_listbox.itemClicked.connect(self._on_species_selected)
         species_list_layout.addWidget(self.species_listbox)
         left_layout.addWidget(species_list_group)
+        self._species_scroll_delegate = ScrollingListDelegate(self.species_listbox)
+        self.species_listbox.setItemDelegate(self._species_scroll_delegate)
 
         # 照片文件列表
         photo_list_group = ModernGroupBox("照片文件")
         photo_list_layout = QVBoxLayout(photo_list_group)
-        self.species_photo_listbox = QListWidget()
+        self.species_photo_listbox = KeepSelectionListWidget()
+        self.species_photo_listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.species_photo_listbox.setResizeMode(QListWidget.ResizeMode.Adjust)
+        # 挂载滚动委托，文件名超出宽度时悬停自动滚动
+        self._photo_scroll_delegate = ScrollingListDelegate(self.species_photo_listbox)
+        self.species_photo_listbox.setItemDelegate(self._photo_scroll_delegate)
+
+        # 开启多选模式 (支持 Shift 和 Ctrl)
+        self.species_photo_listbox.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        # 开启自定义右键菜单支持
+        self.species_photo_listbox.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.species_photo_listbox.customContextMenuRequested.connect(self._show_photo_context_menu)
+
         self.species_photo_listbox.itemSelectionChanged.connect(self._on_species_photo_selected)
         photo_list_layout.addWidget(self.species_photo_listbox)
         left_layout.addWidget(photo_list_group)
@@ -1111,6 +1674,8 @@ class SpeciesValidationPage(QWidget):
         """创建右侧面板"""
         right_panel = QFrame()
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
 
         # 顶部区域
         top_area_frame = QWidget()
@@ -1118,7 +1683,7 @@ class SpeciesValidationPage(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
 
         # 图片显示区域
-        self.species_image_display_frame = ModernGroupBox("图片显示") # <--- 修改
+        self.species_image_display_frame = ModernGroupBox("图片显示")
         image_display_layout = QVBoxLayout(self.species_image_display_frame)
 
         self.species_image_label = QLabel("请从左侧列表选择物种和图像")
@@ -1207,14 +1772,27 @@ class SpeciesValidationPage(QWidget):
     def _create_quantity_buttons(self, parent_layout):
         """创建数量按钮区域 (Material You 风格)"""
         self.quantity_buttons_frame = ModernGroupBox("数量")
-        quantity_buttons_layout = QVBoxLayout(self.quantity_buttons_frame)
+        main_layout = QVBoxLayout(self.quantity_buttons_frame)
         self.quantity_buttons_frame.setFixedWidth(80)
 
-        quantity_buttons_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+
+        # 创建一个 QScrollArea 来容纳数量按钮，防止被挤压
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff) # 隐藏滚动条，保持界面简洁（可用滚轮滚动）
+
+        # 数量按钮容器
+        self.qty_scroll_widget = QWidget()
+        quantity_buttons_layout = QVBoxLayout(self.qty_scroll_widget)
+        quantity_buttons_layout.setContentsMargins(0, 0, 0, 0)
         quantity_buttons_layout.setSpacing(4)
         quantity_buttons_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 数量按钮的 Material 样式 (强制锁定高度 30px，圆角 15px)
+        # 数量按钮的 Material 样式 (强制锁定高度 25px，圆角 12px)
         material_qty_style = """
             QPushButton {
                 max-width: 58px;
@@ -1229,9 +1807,11 @@ class SpeciesValidationPage(QWidget):
             }
         """
 
-        for i in range(1, 11):
+        quantity_values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 25, 50]
+        for i in quantity_values:
             btn = QPushButton(str(i))
             btn.setStyleSheet(material_qty_style)
+            # 绑定点击事件，将对应的数字和按钮对象传过去
             btn.clicked.connect(lambda checked, num=i, b=btn: self._on_quantity_button_press(str(num), b))
             quantity_buttons_layout.addWidget(btn)
 
@@ -1252,13 +1832,16 @@ class SpeciesValidationPage(QWidget):
         more_button.clicked.connect(lambda: self._on_quantity_button_press("更多", more_button))
         quantity_buttons_layout.addWidget(more_button)
 
-        quantity_buttons_layout.addStretch()
+        # 将装有按钮的容器放入滚动区域，并将滚动区域加入主布局
+        scroll_area.setWidget(self.qty_scroll_widget)
+        main_layout.addWidget(scroll_area)
 
+        # === 底部固定区域（分隔线与撤回按钮） ===
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setStyleSheet(
             "border: none; background-color: rgba(128, 128, 128, 0.3); max-height: 1px; margin: 4px 0px;")
-        quantity_buttons_layout.addWidget(separator)
+        main_layout.addWidget(separator)
 
         undo_button = QPushButton()
         undo_button.setToolTip("撤销上一步操作")
@@ -1266,6 +1849,7 @@ class SpeciesValidationPage(QWidget):
         try:
             from PySide6.QtGui import QIcon
             from system.utils import resource_path
+            import os
             icon_path = resource_path(os.path.join("res", "icon", "return.svg"))
             white_icon_pixmap = self._generate_white_icon_pixmap(icon_path, 18)
             if white_icon_pixmap:
@@ -1278,7 +1862,7 @@ class SpeciesValidationPage(QWidget):
 
         undo_button.setStyleSheet(material_qty_style)
         undo_button.clicked.connect(self._undo_last_action)
-        quantity_buttons_layout.addWidget(undo_button)
+        main_layout.addWidget(undo_button)
 
         parent_layout.addWidget(self.quantity_buttons_frame)
 
@@ -1332,9 +1916,9 @@ class SpeciesValidationPage(QWidget):
         export_layout.addWidget(self.format_combo)
 
         # 导出按钮 (Material You)
-        export_button = QPushButton("导出")
+        self.export_button = QPushButton("导出")
 
-        export_button.setStyleSheet("""
+        self.export_button.setStyleSheet("""
                     QPushButton {
                         min-height: 15px;
                         padding: 12px;  
@@ -1343,8 +1927,8 @@ class SpeciesValidationPage(QWidget):
                         border-radius: 12px;
                     }
                 """)
-        export_button.clicked.connect(self._dispatch_export)
-        export_layout.addWidget(export_button)
+        self.export_button.clicked.connect(self._dispatch_export)
+        export_layout.addWidget(self.export_button)
 
         bottom_layout.addWidget(export_options_group)
         parent_layout.addWidget(bottom_area_frame)
@@ -1389,7 +1973,16 @@ class SpeciesValidationPage(QWidget):
             """
 
     def _load_species_data(self):
-        """加载物种数据（动态计算物种归属）"""
+        """拦截外部直接调用的加载方法，强制使用带有状态恢复的刷新逻辑，以在切换界面时保持选中状态"""
+        self._refresh_species_list_logic()
+
+    def _load_species_data_core(self):
+        """核心加载物种数据逻辑（从 SQLite 读取，单次查询替代 N 次 JSON 读取）"""
+        from system.detection_db import (
+            get_db_path, init_db, migrate_from_json,
+            get_all_detections_with_validation
+        )
+
         photo_dir = self.controller.get_temp_photo_dir()
         source_dir = self.controller.start_page.get_file_path()
 
@@ -1398,233 +1991,200 @@ class SpeciesValidationPage(QWidget):
             self.species_image_map.clear()
             return
 
-        # 暂时阻断信号，防止清空时触发不必要的事件
         self.species_listbox.blockSignals(True)
         self.species_listbox.clear()
         self.species_listbox.blockSignals(False)
-
         self.species_image_map.clear()
 
-        # 获取最新的置信度配置
         confidence_settings = self.controller.confidence_settings
         global_conf = confidence_settings.get("global", 0.25)
 
+        # ── 获取源文件映射 ────────────────────────────────────────────
         try:
-            # 获取源文件映射
             source_files = [
                 f for f in os.listdir(source_dir)
                 if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS) or
                    f.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
             ]
-            image_basename_map = {os.path.splitext(f)[0]: f for f in source_files}
-
-            json_files = [f for f in os.listdir(photo_dir) if f.lower().endswith('.json') and f != 'validation.json']
-
-            # ==================== 加载 validation.json ====================
-            validation_file_path = os.path.join(photo_dir, "validation.json")
-            if os.path.exists(validation_file_path):
-                try:
-                    with open(validation_file_path, 'r', encoding='utf-8') as f:
-                        loaded_data = json.load(f)
-                        # 直接加载现有数据，保证原有数据不丢失
-                        self.validation_data.update(loaded_data)
-                except Exception as e:
-                    logger.error(f"加载 validation.json 失败: {e}")
-
         except Exception as e:
-            logger.error(f"读取目录失败: {e}")
+            logger.error(f"读取源目录失败: {e}")
             return
 
+        image_basename_map = {os.path.splitext(f)[0]: f for f in source_files}
+
+        # ── 初始化 / 迁移 SQLite ─────────────────────────────────────
+        db_path = get_db_path(photo_dir)
+        if not os.path.exists(db_path):
+            init_db(db_path)
+            # 首次使用：将已有 JSON 文件批量迁移
+            migrate_from_json(db_path, photo_dir, image_basename_map)
+        else:
+            # 检查是否有尚未入库的新 JSON（例如首次重测后 DB 未同步的边缘情况）
+            try:
+                json_files_on_disk = {
+                    os.path.splitext(f)[0]
+                    for f in os.listdir(photo_dir)
+                    if f.lower().endswith('.json') and f != 'validation.json'
+                }
+                import sqlite3 as _sq
+                with _sq.connect(db_path) as _c:
+                    in_db = {r[0] for r in _c.execute("SELECT base_name FROM detections")}
+                if json_files_on_disk - in_db:
+                    migrate_from_json(db_path, photo_dir, image_basename_map)
+            except Exception as e:
+                logger.warning(f"增量迁移检查失败: {e}")
+
+        # ── 核心：单次查询取全量数据 ──────────────────────────────────
+        try:
+            rows = get_all_detections_with_validation(db_path)
+        except Exception as e:
+            logger.error(f"SQLite 读取失败: {e}")
+            return
+
+        # 同步内存 validation_data（保持与原逻辑兼容）
+        for row in rows:
+            if row["is_validated"] is not None:
+                self.validation_data[row["image_filename"]] = bool(row["is_validated"])
+
+        # ── 与原逻辑完全相同的物种归类计算 ───────────────────────────
         all_species_keys = set()
         processed_basenames = set()
 
-        # === 循环处理所有文件 ===
-        for json_file in json_files:
-            base_name = os.path.splitext(json_file)[0]
-            image_filename = image_basename_map.get(base_name)
-            if not image_filename:
+        for row in rows:
+            base_name = row["base_name"]
+            image_filename = row["image_filename"]
+
+            # 只处理在当前源目录中存在的文件
+            if image_basename_map.get(base_name) != image_filename:
                 continue
 
             processed_basenames.add(base_name)
 
-            json_path = os.path.join(photo_dir, json_file)
             try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    detection_info = json.load(f)
-
-                # ==================== 判断是否已校验 ====================
-                is_validated = False
-                # 1. 优先检查 JSON 文件中是否已明确记录为人工校验（适用于用户修改了物种、数量或[已校验] 标记为空的情况）
-                if detection_info.get('最低置信度') == '人工校验':
-                    is_validated = True
-                # 2. 检查 validation_data 中该文件的值是否明确为 True（适用于用户直接点击了“正确”按钮的情况）
-                elif self.validation_data.get(image_filename) is True:
-                    is_validated = True
-
-                final_species_name = "[未校验] 空"  # 默认归宿
-
-                # ==================== 1. 人工校验 (最高优先级) ====================
-                if detection_info.get('最低置信度') == '人工校验':
-                    res_name = detection_info.get('物种名称', '')
-                    if res_name in ["[未校验] 空", "[已校验] 空", "", "未知", None]:
-                        final_species_name = "[已校验] 空"
-                    else:
-                        final_species_name = res_name
-
-                # ==================== 2. 视频文件处理逻辑 ====================
-                elif 'tracks' in detection_info:
-                    tracks = detection_info.get('tracks', {})
-                    min_frame_ratio = 0.0
-                    if hasattr(self.controller, 'advanced_page'):
-                        min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var
-                    total_frames = detection_info.get('total_frames_processed', 1)
-                    threshold = total_frames * min_frame_ratio
-
-                    valid_votes = []
-                    for track_id, points in tracks.items():
-                        if len(points) < threshold: continue
-                        valid_points = []
-                        for p in points:
-                            sp = p.get('species', 'Unknown')
-                            conf = p.get('confidence', 0)
-                            thresh = confidence_settings.get(sp, global_conf)
-                            if conf >= thresh:
-                                valid_points.append(sp)
-                        if valid_points:
-                            track_species = Counter(valid_points).most_common(1)[0][0]
-                            valid_votes.append(track_species)
-
-                    if valid_votes:
-                        unique_species = sorted(list(set(valid_votes)))
-                        final_species_name = ",".join(unique_species)
-                    else:
-                        final_species_name = "[未校验] 空"
-
-                # ==================== 3. 图片文件处理逻辑 ====================
-                else:
-                    boxes = detection_info.get('检测框', [])
-                    if not boxes:
-                        boxes = detection_info.get('detect_results', detection_info.get('objects', []))
-
-                    valid_species_list = []
-                    is_ambiguous_image = False
-                    AMBIGUITY_THRESHOLD = 0.10
-
-                    for box in boxes:
-                        candidates_pool = []
-                        if "候选项" in box and box["候选项"]:
-                            for c in box["候选项"]:
-                                candidates_pool.append({
-                                    "name": c.get('name'),
-                                    "conf": float(c.get('conf', 0))
-                                })
-                        else:
-                            raw_name = box.get("物种", box.get("species", "未知"))
-                            raw_conf = float(box.get("置信度", box.get("confidence", 0)))
-                            if raw_name and raw_name != "未知":
-                                candidates_pool.append({"name": raw_name, "conf": raw_conf})
-
-                        valid_candidates = []
-                        for c in candidates_pool:
-                            thresh = confidence_settings.get(c['name'], global_conf)
-                            if c['conf'] >= thresh:
-                                valid_candidates.append(c)
-
-                        valid_candidates.sort(key=lambda x: x['conf'], reverse=True)
-
-                        if not valid_candidates:
-                            continue
-
-                        # 差值检查
-                        if len(valid_candidates) >= 2:
-                            diff = valid_candidates[0]['conf'] - valid_candidates[1]['conf']
-                            if diff < AMBIGUITY_THRESHOLD:
-                                is_ambiguous_image = True
-                                break
-
-                        valid_species_list.append(valid_candidates[0]['name'])
-
-                    if is_ambiguous_image:
-                        final_species_name = "需人工检验"
-                    elif valid_species_list:
-                        unique_species = sorted(list(set(valid_species_list)))
-                        final_species_name = ",".join(unique_species)
-                    else:
-                        final_species_name = "[未校验] 空"
-
-                if final_species_name and final_species_name not in ["需人工检验", "[已校验] 空", "未检测", "[未校验] 空"]:
-                    # 1. 统一逗号格式
-                    normalized_name = final_species_name.replace('，', ',')
-                    if ',' in normalized_name:
-                        # 2. 拆分、去除空格、排序
-                        parts = [p.strip() for p in normalized_name.split(',') if p.strip()]
-                        if parts:
-                            # 3. 重新组合
-                            final_species_name = ",".join(sorted(parts))
-
-                display_key = final_species_name
-                
-                if final_species_name == "[未校验] 空" and is_validated:
-                    display_key = "[已校验] 空"
-                elif final_species_name not in ["[未校验] 空", "[已校验] 空", "未检测", "需人工检验"]:
-                    if is_validated:
-                        display_key = f"[已校验] {final_species_name}"
-                    else:
-                        display_key = f"[未校验] {final_species_name}"
-
-                # 将文件添加到对应的 Map
-                all_species_keys.add(display_key)
-                self.species_image_map[display_key].append(image_filename)
-
-            except Exception as e:
-                logger.error(f"重载处理文件 {json_file} 时出错: {e}")
+                detection_info = json.loads(row["detection_json"])
+            except Exception:
                 continue
-        
-        # 处理未检测（无JSON）的文件
-        all_source_basenames = set(image_basename_map.keys())
-        undetected_basenames = all_source_basenames - processed_basenames
 
+            is_validated = row["is_validated"] == 1
+            if detection_info.get('最低置信度') == '人工校验':
+                is_validated = True
+
+            # ---------- 以下物种归类逻辑与原代码完全一致 ----------
+            final_species_name = "[未校验] 空"
+
+            if detection_info.get('最低置信度') == '人工校验':
+                res_name = detection_info.get('物种名称', '')
+                if res_name in ["[未校验] 空", "[已校验] 空", "", "未知", None]:
+                    final_species_name = "[已校验] 空"
+                else:
+                    final_species_name = res_name
+
+            elif 'tracks' in detection_info:
+                tracks = detection_info.get('tracks', {})
+                min_frame_ratio = 0.0
+                if hasattr(self.controller, 'advanced_page'):
+                    min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var
+                total_frames = detection_info.get('total_frames_processed', 1)
+                threshold = total_frames * min_frame_ratio
+                valid_votes = []
+                for track_id, points in tracks.items():
+                    if len(points) < threshold:
+                        continue
+                    valid_points = [
+                        p['species'] for p in points
+                        if p.get('confidence', 0) >= confidence_settings.get(
+                            p.get('species', 'Unknown'), global_conf)
+                    ]
+                    if valid_points:
+                        valid_votes.append(Counter(valid_points).most_common(1)[0][0])
+                final_species_name = (
+                    ",".join(sorted(set(valid_votes))) if valid_votes else "[未校验] 空"
+                )
+
+            else:
+                boxes = detection_info.get('检测框', [])
+                if not boxes:
+                    boxes = detection_info.get('detect_results',
+                                               detection_info.get('objects', []))
+                valid_species_list = []
+                is_ambiguous_image = False
+                AMBIGUITY_THRESHOLD = 0.10
+                for box in boxes:
+                    candidates_pool = (
+                        [{"name": c.get('name'), "conf": float(c.get('conf', 0))}
+                         for c in box["候选项"]]
+                        if "候选项" in box and box["候选项"]
+                        else [{"name": box.get("物种", box.get("species", "未知")),
+                               "conf": float(box.get("置信度", box.get("confidence", 0)))}]
+                    )
+                    valid_candidates = sorted(
+                        [c for c in candidates_pool
+                         if c['conf'] >= confidence_settings.get(c['name'], global_conf)],
+                        key=lambda x: x['conf'], reverse=True
+                    )
+                    if not valid_candidates:
+                        continue
+                    if len(valid_candidates) >= 2 and (
+                            valid_candidates[0]['conf'] - valid_candidates[1]['conf'] < AMBIGUITY_THRESHOLD
+                    ):
+                        is_ambiguous_image = True
+                        break
+                    valid_species_list.append(valid_candidates[0]['name'])
+
+                if is_ambiguous_image:
+                    final_species_name = "需人工检验"
+                elif valid_species_list:
+                    final_species_name = ",".join(sorted(set(valid_species_list)))
+                else:
+                    final_species_name = "[未校验] 空"
+
+            # 归一化逗号
+            if final_species_name not in ("需人工检验", "[已校验] 空", "未检测", "[未校验] 空"):
+                normalized = final_species_name.replace('，', ',')
+                if ',' in normalized:
+                    parts = [p.strip() for p in normalized.split(',') if p.strip()]
+                    if parts:
+                        final_species_name = ",".join(sorted(parts))
+
+            display_key = final_species_name
+            if final_species_name == "[未校验] 空" and is_validated:
+                display_key = "[已校验] 空"
+            elif final_species_name not in ("[未校验] 空", "[已校验] 空", "未检测", "需人工检验"):
+                display_key = f"[已校验] {final_species_name}" if is_validated \
+                    else f"[未校验] {final_species_name}"
+
+            all_species_keys.add(display_key)
+            self.species_image_map[display_key].append(image_filename)
+
+        # 未检测（源目录中有文件但 DB 中无记录）
+        undetected_basenames = set(image_basename_map.keys()) - processed_basenames
         if undetected_basenames:
-            undetected_key = "未检测"
-            all_species_keys.add(undetected_key)
             for base in undetected_basenames:
-                filename = image_basename_map[base]
-                self.species_image_map[undetected_key].append(filename)
+                self.species_image_map["未检测"].append(image_basename_map[base])
+            all_species_keys.add("未检测")
 
-        # ==================== 排序逻辑 ====================
+        # ── 排序并填充左侧列表框（与原逻辑完全一致）───────────────────
         def sort_priority(name):
-            if name == "需人工检验":
-                return 0
-            if name.startswith("[未校验]"):
-                return 1
-            if name == "[未校验] 空":
-                return 2
-            if name.startswith("[已校验]"):
-                return 3
-            if name == "[已校验] 空":
-                return 4
-            if name == "未检测":
-                return 5
+            if name == "需人工检验": return 0
+            if name == "[未校验] 空": return 2
+            if name.startswith("[未校验]"): return 1
+            if name == "[已校验] 空": return 4
+            if name.startswith("[已校验]"): return 3
+            if name == "未检测": return 5
             return 6
 
-        # 排序规则：1. 优先级 (0-5) -> 2. 数量 (负号表示降序) -> 3. 名称 (字母顺序)
-        sorted_species = sorted(
-            list(all_species_keys), 
-            key=lambda x: (sort_priority(x), -len(self.species_image_map[x]), x)
-        )
+        sorted_keys = sorted(all_species_keys, key=lambda x: (sort_priority(x), x))
 
-        for species in sorted_species:
-            count = len(self.species_image_map[species])
-            display_text = f"{species} ({count})"
-            self.species_listbox.addItem(display_text)
-
-        # 更新下拉框候选项
-        self._update_species_selector_items()
+        self.species_listbox.blockSignals(True)
+        for key in sorted_keys:
+            count = len(self.species_image_map[key])
+            self.species_listbox.addItem(f"{key} ({count})")
+        self.species_listbox.blockSignals(False)
 
     def _update_species_selector_items(self):
         """
         根据当前的检测结果更新下拉框内容。
-        包含：候选项分析、视频轨迹投票、智能默认选中
+        包含：候选项分析、视频轨迹投票、智能默认选中、人工校验优先
         """
         # 暂时阻断信号，防止清空时触发 change 事件
         self.species_selector.blockSignals(True)
@@ -1665,8 +2225,21 @@ class SpeciesValidationPage(QWidget):
 
         global_thresh = conf_settings.get("global", 0.25)
 
+        # 【新增】标识是否为人工校验以及其校验的具体名称
+        is_manual_validated = False
+        manual_species_names = []
+
         # 从当前 JSON 数据中提取所有物种
         if self.current_species_info:
+            # 【新增】检查是否为人工校验，将其物种名也加入 found_species 保证下拉框里有它
+            if self.current_species_info.get('最低置信度') == '人工校验':
+                is_manual_validated = True
+                raw_manual_name = self.current_species_info.get('物种名称', '')
+                if raw_manual_name and raw_manual_name not in ["空", "未知"]:
+                    manual_species_names = [p.strip() for p in raw_manual_name.replace('，', ',').split(',') if p.strip()]
+                    for sp in manual_species_names:
+                        found_species.add(sp)
+
             # --- 情况 A: 处理图片 JSON 结构 ---
             boxes = self.current_species_info.get("检测框", [])
             if not boxes:
@@ -1770,17 +2343,24 @@ class SpeciesValidationPage(QWidget):
         # === 核心逻辑：确定最终选中的目标 ===
         target_species_name = None
 
-        # [新增] 策略0：优先保持刷新前的选择（防止调整置信度时跳变）
-        # 只有当该物种依然在下拉框中有效时才保持
+        # 策略0：优先保持刷新前的选择（防止调整置信度时跳变）
         preserved = getattr(self, '_preserve_dropdown_selection', None)
         if preserved and self.species_selector.findData(preserved) != -1:
             target_species_name = preserved
 
         if not target_species_name:
-            # 策略1：优先选择“有效且置信度最高”的物种
+            # 【新增】策略1：如果是人工校验的照片，优先选中人工校验出来的物种（多物种时选第一个有效的）
+            if is_manual_validated and manual_species_names:
+                for sp in manual_species_names:
+                    if self.species_selector.findData(sp) != -1:
+                        target_species_name = sp
+                        break
+
+        if not target_species_name:
+            # 策略2：优先选择“有效且置信度最高”的物种（AI原判断）
             if best_valid_species_name:
                 target_species_name = best_valid_species_name
-            # 策略2：如果所有物种都被过滤了，选择“绝对置信度最高”的物种
+            # 策略3：如果所有物种都被过滤了，选择“绝对置信度最高”的物种
             elif best_absolute_species_name:
                 target_species_name = best_absolute_species_name
 
@@ -1854,7 +2434,7 @@ class SpeciesValidationPage(QWidget):
             self.controller.status_bar.status_label.setText(f"当前物种共有 {photo_count} 张照片")
 
         # 根据选择的物种来决定是否显示置信度滑块
-        if species_name in ["[已校验] 空", "[未校验] 空"]:
+        if species_name in ["[已校验] 空", "[未校验] 空", "空"]:
             self.species_conf_slider.setEnabled(False)
             self.species_conf_label.setText("N/A")
             self.species_selector.setEnabled(False)  # 禁用选择器
@@ -1893,10 +2473,16 @@ class SpeciesValidationPage(QWidget):
                 return
 
         # 2. 原有清理工作
-        self._species_marked = None
-        self._count_marked = None
         self._stop_video_thread()  # 停止之前的视频线程
-        self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
+
+        # 判断是否是由撤回操作引发的刷新
+        if getattr(self, '_is_undoing', False):
+            self._is_undoing = False
+            self._restore_button_styles()  # 恢复撤回栈中保留的半截按钮样式
+        else:
+            self._reset_quantity_buttons()  # 封装了重置按钮样式的逻辑
+            self._reset_species_buttons()  # 重置物种按钮样式
+
         self.current_species_info = {}  # 重置当前信息
 
         # 切换文件时，必须强制清空上一张图片的缓存对象
@@ -1953,22 +2539,122 @@ class SpeciesValidationPage(QWidget):
                 self.species_image_label.setText("无法加载图像")
 
     def _reset_quantity_buttons(self):
-        """重置数量按钮样式的辅助函数"""
-        if hasattr(self, '_selected_quantity_button') and self._selected_quantity_button:
-            self._selected_quantity_button.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    min-height: 25px;
-                    max-height: 25px;
-                    padding: 4px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }
-            """)
-            self._selected_quantity_button = None
+        """重置数量按钮样式的辅助函数(支持多选)"""
+        if hasattr(self, '_selected_quantity_buttons'):
+            for btn in self._selected_quantity_buttons:
+                try:
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            max-width: 58px;
+                            min-width: 45px;
+                            min-height: 25px;
+                            max-height: 25px;
+                            padding: 4px;
+                            font-size: 14px;
+                            font-weight: 600;
+                            text-align: center;
+                            border-radius: 12px;
+                        }
+                    """)
+                except RuntimeError:
+                    pass
+        self._selected_quantity_buttons = []
+        self._selected_counts = []
+
+    def _reset_species_buttons(self):
+        """重置快速标记物种按钮样式的辅助函数(支持多选)"""
+        if hasattr(self, '_selected_species_buttons'):
+            for btn in self._selected_species_buttons:
+                try:
+                    padding = btn.property("base_padding") or "2px 8px"
+                    font_size = btn.property("base_font_size") or "13px"
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            max-width: 80px;
+                            min-width: 60px;
+                            min-height: 30px;
+                            max-height: 30px;
+                            padding: {padding};
+                            font-size: {font_size};
+                            font-weight: 600;
+                            text-align: center;
+                            border-radius: 12px;
+                        }}
+                    """)
+                except RuntimeError:
+                    pass
+        self._selected_species_buttons = []
+        self._selected_species_names = []
+
+    def _restore_button_styles(self):
+        """根据恢复的数组重新高亮物种和数量按钮"""
+        self._selected_species_buttons = []
+        if hasattr(self, 'species_buttons_layout'):
+            for i in range(self.species_buttons_layout.count()):
+                btn = self.species_buttons_layout.itemAt(i).widget()
+                if isinstance(btn, QPushButton):
+                    padding = btn.property("base_padding") or "2px 8px"
+                    font_size = btn.property("base_font_size") or "13px"
+
+                    # 恢复普通样式
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px;
+                            padding: {padding}; font-size: {font_size}; font-weight: 600;
+                            text-align: center; border-radius: 12px;
+                        }}
+                    """)
+
+                    # 如果在恢复的列表中，重新高亮
+                    if btn.text() in getattr(self, '_selected_species_names', []):
+                        self._selected_species_buttons.append(btn)
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px;
+                                padding: {padding}; font-size: {font_size}; font-weight: bold;
+                                text-align: center; border-radius: 12px;
+                                background-color: #5d3a4f; color: white;
+                            }}
+                        """)
+
+        self._selected_quantity_buttons = []
+        if hasattr(self, 'qty_scroll_widget'):
+            for btn in self.qty_scroll_widget.findChildren(QPushButton):
+                if btn.text() == "更多":
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                            padding: 4px; font-size: 13px; font-weight: 600; text-align: center; border-radius: 12px;
+                        }
+                    """)
+                else:
+                    # 恢复普通样式
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                            padding: 4px; font-size: 14px; font-weight: 600; text-align: center; border-radius: 12px;
+                        }
+                    """)
+                    # 如果在恢复的列表中，重新高亮
+                    if btn.text() in getattr(self, '_selected_counts', []):
+                        self._selected_quantity_buttons.append(btn)
+                        btn.setStyleSheet("""
+                            QPushButton {
+                                max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px;
+                                padding: 4px; font-size: 14px; font-weight: bold; text-align: center; border-radius: 12px;
+                                background-color: #5d3a4f; color: white;
+                            }
+                        """)
+
+    def _do_auto_advance(self):
+        """满足个数匹配条件后自动跳转的通用逻辑"""
+        if hasattr(self.controller, 'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+            self._load_species_buttons()
+            self.quick_marks_updated.emit()
+
+        self._move_to_next_image()
+        self.species_photo_listbox.setFocus()
+        QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _display_image(self, image_path):
         """显示图像到标签中"""
@@ -2002,74 +2688,117 @@ class SpeciesValidationPage(QWidget):
             logger.error(f"显示图像失败: {e}")
             self.species_image_label.setText("无法显示图像")
 
-    def _mark_and_move_to_next(self, is_correct=None, species_name=None, count=None):
-        """
-        处理标记逻辑并根据条件跳转到下一张图片。
-        """
+    def _mark_and_move_to_next(self, is_correct=None, species_name=None, count=None, btn_widget=None):
+        """处理标记逻辑并根据条件跳转到下一张图片。"""
         selection = self.species_photo_listbox.selectedItems()
         if not selection:
             return
 
         file_name = selection[0].text()
-
         self._push_to_undo_stack(file_name)
 
-        # "Correct" 和 "Empty" 按钮仍然会立即跳转
+        # "正确" 和 "空" 按钮仍然会立即跳转 (它们是完整独立操作)
         if is_correct is True:
             self.validation_data[file_name] = True
             self._save_validation_data()
-            self._move_to_next_image()
-            # 将焦点设置回照片列表
-            self.species_photo_listbox.setFocus()
-            QTimer.singleShot(50, self._refresh_species_list_logic)
+            self._do_auto_advance()
             return
 
         if species_name == "空" and count == "空":
             self._update_json_file(file_name, new_species="空", new_count="空")
             self.validation_data[file_name] = False
             self._save_validation_data()
-            self._move_to_next_image()
-            # 将焦点设置回照片列表
-            self.species_photo_listbox.setFocus()
-            QTimer.singleShot(50, self._refresh_species_list_logic)
+            self._do_auto_advance()
             return
 
-        # 处理物种按钮点击
-        if species_name:
-            self._species_marked = species_name
-            self._increment_quick_mark_count(species_name)
-            # 如果自动排序开启，则刷新按钮列表
-            if hasattr(self.controller,
-                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self._load_species_buttons()
-                self.quick_marks_updated.emit()
+        # 处理物种按钮多选点击
+        if species_name and btn_widget:
+            # 切换按钮选中状态 (Toggle)
+            if btn_widget in self._selected_species_buttons:
+                self._selected_species_buttons.remove(btn_widget)
+                if species_name in self._selected_species_names:
+                    self._selected_species_names.remove(species_name)
+                # 恢复默认样式
+                padding = btn_widget.property("base_padding") or "2px 8px"
+                font_size = btn_widget.property("base_font_size") or "13px"
+                btn_widget.setStyleSheet(f"""
+                    QPushButton {{
+                        max-width: 80px;
+                        min-width: 60px;
+                        min-height: 30px;
+                        max-height: 30px;
+                        padding: {padding};
+                        font-size: {font_size};
+                        font-weight: 600;
+                        text-align: center;
+                        border-radius: 12px;
+                    }}
+                """)
+            else:
+                self._selected_species_buttons.append(btn_widget)
+                self._selected_species_names.append(species_name)
+                # 设置高亮样式
+                padding = btn_widget.property("base_padding") or "2px 8px"
+                font_size = btn_widget.property("base_font_size") or "13px"
+                btn_widget.setStyleSheet(f"""
+                    QPushButton {{
+                        max-width: 80px;
+                        min-width: 60px;
+                        min-height: 30px;
+                        max-height: 30px;
+                        padding: {padding};
+                        font-size: {font_size};
+                        font-weight: bold;
+                        text-align: center;
+                        border-radius: 12px;
+                        background-color: #5d3a4f;
+                        color: white;
+                    }}
+                """)
 
+            self._increment_quick_mark_count(species_name)
+
+            new_species_str = ",".join(self._selected_species_names) if self._selected_species_names else None
+
+            # 数量处理
             new_count_str = None
-            # 如果数量已经选择，则使用它
-            if self._count_marked is not None:
-                new_count_str = str(self._count_marked)
-            # 否则，应用求和逻辑
-            elif self.current_species_info and '物种数量' in self.current_species_info:
-                count_str = str(self.current_species_info.get('物种数量', ''))
-                if ',' in count_str:
+            if self._selected_counts:
+                new_count_str = ",".join(self._selected_counts)
+            else:
+                # 若还未选数量，尝试继承原有数量
+                count_str = str(self.current_species_info.get('物种数量', '')).strip()
+                if not count_str or count_str in ['空', '未知']:
+                    info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
+                    for part in info_text.split(" | "):
+                        part = part.strip()
+                        if part.startswith("数量:"):
+                            count_str = part.replace("数量:", "").strip()
+                            break
+                if count_str and count_str not in ['空', '未知', '-']:
                     try:
-                        counts = [int(c.strip()) for c in count_str.split(',')]
-                        new_count_str = str(sum(counts))
+                        counts = [int(c.strip()) for c in count_str.replace('，', ',').split(',') if c.strip()]
+                        if counts:
+                            new_count_str = ",".join(map(str, counts))
                     except (ValueError, TypeError):
                         new_count_str = None
 
-            self._update_json_file(file_name, new_species=self._species_marked, new_count=new_count_str)
+            self._update_json_file(file_name, new_species=new_species_str, new_count=new_count_str)
             self.validation_data[file_name] = False
             self._save_validation_data()
 
-            # 如果数量也已选择，则移动到下一张图片并刷新列表
-            if self._count_marked is not None:
-                self._move_to_next_image()
-                self.species_photo_listbox.setFocus()
-                QTimer.singleShot(50, self._refresh_species_list_logic)
+            if new_species_str is not None:
+                self.current_species_info['物种名称'] = new_species_str
+                self.current_species_info['最低置信度'] = '人工校验'
+            if new_count_str is not None:
+                self.current_species_info['物种数量'] = new_count_str
+
+            # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
+            if len(self._selected_species_names) > 0 and len(self._selected_species_names) == len(self._selected_counts):
+                self._do_auto_advance()
             else:
-                # 仅选择了物种，尚未选择数量，不刷新列表
+                # 个数不匹配，保留当前页面并刷新界面显示
                 self.species_photo_listbox.setFocus()
+                self._update_detection_info_display()
 
     def _mark_other_species(self):
         """处理"其他"按钮的逻辑，弹出对话框"""
@@ -2102,7 +2831,9 @@ class SpeciesValidationPage(QWidget):
         self.species_photo_listbox.setFocus()
 
     def _load_species_buttons(self):
-        """根据自动排序设置，加载快速标记物种按钮 (Material You 风格 - 高度25px)"""
+        """根据自动排序设置，动态加载快速标记物种按钮，确保近期频次排序不丢失"""
+        self._selected_species_button = None
+
         while self.species_buttons_layout.count():
             child = self.species_buttons_layout.takeAt(0)
             if child.widget():
@@ -2116,13 +2847,42 @@ class SpeciesValidationPage(QWidget):
         if hasattr(self.controller, 'advanced_page'):
             use_auto_sort = self.controller.advanced_page.auto_sort_switch_row.isChecked()
 
-        if use_auto_sort and "list_auto" in quick_marks_data:
-            species_to_display = quick_marks_data["list_auto"]
+        if use_auto_sort:
+            # 【核心修复】：动态实时计算近期频次排序，防止切换界面时被旧缓存的 list_auto 覆盖
+            recent_history = quick_marks_data.get("recent_history", [])
+            from collections import Counter
+
+            # 统计近期频次 (反转列表以保证频次相同时，越晚使用的越靠前)
+            recent_counter = Counter(reversed(recent_history))
+            recent_sorted = [item[0] for item in recent_counter.most_common()]
+
+            # 统计总数频次作兜底
+            excluded_keys = {'list', 'list_auto', 'auto', 'recent_history'}
+            total_counts = {k: v for k, v in quick_marks_data.items() if
+                            k not in excluded_keys and isinstance(v, (int, float))}
+            total_sorted = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+            total_sorted_species = [item[0] for item in total_sorted]
+
+            # 获取固定列表的长度作为按钮总数参考（通常为 11 个）
+            target_btn_count = len(quick_marks_data.get("list", []))
+            if target_btn_count == 0:
+                target_btn_count = 11
+
+            # 组合最终列表：优先填充近期常用，空余部分用总数最高的补齐
+            species_to_display = []
+            for sp in recent_sorted:
+                if len(species_to_display) < target_btn_count:
+                    species_to_display.append(sp)
+
+            for sp in total_sorted_species:
+                if len(species_to_display) < target_btn_count and sp not in species_to_display:
+                    species_to_display.append(sp)
         else:
+            # 如果未开启自动排序，则使用固定的 list
             species_to_display = quick_marks_data.get("list", [])
 
         for species in species_to_display:
-            btn = QPushButton(species)
+            btn = MarqueeButton(species)
 
             # 根据文字长度动态调整字体大小和水平边距，但高度统一锁定为25px
             text_length = len(species)
@@ -2136,28 +2896,31 @@ class SpeciesValidationPage(QWidget):
                 padding = "2px 4px"
                 font_size = "11px"
 
+            # 将计算好的样式保存到按钮的自定义属性中，方便恢复
+            btn.setProperty("base_padding", padding)
+            btn.setProperty("base_font_size", font_size)
+
             btn.setStyleSheet(f"""
-                QPushButton {{
-                    max-width: 80px;
-                    min-width: 60px;
-                    min-height: 30px;
-                    max-height: 30px;
-                    padding: {padding};
-                    font-size: {font_size};
-                    font-weight: 600;
-                    text-align: center;
-                    border-radius: 12px;
-                }}
-            """)
+                        QPushButton {{
+                            max-width: 80px;
+                            min-width: 60px;
+                            min-height: 30px;
+                            max-height: 30px;
+                            padding: {padding};
+                            font-size: {font_size};
+                            font-weight: 600;
+                            text-align: center;
+                            border-radius: 12px;
+                        }}
+                    """)
 
-            if text_length > 6:
-                btn.setWordWrap(True)
-
-            btn.clicked.connect(lambda checked=False, s=species: self._mark_and_move_to_next(species_name=s))
+            # 将按钮对象 b=btn 传入 lambda 表达式
+            btn.clicked.connect(
+                lambda checked=False, s=species, b=btn: self._mark_and_move_to_next(species_name=s, btn_widget=b))
             self.species_buttons_layout.addWidget(btn)
 
     def _on_quantity_button_press(self, count, btn_widget):
-        """处理数量按钮点击事件，并管理按钮状态"""
+        """处理数量按钮点击事件，并管理按钮多选状态"""
         selection = self.species_photo_listbox.selectedItems()
         if not selection:
             return
@@ -2165,48 +2928,79 @@ class SpeciesValidationPage(QWidget):
         file_name = selection[0].text()
         self._push_to_undo_stack(file_name)
 
-        final_count = count
+        final_count = str(count)
         if count == "更多":
-            from PySide6.QtWidgets import QInputDialog
-            result, ok = QInputDialog.getInt(self, "输入数量", "请输入物种的数量:", 1, 1, 999, 1)
-            if ok:
-                final_count = result
+            dialog = QuantityInputDialog(self, title="输入数量", prompt="请输入物种的数量:", default_value=1)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                final_count = str(dialog.result_value)
             else:
                 self.species_photo_listbox.setFocus()
                 return
 
-        self._reset_quantity_buttons()
+        # 移除切换，每次点击都直接叠加该数量
+        if count != "更多":
+            self._selected_quantity_buttons.append(btn_widget)
+        
 
-        # 设置新按钮为选中状态 (高度 30px，圆角 15px)
-        btn_widget.setStyleSheet("""
-            QPushButton {
-                max-width: 58px;
-                min-width: 45px;
-                min-height: 25px;
-                max-height: 25px;
-                padding: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                text-align: center;
-                border-radius: 12px;
-                background-color: #5d3a4f;
-                color: white;
-            }
-        """)
-        self._selected_quantity_button = btn_widget
-        self._count_marked = final_count
-
+            # 设置高亮样式
+            btn_widget.setStyleSheet("""
+                QPushButton {
+                    max-width: 58px;
+                    min-width: 45px;
+                    min-height: 25px;
+                    max-height: 25px;
+                    padding: 4px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    text-align: center;
+                    border-radius: 12px;
+                    background-color: #5d3a4f;
+                    color: white;
+                }
+            """)
+        
+        self._selected_counts.append(final_count)
+        
         self._mark_as_error_and_save(file_name)
 
-        new_species = self._species_marked if self._species_marked is not None else None
-        self._update_json_file(file_name, new_species=new_species, new_count=str(self._count_marked))
+        new_count_str = ",".join(self._selected_counts)
+        new_species_str = ",".join(self._selected_species_names) if self._selected_species_names else None
 
-        if self._species_marked is not None:
-            self._move_to_next_image()
-            self.species_photo_listbox.setFocus()
-            QTimer.singleShot(50, self._refresh_species_list_logic)
+        # 如果用户没有手动点击物种按钮，尝试继承原有物种名称
+        if new_species_str is None:
+            sp_name = str(self.current_species_info.get('物种名称', '')).strip()
+
+            if not sp_name or sp_name in ['未知', '空', '[未校验] 空', '[已校验] 空']:
+                info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
+                for part in info_text.split(" | "):
+                    part = part.strip()
+                    if part.startswith("物种:"):
+                        sp_name = part.replace("物种:", "").strip()
+                        break
+
+            # 清理界面状态前缀
+            if sp_name.startswith("[未校验] "):
+                sp_name = sp_name.replace("[未校验] ", "")
+            elif sp_name.startswith("[已校验] "):
+                sp_name = sp_name.replace("[已校验] ", "")
+
+            if sp_name and sp_name not in ['空', '未知', '-', '未检测', '需人工检验']:
+                new_species_str = sp_name
+
+        self._update_json_file(file_name, new_species=new_species_str, new_count=new_count_str)
+
+        if new_species_str is not None:
+            self.current_species_info['物种名称'] = new_species_str
+            self.current_species_info['最低置信度'] = '人工校验'
+        if new_count_str is not None:
+            self.current_species_info['物种数量'] = new_count_str
+
+        # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
+        if len(self._selected_counts) > 0 and len(self._selected_counts) == len(self._selected_species_names):
+            self._do_auto_advance()
         else:
             self.species_photo_listbox.setFocus()
+            self._update_detection_info_display()
 
     def _on_confidence_slider_changed(self, value):
         """处理置信度滑块值的变化"""
@@ -2252,20 +3046,19 @@ class SpeciesValidationPage(QWidget):
         self._list_refresh_timer.start()
 
     def _export_validation_data(self):
-        """从校验页面的数据导出为表格文件（Excel或CSV）"""
+        """配置并启动后台线程进行数据导出"""
         temp_dir = self.controller.get_temp_photo_dir()
         source_dir = self.controller.start_page.get_file_path()
 
         if not temp_dir or not os.path.exists(temp_dir) or not source_dir:
-            QMessageBox.critical(self, "错误", "无法找到临时文件或源文件路径，请确保已进行批处理并且路径设置正确。")
+            MaterialMessageBox.critical(self, "错误", "无法找到临时文件或源文件路径，请确保已进行批处理并且路径设置正确。")
             return
 
         json_files = [f for f in os.listdir(temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
         if not json_files:
-            QMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
+            MaterialMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
             return
 
-        # 根据下拉框选择确定文件类型
         file_format = self.export_format_var.lower()
         if file_format == 'excel':
             file_types = "Excel 文件 (*.xlsx);;所有文件 (*.*)"
@@ -2274,152 +3067,75 @@ class SpeciesValidationPage(QWidget):
             file_types = "CSV 文件 (*.csv);;所有文件 (*.*)"
             file_extension = ".csv"
         else:
-            return  # 如果格式未知则不执行操作
+            return
 
-        # 1. 提取文件夹名称 (使用 normpath 去除可能的末尾斜杠，然后取 basename)
         folder_name = os.path.basename(os.path.normpath(source_dir))
-
-        # 2. 生成时间戳
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        # 3. 拼接文件名: 文件夹名_validation_data_时间戳.后缀
         default_filename = f"{folder_name}_validation_data_{timestamp}{file_extension}"
-
-        # 4. 组合完整路径，使保存对话框默认打开源目录
         default_save_path = os.path.join(source_dir, default_filename)
 
-        # 弹出文件保存对话框
-        output_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "选择表格保存位置",
-            default_save_path,
-            file_types
-        )
-
+        output_path, _ = QFileDialog.getSaveFileName(self, "选择表格保存位置", default_save_path, file_types)
         if not output_path:
             return
 
-        # 加载置信度配置文件
-        confidence_settings = self.controller.settings_manager.load_confidence_settings()
-        if not confidence_settings:
-            confidence_settings = {}
+        # 准备导出所需的所有参数
+        confidence_settings = self.controller.settings_manager.load_confidence_settings() or {}
+        min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var if hasattr(self.controller, 'advanced_page') else 0.0
+        columns_to_export = self.controller.advanced_page.get_selected_export_columns() if hasattr(self.controller, 'advanced_page') else None
 
-        all_image_data = []
-        earliest_date = None
+        # 锁定 UI 防止重复点击
+        self.export_button.setEnabled(False)
+        self.format_combo.setEnabled(False)
+        self.controller.status_bar.show_progress()
+        self.controller.status_bar.status_label.setText(f"正在读取文件并导出 {file_format.upper()}，请稍候...")
 
-        for json_file in json_files:
-            json_path = os.path.join(temp_dir, json_file)
-            image_filename_base = os.path.splitext(json_file)[0]
-
-            found_path = None
-            is_video = False
-
-            # 1. 构建搜索列表：合并图片和视频扩展名
-            search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
-            if hasattr(self, 'SUPPORTED_VIDEO_EXTENSIONS'):
-                search_extensions.extend(list(self.SUPPORTED_VIDEO_EXTENSIONS))
-
-            # 2. 查找对应的源文件
-            for ext in search_extensions:
-                temp_path = os.path.join(source_dir, image_filename_base + ext)
-                if os.path.exists(temp_path):
-                    found_path = temp_path
-                    # 判断是否为视频
-                    if hasattr(self, 'SUPPORTED_VIDEO_EXTENSIONS') and ext.lower() in self.SUPPORTED_VIDEO_EXTENSIONS:
-                        is_video = True
-                    break
-
-            if not found_path:
-                logger.warning(f"找不到原始文件: {image_filename_base}")
-                continue
-
-            try:
-                metadata = {}
-
-                # 3. 根据文件类型提取元数据
-                if is_video:
-                    # 视频：手动构建基础元数据
-                    metadata['文件名'] = os.path.basename(found_path)
-                    metadata['格式'] = os.path.splitext(found_path)[1].replace('.', '').upper()
-
-                    # 使用文件修改时间作为拍摄时间
-                    mtime = os.path.getmtime(found_path)
-                    dt_obj = datetime.fromtimestamp(mtime)
-                    metadata['拍摄日期'] = dt_obj.strftime("%Y-%m-%d")
-                    metadata['拍摄时间'] = dt_obj.strftime("%H:%M:%S")
-                    metadata['拍摄日期对象'] = dt_obj  # 用于后续排序和独立探测计算
-                else:
-                    # 图片：使用元数据提取器（支持EXIF）
-                    metadata, _ = ImageMetadataExtractor.extract_metadata(found_path, os.path.basename(found_path))
-
-                # 4. 加载JSON检测结果
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-
-                metadata.update(json_data)
-                all_image_data.append(metadata)
-
-                date_taken = metadata.get('拍摄日期对象')
-                if date_taken:
-                    if earliest_date is None or date_taken < earliest_date:
-                        earliest_date = date_taken
-            except Exception as e:
-                logger.error(f"处理文件 {json_file} 时出错: {e}")
-
-        if not all_image_data:
-            QMessageBox.critical(self, "错误", "未能成功处理任何数据，无法导出。")
-            return
-
-        # 获取检测过滤比例
-        min_frame_ratio = 0.0
-        if hasattr(self.controller, 'advanced_page'):
-            min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var
-
-        # 处理数据 (传递 min_frame_ratio)
-        processed_data = DataProcessor.process_independent_detection(
-            all_image_data,
-            confidence_settings,
-            min_frame_ratio=min_frame_ratio
-        )
-
-        if earliest_date:
-            processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
-
-        # 从高级设置页面获取用户选择的导出列
-        columns_to_export = self.controller.advanced_page.get_selected_export_columns()
-
-        # 导出文件 (传递 min_frame_ratio)
-        success = DataProcessor.export_to_excel(
-            processed_data,
-            output_path,
-            confidence_settings,
+        # 创建并启动后台导出线程
+        self.export_thread = ValidationExportThread(
+            temp_dir=temp_dir,
+            source_dir=source_dir,
+            output_path=output_path,
             file_format=file_format,
+            confidence_settings=confidence_settings,
             columns_to_export=columns_to_export,
-            min_frame_ratio=min_frame_ratio
+            min_frame_ratio=min_frame_ratio,
+            supported_video_exts=getattr(self, 'SUPPORTED_VIDEO_EXTENSIONS', ())
         )
+        # 连接进度条信号
+        self.export_thread.progress_updated.connect(self.controller.status_bar.update_progress)
+        self.export_thread.finished.connect(self._on_export_finished)
+        self.export_thread.start()
+
+    def _on_export_finished(self, success, result_message_or_path):
+        """导出线程结束的回调"""
+        # 恢复 UI 和进度条
+        self.controller.status_bar.hide_progress()
+        self.export_button.setEnabled(True)
+        self.format_combo.setEnabled(True)
 
         if success:
-            reply = QMessageBox.question(self, "成功", f"数据已成功导出到:\n{output_path}\n\n是否立即打开文件？",
+            self.controller.status_bar.status_label.setText("✅ 数据导出成功")
+            reply = MaterialMessageBox.question(self, "成功", f"数据已成功导出到:\n{result_message_or_path}\n\n是否立即打开文件？",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 try:
-                    os.startfile(output_path)
+                    os.startfile(result_message_or_path)
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"无法打开文件: {e}")
+                    MaterialMessageBox.critical(self, "错误", f"无法打开文件: {e}")
         else:
-            QMessageBox.critical(self, "导出失败", "导出文件时发生错误，请查看日志文件获取详情。")
+            self.controller.status_bar.status_label.setText("❌ 数据导出失败")
+            MaterialMessageBox.critical(self, "导出失败", result_message_or_path)
 
     def _export_error_images(self):
         """导出被标记为错误的照片"""
         try:
             source_dir = self.controller.start_page.get_file_path()
             if not source_dir or not os.path.exists(source_dir):
-                QMessageBox.warning(self, "错误", "源图像目录未设置或不存在。")
+                MaterialMessageBox.warning(self, "错误", "源图像目录未设置或不存在。")
                 return
 
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir or not os.path.exists(temp_photo_dir):
-                QMessageBox.warning(self, "错误", "临时目录不存在，无法检查JSON文件。")
+                MaterialMessageBox.warning(self, "错误", "临时目录不存在，无法检查JSON文件。")
                 return
 
             # Get destination directory
@@ -2462,14 +3178,14 @@ class SpeciesValidationPage(QWidget):
                     logger.error(f"处理JSON文件 {json_file} 时出错: {e}")
 
             if copied_count > 0:
-                QMessageBox.information(self, "成功",
+                MaterialMessageBox.information(self, "成功",
                                         f"已成功导出 {copied_count} 张错误照片到:\n{error_dir}")
             else:
-                QMessageBox.information(self, "提示", "没有错误照片可供导出。")
+                MaterialMessageBox.information(self, "提示", "没有错误照片可供导出。")
 
         except Exception as e:
             logger.error(f"导出错误照片失败: {e}")
-            QMessageBox.critical(self, "导出失败", f"导出错误照片时发生错误: {e}")
+            MaterialMessageBox.critical(self, "导出失败", f"导出错误照片时发生错误: {e}")
 
     def _dispatch_export(self):
         """根据下拉框的选择来分派导出任务"""
@@ -2479,7 +3195,7 @@ class SpeciesValidationPage(QWidget):
         elif export_type in ["Excel", "CSV"]:
             self._export_validation_data()
         else:
-            QMessageBox.warning(self, "错误", f"未知的导出格式: {export_type}")
+            MaterialMessageBox.warning(self, "错误", f"未知的导出格式: {export_type}")
 
     def get_settings(self):
         """获取设置"""
@@ -2518,48 +3234,47 @@ class SpeciesValidationPage(QWidget):
         self._save_validation_data()
 
     def _save_validation_data(self):
-        """保存验证数据到文件"""
+        """保存校验状态到 SQLite（同时保留 validation.json 作为兼容备份）"""
+        from system.detection_db import get_db_path, init_db, upsert_validation, delete_validation
+
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
+            if not temp_photo_dir:
+                return
 
-            if temp_photo_dir:
-                validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            db_path = get_db_path(temp_photo_dir)
+            if not os.path.exists(db_path):
+                init_db(db_path)
 
-                # 1. 先读取硬盘上已有的老数据（如果存在）
-                disk_data = {}
-                if os.path.exists(validation_file_path):
-                    try:
-                        with open(validation_file_path, 'r', encoding='utf-8') as f:
-                            disk_data = json.load(f)
-                    except Exception as e:
-                        logger.error(f"读取原有 validation.json 失败: {e}")
+            # 将内存中的最新状态批量写入 SQLite
+            for filename, value in self.validation_data.items():
+                if value is None:
+                    delete_validation(db_path, filename)
+                else:
+                    upsert_validation(db_path, filename, bool(value))
 
-                # 2. 将内存中的最新操作合并到硬盘数据中 (相同文件以内存中最新的操作为准)
-                disk_data.update(self.validation_data)
-
-                # 3. 同步回内存字典，确保状态一致
-                self.validation_data.update(disk_data)
-
-                # 4. 全量写入文件
-                with open(validation_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.validation_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+            # 同时保留 validation.json（兼容旧版本读取）
+            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            with open(validation_file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.validation_data, f, ensure_ascii=False,
+                          indent=2, sort_keys=True)
 
         except Exception as e:
             logger.error(f"保存验证数据失败: {e}")
 
     def _increment_quick_mark_count(self, species_name):
-        """增加快速标记物种的使用次数，并更新 list_auto (基于近期使用+总数兜底)"""
+        """增加快速标记物种的使用次数，并更新历史记录"""
         if hasattr(self.controller, 'settings_manager'):
             quick_marks_data = self.controller.settings_manager.load_quick_mark_species()
             # 1. 确保中文逗号被替换为英文逗号
             normalized_name = species_name.replace('，', ',')
-            
+
             # 2. 按逗号拆分并去除首尾空格
             species_list = [s.strip() for s in normalized_name.split(',') if s.strip()]
-            
+
             if "recent_history" not in quick_marks_data:
                 quick_marks_data["recent_history"] = []
-            
+
             # 3. 对拆分后的每个独立物种分别计数
             for single_species in species_list:
                 # 更新总计数
@@ -2567,68 +3282,43 @@ class SpeciesValidationPage(QWidget):
                     quick_marks_data[single_species] = quick_marks_data.get(single_species, 0) + 1
                 else:
                     quick_marks_data[single_species] = 1
-                
+
                 # 追加到近期记录队列
                 quick_marks_data["recent_history"].append(single_species)
 
+            # 保持近期记录最大长度为 200
             max_recent_len = 200
             if len(quick_marks_data["recent_history"]) > max_recent_len:
                 quick_marks_data["recent_history"] = quick_marks_data["recent_history"][-max_recent_len:]
 
-            # 获取固定列表的长度作为按钮总数参考（通常为 11 个）
-            target_btn_count = len(quick_marks_data.get("list", []))
-            if target_btn_count == 0:
-                target_btn_count = 11
-
-            # A. 统计近期频次 (反转列表以保证频次相同时，越晚使用的越靠前)
-            from collections import Counter
-            recent_counter = Counter(reversed(quick_marks_data["recent_history"]))
-            recent_sorted = [item[0] for item in recent_counter.most_common()]
-
-            # B. 统计总数频次作兜底 (排除非物种的 key)
-            excluded_keys = {'list', 'list_auto', 'auto', 'recent_history'}
-            total_counts = {k: v for k, v in quick_marks_data.items() if k not in excluded_keys and isinstance(v, (int, float))}
-            total_sorted = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
-            total_sorted_species = [item[0] for item in total_sorted]
-
-            # C. 组合最终列表：优先填充近期常用，空余部分用总数最高的补齐
-            new_list_auto = []
-            for sp in recent_sorted:
-                if len(new_list_auto) < target_btn_count:
-                    new_list_auto.append(sp)
-            
-            for sp in total_sorted_species:
-                if len(new_list_auto) < target_btn_count and sp not in new_list_auto:
-                    new_list_auto.append(sp)
-
-            quick_marks_data["list_auto"] = new_list_auto
-            
-            # 保存更新后的数据
+            # 保存更新后的历史记录数据
             self.controller.settings_manager.save_quick_mark_species(quick_marks_data)
 
     def _push_to_undo_stack(self, file_name):
         """将当前文件的状态压入撤回栈"""
         if not hasattr(self, 'undo_stack'):
             self.undo_stack = []
-            
+
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir: return
-            
+
             json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
             old_json = None
             if os.path.exists(json_path):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     old_json = json.load(f)
-                    
+
             old_val = self.validation_data.get(file_name)
-                
+
             self.undo_stack.append({
                 'file_name': file_name,
                 'json_data': old_json,
-                'validation_data': old_val
+                'validation_data': old_val,
+                'selected_species_names': list(getattr(self, '_selected_species_names', [])),
+                'selected_counts': list(getattr(self, '_selected_counts', []))
             })
-            
+
             # 限制栈大小为 50 步，防止占用过多内存
             if len(self.undo_stack) > 50:
                 self.undo_stack.pop(0)
@@ -2638,63 +3328,73 @@ class SpeciesValidationPage(QWidget):
     def _undo_last_action(self):
         """执行撤回操作并自动刷新界面，并在状态栏提示"""
         if not hasattr(self, 'undo_stack') or not self.undo_stack:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "提示", "没有可撤回的操作记录。")
+            MaterialMessageBox.information(self, "提示", "没有可撤回的操作记录。")
             return
-        
+
         try:
             last_state = self.undo_stack.pop()
             file_name = last_state['file_name']
             old_json = last_state['json_data']
             old_val = last_state['validation_data']
-            
+
+            # [新增] 恢复按钮数组，并打上撤回标志位以便恢复高亮样式
+            self._selected_species_names = last_state.get('selected_species_names', [])
+            self._selected_counts = last_state.get('selected_counts', [])
+            self._is_undoing = True
+
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir: return
             json_path = os.path.join(temp_photo_dir, f"{os.path.splitext(file_name)[0]}.json")
-            
+
             # 还原 JSON
             if old_json is not None:
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(old_json, f, ensure_ascii=False, indent=2)
-            
+
+                try:
+                    from system.detection_db import get_db_path, update_detection
+                    base_name = os.path.splitext(file_name)[0]
+                    update_detection(get_db_path(temp_photo_dir), base_name, old_json)
+                except Exception as db_err:
+                    logger.warning(f"撤回时同步 SQLite 失败: {db_err}")
+
             # 还原 内存验证状态 并 保存
             if old_val is not None:
                 self.validation_data[file_name] = old_val
                 self._save_validation_data()
             else:
                 self.validation_data.pop(file_name, None)
-                # 因为 _save_validation_data() 采用的是 update 增量合并逻辑，
-                # 所以必须手动从 validation.json 中删除该记录，防止僵尸数据被重新读回内存
                 validation_file_path = os.path.join(temp_photo_dir, "validation.json")
                 if os.path.exists(validation_file_path):
                     try:
                         with open(validation_file_path, 'r', encoding='utf-8') as f:
                             disk_data = json.load(f)
-                        
+
                         if file_name in disk_data:
                             disk_data.pop(file_name, None)
                             with open(validation_file_path, 'w', encoding='utf-8') as f:
                                 json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
                     except Exception as e:
                         logger.error(f"撤回时清理 validation.json 失败: {e}")
-            
+
             # 触发强制选中，自动刷新界面
-            self._force_select_file = file_name
+            self._force_select_files = [file_name]
             self._refresh_species_list_logic()
-            
+
             if hasattr(self.controller, 'status_bar'):
-                # 获取刷新列表后自带的状态栏文本 (例如: "当前物种共有 X 张照片")
                 current_text = self.controller.status_bar.status_label.text()
-                # 拼接上撤回提示，覆盖回状态栏
                 self.controller.status_bar.status_label.setText(
-                    f"✅ 已成功撤回对 {file_name} 的操作  |  {current_text}"
+                    f"✅ 已成功撤回上一步操作  |  {current_text}"
                 )
-            
+
         except Exception as e:
             logger.error(f"撤回失败: {e}")
 
-    def _update_json_file(self, file_name, new_species=None, new_count=None, new_remark=None):
-        """更新JSON文件中的物种信息"""
+    def _update_json_file(self, file_name, new_species=None,
+                          new_count=None, new_remark=None):
+        """更新 JSON 文件中的物种信息，并同步到 SQLite"""
+        from system.detection_db import get_db_path, update_detection
+
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir:
@@ -2709,27 +3409,24 @@ class SpeciesValidationPage(QWidget):
             else:
                 detection_info = {}
 
-            # 更新信息
+            # ── 原有字段更新逻辑（保持不变）──
             if new_species is not None:
                 detection_info['物种名称'] = new_species
+                detection_info['最低置信度'] = '人工校验'
+                detection_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if new_count is not None:
                 detection_info['物种数量'] = new_count
             if new_remark is not None:
                 detection_info['备注'] = new_remark
 
-            # 标记为人工校验
-            detection_info['最低置信度'] = '人工校验'
-            detection_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            # 保存文件
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(detection_info, f, ensure_ascii=False, indent=2)
 
-            # 更新当前信息
-            self.current_species_info = detection_info
-
-            # 更新显示
-            self._update_detection_info_display()
+            # ── 新增：同步到 SQLite ──
+            try:
+                update_detection(get_db_path(temp_photo_dir), base_name, detection_info)
+            except Exception as db_err:
+                logger.warning(f"_update_json_file 同步 SQLite 失败: {db_err}")
 
         except Exception as e:
             logger.error(f"更新JSON文件失败: {e}")
@@ -2759,7 +3456,7 @@ class SpeciesValidationPage(QWidget):
 
             # 默认值
             species_name = "未知"
-            species_count = "0"
+            species_count = "空"
             confidence = "N/A"
 
             # === 情况A：人工校验 ===
@@ -2819,8 +3516,8 @@ class SpeciesValidationPage(QWidget):
                     species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                     confidence = f"{min_conf_val:.2f}"
                 else:
-                    species_name = "[未校验] 空"
-                    species_count = "0"
+                    species_name = "空"
+                    species_count = "空"
                     confidence = "N/A"
 
             # === 情况C：图片数据 (检测框) ===
@@ -2875,14 +3572,18 @@ class SpeciesValidationPage(QWidget):
                         species_count = ','.join([str(species_counts_map[s]) for s in sorted_species])
                         confidence = f"{min_conf_val:.2f}"
                     else:
-                        species_name = "[未校验] 空"
-                        species_count = "0"
+                        species_name = "空"
+                        species_count = "空"
                         confidence = "N/A"
                 else:
                     # 如果JSON本身没有框数据，回退到读取原始字段
                     species_name = self.current_species_info.get('物种名称', '未知')
                     species_count = self.current_species_info.get('物种数量', '未知')
                     confidence = self.current_species_info.get('最低置信度', '未知')
+
+            # 统一拦截处理：如果置信度为 None 或 "None"、空字符串，则强制转换为 "N/A"
+            if confidence is None or str(confidence).strip().lower() in ["none", ""]:
+                confidence = "N/A"
 
             # 更新 UI 标签
             species_type_str = "空"
@@ -2893,8 +3594,8 @@ class SpeciesValidationPage(QWidget):
                 for name in names:
                     name = name.strip()
                     if name:
-                        # 利用缓存获取类型，若无则自动查Excel并更新缓存
-                        sType = self._get_species_info_with_cache(name)
+                        # 直接查 SQLite 数据库
+                        sType = self._get_species_info_from_db(name)
                         type_list.append(sType if sType else "空")
 
                 if type_list:
@@ -2916,8 +3617,296 @@ class SpeciesValidationPage(QWidget):
         if next_row < self.species_photo_listbox.count():
             self.species_photo_listbox.setCurrentRow(next_row)
         else:
-            # 如果是最后一张，可以选择跳转到下一个物种或显示完成消息
-            QMessageBox.information(self, "提示", "当前物种的所有图像已处理完成！")
+            # 如果当前已经是列表最后一张
+            # 判断列表中是否还有其他照片（总数 > 1 说明除了当前这张，还有别的没处理完）
+            if self.species_photo_listbox.count() > 1:
+                # 循环跳转回当前分组的第一张照片
+                self.species_photo_listbox.setCurrentRow(0)
+            else:
+                # 真正完全没有其他照片了，才显示完成提示
+                MaterialMessageBox.information(self, "提示", "当前物种的所有图像已处理完成！")
+
+    def _show_photo_context_menu(self, pos):
+        """显示照片列表的右键菜单"""
+        selected_items = self.species_photo_listbox.selectedItems()
+        if not selected_items:
+            return
+
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+
+        # 获取当前主题状态，动态适应深/浅色模式
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+        if is_dark:
+            bg_color = Win11Colors.DARK_CARD.name()
+            border_color = Win11Colors.DARK_BORDER.name()
+            text_color = Win11Colors.DARK_TEXT_PRIMARY.name()
+            accent_color = Win11Colors.DARK_ACCENT.name()
+        else:
+            bg_color = Win11Colors.LIGHT_CARD.name()
+            border_color = Win11Colors.LIGHT_BORDER.name()
+            text_color = Win11Colors.LIGHT_TEXT_PRIMARY.name()
+            accent_color = Win11Colors.LIGHT_ACCENT.name()
+
+        # 动态应用 Material You 风格样式
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 12px;
+                padding: 6px;
+                color: {text_color};
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            QMenu::item {{
+                padding: 8px 28px;
+                border-radius: 8px;
+                margin: 2px 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent_color};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {border_color};
+                margin: 4px 8px;
+            }}
+        """)
+
+        # 动态显示选中了多少项
+        action_correct = menu.addAction(f"标记为正确 ({len(selected_items)}项)")
+        action_empty = menu.addAction(f"标记为空 ({len(selected_items)}项)")
+        action_other = menu.addAction(f"标注为其他 ({len(selected_items)}项)")
+        action_unverified = menu.addAction(f"改为未校验 ({len(selected_items)}项)")
+
+        menu.addSeparator()
+
+        # 重新检测选项
+        action_redetect = menu.addAction(f"重新检测 ({len(selected_items)}项)")
+
+        action = menu.exec(self.species_photo_listbox.mapToGlobal(pos))
+
+        if action == action_correct:
+            self._bulk_mark_correct(selected_items)
+        elif action == action_empty:
+            self._bulk_mark_empty(selected_items)
+        elif action == action_other:
+            self._bulk_mark_other(selected_items)
+        elif action == action_unverified:
+            self._bulk_mark_unverified(selected_items)
+
+        # 点击重新检测后调用新的处理函数
+        elif action == action_redetect:
+            self._bulk_redetect(selected_items)
+
+    def _bulk_mark_correct(self, items):
+        """批量标记为正确"""
+        file_names = []
+        for item in items:
+            file_name = item.text()
+            file_names.append(file_name)
+            self._push_to_undo_stack(file_name)
+            self.validation_data[file_name] = True
+
+        self._save_validation_data()
+        self._force_select_files = file_names
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_empty(self, items):
+        """批量标记为空"""
+        file_names = []
+        for item in items:
+            file_name = item.text()
+            file_names.append(file_name)
+            self._push_to_undo_stack(file_name)
+            self._update_json_file(file_name, new_species="空", new_count="空")
+            self.validation_data[file_name] = False
+
+        self._save_validation_data()
+        self._force_select_files = file_names
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_other(self, items):
+        """批量标注为其他物种"""
+        # 弹窗让用户输入统一的物种信息
+        dialog = CorrectionDialog(self, title=f"批量输入其他物种信息 ({len(items)}项)",
+                                  original_info=self.current_species_info)
+
+        # 执行对话框并检查用户是否点击了"确定"
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
+            species_name, species_count, remark = dialog.result
+
+            file_names = []
+            # 遍历并更新所有选中的项目
+            for item in items:
+                file_name = item.text()
+                file_names.append(file_name)
+                self._push_to_undo_stack(file_name)
+                self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
+                self.validation_data[file_name] = False  # 标记为错误(人工修正)
+
+            # 批量保存验证数据
+            self._save_validation_data()
+            self._increment_quick_mark_count(species_name)
+
+            self._force_select_files = file_names
+
+            # 如果自动排序开启，则刷新快捷按钮列表
+            if hasattr(self.controller,
+                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+                self._load_species_buttons()
+                self.quick_marks_updated.emit()
+
+            # 统一刷新左侧列表和 UI
+            QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_mark_unverified(self, items):
+        """批量将状态重置为未校验"""
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        files_to_remove = []
+
+        for item in items:
+            file_name = item.text()
+            files_to_remove.append(file_name)
+            self._push_to_undo_stack(file_name)
+
+            # 1. 从内存状态中移除
+            self.validation_data.pop(file_name, None)
+
+            # 2. 擦除每个文件对应的 JSON 中的人工校验痕迹，让其回归算法原始数据
+            if temp_photo_dir:
+                base_name = os.path.splitext(file_name)[0]
+                json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+                if os.path.exists(json_path):
+                    try:
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            detection_info = json.load(f)
+
+                        changed = False
+                        if detection_info.get('最低置信度') == '人工校验':
+                            # 弹出手动注入的字段
+                            for key in ['最低置信度', '物种名称', '物种数量', '备注', '检测时间']:
+                                if key in detection_info:
+                                    detection_info.pop(key, None)
+                                    changed = True
+
+                        if changed:
+                            with open(json_path, 'w', encoding='utf-8') as f:
+                                json.dump(detection_info, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        logger.error(f"恢复未校验状态失败: {file_name}, {e}")
+
+        # 3. 从硬盘的 validation.json 中彻底移除 (防止原生的 update 逻辑把它又合并回来)
+        if temp_photo_dir and files_to_remove:
+            from system.detection_db import get_db_path, delete_validation_bulk
+
+            db_path = get_db_path(temp_photo_dir)
+            if os.path.exists(db_path):
+                delete_validation_bulk(db_path, files_to_remove)
+
+            # 同时保持 validation.json 同步（可选，兼容性用）
+            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            if os.path.exists(validation_file_path):
+                try:
+                    with open(validation_file_path, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+                    modified = False
+                    for f_name in files_to_remove:
+                        if disk_data.pop(f_name, None) is not None:
+                            modified = True
+                    if modified:
+                        with open(validation_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception as e:
+                    logger.error(f"清理 validation.json 失败: {e}")
+
+        self._force_select_files = files_to_remove
+        # 统一刷新列表UI
+        QTimer.singleShot(50, self._refresh_species_list_logic)
+
+    def _bulk_redetect(self, items):
+        """批量重新检测选中的文件"""
+        file_names = [item.text() for item in items]
+        source_dir = self.controller.start_page.get_file_path()
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+
+        if not source_dir or not temp_photo_dir:
+            return
+
+        # 推入撤回栈以便日后恢复
+        for file_name in file_names:
+            self._push_to_undo_stack(file_name)
+
+        # 禁用列表控件防止检测期间被点击扰乱状态
+        self.species_photo_listbox.setEnabled(False)
+        self.species_listbox.setEnabled(False)
+
+        # 激活底部进度条界面
+        self.controller.status_bar.show_progress()
+        self.controller.status_bar.status_label.setText(f"正在重新检测 {len(file_names)} 个文件...")
+
+        # 启动后台独立检测线程
+        self.redetect_thread = ReDetectThread(self.controller, file_names, source_dir, temp_photo_dir)
+        self.redetect_thread.progress_updated.connect(self.controller.status_bar.update_progress)
+        # 利用 lambda 传递已选文件列表给回调
+        self.redetect_thread.finished.connect(lambda success: self._on_redetect_finished(success, file_names))
+        self.redetect_thread.start()
+
+    def _on_redetect_finished(self, success, file_names):
+        """重新检测完成后的后置处理"""
+        # 恢复底部进度条状态及界面控件
+        self.controller.status_bar.hide_progress()
+        self.species_photo_listbox.setEnabled(True)
+        self.species_listbox.setEnabled(True)
+
+        if success:
+            self.controller.status_bar.status_label.setText("✅ 选定文件重新检测完成")
+        else:
+            self.controller.status_bar.status_label.setText("❌ 重新检测过程出现错误，请查看日志")
+
+        # 重测完成后，必须抹除掉这些文件以前带有的人工检验标志(以便界面上恢复到自动判断的状态)
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        files_to_remove = []
+
+        for file_name in file_names:
+            files_to_remove.append(file_name)
+            # 清除内存状态
+            self.validation_data.pop(file_name, None)
+
+        # 彻底移除本地 validation.json 中的标记，防止自动合并时老数据又被合并回来
+        if temp_photo_dir and files_to_remove:
+            from system.detection_db import get_db_path, delete_validation_bulk
+
+            db_path = get_db_path(temp_photo_dir)
+            if os.path.exists(db_path):
+                delete_validation_bulk(db_path, files_to_remove)
+
+            # 同时保持 validation.json 同步（可选，兼容性用）
+            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
+            if os.path.exists(validation_file_path):
+                try:
+                    with open(validation_file_path, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+                    modified = False
+                    for f_name in files_to_remove:
+                        if disk_data.pop(f_name, None) is not None:
+                            modified = True
+                    if modified:
+                        with open(validation_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception as e:
+                    logger.error(f"清理 validation.json 失败: {e}")
+
+        # 设置重新选中标记 (如果有之前选择的文件在这个列表里，界面刷新后会自动保持选中)
+        if len(file_names) > 0:
+            self._force_select_files = file_names
+
+        # 重新加载左侧列表和对应显示
+        QTimer.singleShot(50, self._refresh_species_list_logic)
 
     def _update_confidence_label(self, value):
         """更新置信度标签"""
@@ -3459,36 +4448,80 @@ class SpeciesValidationPage(QWidget):
 
         # 1. 记住当前的选中状态
         current_species = self.current_selected_species
-        force_file = getattr(self, '_force_select_file', None)
-        if force_file:
-            current_photo_name = force_file
-            self._force_select_file = None  # 消费掉标志，避免影响后续的常规刷新
+
+        # 记住当前左侧确切选中的完整分组名
+        current_group_exact = None
+        current_item = self.species_listbox.currentItem()
+        if current_item:
+            current_group_exact = current_item.text().split(' (')[
+                0] if ' (' in current_item.text() else current_item.text()
+
+        # 使用列表支持多选恢复
+        force_files = getattr(self, '_force_select_files', None)
+        current_photo_names = []
+        if force_files:
+            current_photo_names = force_files
+            self._force_select_files = None  # 消费掉标志，避免影响后续的常规刷新
         else:
-            current_photo_item = self.species_photo_listbox.currentItem()
-            current_photo_name = current_photo_item.text() if current_photo_item else None
+            # 兼容旧的单选标志位
+            force_file = getattr(self, '_force_select_file', None)
+            if force_file:
+                current_photo_names = [force_file]
+                self._force_select_file = None
+            else:
+                selected_items = self.species_photo_listbox.selectedItems()
+                if selected_items:
+                    current_photo_names = [item.text() for item in selected_items]
+
         current_photo_row = self.species_photo_listbox.currentRow()
 
         # 2. 重新加载物种数据
         # 暂时阻断信号，避免在 clear() 和 addItem() 期间触发不必要的闪烁
         self.species_listbox.blockSignals(True)
-        self._load_species_data()
+        self._load_species_data_core()
         self.species_listbox.blockSignals(False)
 
         # 3. 尝试恢复物种选中状态
         if current_species:
             target_item = None
 
-            # 优先通过照片名反查新的分组 (这样可以跟随照片的状态跳跃，例如从未校验跳到已校验)
-            if current_photo_name:
+            # 策略A：如果是批量操作 (有 force_files 标志)，优先追踪照片跳转到新分组
+            if force_files and current_photo_names:
+                for current_photo_name in current_photo_names:
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if current_photo_name in self.species_image_map.get(map_key, []):
+                            target_item = item
+                            break
+                    if target_item:
+                        break
+
+            # 策略B：如果是快速标记等普通操作，坚决优先保持在原本的确切分组（例如 "[未校验] 马"）
+            if not target_item and current_group_exact:
                 for idx in range(self.species_listbox.count()):
                     item = self.species_listbox.item(idx)
                     item_text = item.text()
                     map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
-                    if current_photo_name in self.species_image_map.get(map_key, []):
+                    if map_key == current_group_exact:
                         target_item = item
                         break
 
-            # 如果没找到（照片可能被移除了），尝试找回原来的物种名
+            # 策略C：如果原分组因为被你标完了而消失了，或者以上都没找到，则降级尝试追踪当前焦点照片的去向
+            if not target_item and current_photo_names:
+                for current_photo_name in current_photo_names:
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if current_photo_name in self.species_image_map.get(map_key, []):
+                            target_item = item
+                            break
+                    if target_item:
+                        break
+
+            # 策略D：终极兜底，尝试按前缀找回原来的物种大类
             if not target_item:
                 for prefix in ["[未校验] ", "[已校验] ", ""]:
                     search_key = f"{prefix}{current_species}"
@@ -3508,6 +4541,9 @@ class SpeciesValidationPage(QWidget):
                 self.species_listbox.scrollToItem(target_item)
                 self.species_listbox.blockSignals(False)
 
+                if hasattr(self, '_species_scroll_delegate'):
+                    self._species_scroll_delegate._update_active_rows()
+
                 # 手动恢复照片列表
                 item_text = target_item.text()
                 map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
@@ -3518,23 +4554,36 @@ class SpeciesValidationPage(QWidget):
                 self.species_photo_listbox.clear()
                 for img in image_files:
                     self.species_photo_listbox.addItem(img)
-
                 self.species_photo_listbox.blockSignals(False)
 
-                # 恢复照片选中
-                if current_photo_name:
-                    items = self.species_photo_listbox.findItems(current_photo_name, Qt.MatchFlag.MatchExactly)
-                    if items:
-                        self.species_photo_listbox.setCurrentItem(items[0])
-                        self.species_photo_listbox.scrollToItem(items[0])
-                    else:
-                        row = min(current_photo_row, self.species_photo_listbox.count() - 1)
-                        if row >= 0:
-                            self.species_photo_listbox.setCurrentRow(row)
+                if hasattr(self, '_photo_scroll_delegate'):
+                    self._photo_scroll_delegate._update_active_rows()
+
+                # 恢复照片选中 (多选逻辑)
+                if current_photo_names:
+                    # 1. 先找出需要被设为当前焦点（CurrentItem）的第一项
+                    first_item_found = None
+                    for photo_name in current_photo_names:
+                        items = self.species_photo_listbox.findItems(photo_name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            first_item_found = items[0]
+                            break
+
+                    # 2. 优先设置 CurrentItem（此时 Qt 底层无论怎么重置现有多选状态都没关系）
+                    if first_item_found:
+                        self.species_photo_listbox.setCurrentItem(first_item_found)
+                        self.species_photo_listbox.scrollToItem(first_item_found)
+
+                    # 3. 最后遍历所有需要选中的项，安全地将其强行设为选中状态
+                    for photo_name in current_photo_names:
+                        items = self.species_photo_listbox.findItems(photo_name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            items[0].setSelected(True)
 
                 # 更新状态栏
                 if hasattr(self.controller, 'status_bar'):
                     self.controller.status_bar.status_label.setText(f"当前物种共有 {len(image_files)} 张照片")
+
         self.species_photo_listbox.setFocus()
 
     def reload_and_apply_conf(self):
@@ -3546,177 +4595,35 @@ class SpeciesValidationPage(QWidget):
         self._load_species_conf()
 
         # 2. 刷新下拉框和滑块状态
-        # _on_species_selector_changed 会根据当前选中的物种 (或 global)
-        # 从 controller.confidence_settings 中取出最新值并更新滑块和 self.species_conf_var
         self._on_species_selector_changed()
 
-        # 3. 如果当前有加载图片/视频，立即重绘检测框和信息
-        if self.current_species_info:
-            # 更新文本信息
-            self._update_detection_info_display()
+        # 3. 核心修复：强制调用带状态恢复的列表刷新逻辑。
+        self._refresh_species_list_logic()
 
-            # 更新图片显示的框 (如果是图片模式)
-            if hasattr(self, 'species_validation_original_image') and self.species_validation_original_image:
-                self._display_image_with_detection_boxes(
-                    self.species_validation_original_image,
-                    self.current_species_info,
-                    self.species_conf_var
-                )
+        # 4. 如果当前有加载视频且正在运行，需单独更新其阈值并刷新 (图片重绘已在上一条的选中恢复逻辑中自动处理)
+        if self.video_thread and self.video_thread.isRunning():
+            self.video_thread.conf_threshold = self.species_conf_var
+            if self.video_thread.paused:
+                self.video_thread.refresh_frame()
 
-            # 更新视频显示的阈值 (如果是视频模式且正在运行)
-            if self.video_thread and self.video_thread.isRunning():
-                self.video_thread.conf_threshold = self.species_conf_var
-                if self.video_thread.paused:
-                    self.video_thread.refresh_frame()
-
-    def _load_species_cache(self):
-        """启动时加载临时物种缓存，并预加载 quick_mark.json 中使用频率最高的200种物种"""
-        cache = {}
-
-        # 1. 尝试加载现有缓存
-        if os.path.exists(self.species_cache_file):
-            try:
-                with open(self.species_cache_file, 'r', encoding='utf-8') as f:
-                    cache = json.load(f)
-            except Exception as e:
-                logger.error(f"加载物种缓存失败: {e}")
-
-        # 2. 从 quick_mark.json 同步高频物种
-        try:
-            # 获取 quick_mark.json 路径
-            qm_path = os.path.join("temp", "quick_mark.json")
-            # 如果能通过 controller 获取更准确的路径则使用，否则使用默认
-            if hasattr(self.controller, 'settings_manager') and hasattr(self.controller.settings_manager,
-                                                                        'settings_dir'):
-                qm_path = os.path.join(self.controller.settings_manager.settings_dir, "quick_mark.json")
-
-            if os.path.exists(qm_path):
-                with open(qm_path, 'r', encoding='utf-8') as f:
-                    qm_data = json.load(f)
-
-                # 提取计数 (排除非物种key)
-                excluded_keys = {'list', 'list_auto', 'auto'}
-                species_counts = {k: v for k, v in qm_data.items() if
-                                  k not in excluded_keys and isinstance(v, (int, float))}
-
-                # 按使用次数降序排序，取前200名
-                top_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)[:200]
-                missing_species = [name for name, count in top_species if name not in cache]
-
-                # 如果有缺失的物种，从Excel批量读取
-                if missing_species:
-                    logger.info(f"发现 {len(missing_species)} 个高频物种未在缓存中，正在从Excel同步...")
-
-                    # 获取 Excel 路径，尝试兼容 resource_path
-                    try:
-                        from system.utils import resource_path
-                        excel_path = resource_path(os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx"))
-                    except ImportError:
-                        excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
-
-                    if os.path.exists(excel_path):
-                        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-                        sheet = wb.active
-
-                        missing_set = set(missing_species)
-
-                        # 遍历 Excel 查找缺失物种 (B列为中文名, P列为类型)
-                        for row in sheet.iter_rows(min_row=2, values_only=True):
-                            if not missing_set:
-                                break
-
-                            # 获取物种名 (B列, 索引1)
-                            name = str(row[1]).strip() if row[1] else ""
-                            if name in missing_set:
-                                # 获取物种类型 (P列, 索引15)
-                                type_str = str(row[15]).strip() if (len(row) > 15 and row[15]) else ""
-                                cache[name] = type_str
-                                missing_set.remove(name)
-
-                        wb.close()
-
-                        # 对于在Excel中未找到的物种，设为空字符串，防止下次重复无效查询
-                        for name in missing_set:
-                            cache[name] = "空"
-
-                        # 将更新后的缓存保存回磁盘
-                        try:
-                            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
-                            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
-                                json.dump(cache, f, ensure_ascii=False, indent=4)
-                        except Exception as e:
-                            logger.error(f"保存预加载缓存失败: {e}")
-
-                        logger.info("高频物种缓存同步完成")
-        except Exception as e:
-            logger.error(f"同步高频物种缓存失败: {e}")
-
-        return cache
-
-    def _save_species_cache(self):
-        """保存物种缓存到临时文件"""
-        try:
-            os.makedirs(os.path.dirname(self.species_cache_file), exist_ok=True)
-            with open(self.species_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.species_cache, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"保存物种缓存失败: {e}")
-
-    def _get_species_info_with_cache(self, species_name):
-        """从缓存读取，若无则查Excel并更新缓存，同时处理200条清理逻辑"""
+    def _get_species_info_from_db(self, species_name):
+        """直接从 SQLite 查询物种类型"""
         if not species_name:
             return "空"
 
-        # 1. 命中缓存直接返回
-        if species_name in self.species_cache:
-            return self.species_cache[species_name]
-
-        # 2. 未命中，从 Excel 中查询
         species_type = "空"
         try:
-            excel_path = os.path.join("res", "《中国生物物种名录》-鸟纲哺乳纲-2025.xlsx")
-            if os.path.exists(excel_path):
-                # 这里的逻辑参考原代码中的 openpyxl 查询
-                wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-                sheet = wb.active
-                for row in sheet.iter_rows(min_row=2, values_only=True):
-                    if row[1] and str(row[1]).strip() == species_name:
-                        species_type = str(row[15]) if len(row) > 15 and row[15] else ""
-                        break
-                wb.close()
+            db_path = resource_path(os.path.join("res", "species_database.db"))
+            if os.path.exists(db_path):
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT 物种类型 FROM species WHERE 中文名=?", (species_name,))
+                row = cursor.fetchone()
+                if row:
+                    species_type = str(row[0]).strip() if row[0] else ""
+                conn.close()
         except Exception as e:
-            logger.error(f"查询Excel失败: {e}")
+            logger.error(f"查询数据库失败: {e}")
 
-        # 3. 检查缓存容量，执行清理逻辑
-        if len(self.species_cache) >= 200:
-            self._prune_species_cache()
-
-        # 4. 更新缓存
-        self.species_cache[species_name] = species_type
-        self._save_species_cache()
         return species_type
-
-    def _prune_species_cache(self):
-        """当超过200种时，根据 quick_mark.json 中的使用次数删除最少使用的50种"""
-        try:
-            qm_path = os.path.join("temp", "quick_mark.json")
-            usage_counts = {}
-            if os.path.exists(qm_path):
-                with open(qm_path, 'r', encoding='utf-8') as f:
-                    usage_counts = json.load(f)
-
-            # 找出缓存中所有物种在 quick_mark 中的次数，没有记录的视为 0
-            cache_items = []
-            for name in self.species_cache.keys():
-                count = usage_counts.get(name, 0)
-                cache_items.append((name, count))
-
-            # 按使用次数升序排序，取前50个
-            to_delete = sorted(cache_items, key=lambda x: x[1])[:50]
-
-            for name, _ in to_delete:
-                del self.species_cache[name]
-
-            logger.info(f"物种缓存已清理，删除了使用次数最少的 {len(to_delete)} 种")
-        except Exception as e:
-            logger.error(f"清理物种缓存失败: {e}")

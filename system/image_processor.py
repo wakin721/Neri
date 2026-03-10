@@ -273,7 +273,7 @@ class ImageProcessor:
         def run_batch_process():
             nonlocal batch_results_info
             try:
-                # [修改] 1. 优先使用预加载的数据，否则现场处理
+                # 1. 优先使用预加载的数据，否则现场处理
                 if preloaded_data:
                     valid_indices, processed_imgs, original_imgs_rgb = preloaded_data
                 else:
@@ -299,6 +299,9 @@ class ImageProcessor:
                 if not processed_imgs:
                     return
 
+                import tempfile
+                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs") 
+
                 # 2. 批量运行检测模型
                 # stream=False 确保返回完整列表
                 det_results = self.model(
@@ -309,7 +312,8 @@ class ImageProcessor:
                     half=use_fp16,
                     iou=iou,
                     conf=conf,
-                    max_det=20,
+                    project=temp_run_project,
+                    name="detect_log",
                     save=False
                 )
 
@@ -343,7 +347,14 @@ class ImageProcessor:
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
                         # 这里的 batch size 可以根据显存调整，YOLO通常自动处理
-                        cls_results_list = self.cls_model(all_crops, half=use_fp16, save=False)
+                        cls_results_list = self.cls_model(
+                            all_crops, 
+                            half=use_fp16, 
+                            save=False,
+                            project=temp_run_project,
+                            name="cls_log",
+                            exist_ok=True
+                        )
 
                         # 5. 映射回原结果 (Map Back)
                         for i, cls_res in enumerate(cls_results_list):
@@ -789,4 +800,75 @@ class ImageProcessor:
             logger.error(f"保存检测结果JSON失败: {e}")
             return ""
 
+    def save_detection_info_json(self, results, image_name: str,
+                                 species_info: dict, temp_photo_dir: str) -> str:
+        """保存探测结果信息到指定的临时目录，并同步写入 SQLite"""
+        if not results or not temp_photo_dir:
+            return ""
 
+        try:
+            import json
+            # ── 原有逻辑（保持不变，保留 JSON 文件作为兼容备份）──
+            os.makedirs(temp_photo_dir, exist_ok=True)
+            data_to_save = {
+                "物种名称": species_info.get('物种名称', ''),
+                "物种数量": species_info.get('物种数量', ''),
+                "最低置信度": species_info.get('最低置信度', ''),
+                "检测时间": species_info.get('检测时间', '')
+            }
+            boxes_info = []
+            all_confidences = []
+            all_classes = []
+            names_map = {}
+
+            if results:
+                for r in results:
+                    original_names_map = r.names
+                    translated_names_map = {
+                        class_id: self.translation_dict.get(english_name, english_name)
+                        for class_id, english_name in original_names_map.items()
+                    }
+                    names_map = translated_names_map
+                    if r.boxes is not None:
+                        for i, box in enumerate(r.boxes):
+                            cls_id = int(box.cls.item())
+                            species_name = r.names[cls_id]
+                            translated_name = self.translation_dict.get(species_name, species_name)
+                            confidence = float(box.conf.item())
+                            bbox = [float(x) for x in box.xyxy.tolist()[0]]
+                            box_info = {"物种": translated_name, "置信度": confidence, "边界框": bbox}
+                            if hasattr(r, 'candidates_data') and i in r.candidates_data:
+                                box_info["候选项"] = r.candidates_data[i]
+                                if r.candidates_data[i]:
+                                    box_info["物种"] = r.candidates_data[i][0]['name']
+                                    box_info["置信度"] = r.candidates_data[i][0]['conf']
+                            boxes_info.append(box_info)
+                        all_confidences = r.boxes.conf.tolist()
+                        all_classes = r.boxes.cls.tolist()
+
+            data_to_save["检测框"] = boxes_info
+            data_to_save["all_confidences"] = all_confidences
+            data_to_save["all_classes"] = all_classes
+            data_to_save["names_map"] = names_map
+
+            base_name, _ = os.path.splitext(image_name)
+            json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(data_to_save, f, ensure_ascii=False, indent=4)
+
+            # ── 新增：同步写入 SQLite ──────────────────────────────────
+            try:
+                from system.detection_db import get_db_path, init_db, upsert_detection
+                db_path = get_db_path(temp_photo_dir)
+                if not os.path.exists(db_path):
+                    init_db(db_path)
+                upsert_detection(db_path, base_name, image_name, data_to_save)
+            except Exception as db_err:
+                logger.warning(f"写入 SQLite 失败（不影响正常流程）: {db_err}")
+            # ─────────────────────────────────────────────────────────────
+
+            return json_path
+        except Exception as e:
+            logger.error(f"保存检测结果JSON失败: {e}")
+            return ""
