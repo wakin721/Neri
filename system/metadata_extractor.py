@@ -50,7 +50,7 @@ class ImageMetadataExtractor:
                 date_taken = ImageMetadataExtractor._get_date_from_exif(exif, filename)
                 if date_taken:
                     image_info['拍摄日期'] = date_taken.strftime('%Y-%m-%d')
-                    image_info['拍摄时间'] = date_taken.strftime('%H:%M')
+                    image_info['拍摄时间'] = date_taken.strftime('%H:%M:%S')
                     image_info['拍摄日期对象'] = date_taken
 
             return image_info, img
