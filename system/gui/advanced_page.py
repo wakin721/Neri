@@ -188,6 +188,7 @@ class AdvancedPage(QWidget):
         self.software_settings_layout = QVBoxLayout(software_settings_group)
         self._create_software_settings_content()
 
+
     def _create_model_params_content(self):
         """创建模型参数设置内容"""
         # 主内容容器
