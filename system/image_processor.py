@@ -691,6 +691,21 @@ class ImageProcessor:
 
             logger.info(f"视频处理完成，JSON已保存至: {json_output_path}")
 
+            # 视频处理完成后，同步将结果更新到 SQLite 数据库中
+            try:
+                from system.detection_db import get_db_path, init_db, upsert_detection
+                db_path = get_db_path(target_json_dir)
+                if not os.path.exists(db_path):
+                    init_db(db_path)
+
+                # 获取带有后缀的完整视频文件名
+                full_video_filename = os.path.basename(video_source)
+
+                # 写入数据库 (base_name, 完整文件名, 包含检测结果的字典)
+                upsert_detection(db_path, video_name, full_video_filename, final_json_data)
+            except Exception as db_err:
+                logger.warning(f"同步视频检测结果到 SQLite 失败（不影响正常流程）: {db_err}")
+
             return {"json_path": json_output_path, "frame_count": current_track_frame, "status": "success"}
 
         except Exception as e:
@@ -732,72 +747,6 @@ class ImageProcessor:
                 return result_file
         except Exception as e:
             logger.error(f"保存临时检测结果图片失败: {e}")
-            return ""
-
-    def save_detection_info_json(self, results, image_name: str, species_info: dict, temp_photo_dir: str) -> str:
-        """保存探测结果信息到指定的临时目录 (用于单张图片)"""
-        if not results or not temp_photo_dir:
-            return ""
-
-        try:
-            import json
-            os.makedirs(temp_photo_dir, exist_ok=True)
-            data_to_save = {
-                "物种名称": species_info.get('物种名称', ''),
-                "物种数量": species_info.get('物种数量', ''),
-                "最低置信度": species_info.get('最低置信度', ''),
-                "检测时间": species_info.get('检测时间', '')
-            }
-            boxes_info = []
-            all_confidences = []
-            all_classes = []
-            names_map = {}
-
-            if results:
-                for r in results:
-                    original_names_map = r.names
-                    translated_names_map = {
-                        class_id: self.translation_dict.get(english_name, english_name)
-                        for class_id, english_name in original_names_map.items()
-                    }
-                    names_map = translated_names_map
-                    if r.boxes is not None:
-                        for i, box in enumerate(r.boxes):
-                            cls_id = int(box.cls.item())
-                            species_name = r.names[cls_id]
-
-                            translated_name = self.translation_dict.get(species_name, species_name)
-
-                            confidence = float(box.conf.item())
-                            bbox = [float(x) for x in box.xyxy.tolist()[0]]
-
-                            box_info = {"物种": translated_name, "置信度": confidence, "边界框": bbox}
-
-                            if hasattr(r, 'candidates_data') and i in r.candidates_data:
-                                box_info["候选项"] = r.candidates_data[i]
-                                # 如果有分类结果，将"物种"字段更新为分类置信度最高的那一个
-                                if r.candidates_data[i]:
-                                    box_info["物种"] = r.candidates_data[i][0]['name']
-                                    box_info["置信度"] = r.candidates_data[i][0]['conf']
-
-                            boxes_info.append(box_info)
-                        all_confidences = r.boxes.conf.tolist()
-                        all_classes = r.boxes.cls.tolist()
-
-            data_to_save["检测框"] = boxes_info
-            data_to_save["all_confidences"] = all_confidences
-            data_to_save["all_classes"] = all_classes
-            data_to_save["names_map"] = names_map
-
-            base_name, _ = os.path.splitext(image_name)
-            json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
-
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(data_to_save, f, ensure_ascii=False, indent=4)
-
-            return json_path
-        except Exception as e:
-            logger.error(f"保存检测结果JSON失败: {e}")
             return ""
 
     def save_detection_info_json(self, results, image_name: str,
