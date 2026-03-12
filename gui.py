@@ -37,22 +37,29 @@ from system.utils import resource_path
 from system.gui.ui_components import MaterialMessageBox
 
 
-def check_cuda_available():
-    """检查CUDA可用性"""
+def check_gpu_available():
+    """检查可用的硬件加速 (CUDA / ROCm / Intel XPU)"""
     try:
         import torch
-        return torch.cuda.is_available()
+        # 1. 检查 NVIDIA CUDA 或 AMD ROCm
+        if torch.cuda.is_available():
+            return True
+        # 2. 检查原生 Intel XPU
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            return True
+
+        return False
     except ImportError:
         return False
 
 
-def show_cuda_warning():
-    """显示CUDA警告"""
+def show_gpu_warning():
+    """显示GPU加速缺失警告"""
     # 使用 MaterialMessageBox 替换 QMessageBox
     MaterialMessageBox.warning(
         None,
-        "CUDA检测",
-        "未检测到CUDA/ROCm，请检查是否正确安装对应PyTorch版本。\n\n程序将使用CPU模式运行，处理速度可能较慢。"
+        "硬件加速未就绪",
+        "未检测到支持的GPU加速环境 (NVIDIA CUDA / AMD ROCm / Intel XPU)。\n\n程序将回退至CPU模式运行，处理速度可能会受限。"
     )
 
 
@@ -86,10 +93,10 @@ def main():
     except Exception as e:
         logger.warning(f"无法加载应用程序图标: {e}")
 
-    # 检查CUDA可用性
-    cuda_available = check_cuda_available()
-    if not cuda_available:
-        show_cuda_warning()
+    # 检查GPU加速可用性
+    gpu_available = check_gpu_available()
+    if not gpu_available:
+        show_gpu_warning()
 
     # 初始化设置管理器
     base_dir = os.path.dirname(os.path.abspath(__file__))
