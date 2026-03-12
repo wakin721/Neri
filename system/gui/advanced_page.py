@@ -86,7 +86,7 @@ class AdvancedPage(QWidget):
         self.cache_size_var = "正在计算..."
         self.update_channel_var = "预览版 (Preview)"
         self.update_mirror_var = "国内源 (KKGitHub)"# 默认镜像源为 国内源 (KKGitHub)
-        self.pytorch_version_var = "2.10.0 (CPU Only)"
+        self.pytorch_version_var = "自动检测"
         self.package_var = ""
         self.version_constraint_var = ""
         self.pytorch_status_var = "未检查"
@@ -744,28 +744,29 @@ class AdvancedPage(QWidget):
         pytorch_layout.setSpacing(15)
 
         # 版本选择
-        version_label = QLabel("选择版本")
+        version_label = QLabel("选择安装环境")  # 原文为 "选择版本"
         version_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         pytorch_layout.addWidget(version_label)
 
         self.pytorch_version_combo = ModernComboBox()
+        # 修改为纯环境选项，移除具体的 PyTorch 版本号
         versions = [
-            "2.10.0 (CUDA 13.0)",
-            "2.10.0 (CUDA 12.8)",
-            "2.10.0 (CUDA 12.6)",
-            "2.10.0 (CPU Only)",
-            "2.7.1 (CUDA 12.8)",
-            "2.7.1 (CUDA 12.6)",
-            "2.7.1 (CUDA 11.8)",
-            "2.7.1 (CPU Only)",
+            "自动检测",
+            "CUDA 12.8",
+            "CUDA 12.6",
+            "CUDA 12.4",
+            "CUDA 12.1",
+            "CUDA 11.8",
+            "Intel XPU",
+            "CPU Only"
         ]
         self.pytorch_version_combo.addItems(versions)
         self.pytorch_version_combo.setCurrentText(self.pytorch_version_var)
         self.components_to_update.append(self.pytorch_version_combo)
         pytorch_layout.addWidget(self.pytorch_version_combo)
 
-        # 说明文本
-        warning_label = QLabel("将先卸载现有的torch、torchvision、torchaudio模块再重新安装")
+        # 说明文本稍微修改以符合新逻辑
+        warning_label = QLabel("将先卸载现有的torch模块，然后根据选择的环境安装最新兼容的PyTorch。")
         warning_label.setStyleSheet("color: #666666; font-size: 12px;")
         warning_label.setWordWrap(True)
         pytorch_layout.addWidget(warning_label)
@@ -1161,12 +1162,17 @@ class AdvancedPage(QWidget):
         """处理模型加载完成的结果。"""
         if error_string:
             self.model_status_label.setText(f"加载失败: {error_string}")
+
         else:
             self.model_status_label.setText(f"已应用: {model_name}")
             self.model_combo.setToolTip(f"当前使用的模型: {model_name}")
             self._refresh_classes_list()
             self._on_setting_changed()
             logger.info(f"模型自动加载成功: {model_name}")
+
+        # 加载流程结束后，重新启用“开始处理”按钮
+        if hasattr(self.controller, 'start_page'):
+            self.controller.start_page.set_processing_enabled(True)
 
     def _save_settings_immediately(self):
         """立即保存设置到JSON文件"""
@@ -1259,12 +1265,12 @@ class AdvancedPage(QWidget):
 
     def _install_pytorch(self):
         """安装PyTorch"""
-        version = self.pytorch_version_combo.currentText()
-        if not version:
-            QMessageBox.critical(self, "错误", "请选择PyTorch版本")
+        env_choice = self.pytorch_version_combo.currentText()
+        if not env_choice:
+            QMessageBox.critical(self, "错误", "请选择安装环境")
             return
 
-        message = f"将安装 PyTorch {version}。\n\n此操作会强制卸载任何现有版本，是否继续？"
+        message = f"将为您安装适用于 {env_choice} 的最新版 PyTorch。\n\n此操作会强制卸载现有的 torch、torchvision、torchaudio 模块，是否继续？"
 
         reply = QMessageBox.question(
             self, "确认安装", message,
@@ -1274,43 +1280,101 @@ class AdvancedPage(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        is_cuda = "CPU" not in version
-        cuda_version = None
-        if is_cuda:
-            cuda_match = re.search(r"CUDA (\d+\.\d+)", version)
-            if cuda_match:
-                cuda_version = cuda_match.group(1)
-
-        pytorch_match = re.search(r"(\d+\.\d+\.\d+)", version)
-        if pytorch_match:
-            pytorch_version = pytorch_match.group(1)
-        else:
-            QMessageBox.critical(self, "错误", "无法解析PyTorch版本")
-            return
-
         self.install_pytorch_button.setEnabled(False)
         self.pytorch_status_label.setText("准备安装...")
 
         # 启动安装线程
         threading.Thread(
             target=self._run_pytorch_install,
-            args=(pytorch_version, cuda_version),
+            args=(env_choice,),
             daemon=True
         ).start()
 
-    def _run_pytorch_install(self, pytorch_version, cuda_version=None):
+    def _run_pytorch_install(self, env_choice):
         """运行PyTorch安装"""
         try:
             QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("正在启动安装..."))
 
             pip_command_prefix = self._get_python_command_prefix()
 
-            if cuda_version:
-                cuda_str_map = {"11.8": "cu118", "12.1": "cu121", "12.6": "cu126", "12.8": "cu128"}
-                cuda_str = cuda_str_map.get(cuda_version, f"cu{cuda_version.replace('.', '')}")
-                install_cmd = f"{pip_command_prefix} install torch=={pytorch_version} torchvision torchaudio --index-url https://download.pytorch.org/whl/{cuda_str}"
-            else:
-                install_cmd = f"{pip_command_prefix} install torch=={pytorch_version} torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu"
+            # 解析安装环境与源
+            index_url = ""
+            actual_env = env_choice
+
+            if env_choice == "自动检测":
+                try:
+                    # 运行 nvidia-smi 获取详细信息
+                    result = subprocess.run(
+                        ["nvidia-smi"],
+                        capture_output=True,
+                        text=True,
+                        encoding='gbk',
+                        errors='ignore',
+                        timeout=10,
+                        shell=True
+                    )
+
+                    if result.returncode == 0:
+                        # 从 nvidia-smi 输出中提取 CUDA 版本
+                        match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
+                        if match:
+                            major, minor = match.groups()
+                            cuda_major = int(major)
+                            cuda_minor = int(minor)
+
+                            # 根据 CUDA 版本选择对应的 PyTorch 版本
+                            if cuda_major >= 13:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu130"
+                                actual_env = f"CUDA 13.0 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            elif cuda_major >= 12 and cuda_minor >= 8:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu128"
+                                actual_env = f"CUDA 12.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            elif cuda_major >= 12 and cuda_minor >= 6:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu126"
+                                actual_env = f"CUDA 12.6 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            elif cuda_major >= 12 and cuda_minor >= 4:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu124"
+                                actual_env = f"CUDA 12.4 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            elif cuda_major >= 12 and cuda_minor >= 1:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu121"
+                                actual_env = f"CUDA 12.1 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            elif cuda_major >= 11 and cuda_minor >= 8:
+                                index_url = "--index-url https://download.pytorch.org/whl/cu118"
+                                actual_env = f"CUDA 11.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
+                            else:
+                                # 旧版本CUDA，使用CPU版本
+                                index_url = "--index-url https://download.pytorch.org/whl/cpu"
+                                actual_env = f"CPU Only (CUDA版本过旧: {cuda_major}.{cuda_minor})"
+                        else:
+                            # 有 nvidia-smi 但没匹配到具体版本，给一个兼容性最好的默认版本
+                            index_url = "--index-url https://download.pytorch.org/whl/cu124"
+                            actual_env = "CUDA 12.4 (自动检测 - 未识别具体版本)"
+                    else:
+                        # nvidia-smi 执行失败，说明可能没装驱动或没显卡，回退CPU
+                        index_url = "--index-url https://download.pytorch.org/whl/cpu"
+                        actual_env = "CPU Only (未检测到 NVIDIA GPU)"
+
+                except Exception as e:
+                    logger.warning(f"自动检测 CUDA 版本失败: {e}")
+                    # 发生异常，回退CPU
+                    index_url = "--index-url https://download.pytorch.org/whl/cpu"
+                    actual_env = "CPU Only (自动检测出错)"
+
+            elif "CUDA" in env_choice:
+                match = re.search(r"CUDA (\d+\.\d+)", env_choice)
+                if match:
+                    cuda_version = match.group(1).replace('.', '')
+                    index_url = f"--index-url https://download.pytorch.org/whl/cu{cuda_version}"
+
+            elif "XPU" in env_choice:
+                # Intel XPU 的安装源
+                index_url = "--index-url https://download.pytorch.org/whl/xpu"
+
+            elif "CPU" in env_choice:
+                index_url = "--index-url https://download.pytorch.org/whl/cpu"
+
+            # 移除硬编码的版本号，直接安装最新对应版本的 torch, torchvision, torchaudio
+            install_cmd = f"{pip_command_prefix} install torch torchvision torchaudio {index_url}"
 
             command = (
                 f"echo 正在卸载现有PyTorch... && "
@@ -1353,8 +1417,7 @@ class AdvancedPage(QWidget):
                 "命令执行完成后窗口将在5秒后自动关闭。"
             ))
 
-            version_text = f"{pytorch_version} {'(CUDA ' + cuda_version + ')' if cuda_version else '(CPU)'}"
-            QTimer.singleShot(3000, lambda: self.pytorch_status_label.setText(f"已完成安装 PyTorch {version_text}"))
+            QTimer.singleShot(3000, lambda: self.pytorch_status_label.setText(f"已下发安装指令: {actual_env}"))
 
         except Exception as e:
             logger.error(f"安装PyTorch出错: {e}")
