@@ -92,6 +92,7 @@ class AdvancedPage(QWidget):
         self.model_status_var = ""
         self.package_status_var = ""
         self.auto_sort_var = False
+        self.selected_classes_var = None
 
         # 存储引用以便主题更新
         self.components_to_update = []
@@ -276,6 +277,34 @@ class AdvancedPage(QWidget):
         self.model_panel.add_content_widget(model_widget)
         content_layout.addWidget(self.model_panel)
 
+        # 物种过滤设置面板
+        self.classes_panel = CollapsiblePanel(
+            title="识别物种设置",
+            subtitle="选择模型需要检测的特定物种 (取消勾选以过滤不需要的结果)",
+            icon="🐾"
+        )
+
+        classes_widget = QWidget()
+        self.classes_layout = QVBoxLayout(classes_widget)
+        self.classes_layout.setSpacing(10)
+
+        # 添加全选复选框
+        self.classes_select_all_cb = ModernCheckBox("全选/全不选")
+        self.classes_select_all_cb.setChecked(True)
+        self.classes_select_all_cb.stateChanged.connect(self._toggle_all_classes)
+        self.classes_layout.addWidget(self.classes_select_all_cb)
+
+        # 创建一个网格布局存放具体物种
+        self.classes_grid_widget = QWidget()
+        self.classes_grid_layout = QGridLayout(self.classes_grid_widget)
+        self.classes_grid_layout.setSpacing(10)
+        self.classes_layout.addWidget(self.classes_grid_widget)
+
+        self.classes_checkboxes = {}  # 用于存储 id: ModernCheckBox 对象的映射
+
+        self.classes_panel.add_content_widget(classes_widget)
+        content_layout.addWidget(self.classes_panel)
+
         # 检测阈值设置面板
         self.threshold_panel = CollapsiblePanel(
             title="检测阈值设置",
@@ -448,6 +477,73 @@ class AdvancedPage(QWidget):
 
         content_layout.addWidget(button_frame)
         self.model_params_layout.addWidget(content_widget)
+
+    def _refresh_classes_list(self):
+        """刷新当前模型支持的物种列表，并显示 ID 和中文名"""
+        # 1. 清空现有网格
+        while self.classes_grid_layout.count():
+            child = self.classes_grid_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self.classes_checkboxes.clear()
+
+        # 2. 检查模型是否有效加载
+        if not hasattr(self.controller, 'image_processor') or not self.controller.image_processor.model:
+            self.classes_select_all_cb.setEnabled(False)
+            return
+
+        # 3. 获取数据
+        model_names = self.controller.image_processor.model.names
+        trans_dict = self.controller.image_processor.translation_dict
+
+        self.classes_select_all_cb.setEnabled(True)
+
+        columns_per_row = 3
+
+        # 4. 遍历并创建复选框，根据 ID 排序
+        for i, cls_id in enumerate(sorted(model_names.keys())):
+            eng_name = model_names[cls_id]
+            chs_name = trans_dict.get(eng_name, eng_name)
+            # 如果有中文翻译，则展示：中文 (英文) [ID]，否则只展示英文 [ID]
+            display_text = f"{chs_name}" if chs_name == eng_name else f"{chs_name} ({eng_name})"
+
+            cb = ModernCheckBox(display_text)
+
+            # 恢复上次选中的状态
+            if self.selected_classes_var is not None:
+                is_checked = cls_id in self.selected_classes_var
+            else:
+                is_checked = True  # 无保存记录时默认全选
+
+            cb.setChecked(is_checked)
+            cb.stateChanged.connect(self._update_classes_select_all_state)
+
+            row = i // columns_per_row
+            col = i % columns_per_row
+            self.classes_grid_layout.addWidget(cb, row, col)
+            self.classes_checkboxes[cls_id] = cb
+
+        # 5. 更新全选按钮状态
+        self._update_classes_select_all_state()
+
+    def _toggle_all_classes(self, state):
+        """响应“全选/全不选”复选框（物种过滤面板）"""
+        is_checked = (state == Qt.CheckState.Checked.value)
+        for cb in self.classes_checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(is_checked)
+            cb.blockSignals(False)
+        self._on_setting_changed()
+
+    def _update_classes_select_all_state(self):
+        """当单个物种勾选状态改变时，更新“全选”按钮状态"""
+        if not self.classes_checkboxes:
+            return
+        all_checked = all(cb.isChecked() for cb in self.classes_checkboxes.values())
+        self.classes_select_all_cb.blockSignals(True)
+        self.classes_select_all_cb.setChecked(all_checked)
+        self.classes_select_all_cb.blockSignals(False)
+        self._on_setting_changed()
 
     def _update_batch_size_label(self, value):
         """更新Batch Size标签"""
@@ -1056,11 +1152,9 @@ class AdvancedPage(QWidget):
         else:
             self.model_status_label.setText(f"已应用: {model_name}")
             self.model_combo.setToolTip(f"当前使用的模型: {model_name}")
-            self._on_setting_changed()  # 加载成功后保存设置
+            self._refresh_classes_list()
+            self._on_setting_changed()
             logger.info(f"模型自动加载成功: {model_name}")
-
-        if hasattr(self.controller, 'start_page'):
-            self.controller.start_page.set_processing_enabled(True)
 
     def _save_settings_immediately(self):
         """立即保存设置到JSON文件"""
@@ -1086,6 +1180,7 @@ class AdvancedPage(QWidget):
         self._check_pytorch_status()
         self._refresh_model_list()
         self.load_quick_mark_settings()
+        self._refresh_classes_list()
         QTimer.singleShot(100, self.update_cache_size)
 
     def _update_iou_label(self, value):
@@ -1830,6 +1925,7 @@ class AdvancedPage(QWidget):
             "selected_model": selected_model,
             "selected_cls_model": self.cls_model_combo.currentText(),
             "export_columns": [name for name, cb in self.export_checkboxes.items() if cb.isChecked()],
+            "selected_classes": [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()]
         }
 
     def load_settings(self, settings):
@@ -1933,6 +2029,16 @@ class AdvancedPage(QWidget):
 
             # 加载后，根据单个复选框的状态更新“全选”框的状态
             self._update_select_all_state()
+
+        if "selected_classes" in settings:
+            self.selected_classes_var = settings["selected_classes"]
+            # 若 UI 已经被渲染，则更新对应的复选框并刷新全选状态
+            if hasattr(self, 'classes_checkboxes') and self.classes_checkboxes:
+                for cls_id, cb in self.classes_checkboxes.items():
+                    cb.blockSignals(True)
+                    cb.setChecked(cls_id in self.selected_classes_var)
+                    cb.blockSignals(False)
+                self._update_classes_select_all_state()
 
     def _set_selected_model(self, model_name):
         """设置选定的模型"""

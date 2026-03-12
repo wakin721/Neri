@@ -252,7 +252,8 @@ class ImageProcessor:
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
                              conf: float = 0.25, augment: bool = True,
                              agnostic_nms: bool = True, timeout: float = 60.0,
-                             preloaded_data: Optional[Tuple] = None) -> List[Dict[str, Any]]:
+                             preloaded_data: Optional[Tuple] = None,
+                             classes: Optional[List[int]] = None) -> List[Dict[str, Any]]:
         """
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
@@ -314,9 +315,9 @@ class ImageProcessor:
                     conf=conf,
                     project=temp_run_project,
                     name="detect_log",
-                    save=False
+                    save=False,
+                    classes=classes
                 )
-
                 # 3. 准备分类裁剪 (Collection Phase)
                 all_crops = []
                 crop_map_info = []  # 映射: list index -> (result_index_in_batch, box_index)
@@ -543,7 +544,8 @@ class ImageProcessor:
                              agnostic_nms: bool = True,
                              status_callback: Optional[Any] = None,
                              vid_stride: int = 1,
-                             temp_video_dir: Optional[str] = None) -> Dict[str, Any]:
+                             temp_video_dir: Optional[str] = None,
+                             classes: Optional[List[int]] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
         策略：先生成跳帧+增强后的临时视频(保持原分辨率)，再进行追踪。
@@ -594,8 +596,6 @@ class ImageProcessor:
 
             # === 第二步：运行 YOLO 追踪 ===
             # source 直接传入临时视频路径
-            # imgsz=1920 仍保留作为推理尺寸，YOLO 会自动 resize 输入网络，不影响结果
-            # vid_stride=1 必须为1，因为我们在第一步已经物理删除了不需要的帧
             results = self.model.track(
                 source=temp_enhanced_video_path,
                 tracker=tracker_config,
@@ -611,7 +611,8 @@ class ImageProcessor:
                 name="track_log",
                 exist_ok=True,
                 stream=True,
-                vid_stride=1  # 关键：不要让 YOLO 再次跳帧
+                vid_stride=1,  # 关键：不要让 YOLO 再次跳帧
+                classes=classes
             )
 
             tracks_data = defaultdict(list)
