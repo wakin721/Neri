@@ -73,17 +73,29 @@ class ImageProcessor:
             logger.error(f"加载或解析翻译文件失败: {e}")
             return {}
 
-    def _check_cuda(self, use_fp16: bool) -> bool:
-        """检查CUDA可用性并决定是否使用FP16"""
+    def _determine_device(self, use_fp16: bool) -> tuple[str, bool]:
+        """检查 CUDA 或 XPU 可用性，并返回设备名称及是否使用 FP16"""
+        device = 'cpu'
+        fp16_enabled = False
+
         try:
-            cuda_available = torch.cuda.is_available()
-            if not cuda_available:
-                return False
-            return use_fp16
-        except ImportError:
-            return False
-        except Exception:
-            return False
+            # 1. 首先检查 NVIDIA CUDA
+            if torch.cuda.is_available():
+                device = 'cuda'
+                fp16_enabled = use_fp16
+            else:
+                # 2. 检查 Intel XPU
+                try:
+                    import intel_extension_for_pytorch as ipex
+                    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                        device = 'xpu'
+                        fp16_enabled = use_fp16
+                except ImportError:
+                    logger.debug("未安装 intel_extension_for_pytorch，跳过 Intel GPU 检测")
+        except Exception as e:
+            logger.error(f"设备检测失败: {e}")
+
+        return device, fp16_enabled
 
     def _preprocess_image(self, img: Any) -> Any:
         """
@@ -258,7 +270,7 @@ class ImageProcessor:
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
         """
-        use_fp16 = self._check_cuda(use_fp16)
+        device_name, use_fp16 = self._determine_device(use_fp16)
         w_det = 0.4
         w_cls = 0.6
         batch_results_info = []
@@ -301,22 +313,21 @@ class ImageProcessor:
                     return
 
                 import tempfile
-                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs") 
+                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs")
 
                 # 2. 批量运行检测模型
-                # stream=False 确保返回完整列表
                 det_results = self.model(
                     processed_imgs,
                     augment=augment,
                     agnostic_nms=agnostic_nms,
                     imgsz=1920,
                     half=use_fp16,
+                    device=device_name,
                     iou=iou,
                     conf=conf,
                     project=temp_run_project,
                     name="detect_log",
-                    save=False,
-                    classes=classes
+                    save=False
                 )
                 # 3. 准备分类裁剪 (Collection Phase)
                 all_crops = []
@@ -347,10 +358,10 @@ class ImageProcessor:
 
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
-                        # 这里的 batch size 可以根据显存调整，YOLO通常自动处理
                         cls_results_list = self.cls_model(
-                            all_crops, 
-                            half=use_fp16, 
+                            all_crops,
+                            half=use_fp16,
+                            device=device_name,
                             save=False,
                             project=temp_run_project,
                             name="cls_log",
@@ -557,7 +568,7 @@ class ImageProcessor:
                 logger.warning(f"重置模型状态失败: {e}")
 
         if not self.model: return {'error': 'Model not loaded'}
-        use_fp16 = self._check_cuda(use_fp16)
+        device_name, use_fp16 = self._determine_device(use_fp16)
 
         # 准备路径
         output_dir = os.path.normpath(output_dir)
@@ -595,7 +606,6 @@ class ImageProcessor:
             logger.info(f"预处理完成，生成临时视频: {temp_enhanced_video_path} (共 {processed_frame_count} 帧)")
 
             # === 第二步：运行 YOLO 追踪 ===
-            # source 直接传入临时视频路径
             results = self.model.track(
                 source=temp_enhanced_video_path,
                 tracker=tracker_config,
@@ -603,6 +613,7 @@ class ImageProcessor:
                 agnostic_nms=agnostic_nms,
                 imgsz=1920,
                 half=use_fp16,
+                device=device_name,
                 iou=iou,
                 conf=conf,
                 persist=True,
@@ -611,8 +622,7 @@ class ImageProcessor:
                 name="track_log",
                 exist_ok=True,
                 stream=True,
-                vid_stride=1,  # 关键：不要让 YOLO 再次跳帧
-                classes=classes
+                vid_stride=1
             )
 
             tracks_data = defaultdict(list)

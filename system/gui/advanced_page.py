@@ -75,7 +75,8 @@ class AdvancedPage(QWidget):
         # 初始化变量
         self.iou_var = 0.3
         self.conf_var = 0.25
-        self.use_fp16_var = self.controller.cuda_available if hasattr(controller, 'cuda_available') else False
+        self.gpu_available = getattr(controller, 'gpu_available', getattr(controller, 'cuda_available', False))
+        self.use_fp16_var = self.gpu_available
         self.batch_size_var = 16
         self.use_augment_var = True
         self.use_agnostic_nms_var = True
@@ -401,7 +402,13 @@ class AdvancedPage(QWidget):
         batch_label_layout.addWidget(self.batch_size_label)
 
         self.batch_slider = ModernSlider()
-        self.batch_slider.setRange(1, 64)  # 范围 1-64，可根据需求调整
+        self.batch_slider.setRange(1, 32)
+
+        # CPU 模式下强制 Batch Size 为 1 并禁用滑块
+        if not self.gpu_available:
+            self.batch_size_var = 1
+            self.batch_slider.setEnabled(False)
+
         self.batch_slider.setValue(self.batch_size_var)
         self.batch_slider.valueChanged.connect(self._update_batch_size_label)
         self.batch_slider.valueChanged.connect(self._on_setting_changed)
@@ -410,25 +417,30 @@ class AdvancedPage(QWidget):
         batch_layout.addWidget(batch_label_frame)
         batch_layout.addWidget(self.batch_slider)
 
-        batch_explain = QLabel("数值越大处理越快，但显存占用越高。显存不足时请调小此值。")
+        # 动态更新说明文字
+        explain_text = "数值越大处理越快，但显存占用越高。显存不足时请调小此值。"
+        if not self.gpu_available:
+            explain_text = "当前处于 CPU 模式，为了保证系统稳定性和内存安全，批处理大小已强制锁定为 1。"
+
+        batch_explain = QLabel(explain_text)
         batch_explain.setStyleSheet("color: #888888; font-size: 12px;")
+        batch_explain.setWordWrap(True)
         batch_layout.addWidget(batch_explain)
 
         accel_layout.addWidget(batch_frame)
 
         # 2. FP16 开关
-        # 替换为开关行
-        self.fp16_switch_row = SwitchRow("使用FP16加速 (需要支持CUDA)", checked=self.use_fp16_var)
-        self.fp16_switch_row.switch().setEnabled(
-            self.controller.cuda_available if hasattr(self.controller, 'cuda_available') else False)
+        # 替换为开关行 (更新文本以兼容多平台)
+        self.fp16_switch_row = SwitchRow("使用FP16加速 (需要支持的 GPU)", checked=self.use_fp16_var)
+        self.fp16_switch_row.switch().setEnabled(self.gpu_available)
         self.fp16_switch_row.toggled.connect(self._on_setting_changed)
         self.components_to_update.append(self.fp16_switch_row)
         accel_layout.addWidget(self.fp16_switch_row)
 
-        if not (hasattr(self.controller, 'cuda_available') and self.controller.cuda_available):
-            cuda_warning = QLabel("未检测到CUDA，FP16加速已禁用")
-            cuda_warning.setStyleSheet("color: #e74c3c; font-size: 12px;")
-            accel_layout.addWidget(cuda_warning)
+        if not self.gpu_available:
+            gpu_warning = QLabel("未检测到支持的硬件加速 (CUDA/XPU)，FP16加速已禁用")
+            gpu_warning.setStyleSheet("color: #e74c3c; font-size: 12px;")
+            accel_layout.addWidget(gpu_warning)
 
         self.accel_panel.add_content_widget(accel_widget)
         content_layout.addWidget(self.accel_panel)
@@ -1201,8 +1213,9 @@ class AdvancedPage(QWidget):
         """重置模型参数"""
         self.iou_var = 0.3
         self.conf_var = 0.25
-        self.use_fp16_var = self.controller.cuda_available if hasattr(self.controller, 'cuda_available') else False
-        self.batch_size_var = 16
+        self.use_fp16_var = getattr(self.controller, 'gpu_available', False)
+        # 默认值根据 GPU 可用性动态变化
+        self.batch_size_var = 4 if getattr(self.controller, 'gpu_available', False) else 1
         self.use_augment_var = True
         self.use_agnostic_nms_var = True
 
@@ -1227,7 +1240,14 @@ class AdvancedPage(QWidget):
         try:
             import torch
             version = torch.__version__
-            device = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
+
+            # 改进设备检测逻辑 (仅使用原生API)
+            device = "CPU"
+            if torch.cuda.is_available():
+                device = "GPU (CUDA)"
+            elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+                device = "GPU (Intel XPU)"
+
             self.pytorch_status_var = f"已安装 v{version} ({device})"
             self.pytorch_status_label.setText(self.pytorch_status_var)
         except ImportError:
@@ -1946,8 +1966,16 @@ class AdvancedPage(QWidget):
             self.fp16_switch_row.setChecked(self.use_fp16_var)
 
         if "batch_size" in settings:
-            self.batch_size_var = int(settings["batch_size"])
+            loaded_batch_size = int(settings["batch_size"])
+            # 如果没有 GPU，强制覆盖读取到的配置并重置为 1
+            if not self.gpu_available:
+                self.batch_size_var = 1
+            else:
+                self.batch_size_var = loaded_batch_size
+
+            self.batch_slider.blockSignals(True)
             self.batch_slider.setValue(self.batch_size_var)
+            self.batch_slider.blockSignals(False)
             self.batch_size_label.setText(str(self.batch_size_var))
 
         if "use_augment" in settings:

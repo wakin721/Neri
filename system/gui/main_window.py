@@ -898,12 +898,18 @@ class ObjectDetectionGUI(QMainWindow):
         self.is_dark_mode = False
         self.accent_color = Win11Colors.LIGHT_ACCENT  # 默认使用浅色模式的颜色
 
-        # 检查CUDA可用性
+        # 检查GPU加速可用性 (兼容 CUDA 和 Intel XPU)
+        self.gpu_available = False
         try:
             import torch
-            self.cuda_available = torch.cuda.is_available()
+            # 1. 检查 NVIDIA CUDA 或 AMD ROCm
+            if torch.cuda.is_available():
+                self.gpu_available = True
+            # 2. 检查原生 Intel XPU
+            elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+                self.gpu_available = True
         except ImportError:
-            self.cuda_available = False
+            pass
 
         self.is_processing = False
         self.processing_thread = None
