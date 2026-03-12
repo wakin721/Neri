@@ -752,6 +752,7 @@ class AdvancedPage(QWidget):
         # 修改为纯环境选项，移除具体的 PyTorch 版本号
         versions = [
             "自动检测",
+            "CUDA 13.0",
             "CUDA 12.8",
             "CUDA 12.6",
             "CUDA 12.4",
