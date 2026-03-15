@@ -123,7 +123,8 @@ class ReDetectThread(QThread):
                     species_info = batch_results[i]
                     detect_results = species_info.get('detect_results')
                     self.controller.image_processor.save_detection_info_json(
-                        detect_results, f_name, species_info, self.temp_photo_dir
+                        detect_results, f_name, species_info, self.temp_photo_dir,
+                        extra_db_dir=self._get_image_folder_dir()
                     )
                     processed_units += 1
                     elapsed = time.time() - start_time
@@ -181,11 +182,13 @@ class ReDetectThread(QThread):
 
                             if best_detect_results is not None:
                                 self.controller.image_processor.save_detection_info_json(
-                                    best_detect_results, vid, best_species_info, self.temp_photo_dir
+                                    best_detect_results, vid, best_species_info, self.temp_photo_dir,
+                                    extra_db_dir=self._get_image_folder_dir()
                                 )
                             else:
                                 self.controller.image_processor.save_detection_info_json(
-                                    [], vid, {'detect_results': []}, self.temp_photo_dir
+                                    [], vid, {'detect_results': []}, self.temp_photo_dir,
+                                    extra_db_dir=self._get_image_folder_dir()
                                 )
                 else:
                     def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
@@ -198,7 +201,9 @@ class ReDetectThread(QThread):
 
                     self.controller.image_processor.detect_video_species(
                         vid_path, self.temp_photo_dir, use_fp16, iou, conf, augment, agnostic_nms,
-                        status_callback=video_log_callback, vid_stride=vid_stride, temp_video_dir=self.temp_photo_dir
+                        status_callback=video_log_callback, vid_stride=vid_stride,
+                        temp_video_dir=self.temp_photo_dir,
+                        extra_db_dir=self._get_image_folder_dir()
                     )
                     processed_units += file_unit_map[vid]
 
@@ -207,13 +212,25 @@ class ReDetectThread(QThread):
             logger.error(f"ReDetectThread 报错: {e}", exc_info=True)
             self.finished.emit(False)
 
+    def _get_image_folder_dir(self) -> str:
+        """判断是否启用图像文件夹缓存，返回图像源目录或 None。"""
+        try:
+            if not getattr(
+                    getattr(self.controller, 'advanced_page', None),
+                    'save_cache_to_image_folder_var', False
+            ):
+                return None
+            return self.source_dir if self.source_dir and os.path.isdir(self.source_dir) else None
+        except Exception:
+            return None
+
 
 class ValidationExportThread(QThread):
     """用于后台处理和导出数据的独立线程，防止界面卡死"""
     progress_updated = Signal(int, int, float, float, float)
     finished = Signal(bool, str)
 
-    def __init__(self, temp_dir, source_dir, output_path, file_format, confidence_settings, columns_to_export, min_frame_ratio, supported_video_exts):
+    def __init__(self, temp_dir, source_dir, output_path, file_format, confidence_settings, columns_to_export, min_frame_ratio, supported_video_exts, save_to_source=False):
         super().__init__()
         self.temp_dir = temp_dir
         self.source_dir = source_dir
@@ -223,6 +240,7 @@ class ValidationExportThread(QThread):
         self.columns_to_export = columns_to_export
         self.min_frame_ratio = min_frame_ratio
         self.supported_video_exts = supported_video_exts
+        self.save_to_source = save_to_source
 
     def run(self):
         import time
@@ -232,40 +250,77 @@ class ValidationExportThread(QThread):
         from system.metadata_extractor import ImageMetadataExtractor
         from system.config import SUPPORTED_IMAGE_EXTENSIONS
         from system.data_processor import DataProcessor
+        from system.detection_db import get_db_path, get_all_detections_with_validation
 
         start_time = time.time()
         try:
-            json_files = [f for f in os.listdir(self.temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
-            total_files = len(json_files)
-            # 总工作量设定为：读取JSON(1倍) + 处理和生成表格(1倍)
+            temp_db_path = get_db_path(self.temp_dir)
+            source_db_path = get_db_path(self.source_dir)
+            rows = []
+
+            # 1. 优先从源目录 SQLite 数据库加载
+            if self.save_to_source and os.path.exists(source_db_path):
+                try:
+                    rows = get_all_detections_with_validation(source_db_path)
+                except Exception as e:
+                    pass
+
+            # 2. 回退到软件缓存的 SQLite 数据库
+            if not rows and os.path.exists(temp_db_path):
+                try:
+                    rows = get_all_detections_with_validation(temp_db_path)
+                except Exception as e:
+                    pass
+
+            search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
+            if self.supported_video_exts:
+                search_extensions.extend(list(self.supported_video_exts))
+
+            # 3. 【兼容老版本】如果数据库没有数据，回退读取 temp 目录下的 JSON 文件
+            if not rows:
+                json_files = [f for f in os.listdir(self.temp_dir) if
+                              f.lower().endswith('.json') and f not in ('validation.json', 'conf.json')]
+                for jf in json_files:
+                    base_name = os.path.splitext(jf)[0]
+                    rows.append({
+                        'base_name': base_name,
+                        'image_filename': base_name,
+                        'json_path': os.path.join(self.temp_dir, jf)
+                    })
+
+            if not rows:
+                self.finished.emit(False, "未能成功读取到任何有效数据，无法导出。")
+                return
+
+            total_files = len(rows)
             total_work = total_files * 2
 
             all_image_data = []
             earliest_date = None
             processed_units = 0
 
-            # --- 阶段 1: 读取所有 JSON 文件 ---
-            for json_file in json_files:
-                json_path = os.path.join(self.temp_dir, json_file)
-                image_filename_base = os.path.splitext(json_file)[0]
-                found_path = None
-                is_video = False
+            # --- 阶段 1: 遍历数据记录 ---
+            for row in rows:
+                base_name = row['base_name']
+                image_filename = row['image_filename']
+                found_path = os.path.join(self.source_dir, image_filename)
 
-                search_extensions = list(SUPPORTED_IMAGE_EXTENSIONS)
-                if self.supported_video_exts:
-                    search_extensions.extend(list(self.supported_video_exts))
-
-                for ext in search_extensions:
-                    temp_path = os.path.join(self.source_dir, image_filename_base + ext)
-                    if os.path.exists(temp_path):
-                        found_path = temp_path
-                        if self.supported_video_exts and ext.lower() in self.supported_video_exts:
-                            is_video = True
-                        break
+                # 如果记录的文件名在源目录找不到，尝试容错扩展名
+                if not os.path.exists(found_path):
+                    found_path = None
+                    for ext in search_extensions:
+                        temp_path = os.path.join(self.source_dir, base_name + ext)
+                        if os.path.exists(temp_path):
+                            found_path = temp_path
+                            break
 
                 if not found_path:
                     processed_units += 1
                     continue
+
+                is_video = False
+                if self.supported_video_exts and os.path.splitext(found_path)[1].lower() in self.supported_video_exts:
+                    is_video = True
 
                 try:
                     metadata = {}
@@ -280,8 +335,12 @@ class ValidationExportThread(QThread):
                     else:
                         metadata, _ = ImageMetadataExtractor.extract_metadata(found_path, os.path.basename(found_path))
 
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        json_data = json.load(f)
+                    # 3. 【兼容老版本】优先读 SQLite 的字段，没有则读物理 JSON 文件
+                    if 'detection_json' in row:
+                        json_data = json.loads(row['detection_json'])
+                    else:
+                        with open(row['json_path'], 'r', encoding='utf-8') as f:
+                            json_data = json.load(f)
 
                     metadata.update(json_data)
                     all_image_data.append(metadata)
@@ -291,7 +350,7 @@ class ValidationExportThread(QThread):
                         if earliest_date is None or date_taken < earliest_date:
                             earliest_date = date_taken
                 except Exception as e:
-                    pass # 忽略单文件错误，继续处理
+                    pass  # 忽略单文件错误，继续处理
 
                 # 刷新进度
                 processed_units += 1
@@ -301,7 +360,7 @@ class ValidationExportThread(QThread):
                 self.progress_updated.emit(processed_units, total_work, elapsed, remain, speed)
 
             if not all_image_data:
-                self.finished.emit(False, "未能成功读取到任何有效数据，无法导出。")
+                self.finished.emit(False, "数据读取成功，但未找到对应的物理文件。")
                 return
 
             # --- 阶段 2: 数据预处理 ---
@@ -313,7 +372,6 @@ class ValidationExportThread(QThread):
 
             # --- 阶段 3: 执行导出 ---
             def progress_cb(current, total):
-                # 映射到总进度的后半段
                 current_total = total_files + current
                 elapsed = time.time() - start_time
                 speed = current_total / elapsed if elapsed > 0 else 0
@@ -333,6 +391,117 @@ class ValidationExportThread(QThread):
 
         except Exception as e:
             self.finished.emit(False, f"导出过程中发生异常: {str(e)}")
+
+
+class BackgroundUpdateThread(QThread):
+    """用于在后台处理批量物种校验和数据保存的独立线程，防止UI卡死"""
+    finished = Signal(bool)
+
+    def __init__(self, update_tasks, temp_photo_dir, source_dir, save_to_source, full_validation_data):
+        super().__init__()
+        self.update_tasks = update_tasks
+        self.temp_photo_dir = temp_photo_dir
+        self.source_dir = source_dir
+        self.save_to_source = save_to_source
+        self.full_validation_data = full_validation_data.copy()
+
+    def run(self):
+        import sqlite3
+        import json
+        import os
+        from datetime import datetime
+        from system.detection_db import get_db_path, update_detection, init_db, upsert_validation, delete_validation, delete_validation_bulk
+
+        try:
+            db_path = get_db_path(self.temp_photo_dir)
+            if not os.path.exists(db_path):
+                init_db(db_path)
+
+            source_db_path = None
+            if self.save_to_source and self.source_dir and os.path.isdir(self.source_dir):
+                source_db_path = get_db_path(self.source_dir)
+                if not os.path.exists(source_db_path):
+                    init_db(source_db_path)
+
+            # 1. 批量更新检测数据 (SQLite & JSON 回退)
+            for task in self.update_tasks:
+                file_name = task['file_name']
+                base_name = os.path.splitext(file_name)[0]
+                action = task.get('action')
+
+                if action in ('empty', 'update', 'unverified'):
+                    detection_info = {}
+                    try:
+                        with sqlite3.connect(db_path) as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT detection_json FROM detections WHERE base_name=?", (base_name,))
+                            row = cursor.fetchone()
+                            if row:
+                                detection_info = json.loads(row[0])
+                    except Exception:
+                        pass
+
+                    json_path = os.path.join(self.temp_photo_dir, f"{base_name}.json")
+                    if not detection_info and os.path.exists(json_path):
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            detection_info = json.load(f)
+
+                    changed = False
+                    if action == 'unverified':
+                        if detection_info.get('最低置信度') == '人工校验':
+                            for key in ['最低置信度', '物种名称', '物种数量', '备注', '检测时间']:
+                                if key in detection_info:
+                                    detection_info.pop(key, None)
+                                    changed = True
+                    else:
+                        if task.get('new_species') is not None:
+                            detection_info['物种名称'] = task['new_species']
+                            detection_info['最低置信度'] = '人工校验'
+                            detection_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            changed = True
+                        if task.get('new_count') is not None:
+                            detection_info['物种数量'] = task['new_count']
+                            changed = True
+                        if task.get('new_remark') is not None:
+                            detection_info['备注'] = task['new_remark']
+                            changed = True
+
+                    if changed:
+                        update_detection(db_path, base_name, detection_info)
+                        if source_db_path:
+                            update_detection(source_db_path, base_name, detection_info)
+
+            # 2. 批量处理 validation.json 校验状态
+            files_to_remove = [t['file_name'] for t in self.update_tasks if t.get('action') == 'unverified']
+            for f in files_to_remove:
+                self.full_validation_data.pop(f, None)
+
+            for filename, value in self.full_validation_data.items():
+                if value is None:
+                    delete_validation(db_path, filename)
+                    if source_db_path:
+                        delete_validation(source_db_path, filename)
+                else:
+                    upsert_validation(db_path, filename, bool(value))
+                    if source_db_path:
+                        upsert_validation(source_db_path, filename, bool(value))
+
+            if files_to_remove:
+                delete_validation_bulk(db_path, files_to_remove)
+                if source_db_path:
+                    delete_validation_bulk(source_db_path, files_to_remove)
+
+            val_json_path = os.path.join(self.temp_photo_dir, "validation.json")
+            with open(val_json_path, 'w', encoding='utf-8') as f:
+                clean_dict = {k: v for k, v in self.full_validation_data.items() if v is not None}
+                json.dump(clean_dict, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+            self.finished.emit(True)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"后台批量更新失败: {e}")
+            self.finished.emit(False)
 
 
 class QuantityInputDialog(QDialog):
@@ -897,11 +1066,11 @@ class VideoPlayerThread(QThread):
     playback_finished = Signal()
     pause_state_changed = Signal(bool)
 
-    def __init__(self, video_path, json_path, conf_threshold, draw_boxes=True, min_frame_ratio=0.0, start_frame=0,
+    def __init__(self, video_path, detection_data, conf_threshold, draw_boxes=True, min_frame_ratio=0.0, start_frame=0,
                  parent=None):
         super().__init__(parent)
         self.video_path = video_path
-        self.json_path = json_path
+        self.detection_data = detection_data
         self.conf_threshold = conf_threshold
         self.draw_boxes = draw_boxes
         self.min_frame_ratio = min_frame_ratio
@@ -1018,16 +1187,15 @@ class VideoPlayerThread(QThread):
         self.wait()
 
     def _parse_tracking_json(self):
-        """解析跟踪JSON数据，转换为以帧为索引的字典"""
+        """解析内存中的跟踪数据字典，转换为以帧为索引的字典"""
         parsed_frames = {'frames': {}, 'stride': 1}
 
-        if not self.json_path or not os.path.exists(self.json_path):
+        # 变更为直接使用传入的字典，不再 open file
+        if not self.detection_data:
             return parsed_frames
 
         try:
-            with open(self.json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
+            data = self.detection_data
             parsed_frames['stride'] = data.get('vid_stride', 1)
             total_frames = data.get('total_frames_processed', 0)
 
@@ -2012,31 +2180,53 @@ class SpeciesValidationPage(QWidget):
 
         image_basename_map = {os.path.splitext(f)[0]: f for f in source_files}
 
-        # ── 初始化 / 迁移 SQLite ─────────────────────────────────────
-        db_path = get_db_path(photo_dir)
-        if not os.path.exists(db_path):
-            init_db(db_path)
-            # 首次使用：将已有 JSON 文件批量迁移
-            migrate_from_json(db_path, photo_dir, image_basename_map)
+        # ── 初始化 / 选择优先加载的 SQLite ─────────────────────────────
+        save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                 False)
+        source_db_path = get_db_path(source_dir)
+        temp_db_path = get_db_path(photo_dir)
+
+        target_db_path = None
+
+        if save_to_source and os.path.exists(source_db_path):
+            # 优先从源目录读取
+            target_db_path = source_db_path
         else:
-            # 检查是否有尚未入库的新 JSON（例如首次重测后 DB 未同步的边缘情况）
-            try:
-                json_files_on_disk = {
-                    os.path.splitext(f)[0]
-                    for f in os.listdir(photo_dir)
-                    if f.lower().endswith('.json') and f != 'validation.json'
-                }
-                import sqlite3 as _sq
-                with _sq.connect(db_path) as _c:
-                    in_db = {r[0] for r in _c.execute("SELECT base_name FROM detections")}
-                if json_files_on_disk - in_db:
-                    migrate_from_json(db_path, photo_dir, image_basename_map)
-            except Exception as e:
-                logger.warning(f"增量迁移检查失败: {e}")
+            # 否则从 temp_dir 读取，并执行必要的初始化或同步
+            target_db_path = temp_db_path
+            if not os.path.exists(temp_db_path):
+                init_db(temp_db_path)
+                migrate_from_json(temp_db_path, photo_dir, image_basename_map)
+
+                if save_to_source and os.path.exists(source_db_path):
+                    try:
+                        from system.detection_db import get_all_detections_with_validation, upsert_detection
+                        img_rows = get_all_detections_with_validation(source_db_path)
+                        for r in img_rows:
+                            import json as _json
+                            upsert_detection(temp_db_path, r["base_name"], r["image_filename"],
+                                             _json.loads(r["detection_json"]))
+                        logger.info(f"已从图像文件夹 db 恢复 {len(img_rows)} 条记录到软件缓存")
+                    except Exception as e:
+                        logger.warning(f"从图像文件夹 db 恢复失败: {e}")
+            else:
+                try:
+                    json_files_on_disk = {
+                        os.path.splitext(f)[0]
+                        for f in os.listdir(photo_dir)
+                        if f.lower().endswith('.json') and f != 'validation.json'
+                    }
+                    import sqlite3 as _sq
+                    with _sq.connect(temp_db_path) as _c:
+                        in_db = {r[0] for r in _c.execute("SELECT base_name FROM detections")}
+                    if json_files_on_disk - in_db:
+                        migrate_from_json(temp_db_path, photo_dir, image_basename_map)
+                except Exception as e:
+                    logger.warning(f"增量迁移检查失败: {e}")
 
         # ── 核心：单次查询取全量数据 ──────────────────────────────────
         try:
-            rows = get_all_detections_with_validation(db_path)
+            rows = get_all_detections_with_validation(target_db_path)
         except Exception as e:
             logger.error(f"SQLite 读取失败: {e}")
             return
@@ -2499,20 +2689,52 @@ class SpeciesValidationPage(QWidget):
         source_dir = self.controller.start_page.get_file_path()
         media_path = os.path.join(source_dir, file_name)
 
-        # JSON 路径
+        # 使用SQLite 加载
         photo_dir = self.controller.get_temp_photo_dir()
         json_path = None
         if photo_dir:
-            json_path = os.path.join(photo_dir, f"{os.path.splitext(file_name)[0]}.json")
-            if os.path.exists(json_path):
+            base_name = os.path.splitext(file_name)[0]
+            json_path = os.path.join(photo_dir, f"{base_name}.json")
+
+            loaded = False
+            save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                     False)
+
+            # 优先从各级数据库加载
+            try:
+                from system.detection_db import get_db_path, get_detection
+                source_db_path = get_db_path(source_dir)
+                temp_db_path = get_db_path(photo_dir)
+
+                # 1. 优先从图像源目录 SQLite 加载
+                if save_to_source and os.path.exists(source_db_path):
+                    data = get_detection(source_db_path, base_name)
+                    if data:
+                        self.current_species_info = data
+                        self._update_detection_info_display()
+                        loaded = True
+
+                # 2. 回退到软件缓存目录 SQLite 加载
+                if not loaded and os.path.exists(temp_db_path):
+                    data = get_detection(temp_db_path, base_name)
+                    if data:
+                        self.current_species_info = data
+                        self._update_detection_info_display()
+                        loaded = True
+            except Exception as e:
+                logger.warning(f"从 SQLite 加载检测信息失败: {e}")
+
+            # 3. 回退到旧 JSON（仅当 SQLite 无记录时）
+            if not loaded and os.path.exists(json_path):
                 try:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         self.current_species_info = json.load(f)
                     self._update_detection_info_display()
-                except:
-                    pass
-            else:
-                # 未检测到JSON文件（未检测），强制重置显示信息
+                    loaded = True
+                except Exception as e:
+                    logger.warning(f"从 JSON 加载检测信息失败: {e}")
+
+            if not loaded:
                 self.species_info_label.setText("物种:  | 数量:  | 类型:  | 置信度: ")
 
         # 加载图片信息后，刷新下拉框
@@ -2525,7 +2747,7 @@ class SpeciesValidationPage(QWidget):
                 self.species_image_label.setText("视频文件不存在")
                 return
             self.species_image_label.setText("正在加载视频...")
-            self._start_video_thread(media_path, json_path)
+            self._start_video_thread(media_path)
         else:
             try:
                 self.species_validation_original_image = Image.open(media_path)
@@ -2646,6 +2868,38 @@ class SpeciesValidationPage(QWidget):
                             }
                         """)
 
+    def _run_background_update(self, tasks, on_finished_callback=None):
+        """挂起界面，启动后台更新线程"""
+        self.controller.status_bar.show_progress()
+        self.controller.status_bar.status_label.setText(f"正在后台保存 {len(tasks)} 项修改，请稍候...")
+        self.species_photo_listbox.setEnabled(False)
+        self.species_listbox.setEnabled(False)
+
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        source_dir = self.controller.start_page.get_file_path()
+        save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                 False)
+
+        # 实例化后台更新线程
+        self.bg_update_thread = BackgroundUpdateThread(
+            tasks, temp_photo_dir, source_dir, save_to_source, self.validation_data
+        )
+
+        def thread_finished(success):
+            self.controller.status_bar.hide_progress()
+            self.species_photo_listbox.setEnabled(True)
+            self.species_listbox.setEnabled(True)
+            if success:
+                self.controller.status_bar.status_label.setText("✅ 修改已成功保存")
+            else:
+                self.controller.status_bar.status_label.setText("❌ 保存过程出现异常，请查看日志")
+
+            if on_finished_callback:
+                on_finished_callback()
+
+        self.bg_update_thread.finished.connect(thread_finished)
+        self.bg_update_thread.start()
+
     def _do_auto_advance(self):
         """满足个数匹配条件后自动跳转的通用逻辑"""
         if hasattr(self.controller, 'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
@@ -2689,83 +2943,57 @@ class SpeciesValidationPage(QWidget):
             self.species_image_label.setText("无法显示图像")
 
     def _mark_and_move_to_next(self, is_correct=None, species_name=None, count=None, btn_widget=None):
-        """处理标记逻辑并根据条件跳转到下一张图片。"""
+        """处理标记逻辑并根据条件跳转到下一张图片。(支持批量后台)"""
         selection = self.species_photo_listbox.selectedItems()
         if not selection:
             return
 
-        file_name = selection[0].text()
-        self._push_to_undo_stack(file_name)
-
-        # "正确" 和 "空" 按钮仍然会立即跳转 (它们是完整独立操作)
+        tasks = []
         if is_correct is True:
-            self.validation_data[file_name] = True
-            self._save_validation_data()
-            self._do_auto_advance()
+            for item in selection:
+                f_name = item.text()
+                self._push_to_undo_stack(f_name)
+                self.validation_data[f_name] = True
+                tasks.append({'file_name': f_name, 'action': 'correct'})
+            self._run_background_update(tasks, self._do_auto_advance)
             return
 
         if species_name == "空" and count == "空":
-            self._update_json_file(file_name, new_species="空", new_count="空")
-            self.validation_data[file_name] = False
-            self._save_validation_data()
-            self._do_auto_advance()
+            for item in selection:
+                f_name = item.text()
+                self._push_to_undo_stack(f_name)
+                self.validation_data[f_name] = False
+                tasks.append({'file_name': f_name, 'action': 'empty', 'new_species': '空', 'new_count': '空'})
+            self._run_background_update(tasks, self._do_auto_advance)
             return
 
-        # 处理物种按钮多选点击
         if species_name and btn_widget:
-            # 切换按钮选中状态 (Toggle)
+            # 切换按钮选中状态
             if btn_widget in self._selected_species_buttons:
                 self._selected_species_buttons.remove(btn_widget)
                 if species_name in self._selected_species_names:
                     self._selected_species_names.remove(species_name)
-                # 恢复默认样式
                 padding = btn_widget.property("base_padding") or "2px 8px"
                 font_size = btn_widget.property("base_font_size") or "13px"
                 btn_widget.setStyleSheet(f"""
-                    QPushButton {{
-                        max-width: 80px;
-                        min-width: 60px;
-                        min-height: 30px;
-                        max-height: 30px;
-                        padding: {padding};
-                        font-size: {font_size};
-                        font-weight: 600;
-                        text-align: center;
-                        border-radius: 12px;
-                    }}
+                    QPushButton {{ max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px; padding: {padding}; font-size: {font_size}; font-weight: 600; text-align: center; border-radius: 12px; }}
                 """)
             else:
                 self._selected_species_buttons.append(btn_widget)
                 self._selected_species_names.append(species_name)
-                # 设置高亮样式
                 padding = btn_widget.property("base_padding") or "2px 8px"
                 font_size = btn_widget.property("base_font_size") or "13px"
                 btn_widget.setStyleSheet(f"""
-                    QPushButton {{
-                        max-width: 80px;
-                        min-width: 60px;
-                        min-height: 30px;
-                        max-height: 30px;
-                        padding: {padding};
-                        font-size: {font_size};
-                        font-weight: bold;
-                        text-align: center;
-                        border-radius: 12px;
-                        background-color: #5d3a4f;
-                        color: white;
-                    }}
+                    QPushButton {{ max-width: 80px; min-width: 60px; min-height: 30px; max-height: 30px; padding: {padding}; font-size: {font_size}; font-weight: bold; text-align: center; border-radius: 12px; background-color: #5d3a4f; color: white; }}
                 """)
 
             self._increment_quick_mark_count(species_name)
-
             new_species_str = ",".join(self._selected_species_names) if self._selected_species_names else None
 
-            # 数量处理
             new_count_str = None
             if self._selected_counts:
                 new_count_str = ",".join(self._selected_counts)
             else:
-                # 若还未选数量，尝试继承原有数量
                 count_str = str(self.current_species_info.get('物种数量', '')).strip()
                 if not count_str or count_str in ['空', '未知']:
                     info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
@@ -2782,9 +3010,12 @@ class SpeciesValidationPage(QWidget):
                     except (ValueError, TypeError):
                         new_count_str = None
 
-            self._update_json_file(file_name, new_species=new_species_str, new_count=new_count_str)
-            self.validation_data[file_name] = False
-            self._save_validation_data()
+            for item in selection:
+                f_name = item.text()
+                self._push_to_undo_stack(f_name)
+                self.validation_data[f_name] = False
+                tasks.append({'file_name': f_name, 'action': 'update', 'new_species': new_species_str,
+                              'new_count': new_count_str})
 
             if new_species_str is not None:
                 self.current_species_info['物种名称'] = new_species_str
@@ -2792,43 +3023,90 @@ class SpeciesValidationPage(QWidget):
             if new_count_str is not None:
                 self.current_species_info['物种数量'] = new_count_str
 
-            # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
-            if len(self._selected_species_names) > 0 and len(self._selected_species_names) == len(self._selected_counts):
+            def on_finished():
+                if len(self._selected_species_names) > 0 and len(self._selected_species_names) == len(
+                        self._selected_counts):
+                    self._do_auto_advance()
+                else:
+                    self.species_photo_listbox.setFocus()
+                    self._update_detection_info_display()
+
+            self._run_background_update(tasks, on_finished)
+
+    def _on_quantity_button_press(self, count, btn_widget):
+        """处理数量按钮点击事件 (支持多选及后台打标)"""
+        selection = self.species_photo_listbox.selectedItems()
+        if not selection:
+            return
+
+        final_count = str(count)
+        if count == "更多":
+            dialog = QuantityInputDialog(self, title="输入数量", prompt="请输入物种的数量:", default_value=1)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                final_count = str(dialog.result_value)
+            else:
+                self.species_photo_listbox.setFocus()
+                return
+
+        if count != "更多":
+            self._selected_quantity_buttons.append(btn_widget)
+            btn_widget.setStyleSheet("""
+                QPushButton { max-width: 58px; min-width: 45px; min-height: 25px; max-height: 25px; padding: 4px; font-size: 14px; font-weight: bold; text-align: center; border-radius: 12px; background-color: #5d3a4f; color: white; }
+            """)
+
+        self._selected_counts.append(final_count)
+
+        new_count_str = ",".join(self._selected_counts)
+        new_species_str = ",".join(self._selected_species_names) if self._selected_species_names else None
+
+        if new_species_str is None:
+            sp_name = str(self.current_species_info.get('物种名称', '')).strip()
+            if not sp_name or sp_name in ['未知', '空', '[未校验] 空', '[已校验] 空']:
+                info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
+                for part in info_text.split(" | "):
+                    part = part.strip()
+                    if part.startswith("物种:"):
+                        sp_name = part.replace("物种:", "").strip()
+                        break
+
+            if sp_name.startswith("[未校验] "):
+                sp_name = sp_name.replace("[未校验] ", "")
+            elif sp_name.startswith("[已校验] "):
+                sp_name = sp_name.replace("[已校验] ", "")
+
+            if sp_name and sp_name not in ['空', '未知', '-', '未检测', '需人工检验']:
+                new_species_str = sp_name
+
+        tasks = []
+        for item in selection:
+            f_name = item.text()
+            self._push_to_undo_stack(f_name)
+            self.validation_data[f_name] = False
+            tasks.append(
+                {'file_name': f_name, 'action': 'update', 'new_species': new_species_str, 'new_count': new_count_str})
+
+        if new_species_str is not None:
+            self.current_species_info['物种名称'] = new_species_str
+            self.current_species_info['最低置信度'] = '人工校验'
+        if new_count_str is not None:
+            self.current_species_info['物种数量'] = new_count_str
+
+        def on_finished():
+            if len(self._selected_counts) > 0 and len(self._selected_counts) == len(self._selected_species_names):
                 self._do_auto_advance()
             else:
-                # 个数不匹配，保留当前页面并刷新界面显示
                 self.species_photo_listbox.setFocus()
                 self._update_detection_info_display()
 
+        self._run_background_update(tasks, on_finished)
+
     def _mark_other_species(self):
-        """处理"其他"按钮的逻辑，弹出对话框"""
+        """处理"其他"按钮的逻辑（支持多选）"""
         selected_items = self.species_photo_listbox.selectedItems()
         if not selected_items:
             return
-
-        file_name = selected_items[0].text()
-
-        dialog = CorrectionDialog(self, title="输入其他物种信息", original_info=self.current_species_info)
-        # 执行对话框并检查用户是否点击了"确定"
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
-            self._push_to_undo_stack(file_name)
-            species_name, species_count, remark = dialog.result
-            self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
-            # 标记为错误并跳转
-            self._mark_as_error_and_save(file_name)
-            self._increment_quick_mark_count(species_name)
-
-            # 如果自动排序开启，则刷新按钮列表
-            if hasattr(self.controller,
-                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self._load_species_buttons()
-                self.quick_marks_updated.emit()
-
-            self._move_to_next_image()
-            
-        QTimer.singleShot(50, self._refresh_species_list_logic)
-        # 无论对话框结果如何，都将焦点设置回照片列表
-        self.species_photo_listbox.setFocus()
+        # 直接路由给批量逻辑，行为一致
+        self._bulk_mark_other(selected_items)
 
     def _load_species_buttons(self):
         """根据自动排序设置，动态加载快速标记物种按钮，确保近期频次排序不丢失"""
@@ -2919,89 +3197,6 @@ class SpeciesValidationPage(QWidget):
                 lambda checked=False, s=species, b=btn: self._mark_and_move_to_next(species_name=s, btn_widget=b))
             self.species_buttons_layout.addWidget(btn)
 
-    def _on_quantity_button_press(self, count, btn_widget):
-        """处理数量按钮点击事件，并管理按钮多选状态"""
-        selection = self.species_photo_listbox.selectedItems()
-        if not selection:
-            return
-
-        file_name = selection[0].text()
-        self._push_to_undo_stack(file_name)
-
-        final_count = str(count)
-        if count == "更多":
-            dialog = QuantityInputDialog(self, title="输入数量", prompt="请输入物种的数量:", default_value=1)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                final_count = str(dialog.result_value)
-            else:
-                self.species_photo_listbox.setFocus()
-                return
-
-        # 移除切换，每次点击都直接叠加该数量
-        if count != "更多":
-            self._selected_quantity_buttons.append(btn_widget)
-        
-
-            # 设置高亮样式
-            btn_widget.setStyleSheet("""
-                QPushButton {
-                    max-width: 58px;
-                    min-width: 45px;
-                    min-height: 25px;
-                    max-height: 25px;
-                    padding: 4px;
-                    font-size: 14px;
-                    font-weight: bold;
-                    text-align: center;
-                    border-radius: 12px;
-                    background-color: #5d3a4f;
-                    color: white;
-                }
-            """)
-        
-        self._selected_counts.append(final_count)
-        
-        self._mark_as_error_and_save(file_name)
-
-        new_count_str = ",".join(self._selected_counts)
-        new_species_str = ",".join(self._selected_species_names) if self._selected_species_names else None
-
-        # 如果用户没有手动点击物种按钮，尝试继承原有物种名称
-        if new_species_str is None:
-            sp_name = str(self.current_species_info.get('物种名称', '')).strip()
-
-            if not sp_name or sp_name in ['未知', '空', '[未校验] 空', '[已校验] 空']:
-                info_text = self.species_info_label.text() if hasattr(self, 'species_info_label') else ""
-                for part in info_text.split(" | "):
-                    part = part.strip()
-                    if part.startswith("物种:"):
-                        sp_name = part.replace("物种:", "").strip()
-                        break
-
-            # 清理界面状态前缀
-            if sp_name.startswith("[未校验] "):
-                sp_name = sp_name.replace("[未校验] ", "")
-            elif sp_name.startswith("[已校验] "):
-                sp_name = sp_name.replace("[已校验] ", "")
-
-            if sp_name and sp_name not in ['空', '未知', '-', '未检测', '需人工检验']:
-                new_species_str = sp_name
-
-        self._update_json_file(file_name, new_species=new_species_str, new_count=new_count_str)
-
-        if new_species_str is not None:
-            self.current_species_info['物种名称'] = new_species_str
-            self.current_species_info['最低置信度'] = '人工校验'
-        if new_count_str is not None:
-            self.current_species_info['物种数量'] = new_count_str
-
-        # 判断是否触发自动跳转 (数量和物种都已选择，且个数相等)
-        if len(self._selected_counts) > 0 and len(self._selected_counts) == len(self._selected_species_names):
-            self._do_auto_advance()
-        else:
-            self.species_photo_listbox.setFocus()
-            self._update_detection_info_display()
-
     def _on_confidence_slider_changed(self, value):
         """处理置信度滑块值的变化"""
         self._update_confidence_label(value)
@@ -3083,13 +3278,17 @@ class SpeciesValidationPage(QWidget):
         min_frame_ratio = self.controller.advanced_page.min_frame_ratio_var if hasattr(self.controller, 'advanced_page') else 0.0
         columns_to_export = self.controller.advanced_page.get_selected_export_columns() if hasattr(self.controller, 'advanced_page') else None
 
+        # 获取设置状态
+        save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                 False)
+
         # 锁定 UI 防止重复点击
         self.export_button.setEnabled(False)
         self.format_combo.setEnabled(False)
         self.controller.status_bar.show_progress()
         self.controller.status_bar.status_label.setText(f"正在读取文件并导出 {file_format.upper()}，请稍候...")
 
-        # 创建并启动后台导出线程
+        # 创建并启动后台导出线程 (增加 save_to_source 参数)
         self.export_thread = ValidationExportThread(
             temp_dir=temp_dir,
             source_dir=source_dir,
@@ -3098,9 +3297,9 @@ class SpeciesValidationPage(QWidget):
             confidence_settings=confidence_settings,
             columns_to_export=columns_to_export,
             min_frame_ratio=min_frame_ratio,
-            supported_video_exts=getattr(self, 'SUPPORTED_VIDEO_EXTENSIONS', ())
+            supported_video_exts=getattr(self, 'SUPPORTED_VIDEO_EXTENSIONS', ()),
+            save_to_source=save_to_source
         )
-        # 连接进度条信号
         self.export_thread.progress_updated.connect(self.controller.status_bar.update_progress)
         self.export_thread.finished.connect(self._on_export_finished)
         self.export_thread.start()
@@ -3135,26 +3334,67 @@ class SpeciesValidationPage(QWidget):
 
             temp_photo_dir = self.controller.get_temp_photo_dir()
             if not temp_photo_dir or not os.path.exists(temp_photo_dir):
-                MaterialMessageBox.warning(self, "错误", "临时目录不存在，无法检查JSON文件。")
+                MaterialMessageBox.warning(self, "错误", "临时目录不存在，无法获取检测数据。")
                 return
 
-            # Get destination directory
+            # 获取目标目录
             dest_dir = self.controller.start_page.get_save_path()
             if not dest_dir or not os.path.isdir(dest_dir):
                 dest_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
                 if not dest_dir:
-                    return  # User cancelled
+                    return  # 用户取消
 
             error_dir = os.path.join(dest_dir, "error")
             os.makedirs(error_dir, exist_ok=True)
 
             copied_count = 0
-            json_files = [f for f in os.listdir(temp_photo_dir) if f.lower().endswith('.json')]
-            for json_file in json_files:
-                json_path = os.path.join(temp_photo_dir, json_file)
+
+            # --- 关键修改：优先从 SQLite 获取数据，回退读取 JSON ---
+            from system.detection_db import get_db_path, get_all_detections_with_validation
+
+            save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                     False)
+            source_db_path = get_db_path(source_dir)
+            temp_db_path = get_db_path(temp_photo_dir)
+
+            rows = []
+            # 1. 源目录数据库
+            if save_to_source and os.path.exists(source_db_path):
                 try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
+                    rows = get_all_detections_with_validation(source_db_path)
+                except Exception as e:
+                    logger.warning(f"读取源目录 SQLite 失败: {e}")
+
+            # 2. 临时目录数据库
+            if not rows and os.path.exists(temp_db_path):
+                try:
+                    rows = get_all_detections_with_validation(temp_db_path)
+                except Exception as e:
+                    logger.warning(f"读取缓存 SQLite 失败: {e}")
+
+            # 3. JSON 兼容
+            if not rows:
+                json_files = [f for f in os.listdir(temp_photo_dir) if
+                              f.lower().endswith('.json') and f not in ('validation.json', 'conf.json')]
+                for jf in json_files:
+                    base_name = os.path.splitext(jf)[0]
+                    rows.append({
+                        'base_name': base_name,
+                        'image_filename': base_name,
+                        'json_path': os.path.join(temp_photo_dir, jf)
+                    })
+
+            if rows:
+                for row in rows:
+                    try:
+                        # 兼容处理
+                        if 'detection_json' in row:
+                            data = json.loads(row['detection_json'])
+                        else:
+                            with open(row['json_path'], 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+
+                        # 判断是否为人工校验（错检数据）
                         if data.get("最低置信度") == "人工校验":
                             species_name = data.get("物种名称", "unknown")
                             if species_name == "[未校验] 空":
@@ -3163,23 +3403,33 @@ class SpeciesValidationPage(QWidget):
                             species_dir = os.path.join(error_dir, species_name)
                             os.makedirs(species_dir, exist_ok=True)
 
-                            image_filename_base = os.path.splitext(json_file)[0]
+                            image_filename = row['image_filename']
+                            source_path = os.path.join(source_dir, image_filename)
 
-                            # Find the corresponding image file (support multiple extensions)
-                            for ext in SUPPORTED_IMAGE_EXTENSIONS:
-                                image_filename = image_filename_base + ext
-                                source_path = os.path.join(source_dir, image_filename)
-                                if os.path.exists(source_path):
-                                    dest_path = os.path.join(species_dir, image_filename)
-                                    shutil.copy2(source_path, dest_path)
-                                    copied_count += 1
-                                    break
-                except Exception as e:
-                    logger.error(f"处理JSON文件 {json_file} 时出错: {e}")
+                            # 复制物理文件
+                            if os.path.exists(source_path):
+                                dest_path = os.path.join(species_dir, image_filename)
+                                shutil.copy2(source_path, dest_path)
+                                copied_count += 1
+                            else:
+                                # 容错逻辑：尝试其他扩展名
+                                image_filename_base = row['base_name']
+                                for ext in SUPPORTED_IMAGE_EXTENSIONS:
+                                    fallback_filename = image_filename_base + ext
+                                    fallback_path = os.path.join(source_dir, fallback_filename)
+                                    if os.path.exists(fallback_path):
+                                        dest_path = os.path.join(species_dir, fallback_filename)
+                                        shutil.copy2(fallback_path, dest_path)
+                                        copied_count += 1
+                                        break
+                    except Exception as e:
+                        logger.error(f"处理数据记录 {row.get('base_name')} 时出错: {e}")
+            else:
+                logger.warning("未找到有效的数据源（数据库与JSON均为空），无法导出错误照片。")
 
             if copied_count > 0:
                 MaterialMessageBox.information(self, "成功",
-                                        f"已成功导出 {copied_count} 张错误照片到:\n{error_dir}")
+                                               f"已成功导出 {copied_count} 张错误照片到:\n{error_dir}")
             else:
                 MaterialMessageBox.information(self, "提示", "没有错误照片可供导出。")
 
@@ -3234,11 +3484,12 @@ class SpeciesValidationPage(QWidget):
         self._save_validation_data()
 
     def _save_validation_data(self):
-        """保存校验状态到 SQLite（同时保留 validation.json 作为兼容备份）"""
+        """保存校验状态到 SQLite（如果设置开启，同时同步到图像文件夹的 SQLite）"""
         from system.detection_db import get_db_path, init_db, upsert_validation, delete_validation
 
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
+            source_dir = self.controller.start_page.get_file_path()
             if not temp_photo_dir:
                 return
 
@@ -3246,12 +3497,27 @@ class SpeciesValidationPage(QWidget):
             if not os.path.exists(db_path):
                 init_db(db_path)
 
-            # 将内存中的最新状态批量写入 SQLite
+            # 判断是否需要同步到源文件夹
+            save_to_source = getattr(
+                getattr(self.controller, 'advanced_page', None),
+                'save_cache_to_image_folder_var', False
+            )
+            source_db_path = None
+            if save_to_source and source_dir and os.path.isdir(source_dir):
+                source_db_path = get_db_path(source_dir)
+                if not os.path.exists(source_db_path):
+                    init_db(source_db_path)
+
+            # 将内存中的最新状态批量写入 SQLite (双写逻辑)
             for filename, value in self.validation_data.items():
                 if value is None:
                     delete_validation(db_path, filename)
+                    if source_db_path:
+                        delete_validation(source_db_path, filename)
                 else:
                     upsert_validation(db_path, filename, bool(value))
+                    if source_db_path:
+                        upsert_validation(source_db_path, filename, bool(value))
 
             # 同时保留 validation.json（兼容旧版本读取）
             validation_file_path = os.path.join(temp_photo_dir, "validation.json")
@@ -3348,9 +3614,6 @@ class SpeciesValidationPage(QWidget):
 
             # 还原 JSON
             if old_json is not None:
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(old_json, f, ensure_ascii=False, indent=2)
-
                 try:
                     from system.detection_db import get_db_path, update_detection
                     base_name = os.path.splitext(file_name)[0]
@@ -3392,24 +3655,57 @@ class SpeciesValidationPage(QWidget):
 
     def _update_json_file(self, file_name, new_species=None,
                           new_count=None, new_remark=None):
-        """更新 JSON 文件中的物种信息，并同步到 SQLite"""
-        from system.detection_db import get_db_path, update_detection
+        """更新物种信息，直接同步到软件缓存 SQLite（如果设置开启，同时同步到图像文件夹的 SQLite）"""
+        from system.detection_db import get_db_path, update_detection, init_db
 
         try:
             temp_photo_dir = self.controller.get_temp_photo_dir()
+            source_dir = self.controller.start_page.get_file_path()
             if not temp_photo_dir:
                 return
 
             base_name = os.path.splitext(file_name)[0]
             json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+            db_path = get_db_path(temp_photo_dir)
 
-            if os.path.exists(json_path):
+            # --- 优先从SQLite读取数据，或作为兼容从旧JSON读取 ---
+            detection_info = {}
+            import sqlite3
+
+            save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                     False)
+            source_db_path = get_db_path(source_dir) if source_dir else None
+
+            # 1. 优先从图像文件夹的 DB 读取
+            if save_to_source and source_db_path and os.path.exists(source_db_path):
+                try:
+                    with sqlite3.connect(source_db_path) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT detection_json FROM detections WHERE base_name=?", (base_name,))
+                        row = cursor.fetchone()
+                        if row:
+                            detection_info = json.loads(row[0])
+                except Exception:
+                    pass
+
+            # 2. 如果没有，则尝试从软件缓存区的 DB 读取
+            if not detection_info and os.path.exists(db_path):
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT detection_json FROM detections WHERE base_name=?", (base_name,))
+                        row = cursor.fetchone()
+                        if row:
+                            detection_info = json.loads(row[0])
+                except Exception:
+                    pass
+
+            # 3. 如果数据库都没数据，尝试从 JSON 读取
+            if not detection_info and os.path.exists(json_path):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     detection_info = json.load(f)
-            else:
-                detection_info = {}
 
-            # ── 原有字段更新逻辑（保持不变）──
+            # ── 原有字段更新逻辑 ──
             if new_species is not None:
                 detection_info['物种名称'] = new_species
                 detection_info['最低置信度'] = '人工校验'
@@ -3419,17 +3715,28 @@ class SpeciesValidationPage(QWidget):
             if new_remark is not None:
                 detection_info['备注'] = new_remark
 
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(detection_info, f, ensure_ascii=False, indent=2)
-
-            # ── 新增：同步到 SQLite ──
+            # ── 同步到软件缓存 SQLite ──
             try:
-                update_detection(get_db_path(temp_photo_dir), base_name, detection_info)
+                update_detection(db_path, base_name, detection_info)
             except Exception as db_err:
-                logger.warning(f"_update_json_file 同步 SQLite 失败: {db_err}")
+                logger.warning(f"_update_json_file 同步缓存 SQLite 失败: {db_err}")
+
+            # ── 同步到图像源文件夹 SQLite (如果高级设置中开启) ──
+            try:
+                save_to_source = getattr(
+                    getattr(self.controller, 'advanced_page', None),
+                    'save_cache_to_image_folder_var', False
+                )
+                if save_to_source and source_dir and os.path.isdir(source_dir):
+                    source_db_path = get_db_path(source_dir)
+                    if not os.path.exists(source_db_path):
+                        init_db(source_db_path)
+                    update_detection(source_db_path, base_name, detection_info)
+            except Exception as e:
+                logger.warning(f"_update_json_file 同步源文件夹 SQLite 失败: {e}")
 
         except Exception as e:
-            logger.error(f"更新JSON文件失败: {e}")
+            logger.error(f"更新数据失败: {e}")
 
     def _update_detection_info_display(self):
         """更新检测信息显示"""
@@ -3706,127 +4013,70 @@ class SpeciesValidationPage(QWidget):
     def _bulk_mark_correct(self, items):
         """批量标记为正确"""
         file_names = []
+        tasks = []
         for item in items:
             file_name = item.text()
             file_names.append(file_name)
             self._push_to_undo_stack(file_name)
             self.validation_data[file_name] = True
+            tasks.append({'file_name': file_name, 'action': 'correct'})
 
-        self._save_validation_data()
         self._force_select_files = file_names
-        QTimer.singleShot(50, self._refresh_species_list_logic)
+        self._run_background_update(tasks, lambda: QTimer.singleShot(50, self._refresh_species_list_logic))
 
     def _bulk_mark_empty(self, items):
         """批量标记为空"""
         file_names = []
+        tasks = []
         for item in items:
             file_name = item.text()
             file_names.append(file_name)
             self._push_to_undo_stack(file_name)
-            self._update_json_file(file_name, new_species="空", new_count="空")
             self.validation_data[file_name] = False
+            tasks.append({'file_name': file_name, 'action': 'empty', 'new_species': '空', 'new_count': '空'})
 
-        self._save_validation_data()
         self._force_select_files = file_names
-        QTimer.singleShot(50, self._refresh_species_list_logic)
+        self._run_background_update(tasks, lambda: QTimer.singleShot(50, self._refresh_species_list_logic))
 
     def _bulk_mark_other(self, items):
         """批量标注为其他物种"""
-        # 弹窗让用户输入统一的物种信息
-        dialog = CorrectionDialog(self, title=f"批量输入其他物种信息 ({len(items)}项)",
-                                  original_info=self.current_species_info)
-
-        # 执行对话框并检查用户是否点击了"确定"
+        dialog = CorrectionDialog(self, title=f"批量输入其他物种信息 ({len(items)}项)", original_info=self.current_species_info)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result:
             species_name, species_count, remark = dialog.result
 
             file_names = []
-            # 遍历并更新所有选中的项目
+            tasks = []
             for item in items:
                 file_name = item.text()
                 file_names.append(file_name)
                 self._push_to_undo_stack(file_name)
-                self._update_json_file(file_name, new_species=species_name, new_count=species_count, new_remark=remark)
-                self.validation_data[file_name] = False  # 标记为错误(人工修正)
+                self.validation_data[file_name] = False
+                tasks.append({'file_name': file_name, 'action': 'update', 'new_species': species_name, 'new_count': species_count, 'new_remark': remark})
 
-            # 批量保存验证数据
-            self._save_validation_data()
             self._increment_quick_mark_count(species_name)
-
             self._force_select_files = file_names
 
-            # 如果自动排序开启，则刷新快捷按钮列表
-            if hasattr(self.controller,
-                       'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
-                self._load_species_buttons()
-                self.quick_marks_updated.emit()
+            def on_finished():
+                if hasattr(self.controller, 'advanced_page') and self.controller.advanced_page.auto_sort_switch_row.isChecked():
+                    self._load_species_buttons()
+                    self.quick_marks_updated.emit()
+                QTimer.singleShot(50, self._refresh_species_list_logic)
 
-            # 统一刷新左侧列表和 UI
-            QTimer.singleShot(50, self._refresh_species_list_logic)
+            self._run_background_update(tasks, on_finished)
 
     def _bulk_mark_unverified(self, items):
         """批量将状态重置为未校验"""
-        temp_photo_dir = self.controller.get_temp_photo_dir()
-        files_to_remove = []
-
+        file_names = []
+        tasks = []
         for item in items:
             file_name = item.text()
-            files_to_remove.append(file_name)
+            file_names.append(file_name)
             self._push_to_undo_stack(file_name)
-
-            # 1. 从内存状态中移除
             self.validation_data.pop(file_name, None)
+            tasks.append({'file_name': file_name, 'action': 'unverified'})
 
-            # 2. 擦除每个文件对应的 JSON 中的人工校验痕迹，让其回归算法原始数据
-            if temp_photo_dir:
-                base_name = os.path.splitext(file_name)[0]
-                json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
-                if os.path.exists(json_path):
-                    try:
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            detection_info = json.load(f)
-
-                        changed = False
-                        if detection_info.get('最低置信度') == '人工校验':
-                            # 弹出手动注入的字段
-                            for key in ['最低置信度', '物种名称', '物种数量', '备注', '检测时间']:
-                                if key in detection_info:
-                                    detection_info.pop(key, None)
-                                    changed = True
-
-                        if changed:
-                            with open(json_path, 'w', encoding='utf-8') as f:
-                                json.dump(detection_info, f, ensure_ascii=False, indent=2)
-                    except Exception as e:
-                        logger.error(f"恢复未校验状态失败: {file_name}, {e}")
-
-        # 3. 从硬盘的 validation.json 中彻底移除 (防止原生的 update 逻辑把它又合并回来)
-        if temp_photo_dir and files_to_remove:
-            from system.detection_db import get_db_path, delete_validation_bulk
-
-            db_path = get_db_path(temp_photo_dir)
-            if os.path.exists(db_path):
-                delete_validation_bulk(db_path, files_to_remove)
-
-            # 同时保持 validation.json 同步（可选，兼容性用）
-            validation_file_path = os.path.join(temp_photo_dir, "validation.json")
-            if os.path.exists(validation_file_path):
-                try:
-                    with open(validation_file_path, 'r', encoding='utf-8') as f:
-                        disk_data = json.load(f)
-                    modified = False
-                    for f_name in files_to_remove:
-                        if disk_data.pop(f_name, None) is not None:
-                            modified = True
-                    if modified:
-                        with open(validation_file_path, 'w', encoding='utf-8') as f:
-                            json.dump(disk_data, f, ensure_ascii=False, indent=2, sort_keys=True)
-                except Exception as e:
-                    logger.error(f"清理 validation.json 失败: {e}")
-
-        self._force_select_files = files_to_remove
-        # 统一刷新列表UI
-        QTimer.singleShot(50, self._refresh_species_list_logic)
+        self._force_select_files = file_names
+        self._run_background_update(tasks, lambda: QTimer.singleShot(50, self._refresh_species_list_logic))
 
     def _bulk_redetect(self, items):
         """批量重新检测选中的文件"""
@@ -4284,8 +4534,8 @@ class SpeciesValidationPage(QWidget):
                     QTimer.singleShot(100, select_image_item)
                     return
 
-    def _start_video_thread(self, video_path, json_path):
-        """启动视频播放线程"""
+    def _start_video_thread(self, video_path):
+        """启动视频播放线程，直接传递内存中基于 SQLite 的检测数据"""
         self._stop_video_thread()
         self._is_video_paused = False
 
@@ -4295,7 +4545,8 @@ class SpeciesValidationPage(QWidget):
             min_ratio = self.controller.advanced_page.min_frame_ratio_var
 
         self.video_thread = VideoPlayerThread(
-            video_path, json_path,
+            video_path,
+            self.current_species_info, # 直接传字典，取代原本的 json_path
             self.species_conf_var,
             draw_boxes=True,
             min_frame_ratio=min_ratio

@@ -94,6 +94,7 @@ class AdvancedPage(QWidget):
         self.package_status_var = ""
         self.auto_sort_var = False
         self.selected_classes_var = None
+        self.save_cache_to_image_folder_var = True
 
         # 存储引用以便主题更新
         self.components_to_update = []
@@ -997,6 +998,26 @@ class AdvancedPage(QWidget):
 
         cache_widget = QWidget()
         cache_layout = QVBoxLayout(cache_widget)
+
+        # 保存缓存到图像文件夹
+        self.save_cache_to_image_folder_switch = SwitchRow(
+            "保存缓存到图像文件夹",
+            checked=self.save_cache_to_image_folder_var
+        )
+        self.save_cache_to_image_folder_switch.toggled.connect(self._on_setting_changed)
+        self.save_cache_to_image_folder_switch.toggled.connect(
+            lambda checked: setattr(self, 'save_cache_to_image_folder_var', checked)
+        )
+        self.components_to_update.append(self.save_cache_to_image_folder_switch)
+        cache_layout.addWidget(self.save_cache_to_image_folder_switch)
+
+        save_cache_explain = QLabel(
+            "开启后同时在图像文件夹和软件缓存位置保存 .db 校验文件；"
+            "关闭后仅在软件缓存位置保存。"
+        )
+        save_cache_explain.setStyleSheet("color: #888888; font-size: 12px;")
+        save_cache_explain.setWordWrap(True)
+        cache_layout.addWidget(save_cache_explain)
 
         self.cache_size_label = QLabel(self.cache_size_var)
         self.cache_size_label.setFont(QFont("Segoe UI", 10))
@@ -1952,6 +1973,12 @@ class AdvancedPage(QWidget):
         """获取是否使用FP16"""
         return self.fp16_switch_row.isChecked()
 
+    def get_save_cache_to_image_folder(self) -> bool:
+        """返回是否同步将 .db 校验文件保存到图像文件夹"""
+        if hasattr(self, 'save_cache_to_image_folder_switch'):
+            return self.save_cache_to_image_folder_switch.isChecked()
+        return self.save_cache_to_image_folder_var
+
     def get_theme_selection(self):
         """获取主题选择"""
         return self.theme_combo.currentText()
@@ -2009,7 +2036,8 @@ class AdvancedPage(QWidget):
             "selected_model": selected_model,
             "selected_cls_model": self.cls_model_combo.currentText(),
             "export_columns": [name for name, cb in self.export_checkboxes.items() if cb.isChecked()],
-            "selected_classes": [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()]
+            "selected_classes": [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()],
+            "save_cache_to_image_folder": self.save_cache_to_image_folder_switch.isChecked(),
         }
 
     def load_settings(self, settings):
@@ -2131,6 +2159,10 @@ class AdvancedPage(QWidget):
                     cb.setChecked(cls_id in self.selected_classes_var)
                     cb.blockSignals(False)
                 self._update_classes_select_all_state()
+
+        if "save_cache_to_image_folder" in settings:
+            self.save_cache_to_image_folder_var = bool(settings["save_cache_to_image_folder"])
+            self.save_cache_to_image_folder_switch.setChecked(self.save_cache_to_image_folder_var)
 
     def _set_selected_model(self, model_name):
         """设置选定的模型"""

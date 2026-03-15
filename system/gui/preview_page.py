@@ -35,11 +35,27 @@ from system.gui.ui_components import Win11Colors, ModernSlider, ModernGroupBox, 
 
 logger = logging.getLogger(__name__)
 
-def _load_detection_from_db_or_json(base_name: str, temp_dir: str) -> dict:
+def _load_detection_from_db_or_json(base_name: str, temp_dir: str,
+                                     image_folder_dir: str = None) -> dict:
     """
-    优先从 SQLite 读取检测数据，回退到 JSON 文件。
-    不抛出异常，失败时返回空字典。
+    按优先级加载检测数据：
+      1. 图像文件夹目录下的 .db 校验文件
+      2. 软件缓存位置的 .db 校验文件
+      3. 软件缓存位置的 .json 兼容文件
     """
+    # 优先级 1：图像文件夹目录
+    if image_folder_dir:
+        try:
+            from system.detection_db import get_db_path, get_detection
+            img_db_path = get_db_path(image_folder_dir)
+            if os.path.exists(img_db_path):
+                data = get_detection(img_db_path, base_name)
+                if data is not None:
+                    return data
+        except Exception as e:
+            logger.debug(f"图像文件夹 DB 读取失败，回退软件缓存: {e}")
+
+    # 优先级 2：软件缓存位置
     if not temp_dir:
         return {}
     try:
@@ -50,9 +66,9 @@ def _load_detection_from_db_or_json(base_name: str, temp_dir: str) -> dict:
             if data is not None:
                 return data
     except Exception as e:
-        logger.debug(f"DB 读取失败，回退 JSON: {e}")
+        logger.debug(f"软件缓存 DB 读取失败，回退 JSON: {e}")
 
-    # 回退：读取 JSON 文件
+    # 优先级 3：JSON 兼容回退
     json_path = os.path.join(temp_dir, f"{base_name}.json")
     if os.path.exists(json_path):
         try:
@@ -72,6 +88,49 @@ class DetectionWorker(QThread):
         self.controller = controller
         self.img_path = img_path
         self.filename = filename
+
+    def _load_detection_from_db_or_json(base_name: str, temp_dir: str,
+                                        image_folder_dir: str = None) -> dict:
+        """
+        按优先级加载检测数据：
+          1. 图像文件夹目录下的 .db 校验文件
+          2. 软件缓存位置的 .db 校验文件
+          3. 软件缓存位置的 .json 兼容文件
+        """
+        # 优先级 1：图像文件夹目录
+        if image_folder_dir:
+            try:
+                from system.detection_db import get_db_path, get_detection
+                img_db_path = get_db_path(image_folder_dir)
+                if os.path.exists(img_db_path):
+                    data = get_detection(img_db_path, base_name)
+                    if data is not None:
+                        return data
+            except Exception as e:
+                logger.debug(f"图像文件夹 DB 读取失败，回退软件缓存: {e}")
+
+        # 优先级 2：软件缓存位置
+        if not temp_dir:
+            return {}
+        try:
+            from system.detection_db import get_db_path, get_detection
+            db_path = get_db_path(temp_dir)
+            if os.path.exists(db_path):
+                data = get_detection(db_path, base_name)
+                if data is not None:
+                    return data
+        except Exception as e:
+            logger.debug(f"软件缓存 DB 读取失败，回退 JSON: {e}")
+
+        # 优先级 3：JSON 兼容回退
+        json_path = os.path.join(temp_dir, f"{base_name}.json")
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"JSON 读取失败: {e}")
+        return {}
 
     def run(self):
         try:
@@ -105,7 +164,14 @@ class DetectionWorker(QThread):
                 )
                 base_name = os.path.splitext(self.filename)[0]
                 # 直接从 DB（或 JSON 备份）读回，无需再 open 文件
-                loaded_detection_info = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+                loaded_detection_info = _load_detection_from_db_or_json(
+                    base_name, temp_photo_dir,
+                    self.controller.start_page.get_file_path()
+                    if getattr(
+                        getattr(self.controller, 'advanced_page', None),
+                        'save_cache_to_image_folder_var', False
+                    ) else None
+                )
                 self.detection_completed.emit(loaded_detection_info, self.filename)
 
             else:
@@ -1079,7 +1145,7 @@ class PreviewPage(QWidget):
             self.current_preview_info = {}
             if temp_dir:
                 base_name = os.path.splitext(os.path.basename(current_file))[0]
-                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
+                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir, self._get_image_folder_dir())
 
             self._update_species_selector_items()
             # 即使 JSON 不存在，VideoPlayerThread 内部也会安全处理（读取不到数据则不画框），
@@ -1102,7 +1168,7 @@ class PreviewPage(QWidget):
             if not self.current_preview_info:
                 temp_dir = self.controller.get_temp_photo_dir()
                 base_name = os.path.splitext(os.path.basename(current_file))[0]
-                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
+                self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir, self._get_image_folder_dir())
 
             if self.current_preview_info:
                 # 更新下拉框内容
@@ -1801,7 +1867,7 @@ class PreviewPage(QWidget):
                     json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
 
                     # 如果JSON文件存在，读取完整信息
-                    loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+                    loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir, self._get_image_folder_dir())
                     if loaded:
                         self.current_preview_info = loaded
 
@@ -1880,7 +1946,7 @@ class PreviewPage(QWidget):
                         temp_photo_dir = self.controller.get_temp_photo_dir()
                         if temp_photo_dir:
                             base_name, _ = os.path.splitext(filename)
-                            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+                            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir, self._get_image_folder_dir())
                             if loaded:
                                 self.current_preview_info = loaded
 
@@ -2099,7 +2165,7 @@ class PreviewPage(QWidget):
             # 标记是否加载了有效的检测结果
             has_detections = False
 
-            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir)
+            loaded = _load_detection_from_db_or_json(base_name, temp_photo_dir, self._get_image_folder_dir())
             if loaded:
                 self.current_preview_info = loaded
                 self._update_detection_info(self.current_preview_info)
@@ -2199,7 +2265,7 @@ class PreviewPage(QWidget):
             # === 修复开始：在加载视频时，立即读取 JSON 并更新下拉框 ===
             self.current_preview_info = {}
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir)
+            self.current_preview_info = _load_detection_from_db_or_json(base_name, temp_dir, self._get_image_folder_dir())
 
             # 立即更新物种选择器
             self._update_species_selector_items()
@@ -2308,7 +2374,7 @@ class PreviewPage(QWidget):
         """Starts the OpenCV QThread for video"""
         temp_dir = self.controller.get_temp_photo_dir()
         base_name = os.path.splitext(os.path.basename(video_path))[0]
-        preloaded_data = _load_detection_from_db_or_json(base_name, temp_dir) or None
+        preloaded_data = _load_detection_from_db_or_json(base_name, temp_dir, self._get_image_folder_dir()) or None
 
         # 获取过滤比例设置
         min_ratio = 0.0
@@ -2502,7 +2568,7 @@ class PreviewPage(QWidget):
             # 2. 处理检测结果
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             temp_dir = self.controller.get_temp_photo_dir()
-            data = _load_detection_from_db_or_json(base_name, temp_dir)
+            data = _load_detection_from_db_or_json(base_name, temp_dir, self._get_image_folder_dir())
             if data:
 
                 total_frames = data.get('total_frames_processed', 1)
