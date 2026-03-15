@@ -115,6 +115,11 @@ class ProcessingThread(QThread):
         stopped_manually = False
         earliest_date = None
         temp_photo_dir = self.controller.get_temp_photo_dir()
+        # 判断是否同时保存到图像文件夹
+        _save_to_image_folder = getattr(
+            self.controller.advanced_page, 'save_cache_to_image_folder_var', False
+        )
+        image_folder_dir = self.file_path if _save_to_image_folder else None
         # 在进入 task_queue 循环之前，初始化预加载器
         preloader_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # 用于存储 {queue_index: future_object} 的字典
@@ -574,8 +579,9 @@ class ProcessingThread(QThread):
                                 bool(self.use_fp16),
                                 iou, conf, augment, agnostic_nms,
                                 status_callback=video_log_callback,
-                                vid_stride=vid_stride,  # 传入跳帧参数
-                                temp_video_dir=temp_photo_dir
+                                vid_stride=vid_stride,
+                                temp_video_dir=temp_photo_dir,
+                                extra_db_dir=image_folder_dir
                             )
 
                             detection_time = (time.time() - detection_start) * 1000
@@ -687,7 +693,8 @@ class ProcessingThread(QThread):
 
                                 # 保存临时 JSON
                                 self.controller.image_processor.save_detection_info_json(
-                                    detect_results, f_name, species_info, temp_photo_dir
+                                    detect_results, f_name, species_info, temp_photo_dir,
+                                    extra_db_dir=image_folder_dir
                                 )
 
                                 # 发射 UI 信号

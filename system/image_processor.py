@@ -85,13 +85,9 @@ class ImageProcessor:
                 fp16_enabled = use_fp16
             else:
                 # 2. 检查 Intel XPU
-                try:
-                    import intel_extension_for_pytorch as ipex
-                    if hasattr(torch, 'xpu') and torch.xpu.is_available():
-                        device = 'xpu'
-                        fp16_enabled = use_fp16
-                except ImportError:
-                    logger.debug("未安装 intel_extension_for_pytorch，跳过 Intel GPU 检测")
+                if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                    device = 'xpu'
+                    fp16_enabled = use_fp16
         except Exception as e:
             logger.error(f"设备检测失败: {e}")
 
@@ -556,7 +552,8 @@ class ImageProcessor:
                              status_callback: Optional[Any] = None,
                              vid_stride: int = 1,
                              temp_video_dir: Optional[str] = None,
-                             classes: Optional[List[int]] = None) -> Dict[str, Any]:
+                             classes: Optional[List[int]] = None,
+                             extra_db_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
         策略：先生成跳帧+增强后的临时视频(保持原分辨率)，再进行追踪。
@@ -697,25 +694,30 @@ class ImageProcessor:
                 "tracker_config": tracker_config,
                 "tracks": dict(tracks_data)
             }
-            with open(json_output_path, 'w', encoding='utf-8') as f:
-                json.dump(final_json_data, f, ensure_ascii=False, indent=4)
 
             logger.info(f"视频处理完成，JSON已保存至: {json_output_path}")
 
             # 视频处理完成后，同步将结果更新到 SQLite 数据库中
+            full_video_filename = os.path.basename(video_source)
             try:
                 from system.detection_db import get_db_path, init_db, upsert_detection
                 db_path = get_db_path(target_json_dir)
                 if not os.path.exists(db_path):
                     init_db(db_path)
-
-                # 获取带有后缀的完整视频文件名
-                full_video_filename = os.path.basename(video_source)
-
-                # 写入数据库 (base_name, 完整文件名, 包含检测结果的字典)
                 upsert_detection(db_path, video_name, full_video_filename, final_json_data)
             except Exception as db_err:
-                logger.warning(f"同步视频检测结果到 SQLite 失败（不影响正常流程）: {db_err}")
+                logger.warning(f"同步视频检测结果到软件缓存 SQLite 失败（不影响正常流程）: {db_err}")
+
+            # 同时写入图像文件夹目录的 SQLite（如果启用）
+            if extra_db_dir:
+                try:
+                    from system.detection_db import get_db_path, init_db, upsert_detection
+                    extra_db_path = get_db_path(extra_db_dir)
+                    if not os.path.exists(extra_db_path):
+                        init_db(extra_db_path)
+                    upsert_detection(extra_db_path, video_name, full_video_filename, final_json_data)
+                except Exception as db_err:
+                    logger.warning(f"同步视频检测结果到图像文件夹 SQLite 失败: {db_err}")
 
             return {"json_path": json_output_path, "frame_count": current_track_frame, "status": "success"}
 
@@ -761,14 +763,13 @@ class ImageProcessor:
             return ""
 
     def save_detection_info_json(self, results, image_name: str,
-                                 species_info: dict, temp_photo_dir: str) -> str:
-        """保存探测结果信息到指定的临时目录，并同步写入 SQLite"""
+                                 species_info: dict, temp_photo_dir: str,
+                                 extra_db_dir: str = None) -> str:
+        """保存探测结果信息到指定的临时目录，并同步写入 SQLite (已清除独立 JSON 保存)"""
         if not results or not temp_photo_dir:
             return ""
 
         try:
-            import json
-            # ── 原有逻辑（保持不变，保留 JSON 文件作为兼容备份）──
             os.makedirs(temp_photo_dir, exist_ok=True)
             data_to_save = {
                 "物种名称": species_info.get('物种名称', ''),
@@ -812,12 +813,8 @@ class ImageProcessor:
             data_to_save["names_map"] = names_map
 
             base_name, _ = os.path.splitext(image_name)
-            json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
 
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(data_to_save, f, ensure_ascii=False, indent=4)
-
-            # ── 新增：同步写入 SQLite ──────────────────────────────────
+            # ── 写入软件缓存位置的 SQLite ──
             try:
                 from system.detection_db import get_db_path, init_db, upsert_detection
                 db_path = get_db_path(temp_photo_dir)
@@ -825,10 +822,20 @@ class ImageProcessor:
                     init_db(db_path)
                 upsert_detection(db_path, base_name, image_name, data_to_save)
             except Exception as db_err:
-                logger.warning(f"写入 SQLite 失败（不影响正常流程）: {db_err}")
-            # ─────────────────────────────────────────────────────────────
+                logger.warning(f"写入软件缓存 SQLite 失败: {db_err}")
 
-            return json_path
+            # ── 同时写入图像文件夹目录的 SQLite（如果启用）──
+            if extra_db_dir:
+                try:
+                    from system.detection_db import get_db_path, init_db, upsert_detection
+                    extra_db_path = get_db_path(extra_db_dir)
+                    if not os.path.exists(extra_db_path):
+                        init_db(extra_db_path)
+                    upsert_detection(extra_db_path, base_name, image_name, data_to_save)
+                except Exception as db_err:
+                    logger.warning(f"写入图像文件夹 SQLite 失败: {db_err}")
+
+            return ""
         except Exception as e:
-            logger.error(f"保存检测结果JSON失败: {e}")
+            logger.error(f"保存检测结果至数据库失败: {e}")
             return ""
