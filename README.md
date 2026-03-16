@@ -110,7 +110,9 @@
 
   在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch，若安装失败，可尝试手动安装。
 
-  在使用Intel gpu（包括集显和独显）的情况下暂时无法自动下载xpu版本的Pytorch，请等待程序第一次安装完依赖后进入高级设置-环境维护-安装Pytorch中选择Intel xpu进行安装。
+  在使用Intel gpu（包括集显和独显）的情况下暂时无法自动下载xpu版本的Pytorch，请等待程序第一次安装完依赖后进入高级设置-环境维护-安装Pytorch中选择Intel xpu进行安装。请在使用时检查是否已经安装Intel显卡驱动，有关安装指南，请访问[Intel GPU 驱动程序安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
+  
+  *有关英特尔 GPU的Pytorch官方[入门指南](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)*
   
   如何查看CUDA版本并且安装CUDA支持的Pytorch？
   
