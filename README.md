@@ -35,7 +35,7 @@
 - [使用指南](#-使用指南)
   - [快速使用](#快速使用)
   - [高级设置](#高级设置)
-  - [使用Nvidia CUDA/Intel xpu加速](#使用nvidia-cudaintel-xpu加速)
+  - [使用显卡对模型加速](#使用nvidia-cudaintel-xpu加速)
 - [未来蓝图](#%EF%B8%8F-未来蓝图)
 - [Warning](#%EF%B8%8F-warning)
 - [联系我们](#-联系我们)
