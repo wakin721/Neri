@@ -35,7 +35,7 @@
 - [使用指南](#-使用指南)
   - [快速使用](#快速使用)
   - [高级设置](#高级设置)
-  - [使用CUDA加速](#使用CUDA加速)
+  - [使用Nvidia CUDA/Intel xpu加速](#使用nvidia-cudaintel-xpu加速)
 - [未来蓝图](#%EF%B8%8F-未来蓝图)
 - [Warning](#%EF%B8%8F-warning)
 - [联系我们](#-联系我们)
@@ -104,11 +104,13 @@
   **检测过滤**
   - **最低帧数比例：** 如果某个目标（TrackID）在视频中出现的总帧数占视频总帧数的，则该目标将被视为误检或无效目标，不会在结果中显示。
 
-  ### 使用CUDA加速
+  ### 使用Nvidia CUDA/Intel xpu加速
 
   建议（但非强制）你的 Windows 系统配备 NVIDIA GPU，因为这样能使用更高精度的模型，且更加快速。
 
   在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch，若安装失败，可尝试手动安装。
+
+  在使用Intel gpu（包括集显和独显）的情况下暂时无法自动下载xpu版本的Pytorch，请等待程序第一次安装完依赖后进入高级设置-环境维护-安装Pytorch中选择Intel xpu进行安装。
   
   如何查看CUDA版本并且安装CUDA支持的Pytorch？
   
