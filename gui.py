@@ -33,7 +33,7 @@ from system.gui.main_window import ObjectDetectionGUI
 from system.config import APP_TITLE
 from system.settings_manager import SettingsManager
 from system.utils import resource_path
-# 导入自定义的 Material You 风格弹窗 (请根据你的实际目录结构调整导入路径)
+# 导入自定义的 Material You 风格弹窗
 from system.gui.ui_components import MaterialMessageBox
 
 
@@ -59,7 +59,7 @@ def show_gpu_warning():
     MaterialMessageBox.warning(
         None,
         "硬件加速未就绪",
-        "未检测到支持的GPU加速环境 (NVIDIA CUDA / AMD ROCm / Intel XPU)。\n\n程序将回退至CPU模式运行，处理速度可能会受限。"
+        "未检测到支持的GPU加速环境 (NVIDIA CUDA / AMD ROCm / Intel XPU)。\n\n程序将使用CPU模式运行，处理速度可能会受限。"
     )
 
 

@@ -102,7 +102,7 @@ class ImageProcessor:
             return None
 
         try:
-            # [新增] 确保图像是 uint8 类型且内存连续，防止 YOLO 报错 Unsupported image type
+            # 确保图像是 uint8 类型且内存连续，防止 YOLO 报错 Unsupported image type
             if img.dtype != np.uint8:
                 img = img.astype(np.uint8)
 
@@ -126,7 +126,7 @@ class ImageProcessor:
                 merged = cv2.merge((l_enhanced, a, b))
                 bgr_enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
-                # [重要] 返回连续数组
+                # 返回连续数组
                 return np.ascontiguousarray(bgr_enhanced)
 
         except Exception as e:
@@ -266,6 +266,7 @@ class ImageProcessor:
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
         """
+        print(classes)
         device_name, use_fp16 = self._determine_device(use_fp16)
         w_det = 0.4
         w_cls = 0.6
@@ -321,6 +322,7 @@ class ImageProcessor:
                     device=device_name,
                     iou=iou,
                     conf=conf,
+                    classes=classes,
                     project=temp_run_project,
                     name="detect_log",
                     save=False
@@ -613,6 +615,7 @@ class ImageProcessor:
                 device=device_name,
                 iou=iou,
                 conf=conf,
+                classes=classes,
                 persist=True,
                 save=False,
                 project=temp_run_project,

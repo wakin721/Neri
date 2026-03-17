@@ -2,7 +2,14 @@
 
 ---
 
-## ✨ Neri 2.4.2-beta 更新日志 (2026.03.10)
+## ✨ Neri 2.4.3-beta1 更新日志 (2026.03.17)
+
+1. 🖍️ **内容更新**：可将文件保存到图像文件夹以便在不同设备上进行物种校验。
+
+> **⚠️ Warning：** 部分avi格式视频可能无法识别，暂不支持windows7系统。
+---
+
+## 2.4.2-beta：03月09日，2026年
 
 1. 🖍️ **内容更新**：增加了对intel gpu的实验性支持，简化了pytorch的安装。
 
@@ -19,7 +26,6 @@
 * MegaDetector github仓库链接：https://github.com/agentmorris/MegaDetector
 
 > **⚠️ Warning：** 部分avi格式视频可能无法识别，暂不支持windows7系统。
-
 
 ---
 

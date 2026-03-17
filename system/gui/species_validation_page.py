@@ -72,6 +72,9 @@ class ReDetectThread(QThread):
             batch_size = getattr(self.controller.advanced_page, 'batch_size_var', 16) if hasattr(self.controller,
                                                                                                  'advanced_page') else 16
 
+            classes = getattr(self.controller.advanced_page, 'selected_classes_var', None) if hasattr(self.controller,
+                                                                                                      'advanced_page') else None
+
             video_mode_setting = "全部识别"
             if hasattr(self.controller, 'start_page') and hasattr(self.controller.start_page, 'video_mode_combo'):
                 video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
@@ -116,7 +119,7 @@ class ReDetectThread(QThread):
             for batch in image_batches:
                 batch_paths = [os.path.join(self.source_dir, f) for f in batch]
                 batch_results = self.controller.image_processor.detect_batch_species(
-                    batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                    batch_paths, use_fp16, iou, conf, augment, agnostic_nms, classes=classes
                 )
 
                 for i, f_name in enumerate(batch):
@@ -155,7 +158,7 @@ class ReDetectThread(QThread):
                         if temp_frames_map:
                             batch_paths = [item['path'] for item in temp_frames_map]
                             batch_results = self.controller.image_processor.detect_batch_species(
-                                batch_paths, use_fp16, iou, conf, augment, agnostic_nms
+                                batch_paths, use_fp16, iou, conf, augment, agnostic_nms, classes=classes
                             )
 
                             best_detect_results = None
@@ -203,6 +206,7 @@ class ReDetectThread(QThread):
                         vid_path, self.temp_photo_dir, use_fp16, iou, conf, augment, agnostic_nms,
                         status_callback=video_log_callback, vid_stride=vid_stride,
                         temp_video_dir=self.temp_photo_dir,
+                        classes=classes,
                         extra_db_dir=self._get_image_folder_dir()
                     )
                     processed_units += file_unit_map[vid]

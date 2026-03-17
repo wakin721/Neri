@@ -140,6 +140,7 @@ class DetectionWorker(QThread):
             conf = self.controller.advanced_page.conf_var
             use_augment = self.controller.advanced_page.use_augment_var
             use_agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
+            classes = getattr(self.controller.advanced_page, 'selected_classes_var', None)
 
             from datetime import datetime
             batch_results = self.controller.image_processor.detect_batch_species(
@@ -148,7 +149,8 @@ class DetectionWorker(QThread):
                 iou,
                 conf,
                 use_augment,
-                use_agnostic_nms
+                use_agnostic_nms,
+                classes=classes
             )
 
             results = batch_results[0] if batch_results else {}
@@ -820,6 +822,25 @@ class PreviewPage(QWidget):
                 json.dump(self.species_conf_map, f, indent=4, ensure_ascii=False)
         except Exception as e:
             logger.error(f"保存 conf.json 失败: {e}")
+
+    def _get_image_folder_dir(self):
+        """
+        获取当前图像所在的文件夹路径。
+        如果高级设置中开启了“将缓存保存至图像文件夹”，则返回该路径供优先读取；
+        如果未开启，则返回 None。
+        """
+        try:
+            # 1. 检查控制器中是否有 advanced_page 且启用了保存到源目录的选项
+            if hasattr(self.controller, 'advanced_page'):
+                save_to_source = getattr(self.controller.advanced_page, 'save_cache_to_image_folder_var', False)
+
+                # 2. 如果开启了，则从 start_page 获取当前加载的目录路径
+                if save_to_source and hasattr(self.controller, 'start_page'):
+                    return self.controller.start_page.get_file_path()
+        except Exception as e:
+            logger.warning(f"获取图像文件夹目录状态失败: {e}")
+
+        return None
 
     def _create_widgets(self):
         """创建预览页面的所有控件"""
