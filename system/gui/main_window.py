@@ -131,6 +131,7 @@ class ProcessingThread(QThread):
             augment = self.controller.advanced_page.use_augment_var
             agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
             vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1)
+            classes = getattr(self.controller.advanced_page, 'selected_classes_var', None)
             video_mode_setting = "全部识别"
             if hasattr(self.controller.start_page, 'video_mode_combo'):
                 video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
@@ -390,7 +391,7 @@ class ProcessingThread(QThread):
                             if not temp_frames_map:
                                 raise Exception("无法从视频中提取有效帧")
 
-                            # === [修改] 第二步：调用 Batch 接口一次性检测 ===
+                            # === 第二步：调用 Batch 接口一次性检测 ===
                             # 提取所有路径
                             batch_paths = [item['path'] for item in temp_frames_map]
 
@@ -398,10 +399,11 @@ class ProcessingThread(QThread):
                             batch_results = self.controller.image_processor.detect_batch_species(
                                 batch_paths,
                                 bool(self.use_fp16),
-                                iou, conf, augment, agnostic_nms
+                                iou, conf, augment, agnostic_nms,
+                                classes=classes
                             )
 
-                            # === [修改] 第三步：统一处理结果 ===
+                            # === 第三步：统一处理结果 ===
                             sampled_species_list = []  # 存储每次识别到的物种名列表
                             max_counts = {}  # 存储每个物种的最大数量
 
@@ -578,10 +580,11 @@ class ProcessingThread(QThread):
                                 video_output_dir,
                                 bool(self.use_fp16),
                                 iou, conf, augment, agnostic_nms,
+                                classes=classes,
                                 status_callback=video_log_callback,
                                 vid_stride=vid_stride,
                                 temp_video_dir=temp_photo_dir,
-                                extra_db_dir=image_folder_dir
+                                extra_db_dir=image_folder_dir,
                             )
 
                             detection_time = (time.time() - detection_start) * 1000
@@ -661,7 +664,7 @@ class ProcessingThread(QThread):
 
                             # 注意：这里调用 detect_batch_species 时传入了 preloaded_data
                             batch_results = self.controller.image_processor.detect_batch_species(
-                                batch_paths, bool(self.use_fp16), iou, conf, augment, agnostic_nms,
+                                batch_paths, bool(self.use_fp16), iou, conf, augment, agnostic_nms, classes=classes,
                                 preloaded_data=preloaded_data
                             )
 

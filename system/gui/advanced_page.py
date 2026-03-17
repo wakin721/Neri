@@ -546,6 +546,7 @@ class AdvancedPage(QWidget):
             cb.blockSignals(True)
             cb.setChecked(is_checked)
             cb.blockSignals(False)
+        self.selected_classes_var = [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()]
         self._on_setting_changed()
 
     def _update_classes_select_all_state(self):
@@ -556,6 +557,7 @@ class AdvancedPage(QWidget):
         self.classes_select_all_cb.blockSignals(True)
         self.classes_select_all_cb.setChecked(all_checked)
         self.classes_select_all_cb.blockSignals(False)
+        self.selected_classes_var = [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()]
         self._on_setting_changed()
 
     def _update_batch_size_label(self, value):
