@@ -78,112 +78,6 @@ def _load_detection_from_db_or_json(base_name: str, temp_dir: str,
             logger.error(f"JSON 读取失败: {e}")
     return {}
 
-class DetectionWorker(QThread):
-    """检测工作线程"""
-    detection_completed = Signal(dict, str)  # 检测完成信号：(loaded_detection_info, filename)
-    detection_failed = Signal(str)  # 检测失败信号：error_message
-
-    def __init__(self, controller, img_path, filename):
-        super().__init__()
-        self.controller = controller
-        self.img_path = img_path
-        self.filename = filename
-
-    def _load_detection_from_db_or_json(base_name: str, temp_dir: str,
-                                        image_folder_dir: str = None) -> dict:
-        """
-        按优先级加载检测数据：
-          1. 图像文件夹目录下的 .db 校验文件
-          2. 软件缓存位置的 .db 校验文件
-          3. 软件缓存位置的 .json 兼容文件
-        """
-        # 优先级 1：图像文件夹目录
-        if image_folder_dir:
-            try:
-                from system.detection_db import get_db_path, get_detection
-                img_db_path = get_db_path(image_folder_dir)
-                if os.path.exists(img_db_path):
-                    data = get_detection(img_db_path, base_name)
-                    if data is not None:
-                        return data
-            except Exception as e:
-                logger.debug(f"图像文件夹 DB 读取失败，回退软件缓存: {e}")
-
-        # 优先级 2：软件缓存位置
-        if not temp_dir:
-            return {}
-        try:
-            from system.detection_db import get_db_path, get_detection
-            db_path = get_db_path(temp_dir)
-            if os.path.exists(db_path):
-                data = get_detection(db_path, base_name)
-                if data is not None:
-                    return data
-        except Exception as e:
-            logger.debug(f"软件缓存 DB 读取失败，回退 JSON: {e}")
-
-        # 优先级 3：JSON 兼容回退
-        json_path = os.path.join(temp_dir, f"{base_name}.json")
-        if os.path.exists(json_path):
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"JSON 读取失败: {e}")
-        return {}
-
-    def run(self):
-        try:
-            # 获取设置参数
-            use_fp16 = self.controller.advanced_page.get_use_fp16()
-            iou = self.controller.advanced_page.iou_var
-            conf = self.controller.advanced_page.conf_var
-            use_augment = self.controller.advanced_page.use_augment_var
-            use_agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var
-            classes = getattr(self.controller.advanced_page, 'selected_classes_var', None)
-
-            from datetime import datetime
-            batch_results = self.controller.image_processor.detect_batch_species(
-                [self.img_path],
-                use_fp16,
-                iou,
-                conf,
-                use_augment,
-                use_agnostic_nms,
-                classes=classes
-            )
-
-            results = batch_results[0] if batch_results else {}
-
-            current_detection_results = results['detect_results']
-            species_info = {k: v for k, v in results.items() if k != 'detect_results'}
-            species_info['检测时间'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            if current_detection_results:
-                temp_photo_dir = self.controller.get_temp_photo_dir()
-                self.controller.image_processor.save_detection_info_json(
-                    current_detection_results, self.filename, species_info, temp_photo_dir
-                )
-                base_name = os.path.splitext(self.filename)[0]
-                # 直接从 DB（或 JSON 备份）读回，无需再 open 文件
-                loaded_detection_info = _load_detection_from_db_or_json(
-                    base_name, temp_photo_dir,
-                    self.controller.start_page.get_file_path()
-                    if getattr(
-                        getattr(self.controller, 'advanced_page', None),
-                        'save_cache_to_image_folder_var', False
-                    ) else None
-                )
-                self.detection_completed.emit(loaded_detection_info, self.filename)
-
-            else:
-                # 没有检测结果
-                self.detection_completed.emit({}, self.filename)
-
-        except Exception as e:
-            logger.error(f"检测图像失败: {e}")
-            self.detection_failed.emit(str(e))
-
 
 class ImageLoaderThread(QThread):
     """用于在后台加载图像和元数据的工作线程（安全取消版）"""
@@ -396,9 +290,6 @@ class VideoPlayerThread(QThread):
             return parsed_frames
 
         try:
-            with open(self.json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
             parsed_frames['stride'] = data.get('vid_stride', 1)
             total_frames = data.get('total_frames_processed', 0)
 
@@ -1213,23 +1104,39 @@ class PreviewPage(QWidget):
             return
 
         file_name = selected_items[0].text()
-        directory = self.controller.start_page.get_file_path()
-        file_path = os.path.join(directory, file_name)
 
         # 更新状态并禁用按钮
         self.detect_button.setEnabled(False)
         self.detect_button.setText("检测中...")
 
-        # 创建检测线程
-        self.detection_worker = DetectionWorker(self.controller, file_path, file_name)
+        # 调用主窗口的统一重新检测接口
+        self.controller.redetect_files([file_name], callback=self._on_single_redetect_finished)
 
-        # 连接信号
-        self.detection_worker.detection_completed.connect(self._on_detection_completed)
-        self.detection_worker.detection_failed.connect(self._on_detection_failed)
-        self.detection_worker.finished.connect(self._on_detection_finished)
+    def _on_single_redetect_finished(self, success, file_names):
+        """处理单张重测结束后的回调逻辑"""
+        # 防止页面在等待期间被销毁
+        if not self.isVisible() or not hasattr(self, 'detect_button'):
+            return
 
-        # 启动线程
-        self.detection_worker.start()
+        # 恢复按钮状态
+        self.detect_button.setEnabled(True)
+        self.detect_button.setText("检测当前图像")
+
+        if not success or not file_names:
+            self._on_detection_failed("检测过程中出现异常或用户已终止")
+            return
+
+        file_name = file_names[0]
+        temp_photo_dir = self.controller.get_temp_photo_dir()
+        base_name = os.path.splitext(file_name)[0]
+
+        # 重新从 SQLite (或 JSON) 读取生成好的检测数据
+        loaded_info = _load_detection_from_db_or_json(
+            base_name, temp_photo_dir, self._get_image_folder_dir()
+        )
+
+        # 将数据丢给原来的渲染回调
+        self._on_detection_completed(loaded_info, file_name)
 
     def _update_detection_info(self, species_info=None):
         """
