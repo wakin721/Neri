@@ -266,7 +266,6 @@ class ImageProcessor:
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
         """
-        print(classes)
         device_name, use_fp16 = self._determine_device(use_fp16)
         w_det = 0.4
         w_cls = 0.6
@@ -311,6 +310,19 @@ class ImageProcessor:
 
                 import tempfile
                 temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs")
+
+                print("\n" + "=" * 50)
+                print("🚀 [ImageProcessor] 开始执行模型推理，参数如下：")
+                print(f"  • 图像批次数量 : {len(processed_imgs) if isinstance(processed_imgs, list) else 1}")
+                print(f"  • 输入尺寸 (imgsz) : 1920")
+                print(f"  • 推理设备 (device): {device_name}")
+                print(f"  • 半精度 (half)    : {use_fp16}")
+                print(f"  • 置信度 (conf)    : {conf}")
+                print(f"  • IOU 阈值 (iou)   : {iou}")
+                print(f"  • TTA增强 (augment): {augment}")
+                print(f"  • 跨类NMS (agnostic_nms): {agnostic_nms}")
+                print(f"  • 限制类别 (classes) : {classes}")
+                print("=" * 50 + "\n")
 
                 # 2. 批量运行检测模型
                 det_results = self.model(

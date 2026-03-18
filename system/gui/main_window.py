@@ -60,13 +60,17 @@ class ProcessingThread(QThread):
                  file_path,
                  save_path,
                  use_fp16,
-                 resume_from=0):
+                 resume_from=0,
+                 specific_files=None):
         super().__init__()
         self.controller = controller
         self.file_path = file_path
         self.save_path = save_path
         self.use_fp16 = use_fp16
         self.resume_from = resume_from
+        self.specific_files = specific_files # 保存特定文件列表
+        self.is_redetect = bool(specific_files) # 标记是否为重检测模式
+
         self.stop_flag = False
         self.force_stop_flag = False
         # 添加用于保存进度的变量
@@ -139,16 +143,21 @@ class ProcessingThread(QThread):
             from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
             all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
 
-            # 获取所有文件
-            all_files_list = sorted([f for f in os.listdir(self.file_path)
-                                    if f.lower().endswith(all_extensions)])
+            if self.is_redetect:
+                # 重新检测模式：只处理指定的文件
+                full_execution_list = self.specific_files
+                all_files_list = self.specific_files
 
-            # 分离所有图片和视频
-            all_images_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
-            all_videos_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
-
-            full_execution_list = all_images_global + all_videos_global
-
+                self.resume_from = 0  # 强制从头开始
+            else:
+                # 全局处理模式：获取所有文件
+                from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
+                all_extensions = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
+                all_files_list = sorted([f for f in os.listdir(self.file_path)
+                                         if f.lower().endswith(all_extensions)])
+                all_images_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)]
+                all_videos_global = [f for f in all_files_list if f.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS)]
+                full_execution_list = all_images_global + all_videos_global
             # 记录总文件数
             total_files_count = len(full_execution_list)
 
@@ -289,8 +298,9 @@ class ProcessingThread(QThread):
                     stopped_manually = True
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(f"[INFO] {current_time} 当前文件处理完毕，正在停止...", "#ffff00")
-                    # 保存进度 (此时 processed_files_count 已包含刚完成的文件)
-                    self._save_processing_cache(excel_data, processed_files_count, total_files_count)
+                    # 保存进度的判断
+                    if not self.is_redetect and processed_files_count % 10 == 0:
+                        self._save_processing_cache(excel_data, processed_files_count, total_files_count)
                     self.console_log.emit(f"[INFO] {current_time} 处理已停止", "#ff0000")
                     break
 
@@ -631,7 +641,8 @@ class ProcessingThread(QThread):
                             self.console_log.emit(log_message, vid_log_color)
                             QThread.msleep(5)
 
-                            excel_data.append(image_info)
+                            if not self.is_redetect:
+                                excel_data.append(image_info)
 
                             # 视频处理完成后，累加该视频的总帧数到已完成工作量
                             processed_work_units += file_unit_map.get(filename, 1)
@@ -705,7 +716,8 @@ class ProcessingThread(QThread):
                                 full_info = {**species_info, 'filename': f_name}
                                 self.current_file_preview.emit(img_path, full_info)
                                 if 'detect_results' in image_meta: del image_meta['detect_results']
-                                excel_data.append(image_meta)
+                                if not self.is_redetect:
+                                    excel_data.append(image_info)
 
                                 # 单张日志
                                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -772,7 +784,8 @@ class ProcessingThread(QThread):
 
                     try:
                         image_info = {'文件名': filename, '错误': str(e)}
-                        excel_data.append(image_info)
+                        if not self.is_redetect:
+                            excel_data.append(image_info)
                     except:
                         pass
 
@@ -785,7 +798,8 @@ class ProcessingThread(QThread):
                 self.current_processed_files = processed_files_count
                 self.current_excel_data = excel_data
 
-                if processed_files_count % 10 == 0:
+                # 保存进度的判断
+                if not self.is_redetect and processed_files_count % 10 == 0:
                     self._save_processing_cache(excel_data, processed_files_count, total_files_count)
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     self.console_log.emit(
@@ -819,7 +833,8 @@ class ProcessingThread(QThread):
                 QThread.msleep(10)
 
                 self.progress_updated.emit(total_work_units, total_work_units, total_time, 0, avg_speed)
-                self.controller.excel_data = excel_data
+                if not self.is_redetect:
+                    self.controller.excel_data = excel_data
 
                 # 日期格式化与数据处理
                 for item in excel_data:
@@ -1067,6 +1082,49 @@ class ObjectDetectionGUI(QMainWindow):
                 # self.cls_model_var = ""
         except Exception as e:
             logger.error(f"加载分类模型失败: {e}")
+
+    def redetect_files(self, file_names, callback=None):
+        """提供给其他页面调用的统一重新检测接口"""
+        if self.is_processing:
+            MaterialMessageBox.warning(self, "提示", "当前正在处理任务，请稍后再试。")
+            return
+
+        file_path = self.start_page.get_file_path() if hasattr(self.start_page, 'get_file_path') else ""
+        use_fp16 = self.advanced_page.get_use_fp16() if hasattr(self.advanced_page, 'get_use_fp16') else False
+
+        if not file_path:
+            return
+
+        # 临时绑定回调
+        self._redetect_callback = callback
+        self._redetect_files_list = file_names
+
+        self._set_processing_state(True)
+        self.status_bar.status_label.setText(f"正在重新检测 {len(file_names)} 个文件...")
+
+        # 启动处理线程，并传入 specific_files
+        self.processing_thread = ProcessingThread(
+            self, file_path, file_path, use_fp16, resume_from=0, specific_files=file_names
+        )
+
+        self.processing_thread.progress_updated.connect(self._on_progress_updated)
+        self.processing_thread.processing_complete.connect(self._on_redetect_complete)
+        self.processing_thread.console_log.connect(self._on_console_log)
+        self.processing_thread.start()
+
+    def _on_redetect_complete(self, success):
+        """重新检测完成后的调度"""
+        self._set_processing_state(False)
+        if success:
+            self.status_bar.status_label.setText("✅ 重新检测完成")
+        else:
+            self.status_bar.status_label.setText("❌ 重新检测过程出现错误，请查看日志")
+
+        # 触发调用方的回调
+        if hasattr(self, '_redetect_callback') and callable(self._redetect_callback):
+            self._redetect_callback(success, self._redetect_files_list)
+            self._redetect_callback = None
+        self._redetect_files_list = None
 
     def _create_ui_elements(self):
         """创建UI元素"""

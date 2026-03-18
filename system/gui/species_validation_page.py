@@ -36,199 +36,6 @@ from system.utils import resource_path
 logger = logging.getLogger(__name__)
 
 
-class ReDetectThread(QThread):
-    """用于重新检测选中文件的独立后台线程"""
-    progress_updated = Signal(int, int, float, float, float)
-    finished = Signal(bool)
-
-    def __init__(self, controller, file_names, source_dir, temp_photo_dir):
-        super().__init__()
-        self.controller = controller
-        self.file_names = file_names
-        self.source_dir = source_dir
-        self.temp_photo_dir = temp_photo_dir
-
-    def run(self):
-        import math
-        import time
-        import os
-        import cv2
-        from system.config import SUPPORTED_IMAGE_EXTENSIONS
-
-        try:
-            # 1. 提取当前高级页面的设置参数
-            use_fp16 = False
-            if hasattr(self.controller, 'advanced_page') and hasattr(self.controller.advanced_page, 'get_use_fp16'):
-                use_fp16 = self.controller.advanced_page.get_use_fp16()
-
-            iou = self.controller.advanced_page.iou_var if hasattr(self.controller, 'advanced_page') else 0.3
-            conf = self.controller.advanced_page.conf_var if hasattr(self.controller, 'advanced_page') else 0.25
-            augment = self.controller.advanced_page.use_augment_var if hasattr(self.controller,
-                                                                               'advanced_page') else False
-            agnostic_nms = self.controller.advanced_page.use_agnostic_nms_var if hasattr(self.controller,
-                                                                                         'advanced_page') else False
-            vid_stride = getattr(self.controller.advanced_page, 'vid_stride_var', 1) if hasattr(self.controller,
-                                                                                                'advanced_page') else 1
-            batch_size = getattr(self.controller.advanced_page, 'batch_size_var', 16) if hasattr(self.controller,
-                                                                                                 'advanced_page') else 16
-
-            classes = getattr(self.controller.advanced_page, 'selected_classes_var', None) if hasattr(self.controller,
-                                                                                                      'advanced_page') else None
-
-            video_mode_setting = "全部识别"
-            if hasattr(self.controller, 'start_page') and hasattr(self.controller.start_page, 'video_mode_combo'):
-                video_mode_setting = self.controller.start_page.video_mode_combo.currentText()
-
-            # 2. 区分图片和视频，并预先计算总工作量(用于进度条)
-            total_work_units = 0
-            file_unit_map = {}
-            images = []
-            videos = []
-
-            SUPPORTED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')
-
-            for f in self.file_names:
-                f_lower = f.lower()
-                f_path = os.path.join(self.source_dir, f)
-                if f_lower.endswith(SUPPORTED_VIDEO_EXTENSIONS):
-                    videos.append(f)
-                    units = 1
-                    if video_mode_setting == "快速识别":
-                        units = 3
-                    else:
-                        try:
-                            cap = cv2.VideoCapture(f_path)
-                            if cap.isOpened():
-                                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                                units = math.ceil(frames / vid_stride) if frames > 0 else 1
-                            cap.release()
-                        except Exception:
-                            pass
-                    file_unit_map[f] = units
-                    total_work_units += units
-                elif f_lower.endswith(SUPPORTED_IMAGE_EXTENSIONS):
-                    images.append(f)
-                    file_unit_map[f] = 1
-                    total_work_units += 1
-
-            processed_units = 0
-            start_time = time.time()
-
-            # 3. 对选中的图片进行批量处理
-            image_batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
-            for batch in image_batches:
-                batch_paths = [os.path.join(self.source_dir, f) for f in batch]
-                batch_results = self.controller.image_processor.detect_batch_species(
-                    batch_paths, use_fp16, iou, conf, augment, agnostic_nms, classes=classes
-                )
-
-                for i, f_name in enumerate(batch):
-                    species_info = batch_results[i]
-                    detect_results = species_info.get('detect_results')
-                    self.controller.image_processor.save_detection_info_json(
-                        detect_results, f_name, species_info, self.temp_photo_dir,
-                        extra_db_dir=self._get_image_folder_dir()
-                    )
-                    processed_units += 1
-                    elapsed = time.time() - start_time
-                    speed = processed_units / elapsed if elapsed > 0 else 0
-                    remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
-                    self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
-
-            # 4. 对选中的视频进行处理
-            for vid in videos:
-                vid_path = os.path.join(self.source_dir, vid)
-                if video_mode_setting == "快速识别":
-                    cap = cv2.VideoCapture(vid_path)
-                    if cap.isOpened():
-                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        sample_points = [
-                            int(total_frames * 1 / 4), int(total_frames * 1 / 2), int(total_frames * 3 / 4)
-                        ]
-                        temp_frames_map = []
-                        for i, point in enumerate(sample_points):
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, point)
-                            ret, frame = cap.read()
-                            if ret:
-                                frame_temp_path = os.path.join(self.temp_photo_dir, f"temp_frame_{vid}_{i}.jpg")
-                                cv2.imwrite(frame_temp_path, frame)
-                                temp_frames_map.append({'path': frame_temp_path, 'point': point})
-                        cap.release()
-
-                        if temp_frames_map:
-                            batch_paths = [item['path'] for item in temp_frames_map]
-                            batch_results = self.controller.image_processor.detect_batch_species(
-                                batch_paths, use_fp16, iou, conf, augment, agnostic_nms, classes=classes
-                            )
-
-                            best_detect_results = None
-                            best_species_info = None
-                            max_detections_in_frame = -1
-
-                            for idx, species_info_frame in enumerate(batch_results):
-                                results = species_info_frame.get('detect_results', [])
-                                current_frame_detection_count = sum(
-                                    1 for r in results if hasattr(r, 'boxes') and r.boxes is not None for _ in r.boxes)
-                                if current_frame_detection_count > max_detections_in_frame:
-                                    max_detections_in_frame = current_frame_detection_count
-                                    best_detect_results = results
-                                    best_species_info = species_info_frame
-
-                                if os.path.exists(temp_frames_map[idx]['path']):
-                                    os.remove(temp_frames_map[idx]['path'])
-
-                                processed_units += 1
-                                elapsed = time.time() - start_time
-                                speed = processed_units / elapsed if elapsed > 0 else 0
-                                remain = (total_work_units - processed_units) / speed if speed > 0 else float('inf')
-                                self.progress_updated.emit(processed_units, total_work_units, elapsed, remain, speed)
-
-                            if best_detect_results is not None:
-                                self.controller.image_processor.save_detection_info_json(
-                                    best_detect_results, vid, best_species_info, self.temp_photo_dir,
-                                    extra_db_dir=self._get_image_folder_dir()
-                                )
-                            else:
-                                self.controller.image_processor.save_detection_info_json(
-                                    [], vid, {'detect_results': []}, self.temp_photo_dir,
-                                    extra_db_dir=self._get_image_folder_dir()
-                                )
-                else:
-                    def video_log_callback(frame_idx, total_frames, w, h, counts, speed_ms):
-                        nonlocal processed_units
-                        current_total_done = processed_units + frame_idx
-                        elapsed = time.time() - start_time
-                        speed = current_total_done / elapsed if elapsed > 0 else 0
-                        remain = (total_work_units - current_total_done) / speed if speed > 0 else float('inf')
-                        self.progress_updated.emit(current_total_done, total_work_units, elapsed, remain, speed)
-
-                    self.controller.image_processor.detect_video_species(
-                        vid_path, self.temp_photo_dir, use_fp16, iou, conf, augment, agnostic_nms,
-                        status_callback=video_log_callback, vid_stride=vid_stride,
-                        temp_video_dir=self.temp_photo_dir,
-                        classes=classes,
-                        extra_db_dir=self._get_image_folder_dir()
-                    )
-                    processed_units += file_unit_map[vid]
-
-            self.finished.emit(True)
-        except Exception as e:
-            logger.error(f"ReDetectThread 报错: {e}", exc_info=True)
-            self.finished.emit(False)
-
-    def _get_image_folder_dir(self) -> str:
-        """判断是否启用图像文件夹缓存，返回图像源目录或 None。"""
-        try:
-            if not getattr(
-                    getattr(self.controller, 'advanced_page', None),
-                    'save_cache_to_image_folder_var', False
-            ):
-                return None
-            return self.source_dir if self.source_dir and os.path.isdir(self.source_dir) else None
-        except Exception:
-            return None
-
-
 class ValidationExportThread(QThread):
     """用于后台处理和导出数据的独立线程，防止界面卡死"""
     progress_updated = Signal(int, int, float, float, float)
@@ -2168,6 +1975,11 @@ class SpeciesValidationPage(QWidget):
         self.species_listbox.blockSignals(False)
         self.species_image_map.clear()
 
+        if hasattr(self, 'species_group_map'):
+            self.species_group_map.clear()
+        else:
+            self.species_group_map = defaultdict(list)
+
         confidence_settings = self.controller.confidence_settings
         global_conf = confidence_settings.get("global", 0.25)
 
@@ -2243,6 +2055,7 @@ class SpeciesValidationPage(QWidget):
         # ── 与原逻辑完全相同的物种归类计算 ───────────────────────────
         all_species_keys = set()
         processed_basenames = set()
+        file_to_display_key = {}
 
         for row in rows:
             base_name = row["base_name"]
@@ -2263,7 +2076,6 @@ class SpeciesValidationPage(QWidget):
             if detection_info.get('最低置信度') == '人工校验':
                 is_validated = True
 
-            # ---------- 以下物种归类逻辑与原代码完全一致 ----------
             final_species_name = "[未校验] 空"
 
             if detection_info.get('最低置信度') == '人工校验':
@@ -2347,8 +2159,7 @@ class SpeciesValidationPage(QWidget):
                 display_key = f"[已校验] {final_species_name}" if is_validated \
                     else f"[未校验] {final_species_name}"
 
-            all_species_keys.add(display_key)
-            self.species_image_map[display_key].append(image_filename)
+            file_to_display_key[image_filename] = display_key
 
         # 未检测（源目录中有文件但 DB 中无记录）
         undetected_basenames = set(image_basename_map.keys()) - processed_basenames
@@ -2357,7 +2168,95 @@ class SpeciesValidationPage(QWidget):
                 self.species_image_map["未检测"].append(image_basename_map[base])
             all_species_keys.add("未检测")
 
-        # ── 排序并填充左侧列表框（与原逻辑完全一致）───────────────────
+        # ==================== 应用自动分组与归类逻辑 ====================
+        auto_group = getattr(getattr(self.controller, 'advanced_page', None), 'auto_group_var', False)
+
+        if auto_group:
+            # 1. 字典序排列以还原相机的触发时间轴
+            sorted_files = sorted(image_basename_map.values())
+            groups = []
+            current_group = []
+
+            # 2. 模拟相机连拍分组（如最大3图+1视频为一个事件组）
+            for idx, f in enumerate(sorted_files):
+                current_group.append(f)
+                is_video = f.lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+
+                next_is_video = False
+                if idx + 1 < len(sorted_files):
+                    next_is_video = sorted_files[idx + 1].lower().endswith(self.SUPPORTED_VIDEO_EXTENSIONS)
+
+                # 截断条件：当前是视频(一般连拍收尾)；或者已达到3图且下一张不是它配套的视频
+                if is_video or (len(current_group) >= 3 and not next_is_video):
+                    groups.append(current_group)
+                    current_group = []
+            if current_group:
+                groups.append(current_group)
+
+            # 3. 对每个组进行处理：合并物种，并且只有组内所有照片都校验才算该组已校验
+            for grp in groups:
+                keys_in_group = [file_to_display_key.get(f, "未检测") for f in grp]
+
+                is_all_validated = True
+                clean_valid_species = set()
+                fallback_clean_keys = []
+
+                for k in keys_in_group:
+                    # 检查是否全部已校验 (只要有一个未校验或未检测，该组就保持未校验状态)
+                    if not k.startswith("[已校验]"):
+                        is_all_validated = False
+
+                    # 剥离前缀，获取纯净的物种名称
+                    clean_k = k.replace("[已校验] ", "").replace("[未校验] ", "")
+                    fallback_clean_keys.append(clean_k)
+
+                    if clean_k not in ["空", "未检测", "需人工检验"]:
+                        # 处理单张照片中本身就有多个物种的情况
+                        for sp in clean_k.replace('，', ',').split(','):
+                            sp = sp.strip()
+                            if sp:
+                                clean_valid_species.add(sp)
+
+                if clean_valid_species:
+                    # 组合组内所有出现的有效物种（如 A,B）
+                    combined_species = ",".join(sorted(list(clean_valid_species)))
+                else:
+                    # 如果全是背景/空/未检测，没有实体物种，走多数表决兜底
+                    combined_species = Counter(fallback_clean_keys).most_common(1)[0][0]
+
+                # 拼接最终的分组显示名称
+                if combined_species in ["未检测", "需人工检验"]:
+                    majority_key = combined_species
+                elif combined_species == "空":
+                    majority_key = "[已校验] 空" if is_all_validated else "[未校验] 空"
+                else:
+                    majority_key = f"[已校验] {combined_species}" if is_all_validated else f"[未校验] {combined_species}"
+
+                all_species_keys.add(majority_key)
+
+                if not hasattr(self, 'species_group_map'):
+                    self.species_group_map = defaultdict(list)
+                self.species_group_map[majority_key].append(grp)
+
+                for f in grp:
+                    self.species_image_map[majority_key].append(f)
+        else:
+            # 未开启自动分组，回退常规的单文件独立展示
+            for f, key in file_to_display_key.items():
+                all_species_keys.add(key)
+                self.species_image_map[key].append(f)
+
+        # ==================== 应用交替底色数据映射 ====================
+        if not hasattr(self, 'species_group_map'):
+            self.species_group_map = defaultdict(list)
+
+        # 补全未走 auto_group 的情况 (或未检测的情况)
+        for key in all_species_keys:
+            if key not in self.species_group_map or not self.species_group_map[key]:
+                sorted_files = sorted(set(self.species_image_map.get(key, [])))
+                # 单张照片作为独立分组，实现单张交替颜色
+                self.species_group_map[key] = [[f] for f in sorted_files]
+
         def sort_priority(name):
             if name == "需人工检验": return 0
             if name == "[未校验] 空": return 2
@@ -2637,10 +2536,33 @@ class SpeciesValidationPage(QWidget):
             self.species_selector.setEnabled(True)
             self._update_species_selector_items()
 
-        # 添加图片到列表
-        for image_file in image_files:
-            self.species_photo_listbox.addItem(image_file)
-            logger.debug(f"添加图片到列表: {image_file}")
+        # 获取当前主题，定义交替的浅灰色 (提高透明度数值使其清晰可见)
+        from PySide6.QtGui import QBrush
+        app = QApplication.instance()
+        is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        # 调高 Alpha 值：深色模式 40，浅色模式 25
+        alt_bg_color = QColor(255, 255, 255, 40) if is_dark else QColor(0, 0, 0, 25)
+        alt_brush = QBrush(alt_bg_color)
+
+        # 添加图片到列表（按分组交替底色）
+        groups = getattr(self, 'species_group_map', {}).get(map_key, [])
+        if groups:
+            for i, grp in enumerate(groups):
+                for image_file in sorted(grp):
+                    self.species_photo_listbox.addItem(image_file)
+                    # 为奇数组添加底色
+                    if i % 2 == 1:
+                        item = self.species_photo_listbox.item(self.species_photo_listbox.count() - 1)
+                        item.setBackground(alt_brush)
+                    logger.debug(f"添加图片到列表: {image_file}")
+        else:
+            # 兼容 fallback 情况
+            for i, image_file in enumerate(image_files):
+                self.species_photo_listbox.addItem(image_file)
+                if i % 2 == 1:
+                    item = self.species_photo_listbox.item(self.species_photo_listbox.count() - 1)
+                    item.setBackground(alt_brush)
+                logger.debug(f"添加图片到列表: {image_file}")
 
         # 如果照片列表不为空，则自动选择第一个
         if self.species_photo_listbox.count() > 0:
@@ -2884,10 +2806,19 @@ class SpeciesValidationPage(QWidget):
         save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
                                  False)
 
-        # 实例化后台更新线程
-        self.bg_update_thread = BackgroundUpdateThread(
+        # =======================================================
+        # 【关键修复】：防止 QThread 对象被 Python 过早垃圾回收导致闪退
+        if not hasattr(self, '_active_bg_threads'):
+            self._active_bg_threads = []
+
+        # 实例化后台更新线程，不再使用单一的 self.bg_update_thread 变量去覆盖
+        thread = BackgroundUpdateThread(
             tasks, temp_photo_dir, source_dir, save_to_source, self.validation_data
         )
+        # 将线程加入托管列表，保持强引用
+        self._active_bg_threads.append(thread)
+
+        # =======================================================
 
         def thread_finished(success):
             self.controller.status_bar.hide_progress()
@@ -2901,8 +2832,15 @@ class SpeciesValidationPage(QWidget):
             if on_finished_callback:
                 on_finished_callback()
 
-        self.bg_update_thread.finished.connect(thread_finished)
-        self.bg_update_thread.start()
+            # =======================================================
+            # 【关键修复】：线程安全完成后，移除强引用并让 C++ 底层安全延后销毁
+            if thread in getattr(self, '_active_bg_threads', []):
+                self._active_bg_threads.remove(thread)
+            thread.deleteLater()
+            # =======================================================
+
+        thread.finished.connect(thread_finished)
+        thread.start()
 
     def _do_auto_advance(self):
         """满足个数匹配条件后自动跳转的通用逻辑"""
@@ -3115,6 +3053,9 @@ class SpeciesValidationPage(QWidget):
     def _load_species_buttons(self):
         """根据自动排序设置，动态加载快速标记物种按钮，确保近期频次排序不丢失"""
         self._selected_species_button = None
+
+        self._selected_species_buttons = []
+        self._selected_species_names = []
 
         while self.species_buttons_layout.count():
             child = self.species_buttons_layout.takeAt(0)
@@ -4099,16 +4040,8 @@ class SpeciesValidationPage(QWidget):
         self.species_photo_listbox.setEnabled(False)
         self.species_listbox.setEnabled(False)
 
-        # 激活底部进度条界面
-        self.controller.status_bar.show_progress()
-        self.controller.status_bar.status_label.setText(f"正在重新检测 {len(file_names)} 个文件...")
-
-        # 启动后台独立检测线程
-        self.redetect_thread = ReDetectThread(self.controller, file_names, source_dir, temp_photo_dir)
-        self.redetect_thread.progress_updated.connect(self.controller.status_bar.update_progress)
-        # 利用 lambda 传递已选文件列表给回调
-        self.redetect_thread.finished.connect(lambda success: self._on_redetect_finished(success, file_names))
-        self.redetect_thread.start()
+        # 直接调用主窗口的统一接口
+        self.controller.redetect_files(file_names, callback=self._on_redetect_finished)
 
     def _on_redetect_finished(self, success, file_names):
         """重新检测完成后的后置处理"""
@@ -4754,6 +4687,8 @@ class SpeciesValidationPage(QWidget):
         # 3. 尝试恢复物种选中状态
         if current_species:
             target_item = None
+            # 获取是否开启了自动分组
+            auto_group = getattr(getattr(self.controller, 'advanced_page', None), 'auto_group_var', False)
 
             # 策略A：如果是批量操作 (有 force_files 标志)，优先追踪照片跳转到新分组
             if force_files and current_photo_names:
@@ -4768,28 +4703,58 @@ class SpeciesValidationPage(QWidget):
                     if target_item:
                         break
 
-            # 策略B：如果是快速标记等普通操作，坚决优先保持在原本的确切分组（例如 "[未校验] 马"）
-            if not target_item and current_group_exact:
-                for idx in range(self.species_listbox.count()):
-                    item = self.species_listbox.item(idx)
-                    item_text = item.text()
-                    map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
-                    if map_key == current_group_exact:
-                        target_item = item
-                        break
+            if auto_group:
+                # ========================================================
+                # 开启了事件分组模式：物种的修改会导致分组名称实时变化（如合并成 狍子,赤狐）
+                # 因此必须优先跟随当前处理的照片，防止因为组名变化导致跳错分组
+                # ========================================================
+                if not target_item and current_photo_names:
+                    for current_photo_name in current_photo_names:
+                        for idx in range(self.species_listbox.count()):
+                            item = self.species_listbox.item(idx)
+                            item_text = item.text()
+                            map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                            if current_photo_name in self.species_image_map.get(map_key, []):
+                                target_item = item
+                                break
+                        if target_item:
+                            break
 
-            # 策略C：如果原分组因为被你标完了而消失了，或者以上都没找到，则降级尝试追踪当前焦点照片的去向
-            if not target_item and current_photo_names:
-                for current_photo_name in current_photo_names:
+                # 兜底：如果照片不见了，再尝试找原分组名
+                if not target_item and current_group_exact:
                     for idx in range(self.species_listbox.count()):
                         item = self.species_listbox.item(idx)
                         item_text = item.text()
                         map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
-                        if current_photo_name in self.species_image_map.get(map_key, []):
+                        if map_key == current_group_exact:
                             target_item = item
                             break
-                    if target_item:
-                        break
+            else:
+                # ========================================================
+                # 未开启事件分组模式：照片是按单一物种聚合的。如果修改了某张照片的物种，
+                # 照片会被踢出当前组。此时应该优先留在原物种组，继续处理其他同类照片。
+                # ========================================================
+                if not target_item and current_group_exact:
+                    for idx in range(self.species_listbox.count()):
+                        item = self.species_listbox.item(idx)
+                        item_text = item.text()
+                        map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                        if map_key == current_group_exact:
+                            target_item = item
+                            break
+
+                # 兜底：如果原物种组因为处理完了而消失，才去跟随照片去向
+                if not target_item and current_photo_names:
+                    for current_photo_name in current_photo_names:
+                        for idx in range(self.species_listbox.count()):
+                            item = self.species_listbox.item(idx)
+                            item_text = item.text()
+                            map_key = item_text.split(' (')[0] if ' (' in item_text else item_text
+                            if current_photo_name in self.species_image_map.get(map_key, []):
+                                target_item = item
+                                break
+                        if target_item:
+                            break
 
             # 策略D：终极兜底，尝试按前缀找回原来的物种大类
             if not target_item:
@@ -4822,8 +4787,28 @@ class SpeciesValidationPage(QWidget):
 
                 self.species_photo_listbox.blockSignals(True)
                 self.species_photo_listbox.clear()
-                for img in image_files:
-                    self.species_photo_listbox.addItem(img)
+
+                from PySide6.QtGui import QBrush
+                app = QApplication.instance()
+                is_dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+                alt_bg_color = QColor(255, 255, 255, 40) if is_dark else QColor(0, 0, 0, 25)
+                alt_brush = QBrush(alt_bg_color)
+
+                groups = getattr(self, 'species_group_map', {}).get(map_key, [])
+                if groups:
+                    for i, grp in enumerate(groups):
+                        for img in sorted(grp):
+                            self.species_photo_listbox.addItem(img)
+                            if i % 2 == 1:
+                                item = self.species_photo_listbox.item(self.species_photo_listbox.count() - 1)
+                                item.setBackground(alt_brush)
+                else:
+                    for i, img in enumerate(image_files):
+                        self.species_photo_listbox.addItem(img)
+                        if i % 2 == 1:
+                            item = self.species_photo_listbox.item(self.species_photo_listbox.count() - 1)
+                            item.setBackground(alt_brush)
+
                 self.species_photo_listbox.blockSignals(False)
 
                 if hasattr(self, '_photo_scroll_delegate'):

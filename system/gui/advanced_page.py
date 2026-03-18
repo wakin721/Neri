@@ -95,6 +95,7 @@ class AdvancedPage(QWidget):
         self.auto_sort_var = False
         self.selected_classes_var = None
         self.save_cache_to_image_folder_var = True
+        self.auto_group_var = True
 
         # 存储引用以便主题更新
         self.components_to_update = []
@@ -858,6 +859,35 @@ class AdvancedPage(QWidget):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(12)
+
+        # 基础设置面板
+        self.basic_settings_panel = CollapsiblePanel(
+            title="基础设置",
+            subtitle="常规与显示控制",
+            icon="⚙️"
+        )
+
+        basic_widget = QWidget()
+        basic_layout = QVBoxLayout(basic_widget)
+
+        self.auto_group_switch = SwitchRow("物种校验界面自动分组", checked=self.auto_group_var)
+        self.auto_group_switch.toggled.connect(self._on_setting_changed)
+        self.auto_group_switch.toggled.connect(
+            lambda checked: setattr(self, 'auto_group_var', checked)
+        )
+        self.components_to_update.append(self.auto_group_switch)
+        basic_layout.addWidget(self.auto_group_switch)
+
+        auto_group_explain = QLabel(
+            "开启后，将根据视频文件自动对连续拍摄的照片和视频（如3图1视频）进行分组，"
+            "并在文件列表中按所在组校验最多的物种统一归类显示。"
+        )
+        auto_group_explain.setStyleSheet("color: #888888; font-size: 12px;")
+        auto_group_explain.setWordWrap(True)
+        basic_layout.addWidget(auto_group_explain)
+
+        self.basic_settings_panel.add_content_widget(basic_widget)
+        content_layout.addWidget(self.basic_settings_panel)
 
         # 快速标记设置面板
         self.quick_mark_panel = CollapsiblePanel(
@@ -2040,6 +2070,7 @@ class AdvancedPage(QWidget):
             "export_columns": [name for name, cb in self.export_checkboxes.items() if cb.isChecked()],
             "selected_classes": [cls_id for cls_id, cb in self.classes_checkboxes.items() if cb.isChecked()],
             "save_cache_to_image_folder": self.save_cache_to_image_folder_switch.isChecked(),
+            "auto_group": self.auto_group_switch.isChecked(),
         }
 
     def load_settings(self, settings):
@@ -2165,6 +2196,10 @@ class AdvancedPage(QWidget):
         if "save_cache_to_image_folder" in settings:
             self.save_cache_to_image_folder_var = bool(settings["save_cache_to_image_folder"])
             self.save_cache_to_image_folder_switch.setChecked(self.save_cache_to_image_folder_var)
+
+        if "auto_group" in settings:
+            self.auto_group_var = bool(settings["auto_group"])
+            self.auto_group_switch.setChecked(self.auto_group_var)
 
     def _set_selected_model(self, model_name):
         """设置选定的模型"""
