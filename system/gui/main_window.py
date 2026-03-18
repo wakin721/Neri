@@ -240,7 +240,7 @@ class ProcessingThread(QThread):
             QThread.msleep(10)
 
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # [修改] 日志显示总帧数/图数
+            # 日志显示总帧数/图数
             self.console_log.emit(
                 f"[INFO] {current_time} 开始处理 {total_files_count} 个文件 (总计 {total_work_units} 单元)", "#00ff00")
             QThread.msleep(10)
@@ -819,7 +819,7 @@ class ProcessingThread(QThread):
                 QThread.msleep(10)
 
                 total_time = time.time() - start_time
-                # [修改] 使用工作单元（帧/图）来计算最终平均速度
+                # 使用工作单元（帧/图）来计算最终平均速度
                 actual_processed_units = processed_work_units - start_work_units
                 avg_speed = actual_processed_units / total_time if total_time > 0 else 0
 
@@ -1256,7 +1256,7 @@ class ObjectDetectionGUI(QMainWindow):
 
             # 调用高级页面的同步方法
         if hasattr(self.advanced_page, 'update_quick_settings_sync'):
-            # [修改] 传递 cls_model_name 参数
+            # 传递 cls_model_name 参数
             self.advanced_page.update_quick_settings_sync(model, stride, video_mode=mode, cls_model_name=cls_model)
 
     def _post_init(self):
@@ -1313,7 +1313,7 @@ class ObjectDetectionGUI(QMainWindow):
         # 使用线程来运行检查
         update_thread = threading.Thread(
             target=check_for_updates,
-            # [修改] 传递 mirror 参数
+            # 传递 mirror 参数
             args=(self, silent, channel, mirror),
             daemon=True
         )
@@ -2013,7 +2013,7 @@ class ObjectDetectionGUI(QMainWindow):
         content_browser.setMarkdown(release_notes)
         content_browser.setOpenExternalLinks(True)  # 允许点击链接
         content_browser.setReadOnly(True)
-        # [关键] 设置固定高度，内容过多时自动出现滚动条
+        # 设置固定高度，内容过多时自动出现滚动条
         content_browser.setFixedHeight(300)
         layout.addWidget(content_browser)
 

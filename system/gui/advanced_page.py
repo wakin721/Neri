@@ -2312,7 +2312,7 @@ class AdvancedPage(QWidget):
             index = self.model_combo.findText(model_name)
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
-                # [新增] 同步检测模型时，顺便更新检测模型状态文字
+                # 同步检测模型时，顺便更新检测模型状态文字
                 self.model_status_label.setText(f"当前使用: {model_name}")
             self.model_combo.blockSignals(False)
 
@@ -2334,7 +2334,7 @@ class AdvancedPage(QWidget):
                 if index >= 0:
                     self.cls_model_combo.setCurrentIndex(index)
 
-                    # [修改核心部分] 手动更新分类模型的状态文字
+                    # 手动更新分类模型的状态文字
                     # 因为blockSignals(True)屏蔽了自动更新，这里必须手动设置Label
                     final_name = self.cls_model_combo.currentText()
                     if final_name == "不使用 (None)" or not final_name:
