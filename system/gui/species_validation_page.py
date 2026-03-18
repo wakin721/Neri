@@ -3548,7 +3548,7 @@ class SpeciesValidationPage(QWidget):
             old_json = last_state['json_data']
             old_val = last_state['validation_data']
 
-            # [新增] 恢复按钮数组，并打上撤回标志位以便恢复高亮样式
+            # 恢复按钮数组，并打上撤回标志位以便恢复高亮样式
             self._selected_species_names = last_state.get('selected_species_names', [])
             self._selected_counts = last_state.get('selected_counts', [])
             self._is_undoing = True

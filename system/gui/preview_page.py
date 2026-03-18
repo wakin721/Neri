@@ -1501,7 +1501,7 @@ class PreviewPage(QWidget):
 
         found_species = set()
 
-        # [新增] 下拉框最小显示阈值
+        # 下拉框最小显示阈值
         MIN_DROPDOWN_CONF = 0.05
 
         # === 变量定义 ===
