@@ -93,7 +93,7 @@ class ImageProcessor:
 
         return device, fp16_enabled
 
-    def _preprocess_image(self, img: Any) -> Any:
+    '''def _preprocess_image(self, img: Any) -> Any:
         """
         图像预处理：LAB色彩空间增强 (L通道 CLAHE)
         适用于 BGR 彩色图像和 灰度图像
@@ -133,7 +133,27 @@ class ImageProcessor:
             logger.warning(f"图像预处理失败，将使用原图: {e}")
             return np.ascontiguousarray(img) if img is not None else None
 
-        return img
+        return img'''
+
+    def _preprocess_image(self, img: Any) -> Any:
+        """
+        图像预处理：已关闭色彩增强
+        仅保留格式安全转换，确保内存连续和 uint8 类型
+        """
+        if img is None or img.size == 0:
+            return None
+
+        try:
+            # 确保图像是 uint8 类型且内存连续，防止 YOLO 报错 Unsupported image type
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+
+            # 直接返回原图的连续数组形式，跳过所有 CLAHE 增强逻辑
+            return np.ascontiguousarray(img)
+
+        except Exception as e:
+            logger.warning(f"图像格式转换失败，将使用原图: {e}")
+            return np.ascontiguousarray(img) if img is not None else None
 
     def _apply_temperature_scaling(self, probs: torch.Tensor, temperature: float = 3.0) -> torch.Tensor:
         """
