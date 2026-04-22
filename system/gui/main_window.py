@@ -717,7 +717,7 @@ class ProcessingThread(QThread):
                                 self.current_file_preview.emit(img_path, full_info)
                                 if 'detect_results' in image_meta: del image_meta['detect_results']
                                 if not self.is_redetect:
-                                    excel_data.append(image_info)
+                                    excel_data.append(image_meta)
 
                                 # 单张日志
                                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
