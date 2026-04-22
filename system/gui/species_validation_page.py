@@ -3194,11 +3194,27 @@ class SpeciesValidationPage(QWidget):
             MaterialMessageBox.critical(self, "错误", "无法找到临时文件或源文件路径，请确保已进行批处理并且路径设置正确。")
             return
 
-        json_files = [f for f in os.listdir(temp_dir) if f.lower().endswith('.json') and f != 'validation.json']
-        if not json_files:
+        save_to_source = getattr(
+            getattr(self.controller, 'advanced_page', None),
+            'save_cache_to_image_folder_var', False
+        )
+        from system.detection_db import get_db_path
+        source_db_path = get_db_path(source_dir)
+        temp_db_path = get_db_path(temp_dir)
+        json_files = [
+            f for f in os.listdir(temp_dir)
+            if f.lower().endswith('.json') and f not in ('validation.json', 'conf.json')
+        ]
+
+        has_data = (
+                (save_to_source and os.path.exists(source_db_path))  # 图像文件夹的 .db
+                or os.path.exists(temp_db_path)  # 软件缓存的 .db
+                or bool(json_files)  # 旧版 JSON 文件（兼容）
+        )
+        if not has_data:
             MaterialMessageBox.information(self, "提示", "没有找到任何处理后的数据，无法导出。")
             return
-
+        
         file_format = self.export_format_var.lower()
         if file_format == 'excel':
             file_types = "Excel 文件 (*.xlsx);;所有文件 (*.*)"
