@@ -210,3 +210,15 @@ def migrate_from_json(db_path: str, photo_dir: str,
 
     logger.info(f"[迁移] 共迁移 {migrated} 条检测记录到 SQLite")
     return migrated
+
+def upsert_validation_bulk(db_path: str, items: list[tuple[str, bool]]):
+    """批量写入/更新校验状态，所有操作在同一事务内完成。
+    items: [(image_filename, is_validated), ...]
+    """
+    if not items:
+        return
+    with _get_conn(db_path) as conn:
+        conn.executemany("""
+            INSERT INTO validation (image_filename, is_validated) VALUES (?,?)
+            ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
+        """, [(fn, 1 if v else 0) for fn, v in items])
