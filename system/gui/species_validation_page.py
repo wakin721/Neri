@@ -221,7 +221,7 @@ class BackgroundUpdateThread(QThread):
         import json
         import os
         from datetime import datetime
-        from system.detection_db import get_db_path, update_detection, init_db, upsert_validation, delete_validation, delete_validation_bulk
+        from system.detection_db import get_db_path, update_detection, init_db, upsert_validation_bulk, delete_validation_bulk
 
         try:
             db_path = get_db_path(self.temp_photo_dir)
@@ -235,20 +235,25 @@ class BackgroundUpdateThread(QThread):
                     init_db(source_db_path)
 
             # 1. 批量更新检测数据 (SQLite & JSON 回退)
-            for task in self.update_tasks:
-                file_name = task['file_name']
-                base_name = os.path.splitext(file_name)[0]
-                action = task.get('action')
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                for task in self.update_tasks:
+                    file_name = task['file_name']
+                    base_name = os.path.splitext(file_name)[0]
+                    action = task.get('action')
 
-                if action in ('empty', 'update', 'unverified'):
+                    if action not in ('empty', 'update', 'unverified'):
+                        continue
+
                     detection_info = {}
                     try:
-                        with sqlite3.connect(db_path) as conn:
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT detection_json FROM detections WHERE base_name=?", (base_name,))
-                            row = cursor.fetchone()
-                            if row:
-                                detection_info = json.loads(row[0])
+                        cursor.execute(
+                            "SELECT detection_json FROM detections WHERE base_name=?",
+                            (base_name,)
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            detection_info = json.loads(row[0])
                     except Exception:
                         pass
 
@@ -282,25 +287,34 @@ class BackgroundUpdateThread(QThread):
                         if source_db_path:
                             update_detection(source_db_path, base_name, detection_info)
 
-            # 2. 批量处理 validation.json 校验状态
+            # 1. 计算本次需要删除的文件名（回退为未校验的）
             files_to_remove = [t['file_name'] for t in self.update_tasks if t.get('action') == 'unverified']
             for f in files_to_remove:
                 self.full_validation_data.pop(f, None)
 
-            for filename, value in self.full_validation_data.items():
-                if value is None:
-                    delete_validation(db_path, filename)
-                    if source_db_path:
-                        delete_validation(source_db_path, filename)
-                else:
-                    upsert_validation(db_path, filename, bool(value))
-                    if source_db_path:
-                        upsert_validation(source_db_path, filename, bool(value))
+            # 2. 分离需要 upsert 和需要 delete 的条目
+            to_upsert = [
+                (filename, bool(value))
+                for filename, value in self.full_validation_data.items()
+                if value is not None
+            ]
+            to_delete_nulls = [
+                filename
+                for filename, value in self.full_validation_data.items()
+                if value is None
+            ]
+            all_to_delete = list(set(files_to_remove + to_delete_nulls))
 
-            if files_to_remove:
-                delete_validation_bulk(db_path, files_to_remove)
+            # 3. 一次性批量写入（单事务）
+            if to_upsert:
+                upsert_validation_bulk(db_path, to_upsert)
                 if source_db_path:
-                    delete_validation_bulk(source_db_path, files_to_remove)
+                    upsert_validation_bulk(source_db_path, to_upsert)
+
+            if all_to_delete:
+                delete_validation_bulk(db_path, all_to_delete)
+                if source_db_path:
+                    delete_validation_bulk(source_db_path, all_to_delete)
 
             val_json_path = os.path.join(self.temp_photo_dir, "validation.json")
             with open(val_json_path, 'w', encoding='utf-8') as f:
