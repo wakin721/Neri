@@ -2186,6 +2186,10 @@ class SpeciesValidationPage(QWidget):
         auto_group = getattr(getattr(self.controller, 'advanced_page', None), 'auto_group_var', False)
 
         if auto_group:
+            self.species_image_map.clear()
+            all_species_keys.clear()
+            self.species_group_map.clear()
+
             # 1. 字典序排列以还原相机的触发时间轴
             sorted_files = sorted(image_basename_map.values())
             groups = []
@@ -4085,8 +4089,9 @@ class SpeciesValidationPage(QWidget):
         else:
             self.controller.status_bar.status_label.setText("❌ 重新检测过程出现错误，请查看日志")
 
-        # 重测完成后，必须抹除掉这些文件以前带有的人工检验标志(以便界面上恢复到自动判断的状态)
+        # 重测完成后，必须抹除掉这些文件以前带有的人工检验标志
         temp_photo_dir = self.controller.get_temp_photo_dir()
+        source_dir = self.controller.start_page.get_file_path()  # 获取源目录
         files_to_remove = []
 
         for file_name in file_names:
@@ -4096,26 +4101,35 @@ class SpeciesValidationPage(QWidget):
 
         # 彻底移除本地 validation.json 中的标记，防止自动合并时老数据又被合并回来
         if temp_photo_dir and files_to_remove:
-            # 👇 这里补充导入 update_detection
             from system.detection_db import get_db_path, delete_validation_bulk, update_detection
 
             db_path = get_db_path(temp_photo_dir)
+
+            save_to_source = getattr(getattr(self.controller, 'advanced_page', None), 'save_cache_to_image_folder_var',
+                                     False)
+            source_db_path = get_db_path(source_dir) if save_to_source and source_dir else None
+
+            # 1. 双端抹除旧的校验状态
             if os.path.exists(db_path):
                 delete_validation_bulk(db_path, files_to_remove)
+            if source_db_path and os.path.exists(source_db_path):
+                delete_validation_bulk(source_db_path, files_to_remove)
 
-                # ==========================================
-                # 👇 【新增修复】：将重测后磁盘上最新的 JSON 数据强制同步更新到 SQLite 数据库中
-                for f_name in file_names:
-                    base_name = os.path.splitext(f_name)[0]
-                    json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
-                    if os.path.exists(json_path):
-                        try:
-                            with open(json_path, 'r', encoding='utf-8') as f:
-                                new_detection_info = json.load(f)
-                            # 覆盖更新 SQLite 缓存中的旧检测结果
+            # 2. 双端覆盖最新的检测 JSON 结果
+            for f_name in file_names:
+                base_name = os.path.splitext(f_name)[0]
+                json_path = os.path.join(temp_photo_dir, f"{base_name}.json")
+                if os.path.exists(json_path):
+                    try:
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            new_detection_info = json.load(f)
+                        # 覆盖更新 SQLite 缓存中的旧检测结果
+                        if os.path.exists(db_path):
                             update_detection(db_path, base_name, new_detection_info)
-                        except Exception as e:
-                            logger.error(f"同步重测结果到 SQLite 失败: {f_name}, {e}")
+                        if source_db_path and os.path.exists(source_db_path):
+                            update_detection(source_db_path, base_name, new_detection_info)
+                    except Exception as e:
+                        logger.error(f"同步重测结果到 SQLite 失败: {f_name}, {e}")
 
             # 同时保持 validation.json 同步（可选，兼容性用）
             validation_file_path = os.path.join(temp_photo_dir, "validation.json")
@@ -4133,7 +4147,7 @@ class SpeciesValidationPage(QWidget):
                 except Exception as e:
                     logger.error(f"清理 validation.json 失败: {e}")
 
-        # 设置重新选中标记 (如果有之前选择的文件在这个列表里，界面刷新后会自动保持选中)
+        # 设置重新选中标记
         if len(file_names) > 0:
             self._force_select_files = file_names
 
