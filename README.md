@@ -163,3 +163,29 @@
 ## 鸣谢
 
   感谢北纬44度的Suger为本项目提供logo
+
+## 🧪 Flutter Material 3 前端与 Python 后端（实验性）
+
+本分支新增了面向跨平台客户端的前后端拆分实现：
+
+- `backend/`：基于 FastAPI 的 Python 后端，复用现有 `system/` 中的配置、EXIF 元数据提取和 YOLO 图像处理模块。
+- `frontend/`：基于 Flutter 的 Material 3 前端，在最左侧使用 NavigationRail 区分开始界面、图像预览、物种校验、设置和关于界面，并提供后端连接状态、任务创建、阈值设置、进度轮询和结果预览。
+
+### 启动 Python 后端
+
+```bash
+python -m pip install -r requirements.txt
+python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+后端文档地址：<http://127.0.0.1:8000/docs>
+
+### 启动 Flutter 前端
+
+```bash
+cd frontend
+flutter pub get
+flutter run
+```
+
+默认连接 `http://127.0.0.1:8000`。当前前端使用本机文件夹路径提交任务，因此桌面端运行体验最佳。
