@@ -8,7 +8,7 @@ import 'models/settings.dart';
 class NeriApiClient {
   NeriApiClient({
     http.Client? httpClient,
-    this.baseUrl = 'http://127.0.0.1:8000',
+    this.baseUrl = 'http://127.0.0.1:721',
   }) : _httpClient = httpClient ?? http.Client();
 
   final http.Client _httpClient;
