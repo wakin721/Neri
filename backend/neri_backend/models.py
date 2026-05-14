@@ -24,6 +24,14 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
+class ModelInfo(BaseModel):
+    """A YOLO model discovered under the project model directory."""
+
+    name: str
+    path: str
+    size_bytes: int | None = None
+
+
 class SettingsResponse(BaseModel):
     """Subset of desktop settings useful to the mobile/desktop frontend."""
 
@@ -31,6 +39,9 @@ class SettingsResponse(BaseModel):
     app_version: str
     supported_image_extensions: list[str]
     supported_video_extensions: list[str]
+    model_directory: str
+    available_models: list[ModelInfo] = Field(default_factory=list)
+    selected_model: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -68,8 +79,11 @@ class DetectionItem(BaseModel):
     date_taken: str | None = None
     width: int | None = None
     height: int | None = None
+    size_bytes: int | None = None
     species: list[str] = Field(default_factory=list)
     confidence: float | None = None
+    detection_boxes: list[dict[str, Any]] = Field(default_factory=list)
+    detection_data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
 
