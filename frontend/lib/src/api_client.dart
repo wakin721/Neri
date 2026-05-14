@@ -55,6 +55,41 @@ class NeriApiClient {
     return ProcessingJob.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
+  Future<List<DetectionItem>> fetchPreviewItems({
+    required String inputPath,
+    String? outputDir,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/preview').replace(
+      queryParameters: {
+        'input_path': inputPath,
+        if (outputDir != null && outputDir.isNotEmpty) 'output_dir': outputDir,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DetectionItem.fromJson)
+        .toList();
+  }
+
+  Future<DetectionItem> fetchPreviewItem({
+    required String filePath,
+    String? inputPath,
+    String? outputDir,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/preview/item').replace(
+      queryParameters: {
+        'file_path': filePath,
+        if (inputPath != null && inputPath.isNotEmpty) 'input_path': inputPath,
+        if (outputDir != null && outputDir.isNotEmpty) 'output_dir': outputDir,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DetectionItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
   Future<List<ProcessingJob>> listJobs() async {
     final response = await _httpClient.get(_uri('/api/jobs'));
     _ensureSuccess(response);
