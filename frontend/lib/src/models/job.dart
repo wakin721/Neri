@@ -1,3 +1,32 @@
+class DetectionBox {
+  const DetectionBox({
+    required this.species,
+    required this.bbox,
+    this.confidence,
+    this.candidates = const <Map<String, dynamic>>[],
+  });
+
+  factory DetectionBox.fromJson(Map<String, dynamic> json) {
+    final rawBbox = json['bbox'] as List<dynamic>? ?? const <dynamic>[];
+    return DetectionBox(
+      species: json['species'] as String? ?? 'Unknown',
+      confidence: (json['confidence'] as num?)?.toDouble(),
+      bbox: rawBbox
+          .map((item) => item is num ? item.toDouble() : double.tryParse(item.toString()))
+          .whereType<double>()
+          .toList(),
+      candidates: (json['candidates'] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .toList(),
+    );
+  }
+
+  final String species;
+  final double? confidence;
+  final List<double> bbox;
+  final List<Map<String, dynamic>> candidates;
+}
+
 class DetectionItem {
   const DetectionItem({
     required this.filename,
@@ -6,8 +35,11 @@ class DetectionItem {
     this.dateTaken,
     this.width,
     this.height,
+    this.sizeBytes,
     this.species = const <String>[],
     this.confidence,
+    this.detectionBoxes = const <DetectionBox>[],
+    this.detectionData = const <String, dynamic>{},
     this.error,
   });
 
@@ -19,10 +51,17 @@ class DetectionItem {
       dateTaken: json['date_taken'] as String?,
       width: json['width'] as int?,
       height: json['height'] as int?,
+      sizeBytes: json['size_bytes'] as int?,
       species: (json['species'] as List<dynamic>? ?? const <dynamic>[])
           .map((item) => item.toString())
           .toList(),
       confidence: (json['confidence'] as num?)?.toDouble(),
+      detectionBoxes:
+          (json['detection_boxes'] as List<dynamic>? ?? const <dynamic>[])
+              .whereType<Map<String, dynamic>>()
+              .map(DetectionBox.fromJson)
+              .toList(),
+      detectionData: json['detection_data'] as Map<String, dynamic>? ?? const <String, dynamic>{},
       error: json['error'] as String?,
     );
   }
@@ -33,8 +72,11 @@ class DetectionItem {
   final String? dateTaken;
   final int? width;
   final int? height;
+  final int? sizeBytes;
   final List<String> species;
   final double? confidence;
+  final List<DetectionBox> detectionBoxes;
+  final Map<String, dynamic> detectionData;
   final String? error;
 }
 

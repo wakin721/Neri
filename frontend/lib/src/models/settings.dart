@@ -4,6 +4,9 @@ class NeriSettings {
     required this.appVersion,
     required this.supportedImageExtensions,
     required this.supportedVideoExtensions,
+    required this.modelDirectory,
+    required this.availableModels,
+    this.selectedModel,
   });
 
   factory NeriSettings.fromJson(Map<String, dynamic> json) {
@@ -18,6 +21,13 @@ class NeriSettings {
           (json['supported_video_extensions'] as List<dynamic>? ?? const <dynamic>[])
               .map((item) => item.toString())
               .toList(),
+      modelDirectory: json['model_directory'] as String? ?? 'res/model',
+      availableModels:
+          (json['available_models'] as List<dynamic>? ?? const <dynamic>[])
+              .whereType<Map<String, dynamic>>()
+              .map(ModelInfo.fromJson)
+              .toList(),
+      selectedModel: json['selected_model'] as String?,
     );
   }
 
@@ -25,4 +35,27 @@ class NeriSettings {
   final String appVersion;
   final List<String> supportedImageExtensions;
   final List<String> supportedVideoExtensions;
+  final String modelDirectory;
+  final List<ModelInfo> availableModels;
+  final String? selectedModel;
+}
+
+class ModelInfo {
+  const ModelInfo({
+    required this.name,
+    required this.path,
+    this.sizeBytes,
+  });
+
+  factory ModelInfo.fromJson(Map<String, dynamic> json) {
+    return ModelInfo(
+      name: json['name'] as String? ?? '',
+      path: json['path'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int?,
+    );
+  }
+
+  final String name;
+  final String path;
+  final int? sizeBytes;
 }
