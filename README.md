@@ -175,10 +175,10 @@
 
 ```bash
 python -m pip install -r requirements.txt
-python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 721
 ```
 
-后端文档地址：<http://127.0.0.1:8000/docs>
+后端文档地址：<http://127.0.0.1:721/docs>
 
 ### 启动 Flutter 前端
 
@@ -188,4 +188,4 @@ flutter pub get
 flutter run
 ```
 
-默认连接 `http://127.0.0.1:8000`。当前前端使用本机文件夹路径提交任务，因此桌面端运行体验最佳。
+默认连接 `http://127.0.0.1:721`。当前前端使用本机文件夹路径提交任务，因此桌面端运行体验最佳。
