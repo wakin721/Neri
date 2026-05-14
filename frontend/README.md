@@ -7,7 +7,7 @@ Flutter Material 3 client for the Neri Python backend.
 1. Start the backend from the repository root:
 
    ```bash
-   python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 8000
+   python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 721
    ```
 
 2. Start Flutter:
