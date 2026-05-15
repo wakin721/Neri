@@ -3,6 +3,8 @@ class DetectionBox {
     required this.species,
     required this.bbox,
     this.confidence,
+    this.frameIndex,
+    this.timestamp,
     this.candidates = const <Map<String, dynamic>>[],
   });
 
@@ -11,8 +13,14 @@ class DetectionBox {
     return DetectionBox(
       species: json['species'] as String? ?? 'Unknown',
       confidence: (json['confidence'] as num?)?.toDouble(),
+      frameIndex: json['frame_index'] as int?,
+      timestamp: (json['timestamp'] as num?)?.toDouble(),
       bbox: rawBbox
-          .map((item) => item is num ? item.toDouble() : double.tryParse(item.toString()))
+          .map(
+            (item) => item is num
+                ? item.toDouble()
+                : double.tryParse(item.toString()),
+          )
           .whereType<double>()
           .toList(),
       candidates: (json['candidates'] as List<dynamic>? ?? const <dynamic>[])
@@ -23,6 +31,8 @@ class DetectionBox {
 
   final String species;
   final double? confidence;
+  final int? frameIndex;
+  final double? timestamp;
   final List<double> bbox;
   final List<Map<String, dynamic>> candidates;
 }
@@ -41,6 +51,7 @@ class DetectionItem {
     this.detectionBoxes = const <DetectionBox>[],
     this.detectionData = const <String, dynamic>{},
     this.error,
+    this.validated,
   });
 
   factory DetectionItem.fromJson(Map<String, dynamic> json) {
@@ -61,8 +72,11 @@ class DetectionItem {
               .whereType<Map<String, dynamic>>()
               .map(DetectionBox.fromJson)
               .toList(),
-      detectionData: json['detection_data'] as Map<String, dynamic>? ?? const <String, dynamic>{},
+      detectionData:
+          json['detection_data'] as Map<String, dynamic>? ??
+          const <String, dynamic>{},
       error: json['error'] as String?,
+      validated: json['validated'] as bool?,
     );
   }
 
@@ -78,6 +92,7 @@ class DetectionItem {
   final List<DetectionBox> detectionBoxes;
   final Map<String, dynamic> detectionData;
   final String? error;
+  final bool? validated;
 }
 
 class ProcessingJob {

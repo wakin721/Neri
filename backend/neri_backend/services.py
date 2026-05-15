@@ -22,7 +22,16 @@ from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 
-from .models import CreateJobRequest, DetectionItem, JobState, JobSummary, ModelInfo
+from .models import (
+    CreateJobRequest,
+    DetectionItem,
+    JobState,
+    JobSummary,
+    ModelInfo,
+    ValidationExportRequest,
+    ValidationExportResponse,
+    ValidationMarkRequest,
+)
 
 
 class JobNotFoundError(KeyError):
@@ -41,21 +50,76 @@ def model_directory() -> Path:
     return Path(resource_path("res/model")).resolve()
 
 
+def classification_model_directory() -> Path:
+    """Return the optional second-stage classification model directory."""
+
+    return Path(resource_path("res/model_cls")).resolve()
+
+
 def list_available_models() -> list[ModelInfo]:
     """List all .pt files available under res/model."""
 
     directory = model_directory()
+    return _list_model_files(directory, ("*.pt",))
+
+
+def list_available_classification_models() -> list[ModelInfo]:
+    """List classification model files under res/model_cls."""
+
+    directory = classification_model_directory()
+    return _list_model_files(directory, ("*.pt", "*.onnx", "*.engine"))
+
+
+def _list_model_files(directory: Path, patterns: tuple[str, ...]) -> list[ModelInfo]:
     if not directory.exists() or not directory.is_dir():
         return []
 
     models: list[ModelInfo] = []
-    for path in sorted(directory.glob("*.pt"), key=lambda item: item.name.lower()):
+    paths: list[Path] = []
+    for pattern in patterns:
+        paths.extend(directory.glob(pattern))
+    for path in sorted(set(paths), key=lambda item: item.name.lower()):
         try:
             size_bytes = path.stat().st_size
         except OSError:
             size_bytes = None
         models.append(ModelInfo(name=path.name, path=str(path), size_bytes=size_bytes))
     return models
+
+
+def load_species_types() -> dict[str, str]:
+    """Load species type labels from res/species_database.db."""
+
+    db_path = Path(resource_path("res/species_database.db"))
+    if not db_path.exists():
+        return {}
+
+    species_types: dict[str, str] = {}
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute("SELECT 中文名, 物种类型 FROM species").fetchall()
+        for name, species_type in rows:
+            clean_name = str(name or "").strip()
+            clean_type = str(species_type or "").strip()
+            if clean_name and clean_type:
+                species_types[clean_name] = clean_type
+    except Exception:
+        return {}
+    return species_types
+
+
+def detect_gpu_available() -> bool:
+    """Best-effort hardware acceleration check used by the settings UI."""
+
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        xpu = getattr(torch, "xpu", None)
+        xpu_available = bool(xpu is not None and xpu.is_available())
+        return cuda_available or xpu_available
+    except Exception:
+        return False
 
 
 def preview_media_items(input_dir: str, output_dir: str | None = None) -> list[DetectionItem]:
@@ -71,12 +135,14 @@ def preview_media_items(input_dir: str, output_dir: str | None = None) -> list[D
 
     detection_db_roots = _detection_db_search_roots(input_path, output_dir)
     detection_index = _load_detection_index(detection_db_roots)
+    validation_index = _load_validation_index(detection_db_roots)
     items: list[DetectionItem] = []
     for path in files:
         item = _build_fast_metadata_item(path)
         db_detection_data = detection_index.get(path.stem) or _load_detection_data_for_path(path, detection_db_roots)
         if db_detection_data:
             item = _apply_detection_data(item, db_detection_data)
+        item = _apply_validation_state(item, path.name, validation_index)
         items.append(item)
     return items
 
@@ -96,9 +162,11 @@ def preview_media_item(file_path: str, input_dir: str | None = None, output_dir:
         input_path = Path(input_dir).expanduser()
         roots.extend(_detection_db_search_roots(input_path, output_dir))
     detection_index = _load_detection_index(roots)
+    validation_index = _load_validation_index(roots)
     db_detection_data = detection_index.get(path.stem) or _load_detection_data_for_path(path, roots)
     if db_detection_data:
         item = _apply_detection_data(item, db_detection_data)
+    item = _apply_validation_state(item, path.name, validation_index)
     return item
 
 
@@ -382,6 +450,21 @@ def _load_detection_index(search_roots: list[Path]) -> dict[str, dict[str, Any]]
     return index
 
 
+def _load_validation_index(search_roots: list[Path]) -> dict[str, bool]:
+    index: dict[str, bool] = {}
+    for db_path in _candidate_detection_dbs_for_roots(search_roots):
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                rows = conn.execute("SELECT image_filename, is_validated FROM validation").fetchall()
+            for image_filename, is_validated in rows:
+                key = str(image_filename)
+                if key not in index:
+                    index[key] = bool(is_validated)
+        except Exception:
+            continue
+    return index
+
+
 def _load_detection_data_for_path(path: Path, search_roots: list[Path]) -> dict[str, Any]:
     base_name = path.stem
     for db_path in _candidate_detection_dbs(path, search_roots):
@@ -394,6 +477,16 @@ def _load_detection_data_for_path(path: Path, search_roots: list[Path]) -> dict[
         except Exception:
             continue
     return {}
+
+
+def _apply_validation_state(
+    item: DetectionItem,
+    filename: str,
+    validation_index: dict[str, bool],
+) -> DetectionItem:
+    if filename not in validation_index:
+        return item
+    return item.model_copy(update={"validated": validation_index[filename]})
 
 
 def _value_from_keys(data: dict[str, Any], keys: Iterable[str]) -> Any:
@@ -455,6 +548,9 @@ def _coerce_bbox(value: Any) -> list[float]:
 def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
     raw_boxes = _value_from_keys(data, ("检测框", "detect_results", "objects"))
     if not isinstance(raw_boxes, list):
+        raw_tracks = data.get("tracks")
+        raw_boxes = _boxes_from_tracks(raw_tracks)
+    if not isinstance(raw_boxes, list):
         return []
 
     boxes: list[dict[str, Any]] = []
@@ -473,6 +569,39 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "confidence": confidence,
                 "bbox": bbox,
                 "candidates": candidates if isinstance(candidates, list) else [],
+            }
+        )
+    return boxes
+
+
+def _boxes_from_tracks(raw_tracks: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_tracks, dict):
+        return []
+
+    boxes: list[dict[str, Any]] = []
+    for points in raw_tracks.values():
+        if not isinstance(points, list):
+            continue
+        best_point: dict[str, Any] | None = None
+        best_confidence = -1.0
+        for point in points:
+            if not isinstance(point, dict):
+                continue
+            bbox = _coerce_bbox(point.get("bbox"))
+            if not bbox:
+                continue
+            confidence = _coerce_float(_value_from_keys(point, ("confidence", "置信度", "conf", "score"))) or 0.0
+            if best_point is None or confidence > best_confidence:
+                best_point = point
+                best_confidence = confidence
+        if best_point is None:
+            continue
+        boxes.append(
+            {
+                "species": str(_value_from_keys(best_point, ("species", "物种", "name", "class_name")) or "Unknown"),
+                "confidence": _coerce_float(_value_from_keys(best_point, ("confidence", "置信度", "conf", "score"))),
+                "bbox": _coerce_bbox(best_point.get("bbox")),
+                "candidates": [],
             }
         )
     return boxes
@@ -599,6 +728,266 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
         return _apply_detection_data(item, detection_data)
     except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
         return item.model_copy(update={"error": f"检测失败: {exc}"})
+
+
+DEFAULT_EXPORT_COLUMNS = [
+    "文件名",
+    "格式",
+    "拍摄日期",
+    "拍摄时间",
+    "工作天数",
+    "物种名称",
+    "学名",
+    "目名",
+    "目拉丁名",
+    "科名",
+    "科拉丁名",
+    "属名",
+    "属拉丁名",
+    "物种类型",
+    "物种数量",
+    "最低置信度",
+    "独立探测首只",
+    "备注",
+]
+
+def _update_species_database(species_name_str: str, species_type_str: str) -> None:
+    """如果前端传来了物种名称和物种类型，则自动更新至物种数据库以供后续使用。"""
+    if not species_name_str or not species_type_str:
+        return
+
+    # 按中英文逗号分割并清理空格
+    names = [n.strip() for n in species_name_str.replace("，", ",").split(",") if n.strip()]
+    types = [t.strip() for t in species_type_str.replace("，", ",").split(",") if t.strip()]
+
+    if not names or not types:
+        return
+
+    db_path = Path(resource_path("res/species_database.db"))
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
+            # 兼容：如果表不存在则自动创建，匹配 load_species_types 查询的 'species' 表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS species (
+                    中文名 TEXT PRIMARY KEY,
+                    物种类型 TEXT
+                )
+            """)
+
+            for i, name in enumerate(names):
+                if name in ("空", "未知鸟"):
+                    continue
+                # 若类型的数量少于物种数量，则使用最后一个类型补齐
+                t = types[i] if i < len(types) else types[-1]
+                
+                if t and t != "待补全" and t != "空":
+                    row = cursor.execute("SELECT 中文名 FROM species WHERE 中文名 = ?", (name,)).fetchone()
+                    if row:
+                        cursor.execute("UPDATE species SET 物种类型 = ? WHERE 中文名 = ?", (t, name))
+                    else:
+                        cursor.execute("INSERT INTO species (中文名, 物种类型) VALUES (?, ?)", (name, t))
+            conn.commit()
+    except Exception as e:
+        print(f"Failed to auto-update species_database.db: {e}")
+
+def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
+    input_path = Path(request.input_path).expanduser().resolve()
+    path = Path(request.file_path).expanduser().resolve()
+    if not input_path.exists():
+        raise ValueError(f"输入路径不存在: {input_path}")
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"文件不存在: {path}")
+
+    roots = _detection_db_search_roots(input_path, None)
+    existing_data = dict(_load_detection_data_for_path(path, roots))
+    existing_item = _build_metadata_item(path)
+    if existing_data:
+        existing_item = _apply_detection_data(existing_item, existing_data)
+
+    validated: bool | None = True
+    detection_data = existing_data
+
+    if request.action == "unverified":
+        if detection_data.get("最低置信度") == "人工校验":
+            for key in ["最低置信度", "物种名称", "物种数量", "备注", "检测时间"]:
+                detection_data.pop(key, None)
+        validated = None
+    else:
+        species_name = (request.species_name or "").strip()
+        species_count = (request.species_count or "").strip()
+
+        if request.action == "empty":
+            species_name = "空"
+            species_count = "空"
+        elif request.action == "correct":
+            species_name = species_name or str(detection_data.get("物种名称") or "").strip()
+            if not species_name and existing_item.species:
+                species_name = ",".join(existing_item.species)
+            species_count = species_count or str(detection_data.get("物种数量") or "").strip()
+            if not species_count:
+                species_count = str(max(1, len(existing_item.detection_boxes))) if species_name and species_name != "空" else "空"
+
+        if species_name:
+            detection_data["物种名称"] = species_name
+        if species_count:
+            detection_data["物种数量"] = species_count
+        if request.species_type is not None:
+            species_type = request.species_type.strip()
+            if species_type:
+                detection_data["物种类型"] = species_type
+                _update_species_database(detection_data.get("物种名称", ""), species_type)
+            else:
+                detection_data.pop("物种类型", None)
+        if request.remark is not None:
+            detection_data["备注"] = request.remark
+        detection_data["最低置信度"] = "人工校验"
+        detection_data["检测时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    _persist_validation_update(path, input_path, detection_data, validated)
+    return _reload_validation_item(path, input_path)
+
+
+def export_validation_data(request: ValidationExportRequest) -> ValidationExportResponse:
+    input_path = Path(request.input_path).expanduser().resolve()
+    if not input_path.exists():
+        raise ValueError(f"输入路径不存在: {input_path}")
+
+    files = list(_resolve_supported_inputs(input_path))
+    if not files:
+        raise ValueError(f"输入路径中没有支持的媒体文件: {input_path}")
+
+    detection_roots = _detection_db_search_roots(input_path, None)
+    image_info_list: list[dict[str, Any]] = []
+    earliest_date: datetime | None = None
+
+    for path in files:
+        metadata = _build_export_metadata(path)
+        detection_data = _load_detection_data_for_path(path, detection_roots)
+        if detection_data:
+            metadata.update(detection_data)
+        image_info_list.append(metadata)
+
+        date_taken = metadata.get("拍摄日期对象")
+        if isinstance(date_taken, datetime) and (earliest_date is None or date_taken < earliest_date):
+            earliest_date = date_taken
+
+    from system.data_processor import DataProcessor
+
+    confidence_settings = dict(request.confidence_settings or {"global": 0.25})
+    processed_data = DataProcessor.process_independent_detection(
+        image_info_list,
+        confidence_settings,
+        min_frame_ratio=request.min_frame_ratio,
+    )
+    if earliest_date:
+        processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
+
+    output_path = _resolve_validation_export_path(input_path, request)
+    columns = request.columns_to_export or DEFAULT_EXPORT_COLUMNS
+    success = DataProcessor.export_to_excel(
+        processed_data,
+        str(output_path),
+        confidence_settings,
+        file_format=request.file_format,
+        columns_to_export=columns,
+        min_frame_ratio=request.min_frame_ratio,
+    )
+    if not success:
+        raise RuntimeError("导出文件失败，请查看后端日志获取详情。")
+
+    return ValidationExportResponse(
+        output_path=str(output_path),
+        file_format=request.file_format,
+        exported_count=len(processed_data),
+    )
+
+
+def _reload_validation_item(path: Path, input_path: Path) -> DetectionItem:
+    roots = _detection_db_search_roots(input_path, None)
+    item = _build_metadata_item(path)
+    detection_data = _load_detection_data_for_path(path, roots)
+    if detection_data:
+        item = _apply_detection_data(item, detection_data)
+    validation_index = _load_validation_index(roots)
+    return _apply_validation_state(item, path.name, validation_index)
+
+
+def _persist_validation_update(
+    path: Path,
+    input_path: Path,
+    detection_data: dict[str, Any],
+    validated: bool | None,
+) -> None:
+    from system.detection_db import delete_validation, get_db_path, init_db, upsert_detection, upsert_validation
+
+    roots = [path.parent]
+    roots.append(input_path if input_path.is_dir() else input_path.parent)
+
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        if resolved in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+
+        db_path = get_db_path(str(resolved))
+        init_db(db_path)
+        if detection_data:
+            upsert_detection(db_path, path.stem, path.name, detection_data)
+        if validated is None:
+            delete_validation(db_path, path.name)
+        else:
+            upsert_validation(db_path, path.name, validated)
+
+
+def _build_export_metadata(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
+        dt_obj = datetime.fromtimestamp(path.stat().st_mtime)
+        return {
+            "文件名": path.name,
+            "格式": path.suffix.replace(".", "").upper(),
+            "拍摄日期": dt_obj.strftime("%Y-%m-%d"),
+            "拍摄时间": dt_obj.strftime("%H:%M:%S"),
+            "拍摄日期对象": dt_obj,
+        }
+
+    image = None
+    try:
+        metadata, image = ImageMetadataExtractor.extract_metadata(str(path), path.name)
+        return metadata
+    except Exception:
+        return {
+            "文件名": path.name,
+            "格式": path.suffix.replace(".", "").upper(),
+        }
+    finally:
+        if image is not None:
+            try:
+                image.close()
+            except Exception:
+                pass
+
+
+def _resolve_validation_export_path(input_path: Path, request: ValidationExportRequest) -> Path:
+    extension = ".xlsx" if request.file_format == "excel" else ".csv"
+    if request.output_path:
+        output_path = Path(request.output_path).expanduser()
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(extension)
+    else:
+        target_dir = input_path if input_path.is_dir() else input_path.parent
+        folder_name = target_dir.name or "neri"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = target_dir / f"{folder_name}_validation_data_{timestamp}{extension}"
+
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path
 
 
 def _export_results(output_dir: str | None, results: list[DetectionItem]) -> Path | None:

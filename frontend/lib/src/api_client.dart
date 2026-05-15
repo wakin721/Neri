@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 
@@ -24,7 +25,21 @@ class NeriApiClient {
   Future<NeriSettings> fetchSettings() async {
     final response = await _httpClient.get(_uri('/api/settings'));
     _ensureSuccess(response);
-    return NeriSettings.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<NeriSettings> saveSettings(Map<String, dynamic> settings) async {
+    final response = await _httpClient.put(
+      _uri('/api/settings'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'settings': settings}),
+    );
+    _ensureSuccess(response);
+    return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<ProcessingJob> createJob({
@@ -52,7 +67,9 @@ class NeriApiClient {
       }),
     );
     _ensureSuccess(response);
-    return ProcessingJob.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<List<DetectionItem>> fetchPreviewItems({
@@ -87,7 +104,64 @@ class NeriApiClient {
     );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
-    return DetectionItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return DetectionItem.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DetectionItem> markValidationItem({
+    required String inputPath,
+    required String filePath,
+    required String action,
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/validation/mark'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'action': action,
+        if (speciesName != null) 'species_name': speciesName,
+        if (speciesCount != null) 'species_count': speciesCount,
+        if (speciesType != null) 'species_type': speciesType,
+        if (remark != null) 'remark': remark,
+      }),
+    );
+    _ensureSuccess(response);
+    return DetectionItem.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ValidationExportResult> exportValidationData({
+    required String inputPath,
+    required String fileFormat,
+    String? outputPath,
+    List<String>? columnsToExport,
+    Map<String, double>? confidenceSettings,
+    double minFrameRatio = 0,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/validation/export'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_format': fileFormat,
+        if (outputPath != null && outputPath.isNotEmpty)
+          'output_path': outputPath,
+        if (columnsToExport != null) 'columns_to_export': columnsToExport,
+        'confidence_settings': confidenceSettings ?? {'global': 0.25},
+        'min_frame_ratio': minFrameRatio,
+      }),
+    );
+    _ensureSuccess(response);
+    return ValidationExportResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<List<ProcessingJob>> listJobs() async {
@@ -102,7 +176,9 @@ class NeriApiClient {
   Future<ProcessingJob> fetchJob(String id) async {
     final response = await _httpClient.get(_uri('/api/jobs/$id'));
     _ensureSuccess(response);
-    return ProcessingJob.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   void close() => _httpClient.close();

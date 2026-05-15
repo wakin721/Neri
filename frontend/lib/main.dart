@@ -5,7 +5,7 @@ import 'package:window_manager/window_manager.dart'; // 確保 import 放在所�
 
 import 'src/api_client.dart';
 import 'src/models/theme_settings.dart';
-import 'src/screens/home_screen.dart';
+import 'src/main_window.dart';
 
 // SharedPreferences keys
 const _kThemeModeKey = 'theme_mode';
@@ -32,11 +32,13 @@ void main() async {
   final prefs = await SharedPreferences.getInstance();
   final themeModeIndex = prefs.getInt(_kThemeModeKey) ?? ThemeMode.system.index;
   final useDynamic = prefs.getBool(_kUseDynamicColorKey) ?? false;
-  final seedValue = prefs.getInt(_kSeedColorKey) ?? kSeedColorOptions.first.color.value;
+  final seedValue =
+      prefs.getInt(_kSeedColorKey) ?? kSeedColorOptions.first.color.toARGB32();
 
   final themeNotifier = ValueNotifier<ThemeSettings>(
     ThemeSettings(
-      themeMode: ThemeMode.values[themeModeIndex.clamp(0, ThemeMode.values.length - 1)],
+      themeMode: ThemeMode
+          .values[themeModeIndex.clamp(0, ThemeMode.values.length - 1)],
       useDynamicColor: useDynamic,
       seedColor: Color(seedValue),
     ),
@@ -61,11 +63,13 @@ class NeriApp extends StatelessWidget {
         return ValueListenableBuilder<ThemeSettings>(
           valueListenable: themeNotifier,
           builder: (context, settings, _) {
-            final ColorScheme lightScheme = (settings.useDynamicColor && lightDynamic != null)
+            final ColorScheme lightScheme =
+                (settings.useDynamicColor && lightDynamic != null)
                 ? lightDynamic
                 : ColorScheme.fromSeed(seedColor: settings.seedColor);
 
-            final ColorScheme darkScheme = (settings.useDynamicColor && darkDynamic != null)
+            final ColorScheme darkScheme =
+                (settings.useDynamicColor && darkDynamic != null)
                 ? darkDynamic
                 : ColorScheme.fromSeed(
                     seedColor: settings.seedColor,
@@ -78,7 +82,7 @@ class NeriApp extends StatelessWidget {
               themeMode: settings.themeMode,
               theme: ThemeData(useMaterial3: true, colorScheme: lightScheme),
               darkTheme: ThemeData(useMaterial3: true, colorScheme: darkScheme),
-              home: HomeScreen(
+              home: MainWindow(
                 apiClient: NeriApiClient(),
                 themeNotifier: themeNotifier,
               ),

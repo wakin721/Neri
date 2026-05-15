@@ -40,8 +40,19 @@ class SettingsResponse(BaseModel):
     supported_image_extensions: list[str]
     supported_video_extensions: list[str]
     model_directory: str
+    classification_model_directory: str
     available_models: list[ModelInfo] = Field(default_factory=list)
+    available_classification_models: list[ModelInfo] = Field(default_factory=list)
     selected_model: str | None = None
+    selected_classification_model: str | None = None
+    species_types: dict[str, str] = Field(default_factory=dict)
+    gpu_available: bool = False
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class SettingsUpdateRequest(BaseModel):
+    """Persisted advanced settings sent from the Flutter settings screen."""
+
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -85,6 +96,38 @@ class DetectionItem(BaseModel):
     detection_boxes: list[dict[str, Any]] = Field(default_factory=list)
     detection_data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    validated: bool | None = None
+
+
+class ValidationMarkRequest(BaseModel):
+    """Manual validation update for one media file."""
+
+    input_path: str = Field(..., min_length=1)
+    file_path: str = Field(..., min_length=1)
+    action: Literal["correct", "empty", "update", "unverified"] = "update"
+    species_name: str | None = None
+    species_count: str | None = None
+    species_type: str | None = None
+    remark: str | None = None
+
+
+class ValidationExportRequest(BaseModel):
+    """Export validated detection data through the existing data processor."""
+
+    input_path: str = Field(..., min_length=1)
+    output_path: str | None = None
+    file_format: Literal["excel", "csv"] = "csv"
+    confidence_settings: dict[str, float] = Field(default_factory=lambda: {"global": 0.25})
+    columns_to_export: list[str] | None = None
+    min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ValidationExportResponse(BaseModel):
+    """Result of a validation export."""
+
+    output_path: str
+    file_format: str
+    exported_count: int
 
 
 class JobSummary(BaseModel):

@@ -1,0 +1,40 @@
+{
+    "selected_model": "E:\\Files\\Neri\\res\\model\\11s_1225.pt",
+    "selected_classification_model": "",
+    "confidence": 0.25,
+    "iou": 0.3,
+    "batch_size": 16,
+    "use_fp16": true,
+    "video_mode": "all",
+    "vid_stride": 1,
+    "min_frame_ratio": 0.0,
+    "auto_group": true,
+    "auto_sort": true,
+    "quick_mark_list": [
+        "灰雁",
+        "大白鹭",
+        "绿头鸭",
+        "赤嘴潜鸭",
+        "赤麻鸭",
+        "青头潜鸭",
+        "马",
+        "黑翅长脚鹬",
+        "未知鸟"
+    ],
+    "export_columns": [
+        "文件名",
+        "格式",
+        "拍摄日期",
+        "拍摄时间",
+        "工作天数",
+        "物种名称",
+        "物种类型",
+        "物种数量",
+        "独立探测首只",
+        "备注"
+    ],
+    "selected_species_names": [],
+    "update_channel": "Preview",
+    "update_mirror": "KKGitHub",
+    "package": ""
+}
