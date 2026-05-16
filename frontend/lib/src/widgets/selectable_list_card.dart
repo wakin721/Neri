@@ -9,6 +9,12 @@ class SelectableListCard<T> extends StatelessWidget {
     this.subtitleBuilder,
     this.leadingBuilder,
     this.trailingBuilder,
+    this.isSelected,
+    this.menuChildrenBuilder,
+    this.menuStyle,
+    this.onMenuOpening,
+    this.onSecondaryTapDown,
+    this.onLongPress,
     this.padding = EdgeInsets.zero,
     super.key,
   });
@@ -19,6 +25,14 @@ class SelectableListCard<T> extends StatelessWidget {
   final String? Function(T item)? subtitleBuilder;
   final Widget Function(T item)? leadingBuilder;
   final Widget? Function(T item)? trailingBuilder;
+  final bool Function(int index, T item)? isSelected;
+  final List<Widget> Function(BuildContext context, int index, T item)?
+  menuChildrenBuilder;
+  final MenuStyle? menuStyle;
+  final void Function(int index, T item)? onMenuOpening;
+  final void Function(TapDownDetails details, int index, T item)?
+  onSecondaryTapDown;
+  final void Function(int index, T item)? onLongPress;
   final void Function(int index, T item) onSelected;
   final EdgeInsetsGeometry padding;
 
@@ -34,20 +48,65 @@ class SelectableListCard<T> extends StatelessWidget {
         itemBuilder: (context, index) {
           final item = items[index];
           final subtitle = subtitleBuilder?.call(item);
-          return ListTile(
-            selected: index == selectedIndex,
-            leading: leadingBuilder?.call(item),
-            title: Text(
-              titleBuilder(item),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: subtitle == null
-                ? null
-                : Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-            trailing: trailingBuilder?.call(item),
-            onTap: () => onSelected(index, item),
-          );
+          final selected =
+              isSelected?.call(index, item) ?? index == selectedIndex;
+          Widget buildTile([MenuController? menuController]) {
+            final hasMenu =
+                menuController != null && menuChildrenBuilder != null;
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onSecondaryTapDown: hasMenu || onSecondaryTapDown != null
+                  ? (details) {
+                      if (menuController != null &&
+                          menuChildrenBuilder != null) {
+                        onMenuOpening?.call(index, item);
+                        if (menuController.isOpen) {
+                          menuController.close();
+                        }
+                        menuController.open(position: details.localPosition);
+                        return;
+                      }
+                      onSecondaryTapDown?.call(details, index, item);
+                    }
+                  : null,
+              onLongPress: onLongPress == null
+                  ? null
+                  : () => onLongPress!(index, item),
+              child: ListTile(
+                selected: selected,
+                leading: leadingBuilder?.call(item),
+                title: Text(
+                  titleBuilder(item),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: subtitle == null
+                    ? null
+                    : Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                trailing: trailingBuilder?.call(item),
+                onTap: () => onSelected(index, item),
+              ),
+            );
+          }
+
+          final menuBuilder = menuChildrenBuilder;
+          if (menuBuilder != null) {
+            // 已移除有问题的 ExcludeSemantics，现在你的右键菜单可以正常展开且不报错了
+            return MenuAnchor(
+              style: menuStyle,
+              clipBehavior: Clip.antiAlias,
+              menuChildren: menuBuilder(context, index, item),
+              builder: (context, controller, child) {
+                return buildTile(controller);
+              },
+            );
+          }
+
+          return buildTile();
         },
       ),
     );

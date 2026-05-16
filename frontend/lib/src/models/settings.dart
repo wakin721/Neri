@@ -85,3 +85,25 @@ class ModelInfo {
   final String path;
   final int? sizeBytes;
 }
+
+class ModelClassInfo {
+  const ModelClassInfo({
+    required this.id,
+    required this.name,
+    required this.displayName,
+  });
+
+  factory ModelClassInfo.fromJson(Map<String, dynamic> json) {
+    return ModelClassInfo(
+      id: json['id'] as int? ?? 0,
+      name: json['name'] as String? ?? '',
+      displayName: json['display_name'] as String? ?? '',
+    );
+  }
+
+  final int id;
+  final String name;
+  final String displayName;
+
+  String get label => displayName.isEmpty ? name : displayName;
+}

@@ -42,6 +42,18 @@ class NeriApiClient {
     );
   }
 
+  Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/models/classes',
+    ).replace(queryParameters: {'model_path': modelPath});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(ModelClassInfo.fromJson)
+        .toList();
+  }
+
   Future<ProcessingJob> createJob({
     required String inputDir,
     String? outputDir,
@@ -50,6 +62,7 @@ class NeriApiClient {
     required double iou,
     required bool useFp16,
     required bool enableDetection,
+    List<String> selectedSpeciesNames = const <String>[],
   }) async {
     final response = await _httpClient.post(
       _uri('/api/jobs'),
@@ -63,6 +76,8 @@ class NeriApiClient {
           'iou': iou,
           'use_fp16': useFp16,
           'enable_detection': enableDetection,
+          if (selectedSpeciesNames.isNotEmpty)
+            'selected_species_names': selectedSpeciesNames,
         },
       }),
     );

@@ -10,7 +10,6 @@ import 'api_client.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
-import 'screens/about_screen.dart';
 import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
@@ -33,7 +32,29 @@ class MainWindow extends StatefulWidget {
 }
 
 class _MainWindowState extends State<MainWindow> with WindowListener {
-  static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置', '关于'];
+  static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置'];
+  static const _navigationItems = <_NavigationRailEntry>[
+    _NavigationRailEntry(
+      label: '开始',
+      icon: Icons.home_outlined,
+      selectedIcon: Icons.home_rounded,
+    ),
+    _NavigationRailEntry(
+      label: '预览',
+      icon: Icons.photo_library_outlined,
+      selectedIcon: Icons.photo_library_rounded,
+    ),
+    _NavigationRailEntry(
+      label: '校验',
+      icon: Icons.fact_check_outlined,
+      selectedIcon: Icons.fact_check_rounded,
+    ),
+    _NavigationRailEntry(
+      label: '设置',
+      icon: Icons.settings_outlined,
+      selectedIcon: Icons.settings_rounded,
+    ),
+  ];
 
   final _inputController = TextEditingController();
   final Map<String, DetectionItem> _previewMetadataCache =
@@ -87,6 +108,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
     _inputController.dispose();
+    _pageController.dispose();
     widget.apiClient.close();
     super.dispose();
   }
@@ -138,8 +160,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final messenger = ScaffoldMessenger.maybeOf(context);
-      messenger?.hideCurrentSnackBar();
-      messenger?.showSnackBar(SnackBar(content: Text(message)));
+      if (messenger == null) return;
+      messenger.clearSnackBars();
+      
+      final controller = messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: '关闭',
+            onPressed: messenger.hideCurrentSnackBar,
+          ),
+        ),
+      );
+      // 强制绕过无障碍模式驻留时间限制
+      Future.delayed(const Duration(seconds: 4), controller.close);
     });
   }
 
@@ -230,34 +265,60 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() => _loading = true);
     }
 
-    final firstLoad = _settings == null;
     try {
       final settings = await widget.apiClient.fetchSettings();
       final jobs = await widget.apiClient.listJobs();
       if (!mounted) return;
-      setState(() {
-        _settings = settings;
-        final modelPaths = settings.availableModels
-            .map((model) => model.path)
-            .toSet();
-        if (_selectedModelPath == null ||
-            !modelPaths.contains(_selectedModelPath)) {
-          _selectedModelPath =
-              settings.selectedModel ??
-              (settings.availableModels.isEmpty
-                  ? null
-                  : settings.availableModels.first.path);
+
+      final firstLoad = _settings == null;
+      
+      // 深度比较，避免每次轮询都触发全局重绘
+      bool settingsChanged = firstLoad ||
+          _settings?.appVersion != settings.appVersion ||
+          _settings?.selectedModel != settings.selectedModel;
+
+      bool jobsChanged = _jobs.length != jobs.length;
+      if (!jobsChanged) {
+        for (int i = 0; i < jobs.length; i++) {
+          if (_jobs[i].id != jobs[i].id ||
+              _jobs[i].state != jobs[i].state ||
+              _jobs[i].processed != jobs[i].processed ||
+              _jobs[i].results.length != jobs[i].results.length) {
+            jobsChanged = true;
+            break;
+          }
         }
-        if (firstLoad) {
-          _confidence = _doubleSetting(settings, 'confidence', _confidence);
-          _iou = _doubleSetting(settings, 'iou', _iou);
-          _useFp16 =
-              settings.gpuAvailable &&
-              _boolSetting(settings, 'use_fp16', _useFp16);
-        }
-        _jobs = jobs;
-        _loading = false;
-      });
+      }
+
+      if (settingsChanged || jobsChanged) {
+        setState(() {
+          _settings = settings;
+          final modelPaths = settings.availableModels
+              .map((model) => model.path)
+              .toSet();
+          if (_selectedModelPath == null ||
+              !modelPaths.contains(_selectedModelPath)) {
+            _selectedModelPath =
+                settings.selectedModel ??
+                (settings.availableModels.isEmpty
+                    ? null
+                    : settings.availableModels.first.path);
+          }
+          if (firstLoad) {
+            _confidence = _doubleSetting(settings, 'confidence', _confidence);
+            _iou = _doubleSetting(settings, 'iou', _iou);
+            _useFp16 =
+                settings.gpuAvailable &&
+                _boolSetting(settings, 'use_fp16', _useFp16);
+          }
+          _jobs = jobs;
+        });
+      }
+
+      // 清理加载状态
+      if (!silent && _loading) {
+        setState(() => _loading = false);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -310,6 +371,62 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return fallback;
   }
 
+  Map<String, int> _intMapSetting(NeriSettings settings, String key) {
+    final value = settings.settings[key];
+    if (value is! Map) return const <String, int>{};
+    return value.map((key, value) {
+      final parsed = value is num
+          ? value.toInt()
+          : int.tryParse(value.toString()) ?? 0;
+      return MapEntry(key.toString(), parsed);
+    });
+  }
+
+  List<String> _splitSpeciesNames(String speciesName) {
+    return speciesName
+        .replaceAll('，', ',')
+        .split(',')
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty && name != '空' && name != 'Unknown')
+        .toList();
+  }
+
+  Future<void> _recordQuickMarkUsage(String speciesName) async {
+    final current = _settings;
+    if (current == null) return;
+    final names = _splitSpeciesNames(speciesName);
+    if (names.isEmpty) return;
+
+    final nextSettings = Map<String, dynamic>.from(current.settings);
+    final counts = Map<String, int>.from(
+      _intMapSetting(current, 'quick_mark_usage_counts'),
+    );
+    final history = _stringListSetting(
+      current,
+      'quick_mark_recent_history',
+      const <String>[],
+    ).toList();
+
+    for (final name in names) {
+      counts[name] = (counts[name] ?? 0) + 1;
+      history.add(name);
+    }
+    if (history.length > 200) {
+      history.removeRange(0, history.length - 200);
+    }
+
+    nextSettings['quick_mark_usage_counts'] = counts;
+    nextSettings['quick_mark_recent_history'] = history;
+
+    try {
+      final saved = await widget.apiClient.saveSettings(nextSettings);
+      if (mounted) setState(() => _settings = saved);
+    } catch (_) {
+      // Usage history is only used for sorting quick-mark buttons; marking
+      // itself should not fail if this lightweight preference save is blocked.
+    }
+  }
+
   Future<void> _createJob() async {
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
@@ -327,6 +444,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         iou: _iou,
         useFp16: _useFp16,
         enableDetection: _enableDetection,
+        selectedSpeciesNames: _selectedSpeciesNames(),
       );
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
@@ -349,6 +467,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         iou: _iou,
         useFp16: _useFp16,
         enableDetection: true,
+        selectedSpeciesNames: _selectedSpeciesNames(),
       );
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
@@ -359,6 +478,31 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showSnackBar('检测当前图像失败：$error');
     } finally {
       if (mounted) setState(() => _previewDetecting = false);
+    }
+  }
+
+  Future<void> _redetectValidationItems(
+    List<DetectionItem> items, {
+    required double confidence,
+  }) async {
+    if (items.isEmpty) return;
+    setState(() => _submitting = true);
+    try {
+      for (final item in items) {
+        await widget.apiClient.createJob(
+          inputDir: item.path,
+          modelPath: _selectedModelPath,
+          confidence: confidence,
+          iou: _iou,
+          useFp16: _useFp16,
+          enableDetection: true,
+          selectedSpeciesNames: _selectedSpeciesNames(),
+        );
+      }
+      await _refresh(silent: true);
+      await _refreshPreviewItems(force: true);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
     }
   }
 
@@ -412,6 +556,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
+  List<String> _selectedSpeciesNames() {
+    return _stringListSetting(
+      _settingsOrEmpty(),
+      'selected_species_names',
+      const <String>[],
+    ).where((name) => name.trim().isNotEmpty).toList();
+  }
+
   int _safePreviewIndex(List<DetectionItem> items) {
     if (items.isEmpty) return 0;
     if (_selectedPreviewIndex >= items.length) return items.length - 1;
@@ -421,12 +573,26 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final titleBarColor = colorScheme.surfaceContainerHigh;
+
     return Scaffold(
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(kToolbarHeight),
         child: DragToMoveArea(
           child: AppBar(
-            title: Text(_pageTitles[_selectedIndex]),
+            backgroundColor: titleBarColor,
+            surfaceTintColor: Colors.transparent,
+            scrolledUnderElevation: 0,
+            titleSpacing: 12,
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildTitleLogo(size: 28),
+                const SizedBox(width: 10),
+                Text(_pageTitles[_selectedIndex]),
+              ],
+            ),
             actions: [
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -499,71 +665,38 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       body: Column(
         children: [
           // 标题栏下方的全局进度条
-          // 当全局加载、预览加载或提交任务时显示
-          if (_loading || _previewLoading || _submitting)
-            const LinearProgressIndicator()
-          else
-            const SizedBox(height: 4), // 占位高度为 4，与进度条默认高度一致，防止显示/隐藏时页面抖动
-            
+          SizedBox(
+            height: 4, // 固定高度防止页面抖动
+            child: (_loading || _previewLoading || _submitting)
+                ? const LinearProgressIndicator() // 移除 ExcludeSemantics
+                : null,
+          ),
           // 原有的主体内容区域
           Expanded(
             child: Row(
               children: [
-                NavigationRail(
+                _NativeNavigationRail(
                   selectedIndex: _selectedIndex,
+                  entries: _navigationItems,
                   onDestinationSelected: (index) {
                     setState(() => _selectedIndex = index);
+                    _pageController.jumpToPage(index);
                     if (index == 1 || index == 2) {
                       unawaited(_refreshPreviewItems());
                     }
                   },
-                  labelType: NavigationRailLabelType.all,
-                  leading: Padding(
-                    padding: const EdgeInsets.only(top: 8, bottom: 16),
-                    child: Icon(
-                      Icons.camera_outdoor_rounded,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ),
-                  destinations: const [
-                    NavigationRailDestination(
-                      icon: Icon(Icons.home_outlined),
-                      selectedIcon: Icon(Icons.home_rounded),
-                      label: Text('开始'),
-                    ),
-                    NavigationRailDestination(
-                      icon: Icon(Icons.photo_library_outlined),
-                      selectedIcon: Icon(Icons.photo_library_rounded),
-                      label: Text('预览'),
-                    ),
-                    NavigationRailDestination(
-                      icon: Icon(Icons.fact_check_outlined),
-                      selectedIcon: Icon(Icons.fact_check_rounded),
-                      label: Text('校验'),
-                    ),
-                    NavigationRailDestination(
-                      icon: Icon(Icons.settings_outlined),
-                      selectedIcon: Icon(Icons.settings_rounded),
-                      label: Text('设置'),
-                    ),
-                    NavigationRailDestination(
-                      icon: Icon(Icons.info_outline_rounded),
-                      selectedIcon: Icon(Icons.info_rounded),
-                      label: Text('关于'),
-                    ),
-                  ],
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
                   // 使用 IndexedStack 保持所有页面的状态（包括滚动位置和局部过滤选项）
-                  child: IndexedStack(
-                    index: _selectedIndex,
+                  child: PageView(
+                    controller: _pageController,
+                    physics: const NeverScrollableScrollPhysics(),
                     children: [
                       _buildStartScreen(),
                       _buildPreviewPage(),
                       _buildValidationPage(),
                       _buildSettingsScreen(),
-                      AboutScreen(settings: _settings),
                     ],
                   ),
                 ),
@@ -575,7 +708,49 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
-Widget _buildStartScreen() {
+  Widget _buildTitleLogo({double size = 26}) {
+    final logoFile = _resolveLogoFile();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.file(
+          logoFile,
+          width: size,
+          height: size,
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) {
+            return Icon(
+              Icons.camera_outdoor_rounded,
+              size: size - 2,
+              color: Theme.of(context).colorScheme.primary,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  File _resolveLogoFile() {
+    final candidates = <File>[File('res/logo.png'), File('../res/logo.png')];
+    for (final file in candidates) {
+      if (file.existsSync()) return file;
+    }
+    return candidates.first;
+  }
+  
+  Widget _buildTabWrapper(int tabIndex, Widget child) {
+    final isActive = _selectedIndex == tabIndex;
+    return ExcludeSemantics(
+      excluding: !isActive,
+      child: FocusScope(
+        canRequestFocus: isActive,
+        child: child,
+      ),
+    );
+  }
+
+  Widget _buildStartScreen() {
     return StartScreen(
       settings: _settings,
       inputController: _inputController,
@@ -599,6 +774,7 @@ Widget _buildStartScreen() {
   Widget _buildSettingsScreen() {
     return SettingsScreen(
       settings: _settings,
+      apiClient: widget.apiClient,
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
       onSaveSettings: _saveAdvancedSettings,
@@ -619,6 +795,7 @@ Widget _buildStartScreen() {
       items: items,
       selectedIndex: selectedIndex,
       selectedItem: selectedItem,
+      speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       showDetections: _previewShowDetections,
       onShowDetectionsChanged: (value) =>
           setState(() => _previewShowDetections = value),
@@ -651,10 +828,20 @@ Widget _buildStartScreen() {
       items: items,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       autoGroup: _boolSetting(_settingsOrEmpty(), 'auto_group', true),
+      autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
       quickMarkSpecies: _stringListSetting(
         _settingsOrEmpty(),
         'quick_mark_list',
         const <String>[],
+      ),
+      quickMarkRecentHistory: _stringListSetting(
+        _settingsOrEmpty(),
+        'quick_mark_recent_history',
+        const <String>[],
+      ),
+      quickMarkUsageCounts: _intMapSetting(
+        _settingsOrEmpty(),
+        'quick_mark_usage_counts',
       ),
       exportColumns: _stringListSetting(
         _settingsOrEmpty(),
@@ -665,6 +852,8 @@ Widget _buildStartScreen() {
       onLoadMetadata: _loadPreviewMetadata,
       onOpenExternal: _openFileWithSystem,
       onMarkItem: _markValidationItem,
+      onQuickMarkUsed: _recordQuickMarkUsage,
+      onRedetectItems: _redetectValidationItems,
     );
   }
 
@@ -685,3 +874,268 @@ Widget _buildStartScreen() {
         );
   }
 }
+
+class _NavigationRailEntry {
+  const _NavigationRailEntry({
+    required this.label,
+    required this.icon,
+    required this.selectedIcon,
+  });
+
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+}
+
+// Kept for the legacy rail implementation below; the active sidebar uses a
+// fixed native NavigationRail to avoid Windows accessibility-tree churn.
+class _NavigationToggleButton extends StatelessWidget {
+  const _NavigationToggleButton({
+    required this.expanded,
+    required this.onPressed,
+  });
+
+  final bool expanded;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: expanded ? '收起侧边栏' : '展开侧边栏',
+      onPressed: onPressed,
+      icon: Icon(expanded ? Icons.menu_open_rounded : Icons.menu_rounded),
+    );
+  }
+}
+
+class _NativeNavigationRail extends StatelessWidget {
+  const _NativeNavigationRail({
+    required this.selectedIndex,
+    required this.entries,
+    required this.onDestinationSelected,
+  });
+
+  final int selectedIndex;
+  final List<_NavigationRailEntry> entries;
+  final ValueChanged<int> onDestinationSelected;
+
+  static const _width = 96.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    // 移除 Semantics 和 ExcludeSemantics 包裹
+    return NavigationRail(
+      backgroundColor: colorScheme.surfaceContainerLowest,
+      labelType: NavigationRailLabelType.all,
+      minWidth: _width,
+      selectedIndex: selectedIndex,
+      groupAlignment: -0.85,
+      useIndicator: true,
+      indicatorColor: colorScheme.secondaryContainer,
+      indicatorShape: const StadiumBorder(),
+      selectedIconTheme: IconThemeData(
+        color: colorScheme.onSecondaryContainer,
+        size: 26,
+      ),
+      unselectedIconTheme: IconThemeData(
+        color: colorScheme.onSurfaceVariant,
+        size: 26,
+      ),
+      selectedLabelTextStyle: TextStyle(
+        color: colorScheme.onSecondaryContainer,
+        fontWeight: FontWeight.w700,
+      ),
+      unselectedLabelTextStyle: TextStyle(
+        color: colorScheme.onSurfaceVariant,
+        fontWeight: FontWeight.w600,
+      ),
+      onDestinationSelected: onDestinationSelected,
+      destinations: [
+        for (final entry in entries)
+          NavigationRailDestination(
+            icon: Icon(entry.icon),
+            selectedIcon: Icon(entry.selectedIcon),
+            label: Text(entry.label),
+          ),
+      ],
+    );
+  }
+}
+
+// ignore: unused_element
+class _ModalNavigationRail extends StatelessWidget {
+  const _ModalNavigationRail({
+    required this.expanded,
+    required this.selectedIndex,
+    required this.entries,
+    required this.onToggleExpanded,
+    required this.onDestinationSelected,
+    required this.child,
+  });
+
+  final bool expanded;
+  final int selectedIndex;
+  final List<_NavigationRailEntry> entries;
+  final VoidCallback onToggleExpanded;
+  final ValueChanged<int> onDestinationSelected;
+  final Widget child;
+
+  static const _collapsedWidth = 88.0;
+  static const _expandedWidth = 220.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Stack(
+      children: [
+        // 1. 底层页面内容
+        Row(
+          children: [
+            const SizedBox(width: _collapsedWidth),
+            Expanded(child: child),
+          ],
+        ),
+
+        // 2. 遮罩层 (Scrim)
+        Positioned.fill(
+          left: _collapsedWidth,
+          child: IgnorePointer(
+            ignoring: !expanded,
+            child: AnimatedOpacity(
+              opacity: expanded ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOutCubic,
+              child: GestureDetector(
+                onTap: onToggleExpanded,
+                child: ColoredBox(
+                  color: colorScheme.scrim.withValues(alpha: 0.32),
+                ),
+              ),
+            ),
+          ),
+        ),
+
+        // 3. 原生 NavigationRail 侧边栏
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          // 💡 关键修改 1：使用 Material 替代 AnimatedPhysicalModel
+          // Material 原生支持阴影和形状的隐式动画，能完美实现平滑的右侧圆角过渡
+          child: Material(
+            animationDuration: const Duration(milliseconds: 250),
+            elevation: expanded ? 8.0 : 0.0,
+            color: colorScheme.surfaceContainerLowest,
+            shadowColor: colorScheme.shadow.withValues(alpha: 0.4),
+            // 💡 关键修改 2：展开时赋予右侧圆角，收起时恢复直角
+            borderRadius: expanded
+                ? const BorderRadius.horizontal(right: Radius.circular(16))
+                : BorderRadius.zero,
+            clipBehavior: Clip.antiAlias, // 确保点击高亮和水波纹不会溢出圆角边界
+            child: _NativeNavigationRailPanel(
+              extended: expanded,
+              selectedIndex: selectedIndex,
+              entries: entries,
+              onToggleExpanded: onToggleExpanded,
+              onDestinationSelected: onDestinationSelected,
+            ),
+          ),
+        ),
+
+        // 4. 绝对固定的 Menu 按钮
+        Positioned(
+          left: 0,
+          top: 10,
+          child: SizedBox(
+            width: _collapsedWidth,
+            height: 48,
+            child: Align(
+              alignment: Alignment.center,
+              child: _NavigationToggleButton(
+                expanded: expanded,
+                onPressed: onToggleExpanded,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ignore: unused_element
+class _NativeNavigationRailPanel extends StatelessWidget {
+  const _NativeNavigationRailPanel({
+    required this.extended,
+    required this.selectedIndex,
+    required this.entries,
+    required this.onToggleExpanded,
+    required this.onDestinationSelected,
+  });
+
+  final bool extended;
+  final int selectedIndex;
+  final List<_NavigationRailEntry> entries;
+  final VoidCallback onToggleExpanded;
+  final ValueChanged<int> onDestinationSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return NavigationRail(
+      backgroundColor: Colors.transparent,
+      extended: extended,
+      minWidth: _ModalNavigationRail._collapsedWidth,
+      minExtendedWidth: _ModalNavigationRail._expandedWidth,
+      selectedIndex: selectedIndex,
+      // 💡 关键修改 3：移除了动态改变的 labelType！
+      // 保持默认设置，不要强制指定 labelType。
+      // 这会让 Flutter 内部的 Tween 动画自然生效：折叠时无文字，展开时文字平滑淡入，且 Indicator 平滑拉伸。
+      groupAlignment: -0.95,
+      useIndicator: true,
+      indicatorColor: colorScheme.secondaryContainer,
+      indicatorShape: const StadiumBorder(),
+      selectedIconTheme: IconThemeData(
+        color: colorScheme.onSecondaryContainer,
+        size: 26,
+      ),
+      unselectedIconTheme: IconThemeData(
+        color: colorScheme.onSurfaceVariant,
+        size: 26,
+      ),
+      selectedLabelTextStyle: TextStyle(
+        color: colorScheme.onSecondaryContainer,
+        fontWeight: FontWeight.w700,
+      ),
+      unselectedLabelTextStyle: TextStyle(
+        color: colorScheme.onSurfaceVariant,
+        fontWeight: FontWeight.w600,
+      ),
+      leading: const Padding(
+        padding: EdgeInsets.only(top: 10, bottom: 18),
+        child: SizedBox(
+          width: _ModalNavigationRail._collapsedWidth,
+          height: 48,
+        ),
+      ),
+      onDestinationSelected: onDestinationSelected,
+      destinations: [
+        for (final entry in entries)
+          NavigationRailDestination(
+            icon: Icon(entry.icon),
+            selectedIcon: Icon(entry.selectedIcon),
+            label: Text(entry.label),
+          ),
+      ],
+    );
+  }
+}
+
+late final PageController _pageController = PageController(
+  initialPage: 0,
+  keepPage: true,
+);

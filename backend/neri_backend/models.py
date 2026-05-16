@@ -32,6 +32,14 @@ class ModelInfo(BaseModel):
     size_bytes: int | None = None
 
 
+class ModelClassInfo(BaseModel):
+    """A class exposed by the selected YOLO model."""
+
+    id: int
+    name: str
+    display_name: str
+
+
 class SettingsResponse(BaseModel):
     """Subset of desktop settings useful to the mobile/desktop frontend."""
 
@@ -66,6 +74,10 @@ class ProcessingOptions(BaseModel):
     enable_detection: bool = Field(
         default=False,
         description="When false, the job indexes supported files and EXIF metadata without loading YOLO.",
+    )
+    selected_species_names: list[str] = Field(
+        default_factory=list,
+        description="Optional translated or raw class names to limit YOLO inference.",
     )
 
 

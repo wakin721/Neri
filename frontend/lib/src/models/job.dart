@@ -5,6 +5,7 @@ class DetectionBox {
     this.confidence,
     this.frameIndex,
     this.timestamp,
+    this.trackId,
     this.candidates = const <Map<String, dynamic>>[],
   });
 
@@ -13,8 +14,9 @@ class DetectionBox {
     return DetectionBox(
       species: json['species'] as String? ?? 'Unknown',
       confidence: (json['confidence'] as num?)?.toDouble(),
-      frameIndex: json['frame_index'] as int?,
-      timestamp: (json['timestamp'] as num?)?.toDouble(),
+      frameIndex: _intFromJson(json['frame_index']),
+      timestamp: _doubleFromJson(json['timestamp']),
+      trackId: _stringFromJson(json['track_id'] ?? json['trackId']),
       bbox: rawBbox
           .map(
             (item) => item is num
@@ -33,8 +35,25 @@ class DetectionBox {
   final double? confidence;
   final int? frameIndex;
   final double? timestamp;
+  final String? trackId;
   final List<double> bbox;
   final List<Map<String, dynamic>> candidates;
+
+  static int? _intFromJson(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  static double? _doubleFromJson(Object? value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '');
+  }
+
+  static String? _stringFromJson(Object? value) {
+    final text = value?.toString().trim();
+    return text == null || text.isEmpty ? null : text;
+  }
 }
 
 class DetectionItem {

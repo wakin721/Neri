@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/job.dart';
+import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/selectable_list_card.dart';
 
@@ -14,6 +15,7 @@ class PreviewScreen extends StatelessWidget {
     required this.items,
     required this.selectedIndex,
     required this.selectedItem,
+    required this.speciesTypes,
     required this.showDetections,
     required this.onShowDetectionsChanged,
     required this.selectedSpeciesFilter,
@@ -32,6 +34,7 @@ class PreviewScreen extends StatelessWidget {
   final List<DetectionItem> items;
   final int selectedIndex;
   final DetectionItem? selectedItem;
+  final Map<String, String> speciesTypes;
   final bool showDetections;
   final ValueChanged<bool> onShowDetectionsChanged;
   final String selectedSpeciesFilter;
@@ -142,7 +145,11 @@ class PreviewScreen extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10), // 与校验界面保持 10 的间距
-        _ImageInfoCard(item: item, visibleBoxes: visibleBoxes),
+        _ImageInfoCard(
+          item: item,
+          visibleBoxes: visibleBoxes,
+          speciesTypes: speciesTypes,
+        ),
         const SizedBox(height: 10), // 与校验界面保持 10 的间距
         _PreviewDetectionControls(
           item: item,
@@ -159,7 +166,7 @@ class PreviewScreen extends StatelessWidget {
       ],
     );
   }
-  
+
   List<DetectionBox> _filteredPreviewBoxes(
     DetectionItem item,
     String selectedSpecies,
@@ -186,180 +193,179 @@ class PreviewScreen extends StatelessWidget {
 }
 
 class _ImageInfoCard extends StatelessWidget {
-  const _ImageInfoCard({required this.item, required this.visibleBoxes});
+  const _ImageInfoCard({
+    required this.item,
+    required this.visibleBoxes,
+    required this.speciesTypes,
+  });
 
   final DetectionItem item;
   final List<DetectionBox> visibleBoxes;
+  final Map<String, String> speciesTypes;
 
   @override
   Widget build(BuildContext context) {
-    String detectionResultStr = '暂无';
-    String boxCountStr = '0';
-    String minConfStr = '未知';
-
-    final rawSpecies = item.detectionData['物种名称'];
-    final rawConf = item.detectionData['最低置信度'];
-
-    if (item.error != null) {
-      detectionResultStr = '错误：${item.error}';
-    } else if (item.detectionBoxes.isNotEmpty) {
-      if (visibleBoxes.isEmpty) {
-        detectionResultStr = '无结果';
-      } else {
-        final counts = <String, int>{};
-        final confidences = <double>[];
-        for (final box in visibleBoxes) {
-          counts[box.species] = (counts[box.species] ?? 0) + 1;
-          if (box.confidence != null) confidences.add(box.confidence!);
-        }
-        detectionResultStr = counts.entries
-            .map((entry) => '${entry.key}×${entry.value}')
-            .join('，');
-        boxCountStr = visibleBoxes.length.toString();
-        if (confidences.isNotEmpty) {
-          minConfStr = confidences
-              .reduce((a, b) => a < b ? a : b)
-              .toStringAsFixed(2);
-        }
-      }
-    } else if (rawSpecies != null && rawSpecies.toString().trim().isNotEmpty) {
-      detectionResultStr = rawSpecies.toString();
-      if (rawConf != null && rawConf.toString().trim().isNotEmpty) {
-        minConfStr = rawConf.toString();
-      }
-    } else if (item.species.isNotEmpty) {
-      detectionResultStr = item.species.join('、');
-      if (item.confidence != null) {
-        minConfStr = item.confidence!.toStringAsFixed(2);
-      }
-    }
+    final summary = _summaryFor(item, visibleBoxes);
+    final colorScheme = Theme.of(context).colorScheme;
 
     return Card.outlined(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // 修改为与校验界面的 Summary 相同的 12
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
           children: [
-            _InfoLine(
-              children: [
-                _InlineInfo(label: '文件名', value: item.filename, maxWidth: 220),
-                _InlineInfo(label: '类型', value: item.fileType, maxWidth: 80),
-                _InlineInfo(
-                  label: '尺寸',
-                  value: _formatImageSize(item),
-                  maxWidth: 120,
-                ),
-                _InlineInfo(
-                  label: '大小',
-                  value: _formatBytes(item.sizeBytes),
-                  maxWidth: 100,
-                ),
-                _InlineInfo(
-                  label: '拍摄时间',
-                  value: item.dateTaken ?? '未知',
-                  maxWidth: 160,
-                ),
-              ],
-            ),
-            _InfoLine(
-              children: [
-                _InlineInfo(
-                  label: '检测结果',
-                  value: detectionResultStr,
-                  maxWidth: 220,
-                ),
-                _InlineInfo(label: '检测框', value: boxCountStr, maxWidth: 80),
-                _InlineInfo(label: '最低置信度', value: minConfStr, maxWidth: 120),
-                _InlineInfo(
-                  label: '检测时间',
-                  value: _detectionTimeLabel(item),
-                  maxWidth: 160,
-                ),
-              ],
-            ),
-            if (item.error != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '错误：${item.error}',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: colorScheme.primaryContainer,
+                shape: BoxShape.circle,
               ),
-            ],
+              child: Icon(
+                Icons.analytics_rounded,
+                color: colorScheme.onPrimaryContainer,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  置信度: ${summary.confidence}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  String _formatImageSize(DetectionItem item) {
-    if (item.width == null || item.height == null) return '未知';
-    return '${item.width}×${item.height}';
-  }
+  _DetectionSummary _summaryFor(
+    DetectionItem item,
+    List<DetectionBox> visibleBoxes,
+  ) {
+    var species = _primarySpecies(item);
+    var count = item.detectionData['物种数量']?.toString() ?? '';
+    var confidence = item.detectionData['最低置信度']?.toString() ?? '';
 
-  String _formatBytes(int? bytes) {
-    if (bytes == null) return '未知';
-    if (bytes < 1024) return '${bytes}B';
-    final kb = bytes / 1024;
-    if (kb < 1024) return '${kb.toStringAsFixed(1)}KB';
-    final mb = kb / 1024;
-    if (mb < 1024) return '${mb.toStringAsFixed(1)}MB';
-    return '${(mb / 1024).toStringAsFixed(1)}GB';
-  }
-
-  String _detectionTimeLabel(DetectionItem item) {
-    final raw = item.detectionData['检测时间'];
-    if (raw != null && raw.toString().trim().isNotEmpty) {
-      return raw.toString();
+    if (visibleBoxes.isNotEmpty && item.detectionData['最低置信度'] != '人工校验') {
+      final counts = _isVideo(item)
+          ? _trackCountsBySpecies(visibleBoxes)
+          : _boxCountsBySpecies(visibleBoxes);
+      final confidences = <double>[];
+      for (final box in visibleBoxes) {
+        if (box.confidence != null) confidences.add(box.confidence!);
+      }
+      species = counts.keys.join(',');
+      count = counts.values.join(',');
+      if (confidences.isNotEmpty) {
+        confidence = confidences
+            .reduce((a, b) => a < b ? a : b)
+            .toStringAsFixed(2);
+      }
     }
-    return '暂无';
-  }
-}
 
-class _InfoLine extends StatelessWidget {
-  const _InfoLine({required this.children});
+    if (count.trim().isEmpty) {
+      count = species == '空'
+          ? '空'
+          : (visibleBoxes.isEmpty ? '未知' : visibleBoxes.length.toString());
+    }
+    if (confidence.trim().isEmpty) {
+      confidence = item.confidence?.toStringAsFixed(2) ?? 'N/A';
+    }
 
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Wrap(spacing: 16, runSpacing: 4, children: children),
+    return _DetectionSummary(
+      species: species,
+      count: count,
+      type: _typeLabel(species, item),
+      confidence: confidence,
     );
   }
+
+  String _primarySpecies(DetectionItem item) {
+    final raw = item.detectionData['物种名称'];
+    if (raw != null && raw.toString().trim().isNotEmpty) {
+      return raw.toString().trim();
+    }
+    if (item.species.isNotEmpty) return item.species.join(',');
+    if (item.error != null) return '错误';
+    return '未知鸟';
+  }
+
+  String _typeLabel(String species, DetectionItem item) {
+    final manualType = item.detectionData['物种类型']?.toString().trim();
+    if (manualType != null && manualType.isNotEmpty) return manualType;
+    if (species == '空' || species == '未知鸟') return '空';
+    final matchedTypes = species
+        .split(',')
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .map((name) => speciesTypes[name] ?? '')
+        .where((speciesType) => speciesType.isNotEmpty)
+        .toSet()
+        .toList();
+    if (matchedTypes.isNotEmpty) return matchedTypes.join(',');
+    if (species.contains('人') || species.contains('牧民')) return '人员';
+    return '待补全';
+  }
+
+  bool _isVideo(DetectionItem item) {
+    const videoTypes = {'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'};
+    return videoTypes.contains(item.fileType.toLowerCase());
+  }
+
+  Map<String, int> _boxCountsBySpecies(List<DetectionBox> boxes) {
+    final counts = <String, int>{};
+    for (final box in boxes) {
+      counts[box.species] = (counts[box.species] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  Map<String, int> _trackCountsBySpecies(List<DetectionBox> boxes) {
+    final trackVotes = <String, Map<String, int>>{};
+    final fallbackCounts = <String, int>{};
+    for (var index = 0; index < boxes.length; index++) {
+      final box = boxes[index];
+      final trackId = box.trackId?.trim();
+      if (trackId == null || trackId.isEmpty) {
+        fallbackCounts[box.species] = (fallbackCounts[box.species] ?? 0) + 1;
+        continue;
+      }
+      final votes = trackVotes.putIfAbsent(trackId, () => <String, int>{});
+      votes[box.species] = (votes[box.species] ?? 0) + 1;
+    }
+
+    final counts = <String, int>{};
+    for (final votes in trackVotes.values) {
+      final species = votes.entries
+          .reduce((a, b) => a.value >= b.value ? a : b)
+          .key;
+      counts[species] = (counts[species] ?? 0) + 1;
+    }
+    for (final entry in fallbackCounts.entries) {
+      counts[entry.key] = (counts[entry.key] ?? 0) + entry.value;
+    }
+    return counts;
+  }
 }
 
-class _InlineInfo extends StatelessWidget {
-  const _InlineInfo({
-    required this.label,
-    required this.value,
-    this.maxWidth = 200,
+class _DetectionSummary {
+  const _DetectionSummary({
+    required this.species,
+    required this.count,
+    required this.type,
+    required this.confidence,
   });
 
-  final String label;
-  final String value;
-  final double maxWidth;
-
-  @override
-  Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
-      child: RichText(
-        text: TextSpan(
-          style: Theme.of(context).textTheme.bodyMedium,
-          children: [
-            TextSpan(
-              text: '$label：',
-              style: Theme.of(context).textTheme.labelMedium,
-            ),
-            TextSpan(text: value),
-          ],
-        ),
-        overflow: TextOverflow.ellipsis,
-        maxLines: 1,
-      ),
-    );
-  }
+  final String species;
+  final String count;
+  final String type;
+  final String confidence;
 }
 
 class _PreviewDetectionControls extends StatelessWidget {
@@ -397,39 +403,22 @@ class _PreviewDetectionControls extends StatelessWidget {
           children: [
             const Text('显示结果', style: TextStyle(fontWeight: FontWeight.w500)),
             const SizedBox(width: 4),
-            Switch(
-              value: showDetections,
-              onChanged: onShowDetectionsChanged,
-            ),
+            Switch(value: showDetections, onChanged: onShowDetectionsChanged),
             const SizedBox(width: 16),
             const Text('置信度', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(width: 4),
+            const SizedBox(width: 8),
             SizedBox(
               width: 150,
-              child: DropdownButtonFormField<String>(
-                key: ValueKey(
-                  'preview-species-$selectedSpecies-${speciesOptions.join('|')}',
-                ),
-                initialValue: selectedSpecies,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 0,
-                  ),
-                ),
-                items: speciesOptions.map((species) {
-                  return DropdownMenuItem(
-                    value: species,
-                    child: Text(
-                      species,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  );
-                }).toList(),
-                onChanged: (value) {
+              child: DropdownMenu<String>(
+                initialSelection: selectedSpecies,
+                expandedInsets: EdgeInsets.zero,
+                menuStyle: appDropdownMenuStyle(context, minWidth: 150),
+                label: const Text('物种'),
+                dropdownMenuEntries: [
+                  for (final species in speciesOptions)
+                    DropdownMenuEntry<String>(value: species, label: species),
+                ],
+                onSelected: (value) {
                   if (value != null) onSpeciesFilterChanged(value);
                 },
               ),

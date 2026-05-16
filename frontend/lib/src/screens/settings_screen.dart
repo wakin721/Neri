@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../api_client.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
+import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
 const _defaultExportColumns = <String>[
@@ -40,6 +42,7 @@ const _defaultQuickMarks = <String>[
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     required this.settings,
+    required this.apiClient,
     required this.themeNotifier,
     required this.onUpdateTheme,
     required this.onSaveSettings,
@@ -48,6 +51,7 @@ class SettingsScreen extends StatefulWidget {
   });
 
   final NeriSettings? settings;
+  final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
@@ -63,24 +67,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic> _draft = <String, dynamic>{};
   int _sectionIndex = 0;
   bool _saving = false;
-  String? _speciesToAdd;
+  bool _dirty = false;
+  bool _resettingDraft = false;
+  bool _loadingModelClasses = false;
+  String? _modelClassesPath;
+  List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
   @override
   void initState() {
     super.initState();
+    _packageController.addListener(_handlePackageChanged);
     _resetDraft();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadModelClassesForSelection();
+    });
   }
 
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.settings != widget.settings) {
+    if (oldWidget.settings != widget.settings && !_dirty && !_saving) {
       _resetDraft();
+      _loadModelClassesForSelection();
     }
   }
 
   @override
   void dispose() {
+    _packageController.removeListener(_handlePackageChanged);
     _packageController.dispose();
     _newQuickMarkController.dispose();
     super.dispose();
@@ -134,7 +148,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'update_channel': _stringSetting(saved, 'update_channel', 'Preview'),
       'update_mirror': _stringSetting(saved, 'update_mirror', 'KKGitHub'),
     };
+    _resettingDraft = true;
     _packageController.text = _stringSetting(saved, 'package', '');
+    _resettingDraft = false;
+    _dirty = false;
+  }
+
+  void _handlePackageChanged() {
+    if (_resettingDraft) return;
+    _draft['package'] = _packageController.text.trim();
+    _markDirty();
+  }
+
+  void _markDirty() {
+    if (_dirty || !mounted) return;
+    setState(() => _dirty = true);
+  }
+
+  Future<void> _loadModelClassesForSelection([String? modelPath]) async {
+    final path =
+        modelPath ??
+        _validModelValue(
+          _string('selected_model'),
+          widget.settings?.availableModels ?? const <ModelInfo>[],
+        );
+    if (path == null || path.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _modelClassesPath = null;
+        _modelClassOptions = const <ModelClassInfo>[];
+        _loadingModelClasses = false;
+      });
+      return;
+    }
+    if (_modelClassesPath == path && _modelClassOptions.isNotEmpty) return;
+
+    setState(() {
+      _modelClassesPath = path;
+      _loadingModelClasses = true;
+    });
+
+    try {
+      final classes = await widget.apiClient.fetchModelClasses(path);
+      if (!mounted || _string('selected_model') != path) return;
+      setState(() {
+        _modelClassOptions = classes;
+        _loadingModelClasses = false;
+      });
+    } catch (error) {
+      if (!mounted || _string('selected_model') != path) return;
+      setState(() {
+        _modelClassOptions = const <ModelClassInfo>[];
+        _loadingModelClasses = false;
+      });
+      widget.onShowMessage('读取模型物种列表失败：$error');
+    }
   }
 
   @override
@@ -154,14 +222,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Text('设置', style: TextStyle(fontSize: 18)),
               ),
               NavigationDrawerDestination(
-                icon: Icon(Icons.memory_outlined),
-                selectedIcon: Icon(Icons.memory_rounded),
-                label: Text('模型参数'),
-              ),
-              NavigationDrawerDestination(
-                icon: Icon(Icons.movie_filter_outlined),
-                selectedIcon: Icon(Icons.movie_filter_rounded),
-                label: Text('视频检测'),
+                icon: Icon(Icons.tune_outlined),
+                selectedIcon: Icon(Icons.tune_rounded),
+                label: Text('检测设置'),
               ),
               NavigationDrawerDestination(
                 icon: Icon(Icons.construction_outlined),
@@ -174,22 +237,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 label: Text('基础设置'),
               ),
               NavigationDrawerDestination(
-                icon: Icon(Icons.bookmark_add_outlined),
-                selectedIcon: Icon(Icons.bookmark_add_rounded),
-                label: Text('快速标记'),
-              ),
-              NavigationDrawerDestination(
-                icon: Icon(Icons.table_chart_outlined),
-                selectedIcon: Icon(Icons.table_chart_rounded),
-                label: Text('导出设置'),
-              ),
-              NavigationDrawerDestination(
                 icon: Icon(Icons.palette_outlined),
                 selectedIcon: Icon(Icons.palette_rounded),
                 label: Text('外观主题'),
               ),
               NavigationDrawerDestination(
-                icon: Icon(Icons.system_update_alt_outlined),
+                icon: Icon(Icons.system_update_alt_rounded),
                 selectedIcon: Icon(Icons.system_update_alt_rounded),
                 label: Text('软件更新'),
               ),
@@ -209,21 +262,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               _buildSaveStrip(),
               _buildSelectedSection(),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                  onPressed: _saving ? null : _save,
-                  icon: _saving
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.save_rounded),
-                  label: Text(_saving ? '保存中' : '保存设置'),
-                ),
-              ),
             ],
           ),
         ),
@@ -233,14 +271,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildSelectedSection() {
     return switch (_sectionIndex) {
-      0 => _buildModelParameters(),
-      1 => _buildVideoSettings(),
-      2 => _buildEnvironmentMaintenance(),
-      3 => _buildBasicSettings(),
-      4 => _buildQuickMarkSettings(),
-      5 => _buildExportSettings(),
-      6 => _buildAppearanceSettings(),
-      7 => _buildUpdateSettingsSection(),
+      0 => _buildDetectionSettings(),
+      1 => _buildEnvironmentMaintenance(),
+      2 => _buildBasicSettings(),
+      3 => _buildAppearanceSettings(),
+      4 => _buildUpdateSettingsSection(),
       _ => _buildProjectSettings(),
     };
   }
@@ -273,7 +308,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildModelParameters() {
+  Widget _buildDetectionSettings() {
     final settings = widget.settings;
     final selectedModel = _validModelValue(
       _string('selected_model'),
@@ -284,59 +319,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
       settings?.availableClassificationModels ?? const <ModelInfo>[],
       allowEmpty: true,
     );
+    final videoMode = _string('video_mode', 'all');
+    final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
 
     return SectionCard(
-      title: '模型参数设置',
-      subtitle: '模型管理、识别物种、阈值和推理加速',
-      icon: Icons.memory_rounded,
+      title: '检测设置',
+      subtitle: '模型管理、识别物种、阈值、推理加速和视频检测',
+      icon: Icons.tune_rounded,
       child: Column(
         children: [
           _SettingsPanel(
-            title: '模型管理',
-            subtitle: '选择探测模型和二次分类模型',
+            title: '探测模型',
+            subtitle: '选择用于照片和视频目标检测的模型',
             icon: Icons.build_rounded,
+            child: _SettingsMenuButton<String>(
+              value: selectedModel,
+              placeholder: '未发现探测模型',
+              options: (settings?.availableModels ?? const <ModelInfo>[])
+                  .map(
+                    (model) => _SettingsOption<String>(
+                      value: model.path,
+                      label: model.name,
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                _set('selected_model', value);
+                _set('selected_species_names', <String>[]);
+                _loadModelClassesForSelection(value);
+              },
+            ),
+          ),
+          _SettingsPanel(
+            title: '分类模型',
+            subtitle: '选择二次分类模型，或设为不使用',
+            icon: Icons.account_tree_rounded,
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                DropdownButtonFormField<String>(
-                  key: ValueKey('model-$selectedModel'),
-                  initialValue: selectedModel,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: '选择探测模型',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: (settings?.availableModels ?? const <ModelInfo>[])
-                      .map(
-                        (model) => DropdownMenuItem(
-                          value: model.path,
-                          child: Text(model.name),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) => _set('selected_model', value ?? ''),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  key: ValueKey('cls-model-$selectedClassificationModel'),
-                  initialValue: selectedClassificationModel,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: '选择分类模型',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    const DropdownMenuItem(value: '', child: Text('不使用')),
+                _SettingsMenuButton<String>(
+                  value: selectedClassificationModel,
+                  options: [
+                    const _SettingsOption<String>(value: '', label: '不使用'),
                     ...(settings?.availableClassificationModels ??
                             const <ModelInfo>[])
                         .map(
-                          (model) => DropdownMenuItem(
+                          (model) => _SettingsOption<String>(
                             value: model.path,
-                            child: Text(model.name),
+                            label: model.name,
                           ),
                         ),
                   ],
                   onChanged: (value) =>
-                      _set('selected_classification_model', value ?? ''),
+                      _set('selected_classification_model', value),
                 ),
                 const SizedBox(height: 8),
                 _MutedText(
@@ -408,82 +443,167 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
+          ..._buildVideoSettingPanels(videoMode, strideLabel),
         ],
       ),
     );
   }
 
   Widget _buildSpeciesSelector() {
-    final speciesNames =
-        (widget.settings?.speciesTypes.keys.toList() ?? const <String>[])
-          ..sort();
+    final speciesNames = _modelSpeciesNames();
     final selected = _stringList('selected_species_names');
+    final summary = _loadingModelClasses
+        ? '读取中...'
+        : _speciesSelectionSummary(selected, speciesNames);
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                key: ValueKey('species-add-${selected.length}-$_speciesToAdd'),
-                initialValue: speciesNames.contains(_speciesToAdd)
-                    ? _speciesToAdd
-                    : null,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '添加识别物种',
-                  border: OutlineInputBorder(),
-                ),
-                items: speciesNames
-                    .map(
-                      (name) =>
-                          DropdownMenuItem(value: name, child: Text(name)),
-                    )
-                    .toList(),
-                onChanged: (value) => setState(() => _speciesToAdd = value),
-              ),
-            ),
-            const SizedBox(width: 10),
-            FilledButton.icon(
-              onPressed: _speciesToAdd == null
-                  ? null
-                  : () {
-                      final next = {...selected, _speciesToAdd!}.toList();
-                      _set('selected_species_names', next);
-                      setState(() => _speciesToAdd = null);
-                    },
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('添加'),
-            ),
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: selected.isEmpty
-                  ? null
-                  : () => _set('selected_species_names', <String>[]),
-              child: const Text('全部识别'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        if (selected.isEmpty)
-          const _MutedText('当前未限制物种，处理时默认识别全部模型类别。')
-        else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: selected.map((name) {
-              return InputChip(
-                label: Text(name),
-                onDeleted: () {
-                  final next = selected.where((item) => item != name).toList();
-                  _set('selected_species_names', next);
-                },
-              );
-            }).toList(),
+        if (_loadingModelClasses)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 12),
+            child: LinearProgressIndicator(),
           ),
+        _SummaryDialogButton(
+          summary: summary,
+          onPressed: _loadingModelClasses
+              ? null
+              : () => _showSpeciesSelectionDialog(speciesNames),
+        ),
       ],
     );
+  }
+
+  List<String> _modelSpeciesNames() {
+    final seen = <String>{};
+    return [
+      for (final species in _modelClassOptions)
+        if (species.label.isNotEmpty && seen.add(species.label)) species.label,
+    ];
+  }
+
+  String _selectionSummary(
+    List<String> selected, {
+    required String emptyLabel,
+  }) {
+    final cleaned = selected.where((item) => item.trim().isNotEmpty).toList();
+    if (cleaned.isEmpty) return emptyLabel;
+    final preview = cleaned.take(3).join(', ');
+    return cleaned.length > 3 ? '$preview, ...' : preview;
+  }
+
+  String _speciesSelectionSummary(List<String> selected, List<String> options) {
+    final optionSet = options.toSet();
+    final cleaned = selected
+        .where((item) => item.trim().isNotEmpty)
+        .where((item) => optionSet.isEmpty || optionSet.contains(item))
+        .toSet();
+    if (cleaned.isEmpty || (options.isNotEmpty && cleaned.length >= options.length)) {
+      return '全部识别';
+    }
+    return _selectionSummary(cleaned.toList(), emptyLabel: '全部识别');
+  }
+
+  Future<void> _showSpeciesSelectionDialog(List<String> speciesNames) async {
+    final initialSelection = _stringList('selected_species_names').toSet();
+    final result = await showDialog<List<String>>(
+      context: context,
+      builder: (context) {
+        final selected = initialSelection.toSet();
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final hasOptions = speciesNames.isNotEmpty;
+            return AlertDialog(
+              title: const Text('选择识别物种'),
+              content: SizedBox(
+                width: 460,
+                height: hasOptions ? 480 : 120,
+                child: hasOptions
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const _MutedText('不勾选时默认识别全部模型类别。'),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              TextButton.icon(
+                                onPressed: () => setDialogState(() {
+                                  selected
+                                    ..clear()
+                                    ..addAll(speciesNames);
+                                }),
+                                icon: const Icon(Icons.select_all_rounded),
+                                label: const Text('全选'),
+                              ),
+                              TextButton.icon(
+                                onPressed: selected.isEmpty
+                                    ? null
+                                    : () => setDialogState(() {
+                                        selected.clear();
+                                      }),
+                                icon: const Icon(Icons.deselect_rounded),
+                                label: const Text('清空'),
+                              ),
+                            ],
+                          ),
+                          const Divider(height: 20),
+                          Expanded(
+                            child: ListView.builder(
+                              itemCount: speciesNames.length,
+                              itemBuilder: (context, index) {
+                                final name = speciesNames[index];
+                                return CheckboxListTile(
+                                  dense: true,
+                                  value: selected.contains(name),
+                                  title: Text(name),
+                                  onChanged: (value) {
+                                    setDialogState(() {
+                                      if (value == true) {
+                                        selected.add(name);
+                                      } else {
+                                        selected.remove(name);
+                                      }
+                                    });
+                                  },
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      )
+                    : const Center(child: Text('当前模型暂未读取到可选物种，处理时会识别全部模型类别。')),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: hasOptions
+                      ? () {
+                          final ordered = speciesNames
+                              .where(selected.contains)
+                              .toList();
+                          Navigator.of(context).pop(
+                            ordered.length == speciesNames.length
+                                ? <String>[]
+                                : ordered,
+                          );
+                        }
+                      : () => Navigator.of(context).pop(<String>[]),
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null) {
+      _set('selected_species_names', result);
+    }
   }
 
   Widget _buildVideoSettings() {
@@ -494,8 +614,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: '视频检测设置',
       subtitle: '视频处理模式、跳帧和检测过滤',
       icon: Icons.movie_filter_rounded,
-      child: Column(
-        children: [
+      child: Column(children: _buildVideoSettingPanels(videoMode, strideLabel)),
+    );
+  }
+
+  List<Widget> _buildVideoSettingPanels(String videoMode, String strideLabel) {
+    return [
           _SettingsPanel(
             title: '视频处理模式',
             subtitle: '全部识别会按帧间隔处理，快速识别只抽取关键帧',
@@ -514,8 +638,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
               selected: {videoMode},
-              onSelectionChanged: (selection) =>
-                  _set('video_mode', selection.first),
+              onSelectionChanged: (selection) {
+                if (selection.isEmpty) return;
+                _set('video_mode', selection.first);
+              },
             ),
           ),
           _SettingsPanel(
@@ -536,6 +662,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: '检测过滤',
             subtitle: '设置检测到的最低帧数比例',
             icon: Icons.filter_alt_rounded,
+            showDivider: false,
             child: _LabeledSlider(
               label: '最低帧数比例',
               value: _double('min_frame_ratio'),
@@ -546,9 +673,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (value) => _set('min_frame_ratio', value),
             ),
           ),
-        ],
-      ),
-    );
+        ];
   }
 
   Widget _buildEnvironmentMaintenance() {
@@ -565,50 +690,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Row(
               children: [
                 Expanded(
-                  child: DropdownButtonFormField<String>(
-                    key: ValueKey('pytorch-${_string('pytorch_version')}'),
-                    initialValue: _string('pytorch_version', '自动检测'),
-                    decoration: const InputDecoration(
-                      labelText: '安装环境',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: '自动检测', child: Text('自动检测')),
-                      DropdownMenuItem(
+                  child: _SettingsMenuButton<String>(
+                    value: _string('pytorch_version', '自动检测'),
+                    options: const [
+                      _SettingsOption<String>(value: '自动检测', label: '自动检测'),
+                      _SettingsOption<String>(
                         value: 'CUDA 13.0',
-                        child: Text('CUDA 13.0'),
+                        label: 'CUDA 13.0',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CUDA 12.8',
-                        child: Text('CUDA 12.8'),
+                        label: 'CUDA 12.8',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CUDA 12.6',
-                        child: Text('CUDA 12.6'),
+                        label: 'CUDA 12.6',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CUDA 12.4',
-                        child: Text('CUDA 12.4'),
+                        label: 'CUDA 12.4',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CUDA 12.1',
-                        child: Text('CUDA 12.1'),
+                        label: 'CUDA 12.1',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CUDA 11.8',
-                        child: Text('CUDA 11.8'),
+                        label: 'CUDA 11.8',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'Intel XPU',
-                        child: Text('Intel XPU'),
+                        label: 'Intel XPU',
                       ),
-                      DropdownMenuItem(
+                      _SettingsOption<String>(
                         value: 'CPU Only',
-                        child: Text('CPU Only'),
+                        label: 'CPU Only',
                       ),
                     ],
-                    onChanged: (value) =>
-                        _set('pytorch_version', value ?? '自动检测'),
+                    onChanged: (value) => _set('pytorch_version', value),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -625,6 +744,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: '重新安装单个 Python 包',
             subtitle: '包名可留空备用',
             icon: Icons.extension_rounded,
+            showDivider: false,
             child: Row(
               children: [
                 Expanded(
@@ -661,19 +781,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildBasicSettings() {
     return SectionCard(
       title: '基础设置',
-      subtitle: '控制物种校验界面的辅助行为',
+      subtitle: '校验辅助、快速标记和导出字段',
       icon: Icons.fact_check_rounded,
       child: Column(
         children: [
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            value: _bool('auto_group'),
-            onChanged: (value) => _set('auto_group', value),
-            title: const Text('物种校验界面自动分组'),
-            subtitle: const Text(
-              '开启后，将根据视频文件自动对连续拍摄的照片和视频进行分组，并在文件列表中按所在组校验最多的物种统一归类显示。',
+          _SettingsPanel(
+            title: '物种校验界面自动分组',
+            subtitle: '开启后，将根据视频文件自动对连续拍摄的照片和视频进行分组，并在文件列表中按所在组校验最多的物种统一归类显示。',
+            icon: Icons.auto_awesome_motion_rounded,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Switch(
+                value: _bool('auto_group'),
+                onChanged: (value) => _set('auto_group', value),
+              ),
             ),
           ),
+          _buildQuickMarkEditor(),
+          Builder(
+            builder: (context) => Padding(
+              padding: const EdgeInsets.only(top: 16, bottom: 12),
+              child: Divider(
+                height: 1,
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+          ),
+          _buildExportColumns(),
         ],
       ),
     );
@@ -731,13 +865,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final marks = _stringList('quick_mark_list');
     return Column(
       children: [
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          value: _bool('auto_sort'),
-          onChanged: (value) => _set('auto_sort', value),
-          title: const Text('自动排序'),
+        _SettingsPanel(
+          title: '自动排序',
+          subtitle: '根据最近常用物种调整快速标记列的显示顺序',
+          icon: Icons.sort_rounded,
+          showDivider: false,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: Switch(
+              value: _bool('auto_sort'),
+              onChanged: (value) => _set('auto_sort', value),
+            ),
+          ),
         ),
-        const Divider(),
         ...List.generate(marks.length, (index) {
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
@@ -756,6 +896,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       final next = _stringList('quick_mark_list');
                       next[index] = value.trim();
                       _draft['quick_mark_list'] = next;
+                      _markDirty();
                     },
                   ),
                 ),
@@ -797,97 +938,157 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildExportColumns() {
-    final selected = _stringList('export_columns').toSet();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 8,
-          children: [
-            TextButton.icon(
-              onPressed: () => _set('export_columns', _defaultExportColumns),
-              icon: const Icon(Icons.select_all_rounded),
-              label: const Text('全选'),
-            ),
-            TextButton.icon(
-              onPressed: () => _set('export_columns', <String>[]),
-              icon: const Icon(Icons.deselect_rounded),
-              label: const Text('全不选'),
-            ),
-          ],
-        ),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: _defaultExportColumns.map((column) {
-            return SizedBox(
-              width: 180,
-              child: CheckboxListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                value: selected.contains(column),
-                onChanged: (value) {
-                  final next = selected.toSet();
-                  if (value == true) {
-                    next.add(column);
-                  } else {
-                    next.remove(column);
-                  }
-                  _set('export_columns', next.toList());
-                },
-                title: Text(column),
-              ),
-            );
-          }).toList(),
-        ),
-      ],
+    final selected = _stringList('export_columns');
+    final summary = selected.isEmpty
+        ? '使用默认列'
+        : selected.length == _defaultExportColumns.length
+        ? '全部列'
+        : _selectionSummary(selected, emptyLabel: '使用默认列');
+
+    return _SettingsPanel(
+      title: '导出表格列',
+      subtitle: '选择校验数据导出时包含的字段',
+      icon: Icons.view_column_rounded,
+      showDivider: false,
+      child: _SummaryDialogButton(
+        summary: summary,
+        onPressed: _showExportColumnsDialog,
+      ),
     );
+  }
+
+  Future<void> _showExportColumnsDialog() async {
+    final initialSelection = _stringList('export_columns').toSet();
+    final result = await showDialog<List<String>>(
+      context: context,
+      builder: (context) {
+        final selected = initialSelection.toSet();
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('选择导出表格列'),
+              content: SizedBox(
+                width: 460,
+                height: 480,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton.icon(
+                          onPressed: () => setDialogState(() {
+                            selected
+                              ..clear()
+                              ..addAll(_defaultExportColumns);
+                          }),
+                          icon: const Icon(Icons.select_all_rounded),
+                          label: const Text('全选'),
+                        ),
+                        TextButton.icon(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => setDialogState(() {
+                                  selected.clear();
+                                }),
+                          icon: const Icon(Icons.deselect_rounded),
+                          label: const Text('清空'),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: _defaultExportColumns.length,
+                        itemBuilder: (context, index) {
+                          final column = _defaultExportColumns[index];
+                          return CheckboxListTile(
+                            dense: true,
+                            value: selected.contains(column),
+                            title: Text(column),
+                            onChanged: (value) {
+                              setDialogState(() {
+                                if (value == true) {
+                                  selected.add(column);
+                                } else {
+                                  selected.remove(column);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final ordered = _defaultExportColumns
+                        .where(selected.contains)
+                        .toList();
+                    Navigator.of(context).pop(ordered);
+                  },
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null) {
+      _set('export_columns', result);
+    }
   }
 
   Widget _buildUpdateSettings() {
     return Column(
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                key: ValueKey('channel-${_string('update_channel')}'),
-                initialValue: _string('update_channel', 'Preview'),
-                decoration: const InputDecoration(
-                  labelText: '更新通道',
-                  border: OutlineInputBorder(),
-                ),
-                items: const [
-                  DropdownMenuItem(value: 'Release', child: Text('稳定版')),
-                  DropdownMenuItem(value: 'Preview', child: Text('预览版')),
-                ],
-                onChanged: (value) =>
-                    _set('update_channel', value ?? 'Preview'),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                key: ValueKey('mirror-${_string('update_mirror')}'),
-                initialValue: _string('update_mirror', 'KKGitHub'),
-                decoration: const InputDecoration(
-                  labelText: '镜像源',
-                  border: OutlineInputBorder(),
-                ),
-                items: const [
-                  DropdownMenuItem(value: 'Official', child: Text('官方源')),
-                  DropdownMenuItem(value: 'KKGitHub', child: Text('国内源')),
-                ],
-                onChanged: (value) =>
-                    _set('update_mirror', value ?? 'KKGitHub'),
-              ),
-            ),
-            const SizedBox(width: 10),
-            FilledButton(
+        _SettingsPanel(
+          title: '更新通道',
+          subtitle: '选择稳定版或预览版更新来源',
+          icon: Icons.commit_rounded,
+          child: _SettingsMenuButton<String>(
+            value: _string('update_channel', 'Preview'),
+            options: const [
+              _SettingsOption<String>(value: 'Release', label: '稳定版'),
+              _SettingsOption<String>(value: 'Preview', label: '预览版'),
+            ],
+            onChanged: (value) => _set('update_channel', value),
+          ),
+        ),
+        _SettingsPanel(
+          title: '镜像源',
+          subtitle: '选择检查更新时使用的下载源',
+          icon: Icons.public_rounded,
+          child: _SettingsMenuButton<String>(
+            value: _string('update_mirror', 'KKGitHub'),
+            options: const [
+              _SettingsOption<String>(value: 'Official', label: '官方源'),
+              _SettingsOption<String>(value: 'KKGitHub', label: '国内源'),
+            ],
+            onChanged: (value) => _set('update_mirror', value),
+          ),
+        ),
+        _SettingsPanel(
+          title: '检查更新',
+          subtitle: '保留软件更新检查入口',
+          icon: Icons.system_update_alt_rounded,
+          showDivider: false,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
               onPressed: () => widget.onShowMessage('软件更新检查入口已保留，后续可接入更新服务。'),
               child: const Text('检查更新'),
             ),
-          ],
+          ),
         ),
       ],
     );
@@ -903,6 +1104,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
+    var saved = false;
     try {
       _draft['package'] = _packageController.text.trim();
       if (widget.settings?.gpuAvailable != true) {
@@ -910,13 +1112,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _draft['use_fp16'] = false;
       }
       await widget.onSaveSettings(Map<String, dynamic>.from(_draft));
+      saved = true;
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          if (saved) _dirty = false;
+        });
+      }
     }
   }
 
   void _set(String key, dynamic value) {
-    setState(() => _draft[key] = value);
+    setState(() {
+      _draft[key] = value;
+      _dirty = true;
+    });
   }
 
   bool _bool(String key, [bool fallback = false]) {
@@ -951,53 +1162,164 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+class _SettingsOption<T> {
+  const _SettingsOption({required this.value, required this.label});
+
+  final T value;
+  final String label;
+}
+
+class _SettingsMenuButton<T> extends StatelessWidget {
+  const _SettingsMenuButton({
+    required this.value,
+    required this.options,
+    required this.onChanged,
+    this.placeholder = '请选择',
+  });
+
+  final T? value;
+  final List<_SettingsOption<T>> options;
+  final ValueChanged<T> onChanged;
+  final String placeholder;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownMenu<T>(
+      enabled: options.isNotEmpty,
+      initialSelection: value,
+      expandedInsets: EdgeInsets.zero,
+      menuStyle: appDropdownMenuStyle(context),
+      hintText: placeholder,
+      dropdownMenuEntries: [
+        for (final option in options)
+          DropdownMenuEntry<T>(value: option.value, label: option.label),
+      ],
+      onSelected: (value) {
+        if (value != null) onChanged(value);
+      },
+    );
+  }
+}
+
+class _SummaryDialogButton extends StatelessWidget {
+  const _SummaryDialogButton({required this.summary, required this.onPressed});
+
+  final String summary;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return TextButton(
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        foregroundColor: scheme.primary,
+        disabledForegroundColor: scheme.onSurfaceVariant,
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
+        alignment: Alignment.centerRight,
+        textStyle: Theme.of(
+          context,
+        ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: Text(
+          summary,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.end,
+        ),
+      ),
+    );
+  }
+}
+
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     required this.title,
     required this.subtitle,
     required this.icon,
     required this.child,
+    this.showDivider = true,
   });
 
   final String title;
   final String subtitle;
   final IconData icon;
   final Widget child;
+  final bool showDivider;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(icon),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.titleMedium),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final label = Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(icon, size: 20, color: scheme.primary),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: textTheme.titleSmall?.copyWith(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          subtitle,
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-            ],
+                  ),
+                ],
+              );
+
+              if (constraints.maxWidth < 720) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [label, const SizedBox(height: 12), child],
+                );
+              }
+
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(flex: 4, child: label),
+                  const SizedBox(width: 28),
+                  Expanded(
+                    flex: 5,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: child,
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-          const SizedBox(height: 16),
-          child,
+          if (showDivider)
+            Padding(
+              padding: const EdgeInsets.only(top: 16),
+              child: Divider(height: 1, color: scheme.outlineVariant),
+            ),
         ],
       ),
     );
@@ -1064,72 +1386,80 @@ class _AppearanceControls extends StatelessWidget {
     return ValueListenableBuilder<ThemeSettings>(
       valueListenable: themeNotifier,
       builder: (context, settings, _) {
-        final colorScheme = Theme.of(context).colorScheme;
         final paletteDisabled = settings.useDynamicColor;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SegmentedButton<ThemeMode>(
-              segments: const [
-                ButtonSegment(
-                  value: ThemeMode.light,
-                  icon: Icon(Icons.light_mode_rounded),
-                  label: Text('浅色'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.dark,
-                  icon: Icon(Icons.dark_mode_rounded),
-                  label: Text('深色'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.system,
-                  icon: Icon(Icons.brightness_auto_rounded),
-                  label: Text('自动'),
-                ),
-              ],
-              selected: {settings.themeMode},
-              onSelectionChanged: (selection) =>
-                  onUpdateTheme(settings.copyWith(themeMode: selection.first)),
-            ),
-            const SizedBox(height: 12),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              value: settings.useDynamicColor,
-              onChanged: (value) =>
-                  onUpdateTheme(settings.copyWith(useDynamicColor: value)),
-              title: const Text('使用系统动态颜色'),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              paletteDisabled ? '调色板已由系统接管' : '调色板',
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: paletteDisabled
-                    ? colorScheme.onSurface.withValues(alpha: 0.38)
-                    : null,
+            _SettingsPanel(
+              title: '主题模式',
+              subtitle: '选择浅色、深色或跟随系统',
+              icon: Icons.brightness_6_rounded,
+              child: SegmentedButton<ThemeMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: ThemeMode.light,
+                    icon: Icon(Icons.light_mode_rounded),
+                    label: Text('浅色'),
+                  ),
+                  ButtonSegment(
+                    value: ThemeMode.dark,
+                    icon: Icon(Icons.dark_mode_rounded),
+                    label: Text('深色'),
+                  ),
+                  ButtonSegment(
+                    value: ThemeMode.system,
+                    icon: Icon(Icons.brightness_auto_rounded),
+                    label: Text('自动'),
+                  ),
+                ],
+                selected: {settings.themeMode},
+                onSelectionChanged: (selection) {
+                  if (selection.isEmpty) return;
+                  onUpdateTheme(settings.copyWith(themeMode: selection.first));
+                },
               ),
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: kSeedColorOptions.map((option) {
-                final selected =
-                    !paletteDisabled &&
-                    settings.seedColor.toARGB32() == option.color.toARGB32();
-                return Tooltip(
-                  message: option.label,
-                  child: _ColorSwatch(
-                    color: option.color,
-                    selected: selected,
-                    disabled: paletteDisabled,
-                    onTap: paletteDisabled
-                        ? null
-                        : () => onUpdateTheme(
-                            settings.copyWith(seedColor: option.color),
-                          ),
-                  ),
-                );
-              }).toList(),
+            _SettingsPanel(
+              title: '使用系统动态颜色',
+              subtitle: '开启后调色板由系统主题接管',
+              icon: Icons.color_lens_rounded,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Switch(
+                  value: settings.useDynamicColor,
+                  onChanged: (value) =>
+                      onUpdateTheme(settings.copyWith(useDynamicColor: value)),
+                ),
+              ),
+            ),
+            _SettingsPanel(
+              title: paletteDisabled ? '调色板已由系统接管' : '调色板',
+              subtitle: '选择应用主色调',
+              icon: Icons.palette_rounded,
+              showDivider: false,
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 12,
+                runSpacing: 12,
+                children: kSeedColorOptions.map((option) {
+                  final selected =
+                      !paletteDisabled &&
+                      settings.seedColor.toARGB32() == option.color.toARGB32();
+                  return Tooltip(
+                    message: option.label,
+                    child: _ColorSwatch(
+                      color: option.color,
+                      selected: selected,
+                      disabled: paletteDisabled,
+                      onTap: paletteDisabled
+                          ? null
+                          : () => onUpdateTheme(
+                              settings.copyWith(seedColor: option.color),
+                            ),
+                    ),
+                  );
+                }).toList(),
+              ),
             ),
           ],
         );
@@ -1145,12 +1475,8 @@ class _ProjectInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return Card.outlined(
       margin: EdgeInsets.zero,
-      decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
       child: ListTile(
         leading: const Icon(Icons.info_outline_rounded),
         title: const Text('项目配置'),

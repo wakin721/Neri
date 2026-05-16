@@ -11,6 +11,7 @@ from .models import (
     CreateJobRequest,
     DetectionItem,
     HealthResponse,
+    ModelClassInfo,
     JobSummary,
     SettingsUpdateRequest,
     SettingsResponse,
@@ -26,6 +27,7 @@ from .services import (
     export_validation_data,
     list_available_classification_models,
     list_available_models,
+    list_model_classes,
     load_species_types,
     mark_validation_item,
     model_directory,
@@ -63,6 +65,23 @@ def settings() -> SettingsResponse:
     """Return Neri runtime settings and supported media formats."""
 
     stored_settings = settings_manager.load_settings() or {}
+    quick_mark_settings = settings_manager.load_quick_mark_species() or {}
+    if "quick_mark_list" not in stored_settings and isinstance(quick_mark_settings.get("list"), list):
+        stored_settings["quick_mark_list"] = quick_mark_settings["list"]
+    if "auto_sort" not in stored_settings and isinstance(quick_mark_settings.get("auto"), bool):
+        stored_settings["auto_sort"] = quick_mark_settings["auto"]
+    if "quick_mark_recent_history" not in stored_settings and isinstance(
+        quick_mark_settings.get("recent_history"), list
+    ):
+        stored_settings["quick_mark_recent_history"] = quick_mark_settings["recent_history"]
+    excluded_quick_mark_keys = {"list", "list_auto", "auto", "recent_history"}
+    quick_mark_counts = {
+        key: int(value)
+        for key, value in quick_mark_settings.items()
+        if key not in excluded_quick_mark_keys and isinstance(value, (int, float))
+    }
+    if "quick_mark_usage_counts" not in stored_settings and quick_mark_counts:
+        stored_settings["quick_mark_usage_counts"] = quick_mark_counts
     available_models = list_available_models()
     available_classification_models = list_available_classification_models()
     saved_model = stored_settings.get("selected_model")
@@ -103,6 +122,18 @@ def settings() -> SettingsResponse:
     )
 
 
+@app.get("/api/models/classes", response_model=list[ModelClassInfo])
+def model_classes(model_path: str = Query(..., min_length=1)) -> list[ModelClassInfo]:
+    """Return the classes exposed by a selected YOLO model."""
+
+    try:
+        return list_model_classes(model_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.put("/api/settings", response_model=SettingsResponse)
 def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
     """Persist advanced settings and return the refreshed settings snapshot."""
@@ -111,6 +142,21 @@ def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
     current_settings.update(request.settings)
     if not settings_manager.save_settings(current_settings):
         raise HTTPException(status_code=500, detail="Failed to save settings")
+    quick_mark_settings = settings_manager.load_quick_mark_species() or {}
+    quick_mark_list = current_settings.get("quick_mark_list")
+    if isinstance(quick_mark_list, list):
+        quick_mark_settings["list"] = quick_mark_list
+    if isinstance(current_settings.get("auto_sort"), bool):
+        quick_mark_settings["auto"] = current_settings["auto_sort"]
+    recent_history = current_settings.get("quick_mark_recent_history")
+    if isinstance(recent_history, list):
+        quick_mark_settings["recent_history"] = recent_history
+    usage_counts = current_settings.get("quick_mark_usage_counts")
+    if isinstance(usage_counts, dict):
+        for key, value in usage_counts.items():
+            if isinstance(value, (int, float)):
+                quick_mark_settings[str(key)] = int(value)
+    settings_manager.save_quick_mark_species(quick_mark_settings)
     return settings()
 
 

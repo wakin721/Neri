@@ -15,6 +15,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -27,6 +28,7 @@ from .models import (
     DetectionItem,
     JobState,
     JobSummary,
+    ModelClassInfo,
     ModelInfo,
     ValidationExportRequest,
     ValidationExportResponse,
@@ -68,6 +70,39 @@ def list_available_classification_models() -> list[ModelInfo]:
 
     directory = classification_model_directory()
     return _list_model_files(directory, ("*.pt", "*.onnx", "*.engine"))
+
+
+def list_model_classes(model_path: str | None) -> list[ModelClassInfo]:
+    """Load a YOLO model and expose its class names for the settings UI."""
+
+    resolved_model_path = _resolve_model_path(model_path)
+    if not resolved_model_path.exists() or not resolved_model_path.is_file():
+        raise FileNotFoundError(f"模型文件不存在: {resolved_model_path}")
+    return list(_cached_model_classes(str(resolved_model_path)))
+
+
+@lru_cache(maxsize=8)
+def _cached_model_classes(resolved_model_path: str) -> tuple[ModelClassInfo, ...]:
+    detector = _load_detector(resolved_model_path)
+    names = _detector_model_names(detector)
+    translation_dict = getattr(detector, "translation_dict", {}) or {}
+    class_infos: list[ModelClassInfo] = []
+
+    for class_id, raw_name in sorted(names.items()):
+        translated_name = str(translation_dict.get(raw_name, raw_name))
+        display_name = (
+            translated_name
+            if translated_name == raw_name
+            else f"{translated_name} ({raw_name})"
+        )
+        class_infos.append(
+            ModelClassInfo(
+                id=class_id,
+                name=raw_name,
+                display_name=display_name,
+            )
+        )
+    return tuple(class_infos)
 
 
 def _list_model_files(directory: Path, patterns: tuple[str, ...]) -> list[ModelInfo]:
@@ -349,6 +384,57 @@ def _load_detector(model_path: str | None):
     return ImageProcessor(str(resolved_model_path))
 
 
+def _detector_model_names(detector) -> dict[int, str]:
+    model = getattr(detector, "model", None)
+    names = getattr(model, "names", None)
+    if isinstance(names, dict):
+        normalized: dict[int, str] = {}
+        for raw_class_id, raw_name in names.items():
+            try:
+                class_id = int(raw_class_id)
+            except (TypeError, ValueError):
+                continue
+            normalized[class_id] = str(raw_name)
+        return normalized
+    if isinstance(names, (list, tuple)):
+        return {index: str(name) for index, name in enumerate(names)}
+    return {}
+
+
+def _selected_species_class_ids(detector, selected_species_names: list[str]) -> list[int] | None:
+    selected_names = {
+        _normalize_species_key(name)
+        for name in selected_species_names
+        if _normalize_species_key(name)
+    }
+    if not selected_names:
+        return None
+
+    translation_dict = getattr(detector, "translation_dict", {}) or {}
+    matched_class_ids: list[int] = []
+    for class_id, raw_name in _detector_model_names(detector).items():
+        translated_name = str(translation_dict.get(raw_name, raw_name))
+        display_name = (
+            translated_name
+            if translated_name == raw_name
+            else f"{translated_name} ({raw_name})"
+        )
+        aliases = {
+            _normalize_species_key(str(class_id)),
+            _normalize_species_key(raw_name),
+            _normalize_species_key(translated_name),
+            _normalize_species_key(display_name),
+        }
+        if aliases & selected_names:
+            matched_class_ids.append(class_id)
+
+    return sorted(set(matched_class_ids)) if matched_class_ids else None
+
+
+def _normalize_species_key(value: str) -> str:
+    return value.strip().casefold()
+
+
 def _resolve_model_path(model_path: str | None) -> Path:
     default_model_dir = model_directory()
     if model_path:
@@ -505,6 +591,13 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+def _coerce_int(value: Any) -> int | None:
+    number = _coerce_float(value)
+    if number is None:
+        return None
+    return int(round(number))
+
+
 def _extract_species_list(data: dict[str, Any], boxes: list[dict[str, Any]] | None = None) -> list[str]:
     raw_species = _value_from_keys(data, ("物种名称", "species", "species_names"))
     species: list[str] = []
@@ -563,14 +656,22 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
         species = _value_from_keys(raw_box, ("物种", "species", "class_name", "name"))
         confidence = _coerce_float(_value_from_keys(raw_box, ("置信度", "confidence", "conf", "score")))
         candidates = _value_from_keys(raw_box, ("候选项", "candidates"))
-        boxes.append(
-            {
-                "species": str(species or "Unknown"),
-                "confidence": confidence,
-                "bbox": bbox,
-                "candidates": candidates if isinstance(candidates, list) else [],
-            }
-        )
+        frame_index = _coerce_int(_value_from_keys(raw_box, ("frame_index", "frameIndex", "frame", "帧索引", "帧序号")))
+        timestamp = _coerce_float(_value_from_keys(raw_box, ("timestamp", "time", "时间", "秒")))
+        track_id = _value_from_keys(raw_box, ("track_id", "trackId", "id", "目标ID"))
+        box_data = {
+            "species": str(species or "Unknown"),
+            "confidence": confidence,
+            "bbox": bbox,
+            "candidates": candidates if isinstance(candidates, list) else [],
+        }
+        if frame_index is not None:
+            box_data["frame_index"] = frame_index
+        if timestamp is not None:
+            box_data["timestamp"] = timestamp
+        if track_id is not None:
+            box_data["track_id"] = str(track_id)
+        boxes.append(box_data)
     return boxes
 
 
@@ -579,31 +680,39 @@ def _boxes_from_tracks(raw_tracks: Any) -> list[dict[str, Any]]:
         return []
 
     boxes: list[dict[str, Any]] = []
-    for points in raw_tracks.values():
+    for track_id, points in raw_tracks.items():
         if not isinstance(points, list):
             continue
-        best_point: dict[str, Any] | None = None
-        best_confidence = -1.0
+        species_votes: dict[str, int] = {}
+        for point in points:
+            if not isinstance(point, dict):
+                continue
+            species = str(_value_from_keys(point, ("species", "物种", "name", "class_name")) or "").strip()
+            if species:
+                species_votes[species] = species_votes.get(species, 0) + 1
+        voted_species = max(species_votes.items(), key=lambda item: item[1])[0] if species_votes else "Unknown"
+
         for point in points:
             if not isinstance(point, dict):
                 continue
             bbox = _coerce_bbox(point.get("bbox"))
             if not bbox:
                 continue
-            confidence = _coerce_float(_value_from_keys(point, ("confidence", "置信度", "conf", "score"))) or 0.0
-            if best_point is None or confidence > best_confidence:
-                best_point = point
-                best_confidence = confidence
-        if best_point is None:
-            continue
-        boxes.append(
-            {
-                "species": str(_value_from_keys(best_point, ("species", "物种", "name", "class_name")) or "Unknown"),
-                "confidence": _coerce_float(_value_from_keys(best_point, ("confidence", "置信度", "conf", "score"))),
-                "bbox": _coerce_bbox(best_point.get("bbox")),
+            species = str(_value_from_keys(point, ("species", "物种", "name", "class_name")) or voted_species)
+            frame_index = _coerce_int(_value_from_keys(point, ("frame_index", "frameIndex", "frame", "帧索引", "帧序号")))
+            timestamp = _coerce_float(_value_from_keys(point, ("timestamp", "time", "时间", "秒")))
+            box_data = {
+                "species": voted_species if species == "Unknown" else species,
+                "confidence": _coerce_float(_value_from_keys(point, ("confidence", "置信度", "conf", "score"))),
+                "bbox": bbox,
                 "candidates": [],
+                "track_id": str(track_id),
             }
-        )
+            if frame_index is not None:
+                box_data["frame_index"] = frame_index
+            if timestamp is not None:
+                box_data["timestamp"] = timestamp
+            boxes.append(box_data)
     return boxes
 
 
@@ -716,11 +825,16 @@ def _save_detection_data_for_path(path: Path, detection_data: dict[str, Any], in
 
 def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobRequest, input_path: Path) -> DetectionItem:
     try:
+        selected_class_ids = _selected_species_class_ids(
+            detector,
+            request.options.selected_species_names,
+        )
         detections = detector.detect_batch_species(
             [str(path)],
             conf=request.options.confidence,
             iou=request.options.iou,
             use_fp16=request.options.use_fp16,
+            classes=selected_class_ids,
         )
         detection = detections[0] if detections else {}
         detection_data = _serialize_detector_output(detector, detection)

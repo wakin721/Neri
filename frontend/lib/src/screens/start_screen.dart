@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/job.dart';
 import '../models/settings.dart';
+import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
 const _defaultModelDirectory = 'res/model';
@@ -78,36 +79,35 @@ class _HeroPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return Card.filled(
       margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: colorScheme.primaryContainer,
-        borderRadius: BorderRadius.circular(28),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.camera_outdoor_rounded,
-            size: 48,
-            color: colorScheme.onPrimaryContainer,
-          ),
-          const SizedBox(height: 12),
-          Text(
-            '红外相机影像智能处理',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+      color: colorScheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.camera_outdoor_rounded,
+              size: 48,
               color: colorScheme.onPrimaryContainer,
             ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '使用 Flutter Material 3 前端连接 Python 后端，完成批量索引、EXIF 提取、YOLO 识别与结果导出。',
-            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-              color: colorScheme.onPrimaryContainer,
+            const SizedBox(height: 12),
+            Text(
+              '红外相机影像智能处理',
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                color: colorScheme.onPrimaryContainer,
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 8),
+            Text(
+              '使用 Flutter Material 3 前端连接 Python 后端，完成批量索引、EXIF 提取、YOLO 识别与结果导出。',
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                color: colorScheme.onPrimaryContainer,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -239,22 +239,19 @@ class _ModelSelector extends StatelessWidget {
       );
     }
 
-    return DropdownButtonFormField<String>(
-      initialValue: selectedValue,
-      decoration: InputDecoration(
-        labelText: '模型文件',
-        helperText:
-            '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory} 下的 .pt 文件',
-        prefixIcon: const Icon(Icons.memory_rounded),
-        border: const OutlineInputBorder(),
-      ),
-      items: models.map((model) {
-        return DropdownMenuItem<String>(
-          value: model.path,
-          child: Text(model.name),
-        );
-      }).toList(),
-      onChanged: onChanged,
+    return DropdownMenu<String>(
+      initialSelection: selectedValue,
+      expandedInsets: EdgeInsets.zero,
+      menuStyle: appDropdownMenuStyle(context),
+      label: const Text('模型文件'),
+      helperText:
+          '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory} 下的 .pt 文件',
+      leadingIcon: const Icon(Icons.memory_rounded),
+      dropdownMenuEntries: [
+        for (final model in models)
+          DropdownMenuEntry<String>(value: model.path, label: model.name),
+      ],
+      onSelected: onChanged,
     );
   }
 }
