@@ -36,3 +36,15 @@ dist/
 *.iml
 .DS_Store
 Thumbs.db
+.vs/
+
+# =========================
+# Custom Exclusions
+# =========================
+toolkit/
+app/
+temp/
+
+# 忽略 frontend 文件夹下的所有内容，但保留 lib 文件夹
+frontend/*
+!frontend/lib/
