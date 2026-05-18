@@ -168,14 +168,14 @@
 
 本分支新增了面向跨平台客户端的前后端拆分实现：
 
-- `backend/`：基于 FastAPI 的 Python 后端，复用现有 `system/` 中的配置、EXIF 元数据提取和 YOLO 图像处理模块。
+- `system/backend/`：基于 FastAPI 的 Python 后端，复用现有 `system/` 中的配置、EXIF 元数据提取和 YOLO 图像处理模块。
 - `frontend/`：基于 Flutter 的 Material 3 前端，在最左侧使用 NavigationRail 区分开始界面、图像预览、物种校验、设置和关于界面，并提供后端连接状态、任务创建、阈值设置、进度轮询、上次输入路径记忆、自动使用 `res/model` 模型文件夹，以及可随窗口大小切换排布的图像预览。
 
 ### 启动 Python 后端
 
 ```bash
 python -m pip install -r requirements.txt
-python -m uvicorn backend.neri_backend.main:app --reload --host 127.0.0.1 --port 721
+python -m uvicorn system.backend.main:app --reload --app-dir . --host 127.0.0.1 --port 721
 ```
 
 后端文档地址：<http://127.0.0.1:721/docs>

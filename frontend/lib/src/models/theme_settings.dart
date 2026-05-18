@@ -1,3 +1,5 @@
+// lib/src/models/theme_settings.dart
+
 import 'package:flutter/material.dart';
 
 /// Persistent theme preferences held in a [ValueNotifier].
@@ -8,7 +10,8 @@ class ThemeSettings {
     this.seedColor = _kDefaultSeed,
   });
 
-  static const Color _kDefaultSeed = Color(0xFF386A20);
+  // 将默认种子色更新为调色板的第一个颜色（抹茶绿），或者你喜欢的任何一个
+  static const Color _kDefaultSeed = Color(0xFF94CC84);
 
   final ThemeMode themeMode;
   final bool useDynamicColor;
@@ -37,12 +40,15 @@ class SeedColorOption {
 
 /// Built-in color palette choices displayed in the Settings page.
 const List<SeedColorOption> kSeedColorOptions = <SeedColorOption>[
-  SeedColorOption(label: '青松绿', color: Color(0xFF386A20)),
-  SeedColorOption(label: '山岚蓝', color: Color(0xFF1565C0)),
-  SeedColorOption(label: '暮霞橙', color: Color(0xFFBF360C)),
-  SeedColorOption(label: '山茶紫', color: Color(0xFF6750A4)),
-  SeedColorOption(label: '珊瑚红', color: Color(0xFFC62828)),
-  SeedColorOption(label: '墨玉青', color: Color(0xFF00695C)),
-  SeedColorOption(label: '流沙金', color: Color(0xFFE65100)),
-  SeedColorOption(label: '苍穹蓝', color: Color(0xFF0277BD)),
+  SeedColorOption(label: '抹茶绿', color: Color(0xFF94CC84)),
+  SeedColorOption(label: '薄荷绿', color: Color(0xFF69D2B0)),
+  SeedColorOption(label: '晴空蓝', color: Color(0xFF63D1E6)),
+  SeedColorOption(label: '矢车菊蓝', color: Color(0xFF7CB5FB)),
+  SeedColorOption(label: '长春花蓝', color: Color(0xFF9AA5FA)),
+  SeedColorOption(label: '丁香紫', color: Color(0xFFB29AFB)),
+  SeedColorOption(label: '紫藤花', color: Color(0xFFD6A1FB)),
+  SeedColorOption(label: '樱花粉', color: Color(0xFFFA98D2)),
+  SeedColorOption(label: '珊瑚红', color: Color(0xFFFA9D85)),
+  SeedColorOption(label: '蜜橘橙', color: Color(0xFFFBB769)),
+  SeedColorOption(label: '橄榄黄', color: Color(0xFFD3D667)),
 ];

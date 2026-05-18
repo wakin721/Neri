@@ -3,6 +3,9 @@ class DetectionBox {
     required this.species,
     required this.bbox,
     this.confidence,
+    this.frameIndex,
+    this.timestamp,
+    this.trackId,
     this.candidates = const <Map<String, dynamic>>[],
   });
 
@@ -11,8 +14,15 @@ class DetectionBox {
     return DetectionBox(
       species: json['species'] as String? ?? 'Unknown',
       confidence: (json['confidence'] as num?)?.toDouble(),
+      frameIndex: _intFromJson(json['frame_index']),
+      timestamp: _doubleFromJson(json['timestamp']),
+      trackId: _stringFromJson(json['track_id'] ?? json['trackId']),
       bbox: rawBbox
-          .map((item) => item is num ? item.toDouble() : double.tryParse(item.toString()))
+          .map(
+            (item) => item is num
+                ? item.toDouble()
+                : double.tryParse(item.toString()),
+          )
           .whereType<double>()
           .toList(),
       candidates: (json['candidates'] as List<dynamic>? ?? const <dynamic>[])
@@ -23,8 +33,27 @@ class DetectionBox {
 
   final String species;
   final double? confidence;
+  final int? frameIndex;
+  final double? timestamp;
+  final String? trackId;
   final List<double> bbox;
   final List<Map<String, dynamic>> candidates;
+
+  static int? _intFromJson(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  static double? _doubleFromJson(Object? value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '');
+  }
+
+  static String? _stringFromJson(Object? value) {
+    final text = value?.toString().trim();
+    return text == null || text.isEmpty ? null : text;
+  }
 }
 
 class DetectionItem {
@@ -33,6 +62,7 @@ class DetectionItem {
     required this.path,
     required this.fileType,
     this.dateTaken,
+    this.modifiedAt,
     this.width,
     this.height,
     this.sizeBytes,
@@ -41,6 +71,7 @@ class DetectionItem {
     this.detectionBoxes = const <DetectionBox>[],
     this.detectionData = const <String, dynamic>{},
     this.error,
+    this.validated,
   });
 
   factory DetectionItem.fromJson(Map<String, dynamic> json) {
@@ -49,6 +80,7 @@ class DetectionItem {
       path: json['path'] as String? ?? '',
       fileType: json['file_type'] as String? ?? '',
       dateTaken: json['date_taken'] as String?,
+      modifiedAt: json['modified_at'] as String?,
       width: json['width'] as int?,
       height: json['height'] as int?,
       sizeBytes: json['size_bytes'] as int?,
@@ -61,8 +93,11 @@ class DetectionItem {
               .whereType<Map<String, dynamic>>()
               .map(DetectionBox.fromJson)
               .toList(),
-      detectionData: json['detection_data'] as Map<String, dynamic>? ?? const <String, dynamic>{},
+      detectionData:
+          json['detection_data'] as Map<String, dynamic>? ??
+          const <String, dynamic>{},
       error: json['error'] as String?,
+      validated: json['validated'] as bool?,
     );
   }
 
@@ -70,6 +105,7 @@ class DetectionItem {
   final String path;
   final String fileType;
   final String? dateTaken;
+  final String? modifiedAt;
   final int? width;
   final int? height;
   final int? sizeBytes;
@@ -78,6 +114,7 @@ class DetectionItem {
   final List<DetectionBox> detectionBoxes;
   final Map<String, dynamic> detectionData;
   final String? error;
+  final bool? validated;
 }
 
 class ProcessingJob {
@@ -128,4 +165,5 @@ class ProcessingJob {
 
   double get progress => total == 0 ? 0 : processed / total;
   bool get isActive => state == 'queued' || state == 'running';
+  bool get canResume => state == 'cancelled' || state == 'failed';
 }
