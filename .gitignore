@@ -23,6 +23,12 @@ ENV/
 # Build outputs
 build/
 dist/
+/Neri.exe
+/launcher.obj
+/launcher.res
+/native_assets.json
+/gui.py
+/checker.py
 
 # Flutter / Dart
 .dart_tool/
