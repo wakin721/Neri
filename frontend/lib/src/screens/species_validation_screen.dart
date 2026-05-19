@@ -188,6 +188,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final List<String> _sessionQuickMarkHistory = <String>[];
   final Set<String> _selectedPaths = <String>{};
   String? _selectionAnchorPath;
+  String? _selectedGroupSignature;
   bool? _bucketCacheAutoGroup;
   String? _bucketCachePathSignature;
   int? _bucketCacheRefreshVersion;
@@ -209,12 +210,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.collapseGroups != widget.collapseGroups) {
       _expandedGroupSignatures.clear();
+      _selectedGroupSignature = null;
     }
     if (widget.items.isEmpty) {
       _selectedPath = null;
       _selectedBucketKey = null;
       _selectedPaths.clear();
       _selectionAnchorPath = null;
+      _selectedGroupSignature = null;
       _bucketCacheAutoGroup = null;
       _bucketCachePathSignature = null;
       _bucketCacheRefreshVersion = null;
@@ -236,6 +239,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         ..clear()
         ..add(widget.items.first.path);
       _selectionAnchorPath = widget.items.first.path;
+      _selectedGroupSignature = null;
       _resetPendingMark();
       unawaited(widget.onLoadMetadata(widget.items.first));
     } else if (_selectedPaths.isEmpty && _selectedPath != null) {
@@ -263,21 +267,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         !buckets.any((bucket) => bucket.key == _selectedBucketKey)) {
       _selectedBucketKey = buckets.first.key;
     }
-    final visibleItems = _visibleItems(buckets);
-    if (visibleItems.isNotEmpty &&
-        (_selectedPath == null ||
-            !visibleItems.any((item) => item.path == _selectedPath))) {
-      _selectedPath = visibleItems.first.path;
-      _selectedPaths
-        ..clear()
-        ..add(visibleItems.first.path);
-      _selectionAnchorPath = visibleItems.first.path;
-      unawaited(widget.onLoadMetadata(visibleItems.first));
+    final visibleRows = _visibleRows(buckets);
+    final visibleItems = _itemsFromRows(visibleRows);
+    if (visibleRows.isNotEmpty && !_hasVisibleSelection(visibleRows)) {
+      _applyRowSelection(visibleRows.first);
+      unawaited(widget.onLoadMetadata(visibleRows.first.item));
     } else if (_selectedPath != null && _selectedPaths.isEmpty) {
       _selectedPaths.add(_selectedPath!);
       _selectionAnchorPath = _selectedPath;
     }
-    final selectedItem = _selectedItem(visibleItems);
+    final selectedItem = _selectedItemFromRows(visibleRows);
 
     return Theme(
       data: Theme.of(context).copyWith(
@@ -307,14 +306,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                           if (constraints.maxWidth < 980) {
                             return _buildNarrowLayout(
                               buckets,
-                              visibleItems,
+                              visibleRows,
                               selectedItem,
                             );
                           }
                           return _buildWideLayout(
                             constraints.maxWidth,
                             buckets,
-                            visibleItems,
+                            visibleRows,
                             selectedItem,
                           );
                         },
@@ -368,7 +367,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   Widget _buildWideLayout(
     double availableWidth,
     List<_SpeciesBucket> buckets,
-    List<DetectionItem> visibleItems,
+    List<_ValidationFileRow> visibleRows,
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
@@ -379,7 +378,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       children: [
         SizedBox(
           width: listWidth,
-          child: _buildLeftLists(buckets, visibleItems),
+          child: _buildLeftLists(buckets, visibleRows),
         ),
         const VerticalDivider(width: 24),
         Expanded(
@@ -402,7 +401,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   Widget _buildNarrowLayout(
     List<_SpeciesBucket> buckets,
-    List<DetectionItem> visibleItems,
+    List<_ValidationFileRow> visibleRows,
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
@@ -413,7 +412,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           child: _buildImagePanel(selectedItem, visibleBoxes),
         ),
         const SizedBox(height: 10),
-        SizedBox(height: 260, child: _buildLeftLists(buckets, visibleItems)),
+        SizedBox(height: 260, child: _buildLeftLists(buckets, visibleRows)),
         const SizedBox(height: 10),
         SizedBox(height: 260, child: _buildRightActions(selectedItem)),
         const SizedBox(height: 10),
@@ -426,15 +425,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   Widget _buildLeftLists(
     List<_SpeciesBucket> buckets,
-    List<DetectionItem> visibleItems,
+    List<_ValidationFileRow> visibleRows,
   ) {
     final colorScheme = Theme.of(context).colorScheme;
     final selectedBucketIndex = buckets.indexWhere(
       (bucket) => bucket.key == _selectedBucketKey,
     );
-    final selectedPhotoIndex = visibleItems.indexWhere(
-      (item) => item.path == _selectedPath,
-    );
+    final selectedPhotoIndex = visibleRows.indexWhere(_isRowSelected);
     final selectedBucket = selectedBucketIndex >= 0
         ? buckets[selectedBucketIndex]
         : (buckets.isEmpty ? null : buckets.first);
@@ -498,85 +495,67 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                 const SizedBox(height: gap),
                 SizedBox(
                   height: usableHeight * (1 - ratio),
-                  child: SelectableListCard<DetectionItem>(
+                  child: SelectableListCard<_ValidationFileRow>(
                     key: ValueKey(_selectedBucketKey),
-                    items: visibleItems,
+                    items: visibleRows,
                     selectedIndex: selectedPhotoIndex,
-                    isSelected: (_, item) => _selectedPaths.contains(item.path),
+                    isSelected: (_, row) => _isRowSelected(row),
                     padding: const EdgeInsets.symmetric(vertical: 6),
-                    leadingBuilder: (item) {
-                      final selected = _selectedPaths.contains(item.path);
-                      final groupContext = _groupContextForItem(
-                        item,
-                        buckets: buckets,
-                      );
-                      final collapsedGroup = _isCollapsedGroupRow(
-                        item,
-                        groupContext,
-                      );
+                    leadingBuilder: (row) {
+                      final selected = _isRowSelected(row);
                       return Icon(
-                        collapsedGroup
+                        row.isGroupHeader
                             ? Icons.folder_copy_rounded
-                            : _fileIcon(item),
+                            : _fileIcon(row.item),
                         color: selected ? colorScheme.primary : null,
                       );
                     },
-                    titleBuilder: (item) {
-                      final groupContext = _groupContextForItem(
-                        item,
-                        buckets: buckets,
-                      );
-                      if (_isCollapsedGroupRow(item, groupContext)) {
-                        final groupNumber = groupContext!.index + 1;
-                        final groupSize = groupContext.group.items.length;
+                    titleBuilder: (row) {
+                      if (row.isGroupHeader) {
+                        final groupNumber = row.groupIndex + 1;
+                        final groupSize = row.group.items.length;
                         return '第 $groupNumber 组 · $groupSize 个文件';
                       }
-                      return item.filename;
+                      return row.item.filename;
                     },
-                    subtitleBuilder: (item) =>
-                        _fileListSubtitle(item, groupIndexByPath, buckets),
-                    tileColorBuilder: (index, item) {
+                    subtitleBuilder: _fileListSubtitle,
+                    tileColorBuilder: (index, row) {
                       if (!widget.autoGroup) return null;
-                      final groupIndex = groupIndexByPath[item.path];
+                      final groupIndex =
+                          row.groupIndexByPath ??
+                          groupIndexByPath[row.item.path];
                       if (groupIndex == null || groupIndex.isEven) return null;
                       return colorScheme.surfaceContainerHighest.withValues(
                         alpha: 0.42,
                       );
                     },
-                    trailingBuilder: (item) {
-                      final selected = _selectedPaths.contains(item.path);
-                      final groupContext = _groupContextForItem(
-                        item,
-                        buckets: buckets,
-                      );
-                      final collapsedGroup = _isCollapsedGroupRow(
-                        item,
-                        groupContext,
-                      );
-                      final expandedGroup =
-                          _useCollapsedGroups &&
-                          groupContext != null &&
-                          _expandedGroupSignatures.contains(
-                            groupContext.signature,
-                          );
-                      final hasError =
-                          groupContext == null
-                              ? item.error != null
-                              : groupContext.group.items.any(
-                                  (candidate) => candidate.error != null,
-                                );
-                      if (!selected && !hasError && !collapsedGroup) {
+                    trailingBuilder: (row) {
+                      final selected = _isRowSelected(row);
+                      final hasError = row.isGroupHeader
+                          ? row.group.items.any(
+                              (candidate) => candidate.error != null,
+                            )
+                          : row.item.error != null;
+                      final showDownArrow =
+                          row.isGroupHeader && !row.groupExpanded && !selected;
+                      final showUpArrow =
+                          row.isGroupHeader && row.groupExpanded;
+                      final showUpArrow =
+                          row.isGroupHeader && row.groupExpanded && !selected;
+                     if (!selected &&
+                          !hasError &&
+                          !showDownArrow &&
+                          !showUpArrow) {
                         return null;
                       }
                       return Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (hasError)
-                            const Icon(Icons.error_outline_rounded),
-                          if (collapsedGroup || expandedGroup) ...[
+                            if (showDownArrow || showUpArrow) ...[
                             if (hasError) const SizedBox(width: 6),
                             Icon(
-                              collapsedGroup
+                              showDownArrow
                                   ? Icons.expand_more_rounded
                                   : Icons.expand_less_rounded,
                               size: 20,
@@ -1027,7 +1006,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                 ? Icons.expand_less_rounded
                 : Icons.expand_more_rounded,
           ),
-          onPressed: () => _toggleGroupExpansion(groupToggleContext),
+          onPressed: () => _toggleGroupExpansion(groupToggleContext!),
           child: Text(groupToggleContext.expanded ? '折叠分组' : '展开分组'),
         ),
         const Padding(
@@ -1176,6 +1155,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       } else {
         _expandedGroupSignatures.add(groupContext.signature);
+        final firstPhoto = groupContext.group.items.firstWhere(
+          _isImage,
+          orElse: () => representative,
+        );
+        _selectedPath = firstPhoto.path;
+        _selectedGroupSignature = null;
+        _selectedPaths
+          ..clear()
+          ..add(firstPhoto.path);
+        _selectionAnchorPath = firstPhoto.path;
+        nextItemToLoad = firstPhoto;
       }
       _activeList = _ValidationListFocus.photos;
       _resetPendingMark();
@@ -1585,19 +1575,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return '未检测';
   }
 
-  List<String> _quickMarkSpecies(DetectionItem item) {
+  List<String> _quickMarkSpecies(DetectionItem _) {
     final configuredQuickSpecies = widget.quickMarkSpecies.isEmpty
         ? _quickSpecies
         : widget.quickMarkSpecies;
     final ordered = widget.autoSortQuickMarks
         ? _autoSortedQuickMarkSpecies(configuredQuickSpecies)
         : configuredQuickSpecies;
-    final values = <String>[
-      ...ordered,
-      ...item.species,
-      ...item.detectionBoxes.map((box) => box.species),
-    ];
-    return _uniqueSpecies(values).take(12).toList();
+    return _uniqueSpecies(ordered).take(12).toList();
   }
 
   List<String> _autoSortedQuickMarkSpecies(List<String> fallbackSpecies) {
