@@ -24,6 +24,7 @@ ENV/
 build/
 dist/
 /Neri.exe
+/Neri.pdb
 /launcher.obj
 /launcher.res
 /native_assets.json
