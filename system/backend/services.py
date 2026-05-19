@@ -318,7 +318,7 @@ class ProcessingJobManager:
             )
             self._jobs[job_id] = JobSummary(**data)
             self._save_state_unlocked()
-            return self._jobs[job_id].model_copy(deep=True)
+            return self._snapshot_unlocked(job_id)
 
     def resume_job(self, job_id: str) -> JobSummary:
         """Continue a cancelled or failed job in-place."""
@@ -351,7 +351,7 @@ class ProcessingJobManager:
             self._deleted_jobs.discard(job_id)
             self._save_state_unlocked()
             request = request.model_copy(deep=True)
-            snapshot = self._jobs[job_id].model_copy(deep=True)
+            snapshot = self._snapshot_unlocked(job_id)
 
         self._executor.submit(self._run_job, job_id, request, initial_results)
         return snapshot
@@ -382,19 +382,27 @@ class ProcessingJobManager:
         """Return a snapshot of a job."""
 
         with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
+            if job_id not in self._jobs:
                 raise JobNotFoundError(job_id)
-            return job.model_copy(deep=True)
+            return self._snapshot_unlocked(job_id)
 
     def list_jobs(self) -> list[JobSummary]:
         """Return all jobs with newest first."""
 
         with self._lock:
-            jobs = [job.model_copy(deep=True) for job in self._jobs.values()]
+            jobs = [self._snapshot_unlocked(job_id) for job_id in self._jobs]
         return sorted(jobs, key=lambda item: item.created_at, reverse=True)
 
-    def _mutate_job(self, job_id: str, **changes: object) -> None:
+    def _snapshot_unlocked(self, job_id: str) -> JobSummary:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise JobNotFoundError(job_id)
+        return job.model_copy(
+            update={"active": job_id in self._active_job_ids},
+            deep=True,
+        )
+
+    def _mutate_job(self, job_id: str, *, persist: bool = True, **changes: object) -> None:
         with self._lock:
             current = self._jobs.get(job_id)
             if current is None or job_id in self._deleted_jobs:
@@ -403,7 +411,8 @@ class ProcessingJobManager:
             data.update(changes)
             data["updated_at"] = utc_now()
             self._jobs[job_id] = JobSummary(**data)
-            self._save_state_unlocked()
+            if persist:
+                self._save_state_unlocked()
 
     def _is_cancelled(self, job_id: str) -> bool:
         with self._lock:
@@ -438,7 +447,7 @@ class ProcessingJobManager:
             for job_id, raw_job in raw_jobs.items():
                 if not isinstance(raw_job, dict):
                     continue
-                job = JobSummary(**raw_job)
+                job = JobSummary(**raw_job).model_copy(update={"active": False})
                 if job.state in {JobState.QUEUED, JobState.RUNNING}:
                     job = job.model_copy(
                         update={
@@ -462,7 +471,10 @@ class ProcessingJobManager:
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "jobs": {job_id: job.model_dump() for job_id, job in self._jobs.items()},
+                "jobs": {
+                    job_id: job.model_copy(update={"active": False}).model_dump()
+                    for job_id, job in self._jobs.items()
+                },
                 "requests": {
                     job_id: request.model_dump()
                     for job_id, request in self._job_requests.items()
@@ -569,40 +581,35 @@ class ProcessingJobManager:
                     batch_items: list[DetectionItem] = []
                     for path in batch:
                         item = _build_metadata_item(path)
-                        db_detection_data = detection_index.get(path.stem) or _load_detection_data_for_path(
-                            path,
-                            detection_db_roots,
-                        )
+                        db_detection_data = detection_index.get(path.stem)
                         if db_detection_data:
                             item = _apply_detection_data(item, db_detection_data)
                         batch_items.append(item)
 
                     detected_items = _detect_image_batch(detector, batch, batch_items, request, input_path)
-                    for path, item in zip(batch, detected_items):
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
-                        results.append(item)
-                        processed += 1
-                        self._mutate_job(
-                            job_id,
-                            processed=processed,
-                            results=results,
-                            message=(
-                                f"正在批处理照片 {processed}/{len(files)} "
-                                f"(batch={len(batch)}): {path.name}"
-                            ),
-                        )
+                    if self._is_cancelled(job_id):
+                        self._mark_cancelled(job_id, results)
+                        return
+                    results.extend(detected_items)
+                    processed += len(detected_items)
+                    last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
+                    self._mutate_job(
+                        job_id,
+                        persist=False,
+                        processed=processed,
+                        results=results,
+                        message=(
+                            f"正在批处理照片 {processed}/{len(files)} "
+                            f"(batch={len(batch)}): {last_path.name}"
+                        ),
+                    )
 
                 for path in video_files:
                     if self._is_cancelled(job_id):
                         self._mark_cancelled(job_id, results)
                         return
                     item = _build_metadata_item(path)
-                    db_detection_data = detection_index.get(path.stem) or _load_detection_data_for_path(
-                        path,
-                        detection_db_roots,
-                    )
+                    db_detection_data = detection_index.get(path.stem)
                     if db_detection_data:
                         item = _apply_detection_data(item, db_detection_data)
 
@@ -1251,26 +1258,50 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
 
 
 def _save_detection_data_for_path(path: Path, detection_data: dict[str, Any], input_path: Path) -> None:
-    roots = [path.parent]
-    if input_path.is_dir():
-        roots.append(input_path)
+    _save_detection_data_batch([(path, detection_data)], input_path)
 
-    seen: set[Path] = set()
-    for root in roots:
-        try:
-            resolved = root.resolve()
-        except OSError:
-            resolved = root
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        try:
-            from system.detection_db import get_db_path, init_db, upsert_detection, upsert_validation
 
-            db_path = get_db_path(str(resolved))
+def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]], input_path: Path) -> None:
+    payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
+    validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
+    for path, detection_data in detections:
+        roots = [path.parent]
+        if input_path.is_dir():
+            roots.append(input_path)
+
+        seen: set[Path] = set()
+        for root in roots:
+            try:
+                resolved = root.resolve()
+            except OSError:
+                resolved = root
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            payloads_by_root.setdefault(resolved, []).append(
+                (path.stem, path.name, detection_data)
+            )
+            validations_by_root.setdefault(resolved, []).append((path.name, False))
+
+    if not payloads_by_root:
+        return
+
+    try:
+        from system.detection_db import (
+            get_db_path,
+            init_db,
+            upsert_detections_bulk,
+            upsert_validation_bulk,
+        )
+    except Exception:
+        return
+
+    for root, payloads in payloads_by_root.items():
+        try:
+            db_path = get_db_path(str(root))
             init_db(db_path)
-            upsert_detection(db_path, path.stem, path.name, detection_data)
-            upsert_validation(db_path, path.name, False)
+            upsert_detections_bulk(db_path, payloads)
+            upsert_validation_bulk(db_path, validations_by_root.get(root, []))
         except Exception:
             continue
 
@@ -1297,13 +1328,15 @@ def _detect_image_batch(
             classes=selected_class_ids,
         )
         detected_items: list[DetectionItem] = []
+        detection_payloads: list[tuple[Path, dict[str, Any]]] = []
         for index, (path, item) in enumerate(zip(paths, items)):
             detection = detections[index] if index < len(detections) else {}
             if not isinstance(detection, dict):
                 detection = {}
             detection_data = _serialize_detector_output(detector, detection)
-            _save_detection_data_for_path(path, detection_data, input_path)
+            detection_payloads.append((path, detection_data))
             detected_items.append(_apply_detection_data(item, detection_data))
+        _save_detection_data_batch(detection_payloads, input_path)
         return detected_items
     except Exception as exc:  # noqa: BLE001 - preserve per-file metadata on batch failure
         return [item.model_copy(update={"error": f"批量检测失败: {exc}"}) for item in items]

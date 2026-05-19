@@ -114,6 +114,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final saved = Map<String, dynamic>.from(
       settings?.settings ?? const <String, dynamic>{},
     );
+    final dependenciesReady =
+        settings == null || settings.missingYoloDependencies.isEmpty;
     _draft = <String, dynamic>{
       ...saved,
       'selected_model': _stringSetting(
@@ -129,12 +131,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'package_source': _stringSetting(saved, 'package_source', 'official'),
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
-      'batch_size': settings?.gpuAvailable == true
+      'batch_size': !dependenciesReady
+          ? _intSetting(saved, 'batch_size', 16)
+          : settings?.gpuAvailable == true
           ? _intSetting(saved, 'batch_size', 16)
           : 1,
-      'use_fp16':
-          settings?.gpuAvailable == true &&
-          _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
+      'use_fp16': !dependenciesReady
+          ? _boolSetting(saved, 'use_fp16', false)
+          : settings?.gpuAvailable == true &&
+                _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
       'use_augment': _boolSetting(saved, 'use_augment', true),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
       'video_mode': _stringSetting(saved, 'video_mode', 'all'),
@@ -142,6 +147,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
       'collapse_groups': _boolSetting(saved, 'collapse_groups', false),
+      'auto_group_detect_burst': _boolSetting(
+        saved,
+        'auto_group_detect_burst',
+        false,
+      ),
       'auto_group_burst_size': _intSetting(saved, 'auto_group_burst_size', 3),
       'auto_group_gap_seconds': _intSetting(
         saved,
@@ -179,12 +189,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _markDirty();
   }
 
+  List<String> get _missingYoloDependencies =>
+      widget.settings?.missingYoloDependencies ?? const <String>[];
+
+  bool get _detectionDependenciesReady => _missingYoloDependencies.isEmpty;
+
+  String get _missingYoloDependenciesLabel {
+    final missing = _missingYoloDependencies;
+    if (missing.isEmpty) return '';
+    return missing.join('、');
+  }
+
   void _markDirty() {
     if (_dirty || !mounted) return;
     setState(() => _dirty = true);
   }
 
   Future<void> _loadModelClassesForSelection([String? modelPath]) async {
+    if (!_detectionDependenciesReady) {
+      if (!mounted) return;
+      setState(() {
+        _modelClassesPath = null;
+        _modelClassOptions = const <ModelClassInfo>[];
+        _loadingModelClasses = false;
+      });
+      return;
+    }
+
     final path =
         modelPath ??
         _validModelValue(
@@ -531,6 +562,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     final videoMode = _string('video_mode', 'all');
     final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
+    final detectionEnabled = _detectionDependenciesReady;
 
     return SectionCard(
       title: '检测设置',
@@ -538,6 +570,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       icon: Icons.tune_rounded,
       child: Column(
         children: [
+          if (!detectionEnabled) _buildDetectionDependencyNotice(),
           _SettingsPanel(
             title: '探测模型',
             subtitle: '选择用于照片和视频目标检测的模型',
@@ -545,6 +578,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: _SettingsMenuButton<String>(
               value: selectedModel,
               placeholder: '未发现探测模型',
+              enabled: detectionEnabled,
               options: (settings?.availableModels ?? const <ModelInfo>[])
                   .map(
                     (model) => _SettingsOption<String>(
@@ -569,6 +603,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 _SettingsMenuButton<String>(
                   value: selectedClassificationModel,
+                  enabled: detectionEnabled,
                   options: [
                     const _SettingsOption<String>(value: '', label: '不使用'),
                     ...(settings?.availableClassificationModels ??
@@ -591,7 +626,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: '识别物种设置',
             subtitle: '不选择时默认识别全部物种',
             icon: Icons.pets_rounded,
-            child: _buildSpeciesSelector(),
+            child: _buildSpeciesSelector(enabled: detectionEnabled),
           ),
           _SettingsPanel(
             title: '检测阈值设置',
@@ -605,6 +640,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   min: 0.05,
                   max: 0.95,
                   divisions: 90,
+                  enabled: detectionEnabled,
                   onChanged: (value) => _set('confidence', value),
                 ),
                 _LabeledSlider(
@@ -613,6 +649,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   min: 0.10,
                   max: 0.90,
                   divisions: 80,
+                  enabled: detectionEnabled,
                   onChanged: (value) => _set('iou', value),
                 ),
               ],
@@ -631,13 +668,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   max: 32,
                   divisions: 31,
                   valueLabel: _int('batch_size').toString(),
-                  enabled: settings?.gpuAvailable == true,
+                  enabled: detectionEnabled && settings?.gpuAvailable == true,
                   onChanged: (value) => _set('batch_size', value.round()),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  value: _bool('use_fp16') && settings?.gpuAvailable == true,
-                  onChanged: settings?.gpuAvailable == true
+                  value:
+                      detectionEnabled &&
+                      _bool('use_fp16') &&
+                      settings?.gpuAvailable == true,
+                  onChanged: detectionEnabled && settings?.gpuAvailable == true
                       ? (value) => _set('use_fp16', value)
                       : null,
                   title: const Text('使用 FP16 加速'),
@@ -659,27 +699,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _bool('use_augment'),
-                  onChanged: (value) => _set('use_augment', value),
+                  onChanged: detectionEnabled
+                      ? (value) => _set('use_augment', value)
+                      : null,
                   title: const Text('使用 TTA 数据增强'),
                   subtitle: const Text('推理时使用测试时增强，通常更慢但可能更稳。'),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   value: _bool('use_agnostic_nms'),
-                  onChanged: (value) => _set('use_agnostic_nms', value),
+                  onChanged: detectionEnabled
+                      ? (value) => _set('use_agnostic_nms', value)
+                      : null,
                   title: const Text('使用跨类别 NMS'),
                   subtitle: const Text('合并不同类别间重叠较高的检测框。'),
                 ),
               ],
             ),
           ),
-          ..._buildVideoSettingPanels(videoMode, strideLabel),
+          ..._buildVideoSettingPanels(
+            videoMode,
+            strideLabel,
+            enabled: detectionEnabled,
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildSpeciesSelector() {
+  Widget _buildDetectionDependencyNotice() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.error.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.report_problem_rounded, color: scheme.error),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              '检测设置需要先安装 PyTorch、torchvision 和 ultralytics。当前缺少：$_missingYoloDependenciesLabel。',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: scheme.onErrorContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          TextButton(
+            onPressed: () => setState(() => _sectionIndex = 1),
+            child: const Text('去安装'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSpeciesSelector({bool enabled = true}) {
     final speciesNames = _modelSpeciesNames();
     final selected = _stringList('selected_species_names');
     final summary = _loadingModelClasses
@@ -707,7 +790,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (!_loadingModelClasses)
           _SummaryDialogButton(
             summary: summary,
-            onPressed: () => _showSpeciesSelectionDialog(speciesNames),
+            onPressed: enabled
+                ? () => _showSpeciesSelectionDialog(speciesNames)
+                : null,
           ),
       ],
     );
@@ -854,11 +939,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: '视频检测设置',
       subtitle: '视频处理模式、跳帧和检测过滤',
       icon: Icons.movie_filter_rounded,
-      child: Column(children: _buildVideoSettingPanels(videoMode, strideLabel)),
+      child: Column(
+        children: _buildVideoSettingPanels(
+          videoMode,
+          strideLabel,
+          enabled: _detectionDependenciesReady,
+        ),
+      ),
     );
   }
 
-  List<Widget> _buildVideoSettingPanels(String videoMode, String strideLabel) {
+  List<Widget> _buildVideoSettingPanels(
+    String videoMode,
+    String strideLabel, {
+    bool enabled = true,
+  }) {
     return [
       _SettingsPanel(
         title: '视频处理模式',
@@ -878,10 +973,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
           selected: {videoMode},
-          onSelectionChanged: (selection) {
-            if (selection.isEmpty) return;
-            _set('video_mode', selection.first);
-          },
+          onSelectionChanged: enabled
+              ? (selection) {
+                  if (selection.isEmpty) return;
+                  _set('video_mode', selection.first);
+                }
+              : null,
         ),
       ),
       _SettingsPanel(
@@ -895,6 +992,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           max: 30,
           divisions: 29,
           valueLabel: _int('vid_stride').toString(),
+          enabled: enabled,
           onChanged: (value) => _set('vid_stride', value.round()),
         ),
       ),
@@ -910,6 +1008,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           max: 0.30,
           divisions: 30,
           valueLabel: '${(_double('min_frame_ratio') * 100).round()}%',
+          enabled: enabled,
           onChanged: (value) => _set('min_frame_ratio', value),
         ),
       ),
@@ -1109,31 +1208,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: '自动分组规则',
             subtitle: '综合拍摄时间和连拍张数判断事件边界；下一项是配套视频时会优先并入当前组。',
             icon: Icons.timelapse_rounded,
-            child: Column(
-              children: [
-                _LabeledSlider(
-                  label: '连拍张数',
-                  value: _int('auto_group_burst_size').toDouble(),
-                  min: 1,
-                  max: 10,
-                  divisions: 9,
-                  valueLabel: '${_int('auto_group_burst_size')} 张',
-                  enabled: _bool('auto_group'),
-                  onChanged: (value) =>
-                      _set('auto_group_burst_size', value.round()),
-                ),
-                _LabeledSlider(
-                  label: '时间间隔',
-                  value: _int('auto_group_gap_seconds').toDouble(),
-                  min: 5,
-                  max: 120,
-                  divisions: 23,
-                  valueLabel: '${_int('auto_group_gap_seconds')} 秒',
-                  enabled: _bool('auto_group'),
-                  onChanged: (value) =>
-                      _set('auto_group_gap_seconds', value.round()),
-                ),
-              ],
+            child: _SummaryDialogButton(
+              summary: _autoGroupRuleSummary(),
+              onPressed: _bool('auto_group') ? _showAutoGroupRulesDialog : null,
             ),
           ),
           _buildQuickMarkEditor(),
@@ -1150,6 +1227,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  String _autoGroupRuleSummary() {
+    if (!_bool('auto_group')) return '已关闭';
+    final burst = _int('auto_group_burst_size').clamp(1, 20).toInt();
+    final gap = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
+    final burstText = _bool('auto_group_detect_burst')
+        ? '自动识别，当前 $burst 张'
+        : '$burst 张';
+    return '$burstText · $gap 秒';
+  }
+
+  Future<void> _showAutoGroupRulesDialog() async {
+    var detectBurst = _bool('auto_group_detect_burst');
+    var burstSize = _int('auto_group_burst_size').clamp(1, 20).toInt();
+    var gapSeconds = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('自动分组规则'),
+              content: SizedBox(
+                width: 460,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: detectBurst,
+                      onChanged: (value) =>
+                          setDialogState(() => detectBurst = value),
+                      title: const Text('自动识别连拍张数'),
+                      subtitle: Text('开启后禁用手动连拍张数；当前分组连拍张数为 $burstSize 张'),
+                    ),
+                    const SizedBox(height: 8),
+                    _LabeledSlider(
+                      label: '连拍张数',
+                      value: burstSize.toDouble(),
+                      min: 1,
+                      max: 20,
+                      divisions: 19,
+                      valueLabel: '$burstSize 张',
+                      enabled: !detectBurst,
+                      onChanged: (value) =>
+                          setDialogState(() => burstSize = value.round()),
+                    ),
+                    _LabeledSlider(
+                      label: '时间间隔',
+                      value: gapSeconds.toDouble(),
+                      min: 5,
+                      max: 120,
+                      divisions: 23,
+                      valueLabel: '$gapSeconds 秒',
+                      onChanged: (value) =>
+                          setDialogState(() => gapSeconds = value.round()),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop({
+                    'auto_group_detect_burst': detectBurst,
+                    'auto_group_burst_size': burstSize,
+                    'auto_group_gap_seconds': gapSeconds,
+                  }),
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result == null) return;
+    setState(() {
+      _draft['auto_group_detect_burst'] = result['auto_group_detect_burst'];
+      _draft['auto_group_burst_size'] = result['auto_group_burst_size'];
+      _draft['auto_group_gap_seconds'] = result['auto_group_gap_seconds'];
+      _dirty = true;
+    });
   }
 
   Widget _buildQuickMarkSettings() {
@@ -1493,7 +1659,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     var saved = false;
     try {
       _draft['package'] = _packageController.text.trim();
-      if (widget.settings?.gpuAvailable != true) {
+      if (_detectionDependenciesReady &&
+          widget.settings?.gpuAvailable != true) {
         _draft['batch_size'] = 1;
         _draft['use_fp16'] = false;
       }
@@ -1567,6 +1734,7 @@ class _SettingsMenuButton<T> extends StatelessWidget {
     this.placeholder = '请选择',
     this.minMenuWidth = 180,
     this.maxMenuWidth = 360,
+    this.enabled = true,
   });
 
   final T? value;
@@ -1575,13 +1743,14 @@ class _SettingsMenuButton<T> extends StatelessWidget {
   final String placeholder;
   final double minMenuWidth;
   final double maxMenuWidth;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final selectedOption = _selectedOption;
     final label = selectedOption?.label ?? placeholder;
-    final enabled = options.isNotEmpty;
+    final canOpen = enabled && options.isNotEmpty;
 
     return Align(
       alignment: Alignment.centerRight,
@@ -1610,7 +1779,7 @@ class _SettingsMenuButton<T> extends StatelessWidget {
         ],
         builder: (context, controller, child) {
           return TextButton(
-            onPressed: enabled
+            onPressed: canOpen
                 ? () {
                     if (controller.isOpen) {
                       controller.close();

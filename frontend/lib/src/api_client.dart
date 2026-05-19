@@ -260,8 +260,13 @@ class NeriApiClient {
     );
   }
 
-  Future<List<ProcessingJob>> listJobs() async {
-    final response = await _httpClient.get(_uri('/api/jobs'));
+  Future<List<ProcessingJob>> listJobs({bool includeResults = true}) async {
+    final uri = includeResults
+        ? _uri('/api/jobs')
+        : _uri(
+            '/api/jobs',
+          ).replace(queryParameters: const {'include_results': 'false'});
+    final response = await _httpClient.get(uri);
     _ensureSuccess(response);
     return (jsonDecode(response.body) as List<dynamic>)
         .whereType<Map<String, dynamic>>()

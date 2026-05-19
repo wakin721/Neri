@@ -94,7 +94,7 @@ class PreviewScreen extends StatelessWidget {
       return Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(width: listWidth, child: _buildFileList()),
+          SizedBox(width: listWidth, child: _buildFileList(context)),
           const VerticalDivider(width: 24),
           Expanded(child: _buildPreviewDetail(context, item)),
         ],
@@ -104,22 +104,49 @@ class PreviewScreen extends StatelessWidget {
     final listHeight = availableWidth < 600 ? 220.0 : 280.0;
     return Column(
       children: [
-        SizedBox(height: listHeight, child: _buildFileList()),
+        SizedBox(height: listHeight, child: _buildFileList(context)),
         const SizedBox(height: 16),
         Expanded(child: _buildPreviewDetail(context, item)),
       ],
     );
   }
 
-  Widget _buildFileList() {
+  Widget _buildFileList(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final selectedPath =
+        selectedItem?.path ??
+        (items.isEmpty
+            ? null
+            : items[selectedIndex.clamp(0, items.length - 1).toInt()].path);
     return SelectableListCard<DetectionItem>(
       items: items,
       selectedIndex: selectedIndex,
       leadingBuilder: (item) => Icon(_previewFileIcon(item)),
       titleBuilder: (item) => item.filename,
       subtitleBuilder: _finalResultLabel,
-      trailingBuilder: (item) =>
-          item.error == null ? null : const Icon(Icons.error_outline_rounded),
+      trailingBuilder: (item) {
+        final selected = item.path == selectedPath;
+        if (!selected && item.error == null) return null;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (item.error != null)
+              Icon(
+                Icons.error_outline_rounded,
+                color: colorScheme.error,
+                size: 20,
+              ),
+            if (selected) ...[
+              if (item.error != null) const SizedBox(width: 6),
+              Icon(
+                Icons.check_circle_rounded,
+                color: colorScheme.primary,
+                size: 20,
+              ),
+            ],
+          ],
+        );
+      },
       onSelected: (index, item) {
         onSelected(index, item);
         unawaited(onLoadMetadata(item));

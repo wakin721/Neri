@@ -63,6 +63,28 @@ def upsert_detection(db_path: str, base_name: str,
               json.dumps(detection_data, ensure_ascii=False)))
 
 
+def upsert_detections_bulk(db_path: str, items: list[tuple[str, str, dict]]):
+    """批量写入/更新检测记录，所有操作在同一事务内完成。"""
+    if not items:
+        return
+    with _get_conn(db_path) as conn:
+        conn.executemany("""
+            INSERT INTO detections (base_name, image_filename, detection_json, updated_at)
+            VALUES (?, ?, ?, strftime('%s','now'))
+            ON CONFLICT(base_name) DO UPDATE SET
+                image_filename = excluded.image_filename,
+                detection_json = excluded.detection_json,
+                updated_at     = excluded.updated_at
+        """, [
+            (
+                base_name,
+                image_filename,
+                json.dumps(detection_data, ensure_ascii=False),
+            )
+            for base_name, image_filename, detection_data in items
+        ])
+
+
 def get_detection(db_path: str, base_name: str) -> dict | None:
     """读取单条检测记录"""
     with _get_conn(db_path) as conn:

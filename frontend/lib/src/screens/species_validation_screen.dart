@@ -67,6 +67,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.speciesTypes,
     required this.autoGroup,
     required this.collapseGroups,
+    required this.autoGroupDetectBurst,
     required this.autoGroupBurstSize,
     required this.autoGroupGapSeconds,
     required this.autoSortQuickMarks,
@@ -92,6 +93,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final Map<String, String> speciesTypes;
   final bool autoGroup;
   final bool collapseGroups;
+  final bool autoGroupDetectBurst;
   final int autoGroupBurstSize;
   final int autoGroupGapSeconds;
   final bool autoSortQuickMarks;
@@ -194,12 +196,23 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String? _selectionAnchorPath;
   String? _selectedGroupSignature;
   bool? _bucketCacheAutoGroup;
+  bool? _bucketCacheAutoGroupDetectBurst;
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
   String? _bucketCachePathSignature;
   String? _bucketCacheGroupingSignature;
   int? _bucketCacheRefreshVersion;
+  List<DetectionItem>? _bucketCacheItemsIdentity;
   List<_SpeciesBucket> _bucketCache = const <_SpeciesBucket>[];
+  Map<String, DetectionItem> _bucketCacheItemByPath =
+      const <String, DetectionItem>{};
+  Map<String, _ValidationGroupIndexEntry> _bucketCacheGroupByPath =
+      const <String, _ValidationGroupIndexEntry>{};
+  Map<String, _ValidationMediaGroup> _bucketCacheGroupBySignature =
+      const <String, _ValidationMediaGroup>{};
+  final Map<String, _MediaTimestampCacheEntry> _mediaTimestampCache =
+      <String, _MediaTimestampCacheEntry>{};
+  final Map<String, String> _groupSpeciesLabelCache = <String, String>{};
   final Set<String> _deferredRegroupGroupSignatures = <String>{};
   final Set<String> _expandedGroupSignatures = <String>{};
 
@@ -216,6 +229,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.collapseGroups != widget.collapseGroups ||
+        oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
         oldWidget.autoGroupBurstSize != widget.autoGroupBurstSize ||
         oldWidget.autoGroupGapSeconds != widget.autoGroupGapSeconds) {
       _expandedGroupSignatures.clear();
@@ -228,12 +242,19 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _selectionAnchorPath = null;
       _selectedGroupSignature = null;
       _bucketCacheAutoGroup = null;
+      _bucketCacheAutoGroupDetectBurst = null;
       _bucketCacheBurstSize = null;
       _bucketCacheGapSeconds = null;
       _bucketCachePathSignature = null;
       _bucketCacheGroupingSignature = null;
       _bucketCacheRefreshVersion = null;
+      _bucketCacheItemsIdentity = null;
       _bucketCache = const <_SpeciesBucket>[];
+      _bucketCacheItemByPath = const <String, DetectionItem>{};
+      _bucketCacheGroupByPath = const <String, _ValidationGroupIndexEntry>{};
+      _bucketCacheGroupBySignature = const <String, _ValidationMediaGroup>{};
+      _mediaTimestampCache.clear();
+      _groupSpeciesLabelCache.clear();
       _deferredRegroupGroupSignatures.clear();
       _expandedGroupSignatures.clear();
       return;
@@ -445,13 +466,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final selectedBucketIndex = buckets.indexWhere(
       (bucket) => bucket.key == _selectedBucketKey,
     );
-    final selectedPhotoIndex = visibleRows.indexWhere(_isRowSelected);
-    final selectedBucket = selectedBucketIndex >= 0
-        ? buckets[selectedBucketIndex]
-        : (buckets.isEmpty ? null : buckets.first);
-    final groupIndexByPath = selectedBucket == null
-        ? const <String, int>{}
-        : _groupIndexByPath(selectedBucket);
+    final selectedPhotoIndex = _selectedPhotoRowIndex(visibleRows);
     final speciesRatio = switch (_activeList) {
       _ValidationListFocus.species => 0.66,
       _ValidationListFocus.photos => 0.34,
@@ -493,7 +508,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         ? '${bucket.groups.length} 组 / ${bucket.items.length} 个文件'
                         : '${bucket.items.length} 个文件',
                     // 取消物种栏后面的数字
-                    trailingBuilder: (bucket) => null,
+                    trailingBuilder: (bucket) {
+                      if (bucket.key != _selectedBucketKey) return null;
+                      return Icon(
+                        Icons.check_circle_rounded,
+                        color: colorScheme.primary,
+                        size: 20,
+                      );
+                    },
                     onSelected: (index, bucket) {
                       setState(() {
                         _activeList = _ValidationListFocus.species;
@@ -533,20 +555,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                     },
                     titleBuilder: (row) {
                       if (row.isGroupHeader) {
-                        final groupNumber = row.groupIndex + 1;
-                        final groupSize = row.group.items.length;
-                        return '第 $groupNumber 组 · $groupSize 个文件';
+                        return _groupHeaderTitle(row);
                       }
                       return row.item.filename;
                     },
-                    subtitleBuilder: (row) =>
-                        _fileListSubtitle(row.item, groupIndexByPath, buckets),
+                    subtitleBuilder: (row) {
+                      if (row.isGroupHeader) {
+                        return _groupHeaderSubtitle(row);
+                      }
+                      return _fileListSubtitle(row);
+                    },
                     tileColorBuilder: (index, row) {
                       if (!widget.autoGroup) return null;
-                      final groupIndex =
-                          row.groupIndexByPath ??
-                          groupIndexByPath[row.item.path];
-                      if (groupIndex == null || groupIndex.isEven) return null;
+                      final groupIndex = row.groupIndex;
+                      if (groupIndex.isEven) return null;
                       return colorScheme.surfaceContainerHighest.withValues(
                         alpha: 0.42,
                       );
@@ -566,11 +588,29 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       final showSelectedCheck =
                           selected && !(row.isGroupHeader && row.groupExpanded);
 
+                      Widget groupToggleButton({
+                        required IconData icon,
+                        required Color color,
+                        required String tooltip,
+                      }) {
+                        return IconButton(
+                          tooltip: tooltip,
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 32,
+                            height: 32,
+                          ),
+                          padding: EdgeInsets.zero,
+                          onPressed: () => _toggleGroupExpansionForRow(row),
+                          icon: Icon(icon, size: 20, color: color),
+                        );
+                      }
+
                       if (showUpArrow) {
-                        return Icon(
-                          Icons.expand_less_rounded,
-                          size: 20,
+                        return groupToggleButton(
+                          icon: Icons.expand_less_rounded,
                           color: colorScheme.onSurfaceVariant,
+                          tooltip: '折叠分组',
                         );
                       }
 
@@ -591,20 +631,28 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                             ),
                           if (showDownArrow) ...[
                             if (hasError) const SizedBox(width: 6),
-                            Icon(
-                              Icons.expand_more_rounded,
-                              size: 20,
+                            groupToggleButton(
+                              icon: Icons.expand_more_rounded,
                               color: colorScheme.onSurfaceVariant,
+                              tooltip: '展开分组',
                             ),
                           ],
                           if (showSelectedCheck) ...[
                             if (hasError || row.isGroupHeader)
                               const SizedBox(width: 6),
-                            Icon(
-                              Icons.check_circle_rounded,
-                              color: colorScheme.primary,
-                              size: 20,
-                            ),
+                            row.isGroupHeader
+                                ? groupToggleButton(
+                                    icon: Icons.check_circle_rounded,
+                                    color: colorScheme.primary,
+                                    tooltip: row.groupExpanded
+                                        ? '折叠分组'
+                                        : '展开分组',
+                                  )
+                                : Icon(
+                                    Icons.check_circle_rounded,
+                                    color: colorScheme.primary,
+                                    size: 20,
+                                  ),
                           ],
                         ],
                       );
@@ -918,6 +966,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     List<DetectionItem> visibleItems, {
     _ValidationFileRow? row,
   }) {
+    final targetItem = row != null && row.isGroupHeader ? row.item : item;
     final pressedKeys = HardwareKeyboard.instance.logicalKeysPressed;
     final rangeSelection =
         pressedKeys.contains(LogicalKeyboardKey.shiftLeft) ||
@@ -929,53 +978,56 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         pressedKeys.contains(LogicalKeyboardKey.metaRight);
 
     setState(() {
-      _selectedPath = item.path;
+      _selectedPath = targetItem.path;
       _activeList = _ValidationListFocus.photos;
       if (rangeSelection && _selectionAnchorPath != null) {
         _selectedPaths
           ..clear()
-          ..addAll(_rangeSelectionPaths(visibleItems, item.path));
+          ..addAll(_rangeSelectionPaths(visibleItems, targetItem.path));
       } else if (toggleSelection) {
-        if (_selectedPaths.contains(item.path) && _selectedPaths.length > 1) {
-          _selectedPaths.remove(item.path);
+        if (_selectedPaths.contains(targetItem.path) &&
+            _selectedPaths.length > 1) {
+          _selectedPaths.remove(targetItem.path);
         } else {
-          _selectedPaths.add(item.path);
+          _selectedPaths.add(targetItem.path);
         }
-        _selectionAnchorPath = item.path;
+        _selectionAnchorPath = targetItem.path;
       } else {
         _selectedPaths
           ..clear()
-          ..add(item.path);
-        _selectionAnchorPath = item.path;
+          ..add(targetItem.path);
+        _selectionAnchorPath = targetItem.path;
       }
       if (row == null) {
-        _setSelectedGroupFromItem(item);
+        _setSelectedGroupFromItem(targetItem);
       } else {
         _setSelectedGroupFromRow(row);
       }
       _resetPendingMark();
     });
-    unawaited(widget.onLoadMetadata(item));
+    unawaited(widget.onLoadMetadata(targetItem));
   }
 
   void _toggleItemSelection(DetectionItem item, {_ValidationFileRow? row}) {
+    final targetItem = row != null && row.isGroupHeader ? row.item : item;
     setState(() {
-      _selectedPath = item.path;
+      _selectedPath = targetItem.path;
       _activeList = _ValidationListFocus.photos;
-      if (_selectedPaths.contains(item.path) && _selectedPaths.length > 1) {
-        _selectedPaths.remove(item.path);
+      if (_selectedPaths.contains(targetItem.path) &&
+          _selectedPaths.length > 1) {
+        _selectedPaths.remove(targetItem.path);
       } else {
-        _selectedPaths.add(item.path);
+        _selectedPaths.add(targetItem.path);
       }
-      _selectionAnchorPath = item.path;
+      _selectionAnchorPath = targetItem.path;
       if (row == null) {
-        _setSelectedGroupFromItem(item);
+        _setSelectedGroupFromItem(targetItem);
       } else {
         _setSelectedGroupFromRow(row);
       }
       _resetPendingMark();
     });
-    unawaited(widget.onLoadMetadata(item));
+    unawaited(widget.onLoadMetadata(targetItem));
   }
 
   Iterable<String> _rangeSelectionPaths(
@@ -1164,7 +1216,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (_expandedGroupSignatures.contains(signature)) {
         visibleItems.addAll(group.items);
       } else {
-        visibleItems.add(group.items.first);
+        visibleItems.add(_preferredGroupItem(group));
       }
     }
     return visibleItems;
@@ -1177,25 +1229,47 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
   }
 
+  _ValidationGroupIndexEntry? _groupIndexEntryForPath(
+    String? path, {
+    List<_SpeciesBucket>? buckets,
+  }) {
+    if (path == null) return null;
+    if (buckets == null || identical(buckets, _bucketCache)) {
+      return _bucketCacheGroupByPath[path];
+    }
+    for (final bucket in buckets) {
+      for (var index = 0; index < bucket.groups.length; index++) {
+        final group = bucket.groups[index];
+        for (final item in group.items) {
+          if (item.path == path) {
+            return _ValidationGroupIndexEntry(
+              index: index,
+              group: group,
+              signature: _groupSignature(group),
+            );
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   _ValidationGroupContext? _groupContextForItem(
     DetectionItem item, {
     List<_SpeciesBucket>? buckets,
   }) {
     if (!widget.autoGroup) return null;
-    final bucket = _selectedBucketFrom(buckets ?? _currentBuckets());
-    for (var index = 0; index < bucket.groups.length; index++) {
-      final group = bucket.groups[index];
-      if (group.items.any((candidate) => candidate.path == item.path)) {
-        final signature = _groupSignature(group);
-        return _ValidationGroupContext(
-          index: index,
-          group: group,
-          signature: signature,
-          expanded: _expandedGroupSignatures.contains(signature),
-        );
-      }
-    }
-    return null;
+    final entry = _groupIndexEntryForPath(
+      item.path,
+      buckets: buckets ?? _currentBuckets(),
+    );
+    if (entry == null) return null;
+    return _ValidationGroupContext(
+      index: entry.index,
+      group: entry.group,
+      signature: entry.signature,
+      expanded: _expandedGroupSignatures.contains(entry.signature),
+    );
   }
 
   bool _isCollapsedGroupRow(
@@ -1206,7 +1280,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         groupContext != null &&
         !groupContext.expanded &&
         groupContext.group.items.length > 1 &&
-        groupContext.group.items.first.path == item.path;
+        groupContext.group.items.any(
+          (candidate) => candidate.path == item.path,
+        );
   }
 
   List<DetectionItem> _expandCollapsedGroupTargets(
@@ -1240,14 +1316,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     List<_SpeciesBucket>? buckets,
   }) {
     if (!_useCollapsedGroups || path == null) return null;
-    for (final bucket in buckets ?? _currentBuckets()) {
-      for (final group in bucket.groups) {
-        if (group.items.any((item) => item.path == path)) {
-          return _groupSignature(group);
-        }
-      }
-    }
-    return null;
+    return _groupIndexEntryForPath(
+      path,
+      buckets: buckets ?? _currentBuckets(),
+    )?.signature;
   }
 
   void _setSelectedGroupFromPath(
@@ -1262,9 +1334,19 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   void _setSelectedGroupFromRow(_ValidationFileRow row) {
-    _selectedGroupSignature = _useCollapsedGroups
-        ? _groupSignature(row.group)
-        : null;
+    _selectedGroupSignature = _useCollapsedGroups ? row.group.signature : null;
+  }
+
+  void _toggleGroupExpansionForRow(_ValidationFileRow row) {
+    if (!row.isGroupHeader) return;
+    _toggleGroupExpansion(
+      _ValidationGroupContext(
+        index: row.groupIndex,
+        group: row.group,
+        signature: row.group.signature,
+        expanded: row.groupExpanded,
+      ),
+    );
   }
 
   void _toggleGroupExpansion(_ValidationGroupContext groupContext) {
@@ -1272,7 +1354,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final groupPaths = groupContext.group.items
         .map((item) => item.path)
         .toSet();
-    final representative = groupContext.group.items.first;
+    final representative = _preferredGroupItem(groupContext.group);
 
     setState(() {
       if (groupContext.expanded) {
@@ -1288,17 +1370,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       } else {
         _expandedGroupSignatures.add(groupContext.signature);
-        final firstPhoto = groupContext.group.items.firstWhere(
-          _isImage,
-          orElse: () => representative,
-        );
-        _selectedPath = firstPhoto.path;
+        _selectedPath = representative.path;
         _selectedGroupSignature = groupContext.signature;
         _selectedPaths
           ..clear()
-          ..add(firstPhoto.path);
-        _selectionAnchorPath = firstPhoto.path;
-        nextItemToLoad = firstPhoto;
+          ..add(representative.path);
+        _selectionAnchorPath = representative.path;
+        nextItemToLoad = representative;
       }
       _activeList = _ValidationListFocus.photos;
       _resetPendingMark();
@@ -1320,7 +1398,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
     for (final group in groups) {
       final species = widget.autoGroup
-          ? _primarySpeciesForGroup(group)
+          ? _groupSpeciesLabel(group)
           : _primarySpecies(group.items.first);
       final isValidated = group.items.every(_isItemValidated);
       final key = '${isValidated ? 1 : 0}::$species';
@@ -1349,15 +1427,26 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   List<_SpeciesBucket> _currentBuckets() {
+    final hasSameGroupingSettings =
+        _bucketCacheAutoGroup == widget.autoGroup &&
+        _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
+        _bucketCacheBurstSize == widget.autoGroupBurstSize &&
+        _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
+        _bucketCacheRefreshVersion == widget.refreshVersion;
+
+    if (hasSameGroupingSettings &&
+        identical(_bucketCacheItemsIdentity, widget.items)) {
+      if (!_hasCompletedDeferredGroup()) {
+        return _bucketCache;
+      }
+    }
+
     final pathSignature = _itemsPathSignature(widget.items);
     final groupingSignature = _itemsGroupingSignature(widget.items);
     final canReuseCache =
         _bucketCachePathSignature == pathSignature &&
         _bucketCacheGroupingSignature == groupingSignature &&
-        _bucketCacheAutoGroup == widget.autoGroup &&
-        _bucketCacheBurstSize == widget.autoGroupBurstSize &&
-        _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
-        _bucketCacheRefreshVersion == widget.refreshVersion;
+        hasSameGroupingSettings;
 
     if (canReuseCache) {
       _updateCachedBucketItems();
@@ -1374,12 +1463,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     String groupingSignature,
   ) {
     _bucketCacheAutoGroup = widget.autoGroup;
+    _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
     _bucketCachePathSignature = pathSignature;
     _bucketCacheGroupingSignature = groupingSignature;
     _bucketCacheRefreshVersion = widget.refreshVersion;
+    _bucketCacheItemsIdentity = widget.items;
+    _groupSpeciesLabelCache.clear();
     _bucketCache = _buildBuckets(widget.items);
+    _rebuildBucketLookups();
     _deferredRegroupGroupSignatures.clear();
     _trimExpandedGroupSignatures();
     return _bucketCache;
@@ -1412,7 +1505,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         .map(
           (item) => [
             item.path,
-            _mediaSortTimestamp(item)?.millisecondsSinceEpoch ?? '',
+            item.dateTaken ?? '',
+            item.detectionData['拍摄时间']?.toString() ?? '',
+            item.modifiedAt ?? '',
             item.fileType,
             _primarySpecies(item),
             _isItemValidated(item),
@@ -1423,14 +1518,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   String _groupSignature(_ValidationMediaGroup group) {
-    return group.items.map((item) => item.path).join('\u001e');
+    return group.signature;
   }
 
   void _updateCachedBucketItems() {
-    if (_bucketCache.isEmpty) return;
+    _bucketCacheItemsIdentity = widget.items;
     final latestByPath = <String, DetectionItem>{
       for (final item in widget.items) item.path: item,
     };
+    _bucketCacheItemByPath = latestByPath;
+    if (_bucketCache.isEmpty) return;
     for (final bucket in _bucketCache) {
       for (var index = 0; index < bucket.items.length; index++) {
         bucket.items[index] =
@@ -1443,32 +1540,54 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       }
     }
+    _rebuildBucketLookups();
+  }
+
+  void _rebuildBucketLookups() {
+    _bucketCacheItemByPath = <String, DetectionItem>{
+      for (final item in widget.items) item.path: item,
+    };
+    _mediaTimestampCache.removeWhere(
+      (path, _) => !_bucketCacheItemByPath.containsKey(path),
+    );
+    final groupByPath = <String, _ValidationGroupIndexEntry>{};
+    final groupBySignature = <String, _ValidationMediaGroup>{};
+    for (final bucket in _bucketCache) {
+      for (var index = 0; index < bucket.groups.length; index++) {
+        final group = bucket.groups[index];
+        final signature = _groupSignature(group);
+        groupBySignature[signature] = group;
+        final entry = _ValidationGroupIndexEntry(
+          index: index,
+          group: group,
+          signature: signature,
+        );
+        for (final item in group.items) {
+          groupByPath[item.path] = entry;
+        }
+      }
+    }
+    _bucketCacheGroupByPath = groupByPath;
+    _bucketCacheGroupBySignature = groupBySignature;
   }
 
   void _deferRegroupForItems(Iterable<DetectionItem> items) {
     if (!widget.autoGroup) return;
     final targetPaths = items.map((item) => item.path).toSet();
     if (targetPaths.isEmpty) return;
-    final buckets = _currentBuckets();
-    for (final bucket in buckets) {
-      for (final group in bucket.groups) {
-        if (group.items.any((item) => targetPaths.contains(item.path))) {
-          _deferredRegroupGroupSignatures.add(_groupSignature(group));
-        }
+    _currentBuckets();
+    for (final path in targetPaths) {
+      final entry = _bucketCacheGroupByPath[path];
+      if (entry != null) {
+        _deferredRegroupGroupSignatures.add(entry.signature);
       }
     }
   }
 
   bool _hasCompletedDeferredGroup() {
     if (_deferredRegroupGroupSignatures.isEmpty) return false;
-    final groupsBySignature = <String, _ValidationMediaGroup>{};
-    for (final bucket in _bucketCache) {
-      for (final group in bucket.groups) {
-        groupsBySignature[_groupSignature(group)] = group;
-      }
-    }
     for (final signature in _deferredRegroupGroupSignatures) {
-      final group = groupsBySignature[signature];
+      final group = _bucketCacheGroupBySignature[signature];
       if (group == null || _groupComplete(group)) {
         return true;
       }
@@ -1484,10 +1603,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final orderedItems = _sortValidationItems(items);
     final groups = <_ValidationMediaGroup>[];
     var current = <DetectionItem>[];
-    final burstSize = widget.autoGroupBurstSize.clamp(1, 20).toInt();
     final gapThreshold = Duration(
       seconds: widget.autoGroupGapSeconds.clamp(1, 3600).toInt(),
     );
+    final burstSize = widget.autoGroupDetectBurst
+        ? _inferAutoGroupBurstSize(orderedItems, gapThreshold)
+        : widget.autoGroupBurstSize.clamp(1, 20).toInt();
 
     void flushCurrent() {
       if (current.isEmpty) return;
@@ -1514,6 +1635,49 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     flushCurrent();
 
     return groups;
+  }
+
+  int _inferAutoGroupBurstSize(
+    List<DetectionItem> orderedItems,
+    Duration gapThreshold,
+  ) {
+    final counts = <int, int>{};
+    var runLength = 0;
+    DetectionItem? previous;
+
+    void finishRun() {
+      if (runLength <= 0) return;
+      final clamped = runLength.clamp(1, 20).toInt();
+      counts[clamped] = (counts[clamped] ?? 0) + 1;
+      runLength = 0;
+    }
+
+    for (final item in orderedItems) {
+      final previousItem = previous;
+      final startsNewRun =
+          previousItem != null &&
+          (_isVideo(previousItem) ||
+              _isVideo(item) ||
+              ((_mediaGap(previousItem, item) ?? Duration.zero) >=
+                  gapThreshold));
+      if (startsNewRun) finishRun();
+      if (_isImage(item)) {
+        runLength += 1;
+      } else {
+        finishRun();
+      }
+      previous = item;
+    }
+    finishRun();
+
+    if (counts.isEmpty) return widget.autoGroupBurstSize.clamp(1, 20).toInt();
+    final entries = counts.entries.toList()
+      ..sort((a, b) {
+        final countCompare = b.value.compareTo(a.value);
+        if (countCompare != 0) return countCompare;
+        return b.key.compareTo(a.key);
+      });
+    return entries.first.key;
   }
 
   bool _shouldStartNewAutoGroup(
@@ -1547,7 +1711,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   String _primarySpeciesForGroup(_ValidationMediaGroup group) {
-    final validVotes = <String, _SpeciesVote>{};
+    final orderedValidSpecies = <String>[];
+    final seenValidSpecies = <String>{};
     final fallbackVotes = <String, _SpeciesVote>{};
 
     for (final item in group.items) {
@@ -1555,20 +1720,37 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final validSpeciesNames = speciesNames
           .where((species) => !_isFallbackSpecies(species))
           .toList();
-      final voteNames = validSpeciesNames.isNotEmpty
-          ? validSpeciesNames
-          : (speciesNames.isEmpty ? <String>['未检测'] : speciesNames);
-      final target = validSpeciesNames.isNotEmpty ? validVotes : fallbackVotes;
-      for (final species in voteNames) {
-        final vote = target.putIfAbsent(species, _SpeciesVote.new);
+
+      if (validSpeciesNames.isNotEmpty) {
+        for (final species in validSpeciesNames) {
+          if (seenValidSpecies.add(species)) {
+            orderedValidSpecies.add(species);
+          }
+        }
+        continue;
+      }
+
+      final fallbackNames = speciesNames.isEmpty
+          ? <String>['未检测']
+          : speciesNames;
+      for (final species in fallbackNames) {
+        final vote = fallbackVotes.putIfAbsent(species, _SpeciesVote.new);
         vote.count += 1;
         if (_isItemValidated(item)) vote.validatedCount += 1;
       }
     }
 
-    if (validVotes.isNotEmpty) return _topVotedSpecies(validVotes);
+    if (orderedValidSpecies.isNotEmpty) return orderedValidSpecies.join('、');
     if (fallbackVotes.isNotEmpty) return _topVotedSpecies(fallbackVotes);
     return '未检测';
+  }
+
+  String _groupSpeciesLabel(_ValidationMediaGroup group) {
+    final signature = _groupSignature(group);
+    return _groupSpeciesLabelCache.putIfAbsent(
+      signature,
+      () => _primarySpeciesForGroup(group),
+    );
   }
 
   String _topVotedSpecies(Map<String, _SpeciesVote> votes) {
@@ -1586,47 +1768,62 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isFallbackSpecies(String species) {
+    final normalized = species.trim();
+    if (normalized.isEmpty || normalized == '空') return true;
+    if (normalized.toLowerCase() == 'empty') return true;
     return const {'Unknown', '未检测', '错误', '需人工校验'}.contains(species);
   }
 
   List<String> _splitGroupSpeciesNames(String speciesName) {
     return speciesName
         .replaceAll('，', ',')
+        .replaceAll('、', ',')
         .split(',')
         .map((name) => name.trim())
         .where((name) => name.isNotEmpty)
         .toList();
   }
 
+  bool _hasValidSpecies(DetectionItem item) {
+    return _splitGroupSpeciesNames(
+      _primarySpecies(item),
+    ).any((species) => !_isFallbackSpecies(species));
+  }
+
+  DetectionItem _preferredGroupItem(_ValidationMediaGroup group) {
+    DetectionItem? firstImage;
+    DetectionItem? firstValid;
+    for (final item in group.items) {
+      final isImage = _isImage(item);
+      final hasValidSpecies = _hasValidSpecies(item);
+      if (isImage && hasValidSpecies) return item;
+      firstImage ??= isImage ? item : null;
+      firstValid ??= hasValidSpecies ? item : null;
+    }
+    return firstValid ?? firstImage ?? group.items.first;
+  }
+
   bool _isItemValidated(DetectionItem item) {
     return item.validated == true || item.detectionData['最低置信度'] == '人工校验';
   }
 
-  Map<String, int> _groupIndexByPath(_SpeciesBucket bucket) {
-    final indexes = <String, int>{};
-    for (var index = 0; index < bucket.groups.length; index++) {
-      for (final item in bucket.groups[index].items) {
-        indexes[item.path] = index;
-      }
-    }
-    return indexes;
+  String _groupHeaderTitle(_ValidationFileRow row) {
+    final species = _groupSpeciesLabel(row.group);
+    return '$species · ${row.group.items.length} 个文件';
   }
 
-  String _fileListSubtitle(
-    DetectionItem item,
-    Map<String, int> groupIndexByPath,
-    List<_SpeciesBucket> buckets,
-  ) {
-    final label = _finalResultLabel(item);
+  String _groupHeaderSubtitle(_ValidationFileRow row) {
+    final state = row.groupExpanded ? '已展开' : '已折叠';
+    return '第 ${row.groupIndex + 1} 组 · $state';
+  }
+
+  String _fileListSubtitle(_ValidationFileRow row) {
+    final label = _finalResultLabel(row.item);
     if (!widget.autoGroup) return label;
-    final groupIndex = groupIndexByPath[item.path];
-    if (groupIndex == null) return label;
-    final groupContext = _groupContextForItem(item, buckets: buckets);
-    if (_useCollapsedGroups &&
-        groupContext != null &&
-        groupContext.group.items.length > 1) {
-      final state = groupContext.expanded ? '已展开' : '已折叠';
-      final groupSize = groupContext.group.items.length;
+    final groupIndex = row.groupIndex;
+    if (_useCollapsedGroups && row.group.items.length > 1) {
+      final state = row.groupExpanded ? '已展开' : '已折叠';
+      final groupSize = row.group.items.length;
       return '第 ${groupIndex + 1} 组 · $state $groupSize 个文件 · $label';
     }
     return '第 ${groupIndex + 1} 组 · $label';
@@ -1654,21 +1851,34 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   DateTime? _mediaSortTimestamp(DetectionItem item) {
-    final dateText = item.dateTaken?.trim();
-    if (dateText != null && dateText.isNotEmpty) {
-      final timeText = item.detectionData['拍摄时间']?.toString().trim();
+    final dateText = item.dateTaken?.trim() ?? '';
+    final timeText = item.detectionData['拍摄时间']?.toString().trim() ?? '';
+    final modifiedAt = item.modifiedAt?.trim() ?? '';
+    final cacheKey = '$dateText\u001d$timeText\u001d$modifiedAt';
+    final cached = _mediaTimestampCache[item.path];
+    if (cached != null && cached.cacheKey == cacheKey) {
+      return cached.timestamp;
+    }
+
+    DateTime? timestamp;
+    if (dateText.isNotEmpty) {
       if (dateText.contains(':') || dateText.contains('T')) {
         final dateTime = DateTime.tryParse(dateText);
-        if (dateTime != null) return dateTime;
+        if (dateTime != null) timestamp = dateTime;
       }
-      if (timeText != null && timeText.isNotEmpty) {
+      if (timestamp == null && timeText.isNotEmpty) {
         final dateTime = DateTime.tryParse('$dateText $timeText');
-        if (dateTime != null) return dateTime;
+        if (dateTime != null) timestamp = dateTime;
       }
     }
-    final modifiedAt = item.modifiedAt?.trim();
-    if (modifiedAt == null || modifiedAt.isEmpty) return null;
-    return DateTime.tryParse(modifiedAt);
+    if (timestamp == null && modifiedAt.isNotEmpty) {
+      timestamp = DateTime.tryParse(modifiedAt);
+    }
+    _mediaTimestampCache[item.path] = _MediaTimestampCacheEntry(
+      cacheKey: cacheKey,
+      timestamp: timestamp,
+    );
+    return timestamp;
   }
 
   int _naturalCompare(String a, String b) {
@@ -2357,14 +2567,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final isGroup = _useCollapsedGroups && group.items.length > 1;
 
       if (isGroup) {
+        final representative = _preferredGroupItem(group);
         rows.add(
           _ValidationFileRow(
-            item: group.items.first,
+            item: representative,
             isGroupHeader: true,
             groupExpanded: expanded,
             group: group,
             groupIndex: index,
-            groupIndexByPath: index,
           ),
         );
 
@@ -2377,7 +2587,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                 groupExpanded: true,
                 group: group,
                 groupIndex: index,
-                groupIndexByPath: index,
               ),
             );
           }
@@ -2391,7 +2600,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               groupExpanded: false,
               group: group,
               groupIndex: index,
-              groupIndexByPath: index,
             ),
           );
         }
@@ -2401,10 +2609,35 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   List<DetectionItem> _itemsFromRows(List<_ValidationFileRow> rows) {
-    return [
-      for (final row in rows)
-        if (!row.isGroupHeader || !row.groupExpanded) row.item,
-    ];
+    final items = <DetectionItem>[];
+    for (final row in rows) {
+      if (row.isGroupHeader) {
+        if (!row.groupExpanded) {
+          items.add(row.item);
+        }
+      } else {
+        items.add(row.item);
+      }
+    }
+    return items;
+  }
+
+  int _selectedPhotoRowIndex(List<_ValidationFileRow> rows) {
+    final selectedPath = _selectedPath;
+    if (selectedPath != null) {
+      final itemIndex = rows.indexWhere(
+        (row) => !row.isGroupHeader && row.item.path == selectedPath,
+      );
+      if (itemIndex >= 0) return itemIndex;
+
+      final selectedGroupSignature = _groupSignatureForPath(selectedPath);
+      final headerIndex = rows.indexWhere(
+        (row) =>
+            row.isGroupHeader && row.group.signature == selectedGroupSignature,
+      );
+      if (headerIndex >= 0) return headerIndex;
+    }
+    return rows.indexWhere(_isRowSelected);
   }
 
   bool _hasVisibleSelection(List<_ValidationFileRow> rows) {
@@ -2428,7 +2661,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       return widget.items.first;
     }
     if (_selectedPath != null) {
-      final selectedItem = _itemFromRowsByPath(rows, _selectedPath!);
+      final selectedItem = _itemByPath(_selectedPath!);
       if (selectedItem != null) return selectedItem;
     }
     for (final row in rows) {
@@ -2440,30 +2673,22 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return rows.first.item;
   }
 
-  DetectionItem? _itemFromRowsByPath(
-    List<_ValidationFileRow> rows,
-    String path,
-  ) {
-    for (final row in rows) {
-      for (final item in row.group.items) {
-        if (item.path == path) return item;
-      }
-    }
-    return null;
+  DetectionItem? _itemByPath(String path) {
+    return _bucketCacheItemByPath[path];
   }
 
   bool _isRowSelected(_ValidationFileRow row) {
     if (row.isGroupHeader) {
       final groupHasActivePath =
           _selectedPath != null &&
-          row.group.items.any((item) => item.path == _selectedPath);
-      final groupHasSelectedPath = row.group.items.any(
-        (item) => _selectedPaths.contains(item.path),
+          _groupSignatureForPath(_selectedPath) == row.group.signature;
+      final groupHasSelectedPath = _selectedPaths.any(
+        (path) => _groupSignatureForPath(path) == row.group.signature,
       );
       if (!row.groupExpanded) {
         return groupHasActivePath || groupHasSelectedPath;
       }
-      return _selectedGroupSignature == _groupSignature(row.group) ||
+      return _selectedGroupSignature == row.group.signature ||
           groupHasActivePath ||
           groupHasSelectedPath;
     }
@@ -2671,9 +2896,11 @@ class _SpeciesBucket {
 }
 
 class _ValidationMediaGroup {
-  const _ValidationMediaGroup(this.items);
+  _ValidationMediaGroup(this.items)
+    : signature = items.map((item) => item.path).join('\u001e');
 
   final List<DetectionItem> items;
+  final String signature;
 }
 
 // 新增 _ValidationFileRow 类
@@ -2684,7 +2911,6 @@ class _ValidationFileRow {
     required this.groupExpanded,
     required this.group,
     required this.groupIndex,
-    this.groupIndexByPath,
   });
 
   final DetectionItem item;
@@ -2692,7 +2918,18 @@ class _ValidationFileRow {
   final bool groupExpanded;
   final _ValidationMediaGroup group;
   final int groupIndex;
-  final int? groupIndexByPath;
+}
+
+class _ValidationGroupIndexEntry {
+  const _ValidationGroupIndexEntry({
+    required this.index,
+    required this.group,
+    required this.signature,
+  });
+
+  final int index;
+  final _ValidationMediaGroup group;
+  final String signature;
 }
 
 class _ValidationGroupContext {
@@ -2712,6 +2949,16 @@ class _ValidationGroupContext {
 class _SpeciesVote {
   int count = 0;
   int validatedCount = 0;
+}
+
+class _MediaTimestampCacheEntry {
+  const _MediaTimestampCacheEntry({
+    required this.cacheKey,
+    required this.timestamp,
+  });
+
+  final String cacheKey;
+  final DateTime? timestamp;
 }
 
 class _DetectionSummary {

@@ -11,6 +11,7 @@ class NeriSettings {
     required this.speciesTypes,
     required this.settings,
     required this.gpuAvailable,
+    required this.missingYoloDependencies,
     this.selectedModel,
     this.selectedClassificationModel,
   });
@@ -52,6 +53,11 @@ class NeriSettings {
         json['settings'] as Map<String, dynamic>? ?? const {},
       ),
       gpuAvailable: json['gpu_available'] as bool? ?? false,
+      missingYoloDependencies:
+          (json['missing_yolo_dependencies'] as List<dynamic>? ??
+                  const <dynamic>[])
+              .map((item) => item.toString())
+              .toList(),
     );
   }
 
@@ -68,6 +74,7 @@ class NeriSettings {
   final Map<String, String> speciesTypes;
   final Map<String, dynamic> settings;
   final bool gpuAvailable;
+  final List<String> missingYoloDependencies;
 
   NeriSettings copyWith({
     String? appTitle,
@@ -83,6 +90,7 @@ class NeriSettings {
     Map<String, String>? speciesTypes,
     Map<String, dynamic>? settings,
     bool? gpuAvailable,
+    List<String>? missingYoloDependencies,
   }) {
     return NeriSettings(
       appTitle: appTitle ?? this.appTitle,
@@ -103,6 +111,8 @@ class NeriSettings {
       speciesTypes: speciesTypes ?? this.speciesTypes,
       settings: settings ?? this.settings,
       gpuAvailable: gpuAvailable ?? this.gpuAvailable,
+      missingYoloDependencies:
+          missingYoloDependencies ?? this.missingYoloDependencies,
     );
   }
 }

@@ -72,7 +72,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _previewLoading = false;
   bool _validationBusy = false;
   int _validationBusyRequests = 0;
-  final Set<String> _pendingStartJobIds = <String>{};
+  final Map<String, int> _pendingStartJobBaselines = <String, int>{};
   final Set<String> _pendingStopJobIds = <String>{};
   bool _useFp16 = false;
   bool _previewShowDetections = true;
@@ -187,24 +187,30 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   bool get _jobTransitionBusy =>
-      _pendingStartJobIds.isNotEmpty || _pendingStopJobIds.isNotEmpty;
+      _pendingStartJobBaselines.isNotEmpty || _pendingStopJobIds.isNotEmpty;
+
+  bool get _jobProcessingBusy => _jobs.any((job) => job.isWorkerActive);
 
   void _syncJobTransitionState(List<ProcessingJob> jobs) {
-    if (_pendingStartJobIds.isEmpty && _pendingStopJobIds.isEmpty) return;
+    if (_pendingStartJobBaselines.isEmpty && _pendingStopJobIds.isEmpty) {
+      return;
+    }
     final jobsById = {for (final job in jobs) job.id: job};
     var changed = false;
 
-    final beforeStartCount = _pendingStartJobIds.length;
-    _pendingStartJobIds.removeWhere((id) {
+    final beforeStartCount = _pendingStartJobBaselines.length;
+    _pendingStartJobBaselines.removeWhere((id, baselineProcessed) {
       final job = jobsById[id];
-      return job == null || !job.isActive || job.processed > 0;
+      return job == null ||
+          !job.isWorkerActive ||
+          job.processed > baselineProcessed;
     });
-    changed = changed || _pendingStartJobIds.length != beforeStartCount;
+    changed = changed || _pendingStartJobBaselines.length != beforeStartCount;
 
     final beforeStopCount = _pendingStopJobIds.length;
     _pendingStopJobIds.removeWhere((id) {
       final job = jobsById[id];
-      return job == null || !job.isActive;
+      return job == null || !job.isWorkerActive;
     });
     changed = changed || _pendingStopJobIds.length != beforeStopCount;
 
@@ -482,7 +488,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings()
           : _settings;
-      final jobs = await widget.apiClient.listJobs();
+      final summariesOnly = silent && _jobProcessingBusy;
+      var jobs = await widget.apiClient.listJobs(
+        includeResults: !summariesOnly,
+      );
+      if (summariesOnly && jobs.every((job) => !job.isWorkerActive)) {
+        jobs = await widget.apiClient.listJobs();
+      } else if (summariesOnly) {
+        jobs = _mergeJobSummariesWithCachedResults(jobs);
+      }
       if (!mounted || settings == null) return;
       _syncJobTransitionState(jobs);
 
@@ -496,6 +510,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           if (_jobs[i].id != jobs[i].id ||
               _jobs[i].state != jobs[i].state ||
               _jobs[i].processed != jobs[i].processed ||
+              _jobs[i].active != jobs[i].active ||
               _jobs[i].results.length != jobs[i].results.length ||
               _jobs[i].message != jobs[i].message ||
               _jobs[i].error != jobs[i].error ||
@@ -506,7 +521,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         }
       }
 
-      final previewJobUpdates = jobsChanged
+      final previewJobUpdates = jobsChanged && !summariesOnly
           ? _jobResultsForInputPath(jobs, _inputController.text.trim())
           : const <DetectionItem>[];
 
@@ -577,6 +592,33 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() => _loading = false);
       if (!silent) _showSnackBar('无法连接 Python 后端：$error');
     }
+  }
+
+  List<ProcessingJob> _mergeJobSummariesWithCachedResults(
+    List<ProcessingJob> summaries,
+  ) {
+    final cachedById = {for (final job in _jobs) job.id: job};
+    return [
+      for (final summary in summaries)
+        if (summary.results.isEmpty &&
+            (cachedById[summary.id]?.results.isNotEmpty ?? false))
+          ProcessingJob(
+            id: summary.id,
+            state: summary.state,
+            inputDir: summary.inputDir,
+            createdAt: summary.createdAt,
+            updatedAt: summary.updatedAt,
+            outputDir: summary.outputDir,
+            total: summary.total,
+            processed: summary.processed,
+            message: summary.message,
+            results: cachedById[summary.id]!.results,
+            error: summary.error,
+            active: summary.active,
+          )
+        else
+          summary,
+    ];
   }
 
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
@@ -762,7 +804,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         selectedSpeciesNames: _selectedSpeciesNames(),
       );
       if (mounted && createdJob.id.isNotEmpty) {
-        setState(() => _pendingStartJobIds.add(createdJob.id));
+        setState(() {
+          _pendingStartJobBaselines[createdJob.id] = createdJob.processed;
+        });
       }
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
@@ -792,12 +836,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _resumeJob(ProcessingJob job) async {
+    if (mounted && job.id.isNotEmpty) {
+      setState(() {
+        _pendingStartJobBaselines[job.id] = job.processed;
+      });
+    }
     try {
       await widget.apiClient.resumeJob(job.id);
       await _refresh(silent: true);
       _showSnackBar('已继续任务');
     } catch (error) {
       if (!mounted) return;
+      setState(() => _pendingStartJobBaselines.remove(job.id));
       _showSnackBar('继续任务失败：$error');
     }
   }
@@ -1195,6 +1245,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                     _previewLoading ||
                     _previewDetecting ||
                     _submitting ||
+                    _jobProcessingBusy ||
                     _jobTransitionBusy ||
                     _validationBusy)
                 ? const LinearProgressIndicator() // 移除 ExcludeSemantics
@@ -1301,6 +1352,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onResumeJob: _resumeJob,
       onDeleteJob: _deleteJob,
       onClearJobs: _clearJobs,
+      pendingStartJobIds: _pendingStartJobBaselines.keys.toSet(),
+      pendingStopJobIds: _pendingStopJobIds,
       jobs: _jobs,
     );
   }
@@ -1318,9 +1371,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildPreviewPage() {
     final inputPath = _inputController.text.trim();
-    final jobResults = _jobs.expand((job) => job.results).toList();
     final items = inputPath.isEmpty
-        ? _sortMediaItemsForDisplay(jobResults)
+        ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
         : _previewItems;
     final selectedIndex = _safePreviewIndex(items);
     final selectedItem = items.isEmpty ? null : items[selectedIndex];
@@ -1355,9 +1407,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildValidationPage() {
     final inputPath = _inputController.text.trim();
-    final jobResults = _jobs.expand((job) => job.results).toList();
     final items = inputPath.isEmpty
-        ? _sortMediaItemsForDisplay(jobResults)
+        ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
         : _previewItems;
 
     return SpeciesValidationScreen(
@@ -1370,6 +1421,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       collapseGroups: _boolSetting(
         _settingsOrEmpty(),
         'collapse_groups',
+        false,
+      ),
+      autoGroupDetectBurst: _boolSetting(
+        _settingsOrEmpty(),
+        'auto_group_detect_burst',
         false,
       ),
       autoGroupBurstSize: _intSetting(
@@ -1429,6 +1485,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           speciesTypes: <String, String>{},
           settings: <String, dynamic>{},
           gpuAvailable: false,
+          missingYoloDependencies: <String>[],
         );
   }
 }

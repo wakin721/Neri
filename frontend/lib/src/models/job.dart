@@ -130,6 +130,7 @@ class ProcessingJob {
     this.message = '',
     this.results = const <DetectionItem>[],
     this.error,
+    this.active = false,
   });
 
   factory ProcessingJob.fromJson(Map<String, dynamic> json) {
@@ -146,6 +147,7 @@ class ProcessingJob {
           .map(DetectionItem.fromJson)
           .toList(),
       error: json['error'] as String?,
+      active: json['active'] as bool? ?? false,
       createdAt: json['created_at'] as String? ?? '',
       updatedAt: json['updated_at'] as String? ?? '',
     );
@@ -160,10 +162,12 @@ class ProcessingJob {
   final String message;
   final List<DetectionItem> results;
   final String? error;
+  final bool active;
   final String createdAt;
   final String updatedAt;
 
   double get progress => total == 0 ? 0 : processed / total;
   bool get isActive => state == 'queued' || state == 'running';
-  bool get canResume => state == 'cancelled' || state == 'failed';
+  bool get isWorkerActive => isActive || active;
+  bool get canResume => !active && (state == 'cancelled' || state == 'failed');
 }

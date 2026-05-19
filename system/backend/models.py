@@ -55,6 +55,7 @@ class SettingsResponse(BaseModel):
     selected_classification_model: str | None = None
     species_types: dict[str, str] = Field(default_factory=dict)
     gpu_available: bool = False
+    missing_yolo_dependencies: list[str] = Field(default_factory=list)
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -203,5 +204,6 @@ class JobSummary(BaseModel):
     message: str = ""
     results: list[DetectionItem] = Field(default_factory=list)
     error: str | None = None
+    active: bool = False
     created_at: str
     updated_at: str

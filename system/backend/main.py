@@ -131,6 +131,7 @@ def settings() -> SettingsResponse:
         selected_classification_model=selected_classification_model,
         species_types=load_species_types(),
         gpu_available=detect_gpu_available(),
+        missing_yolo_dependencies=missing_yolo_dependencies(),
         settings=stored_settings,
     )
 
@@ -333,10 +334,13 @@ def export_validation(request: ValidationExportRequest) -> ValidationExportRespo
 
 
 @app.get("/api/jobs", response_model=list[JobSummary])
-def list_jobs() -> list[JobSummary]:
+def list_jobs(include_results: bool = Query(True)) -> list[JobSummary]:
     """List all jobs known to this backend process."""
 
-    return job_manager.list_jobs()
+    jobs = job_manager.list_jobs()
+    if include_results:
+        return jobs
+    return [job.model_copy(update={"results": []}, deep=True) for job in jobs]
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobSummary)

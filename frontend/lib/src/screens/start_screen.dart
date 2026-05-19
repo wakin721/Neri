@@ -32,6 +32,8 @@ class StartScreen extends StatelessWidget {
     required this.onResumeJob,
     required this.onDeleteJob,
     required this.onClearJobs,
+    required this.pendingStartJobIds,
+    required this.pendingStopJobIds,
     required this.jobs,
     super.key,
   });
@@ -58,6 +60,8 @@ class StartScreen extends StatelessWidget {
   final ValueChanged<ProcessingJob> onResumeJob;
   final ValueChanged<ProcessingJob> onDeleteJob;
   final VoidCallback onClearJobs;
+  final Set<String> pendingStartJobIds;
+  final Set<String> pendingStopJobIds;
   final List<ProcessingJob> jobs;
 
   @override
@@ -93,6 +97,8 @@ class StartScreen extends StatelessWidget {
           onResumeJob: onResumeJob,
           onDeleteJob: onDeleteJob,
           onClearJobs: onClearJobs,
+          pendingStartJobIds: pendingStartJobIds,
+          pendingStopJobIds: pendingStopJobIds,
         ),
       ],
     );
@@ -530,6 +536,8 @@ class _JobsCard extends StatelessWidget {
     required this.onResumeJob,
     required this.onDeleteJob,
     required this.onClearJobs,
+    required this.pendingStartJobIds,
+    required this.pendingStopJobIds,
   });
 
   final List<ProcessingJob> jobs;
@@ -537,6 +545,8 @@ class _JobsCard extends StatelessWidget {
   final ValueChanged<ProcessingJob> onResumeJob;
   final ValueChanged<ProcessingJob> onDeleteJob;
   final VoidCallback onClearJobs;
+  final Set<String> pendingStartJobIds;
+  final Set<String> pendingStopJobIds;
 
   @override
   Widget build(BuildContext context) {
@@ -564,9 +574,16 @@ class _JobsCard extends StatelessWidget {
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
     return ExpansionTile(
       leading: Icon(_jobIcon(job.state)),
-      title: Text(job.message.isEmpty ? job.inputDir : job.message),
-      subtitle: LinearProgressIndicator(
-        value: job.total == 0 && job.isActive ? null : job.progress,
+      title: Text(job.inputDir, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (job.message.isNotEmpty) ...[
+            Text(job.message, maxLines: 1, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 8),
+          ],
+          LinearProgressIndicator(value: _jobProgressValue(job)),
+        ],
       ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -622,6 +639,15 @@ class _JobsCard extends StatelessWidget {
           ),
       ],
     );
+  }
+
+  double? _jobProgressValue(ProcessingJob job) {
+    if (pendingStartJobIds.contains(job.id) ||
+        pendingStopJobIds.contains(job.id)) {
+      return null;
+    }
+    if (job.total == 0 && job.isActive) return null;
+    return job.progress;
   }
 
   IconData _jobIcon(String state) {
