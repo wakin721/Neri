@@ -9,7 +9,10 @@ class SelectableListCard<T> extends StatelessWidget {
     this.subtitleBuilder,
     this.leadingBuilder,
     this.trailingBuilder,
+<<<<<<< HEAD
     this.tileColorBuilder,
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     this.isSelected,
     this.menuChildrenBuilder,
     this.menuStyle,
@@ -26,7 +29,10 @@ class SelectableListCard<T> extends StatelessWidget {
   final String? Function(T item)? subtitleBuilder;
   final Widget Function(T item)? leadingBuilder;
   final Widget? Function(T item)? trailingBuilder;
+<<<<<<< HEAD
   final Color? Function(int index, T item)? tileColorBuilder;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   final bool Function(int index, T item)? isSelected;
   final List<Widget> Function(BuildContext context, int index, T item)?
   menuChildrenBuilder;
@@ -76,7 +82,10 @@ class SelectableListCard<T> extends StatelessWidget {
                   : () => onLongPress!(index, item),
               child: ListTile(
                 selected: selected,
+<<<<<<< HEAD
                 tileColor: tileColorBuilder?.call(index, item),
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                 leading: leadingBuilder?.call(item),
                 title: Text(
                   titleBuilder(item),
@@ -114,4 +123,8 @@ class SelectableListCard<T> extends StatelessWidget {
       ),
     );
   }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d

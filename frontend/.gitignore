@@ -1,50 +1,45 @@
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
 
-res/demo/
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.venv/
-venv/
-env/
-ENV/
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
 
-# Build outputs
-build/
-dist/
-
-# Flutter / Dart
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
 .dart_tool/
-.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
+/build/
+/coverage/
 
-# IDE and OS files
-.idea/
-*.iml
-.DS_Store
-Thumbs.db
-.vs/
+# Symbolication related
+app.*.symbols
 
-# =========================
-# Custom Exclusions
-# =========================
-toolkit/
-app/
-temp/
+# Obfuscation related
+app.*.map.json
 
-# 忽略 frontend 文件夹下的所有内容，但保留 lib 文件夹
-frontend/*
-!frontend/lib/
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release

@@ -68,6 +68,7 @@ class NeriSettings {
   final Map<String, String> speciesTypes;
   final Map<String, dynamic> settings;
   final bool gpuAvailable;
+<<<<<<< HEAD
 
   NeriSettings copyWith({
     String? appTitle,
@@ -105,6 +106,8 @@ class NeriSettings {
       gpuAvailable: gpuAvailable ?? this.gpuAvailable,
     );
   }
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 }
 
 class ModelInfo {

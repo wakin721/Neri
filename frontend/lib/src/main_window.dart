@@ -66,11 +66,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   Timer? _timer;
   Timer? _previewRefreshTimer;
+<<<<<<< HEAD
   int _previewRefreshRequestId = 0;
   bool _loading = true;
   bool _submitting = false;
   bool _previewLoading = false;
   bool _validationBusy = false;
+=======
+  bool _loading = true;
+  bool _submitting = false;
+  bool _previewLoading = false;
+  bool _enableDetection = false;
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   bool _useFp16 = false;
   bool _previewShowDetections = true;
   bool _previewDetecting = false;
@@ -80,9 +87,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   double _previewConfidenceThreshold = 0.25;
   String _previewSpeciesFilter = previewAllSpeciesLabel;
   String? _selectedModelPath;
+<<<<<<< HEAD
   String? _selectedClassificationModelPath;
   String _videoMode = 'all';
   int _vidStride = 1;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   String? _previewLoadedPath;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
@@ -166,7 +176,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final messenger = ScaffoldMessenger.maybeOf(context);
       if (messenger == null) return;
       messenger.clearSnackBars();
+<<<<<<< HEAD
 
+=======
+      
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       final controller = messenger.showSnackBar(
         SnackBar(
           content: Text(message),
@@ -186,14 +200,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshTimer?.cancel();
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
+<<<<<<< HEAD
       _previewRefreshRequestId++;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       if (!mounted) return;
       setState(() {
         _previewItems = const <DetectionItem>[];
         _previewMetadataCache.clear();
         _previewMetadataLoading.clear();
         _previewLoadedPath = null;
+<<<<<<< HEAD
         _previewLoading = false;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       });
       return;
     }
@@ -212,6 +232,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       return;
     }
 
+<<<<<<< HEAD
     final requestId = ++_previewRefreshRequestId;
     if (!mounted) return;
     setState(() {
@@ -224,10 +245,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _selectedPreviewIndex = 0;
       }
     });
+=======
+    if (!mounted) return;
+    setState(() => _previewLoading = true);
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
     try {
       final items = await widget.apiClient.fetchPreviewItems(
         inputPath: inputPath,
+<<<<<<< HEAD
         includeCached: false,
       );
       if (!mounted ||
@@ -278,6 +304,27 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (_) {
       // Cached detection data is a background enhancement; the fast file list
       // should remain usable if a legacy database is slow or unreadable.
+=======
+      );
+      if (!mounted || _inputController.text.trim() != inputPath) return;
+      setState(() {
+        _previewItems = items;
+        _previewMetadataCache.clear();
+        _previewMetadataLoading.clear();
+        _previewLoadedPath = inputPath;
+        _selectedPreviewIndex = _safePreviewIndex(items);
+      });
+      if (items.isNotEmpty) {
+        unawaited(_loadPreviewMetadata(items[_selectedPreviewIndex]));
+      }
+    } catch (error) {
+      if (!mounted || _inputController.text.trim() != inputPath) return;
+      _showSnackBar('无法读取输入文件夹预览：$error');
+    } finally {
+      if (mounted && _inputController.text.trim() == inputPath) {
+        setState(() => _previewLoading = false);
+      }
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     }
   }
 
@@ -295,6 +342,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         inputPath: _inputController.text.trim(),
       );
       if (!mounted) return;
+<<<<<<< HEAD
       setState(() {
         _previewMetadataCache[item.path] = fullItem;
         _previewItems = _sortMediaItemsForDisplay(
@@ -306,6 +354,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               .toList(),
         );
       });
+=======
+      setState(() => _previewMetadataCache[item.path] = fullItem);
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     } catch (_) {
       // Fast preview data is still usable if per-file metadata is unavailable.
     } finally {
@@ -313,6 +364,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
+<<<<<<< HEAD
   List<DetectionItem> _mergePreviewItems(
     List<DetectionItem> currentItems,
     List<DetectionItem> updates,
@@ -445,11 +497,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     bool silent = false,
     bool reloadSettings = false,
   }) async {
+=======
+  DetectionItem _resolvedPreviewItem(DetectionItem item) {
+    return _previewMetadataCache[item.path] ?? item;
+  }
+
+  Future<void> _refresh({bool silent = false}) async {
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     if (!silent) {
       setState(() => _loading = true);
     }
 
     try {
+<<<<<<< HEAD
       final shouldFetchSettings =
           reloadSettings || !silent || _settings == null;
       final settings = shouldFetchSettings
@@ -461,6 +521,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final firstLoad = _settings == null && shouldFetchSettings;
 
       final settingsChanged = shouldFetchSettings;
+=======
+      final settings = await widget.apiClient.fetchSettings();
+      final jobs = await widget.apiClient.listJobs();
+      if (!mounted) return;
+
+      final firstLoad = _settings == null;
+      
+      // 深度比较，避免每次轮询都触发全局重绘
+      bool settingsChanged = firstLoad ||
+          _settings?.appVersion != settings.appVersion ||
+          _settings?.selectedModel != settings.selectedModel;
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
       bool jobsChanged = _jobs.length != jobs.length;
       if (!jobsChanged) {
@@ -468,16 +540,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           if (_jobs[i].id != jobs[i].id ||
               _jobs[i].state != jobs[i].state ||
               _jobs[i].processed != jobs[i].processed ||
+<<<<<<< HEAD
               _jobs[i].results.length != jobs[i].results.length ||
               _jobs[i].message != jobs[i].message ||
               _jobs[i].error != jobs[i].error ||
               _jobs[i].updatedAt != jobs[i].updatedAt) {
+=======
+              _jobs[i].results.length != jobs[i].results.length) {
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
             jobsChanged = true;
             break;
           }
         }
       }
 
+<<<<<<< HEAD
       final previewJobUpdates = jobsChanged
           ? _jobResultsForInputPath(jobs, _inputController.text.trim())
           : const <DetectionItem>[];
@@ -487,6 +564,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           if (settingsChanged) {
             _settings = settings;
           }
+=======
+      if (settingsChanged || jobsChanged) {
+        setState(() {
+          _settings = settings;
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           final modelPaths = settings.availableModels
               .map((model) => model.path)
               .toSet();
@@ -498,6 +580,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                     ? null
                     : settings.availableModels.first.path);
           }
+<<<<<<< HEAD
           final classificationModelPaths = settings
               .availableClassificationModels
               .map((model) => model.path)
@@ -510,12 +593,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             _selectedClassificationModelPath =
                 settings.selectedClassificationModel ?? '';
           }
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           if (firstLoad) {
             _confidence = _doubleSetting(settings, 'confidence', _confidence);
             _iou = _doubleSetting(settings, 'iou', _iou);
             _useFp16 =
                 settings.gpuAvailable &&
                 _boolSetting(settings, 'use_fp16', _useFp16);
+<<<<<<< HEAD
             _videoMode =
                 _stringSetting(settings, 'video_mode', _videoMode) == 'fast'
                 ? 'fast'
@@ -537,6 +623,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             }
             _selectedPreviewIndex = _safePreviewIndex(_previewItems);
           }
+=======
+          }
+          _jobs = jobs;
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         });
       }
 
@@ -558,13 +648,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() {
         _settings = saved;
         _selectedModelPath = saved.selectedModel ?? _selectedModelPath;
+<<<<<<< HEAD
         _selectedClassificationModelPath =
             saved.selectedClassificationModel ??
             _selectedClassificationModelPath;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         _confidence = _doubleSetting(saved, 'confidence', _confidence);
         _iou = _doubleSetting(saved, 'iou', _iou);
         _useFp16 =
             saved.gpuAvailable && _boolSetting(saved, 'use_fp16', _useFp16);
+<<<<<<< HEAD
         _videoMode = _stringSetting(saved, 'video_mode', _videoMode) == 'fast'
             ? 'fast'
             : 'all';
@@ -573,6 +667,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           'vid_stride',
           _vidStride,
         ).clamp(1, 120).toInt();
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       });
       _showSnackBar('设置已保存');
     } catch (error) {
@@ -595,6 +691,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return fallback;
   }
 
+<<<<<<< HEAD
   int _intSetting(NeriSettings settings, String key, int fallback) {
     final value = settings.settings[key];
     if (value is num) return value.toInt();
@@ -640,6 +737,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return _stringSetting(_settingsOrEmpty(), 'pytorch_version', '自动检测');
   }
 
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   List<String> _stringListSetting(
     NeriSettings settings,
     String key,
@@ -721,6 +820,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       await widget.apiClient.createJob(
         inputDir: inputPath,
         modelPath: _selectedModelPath,
+<<<<<<< HEAD
         classificationModelPath: _selectedClassificationModelPath,
         confidence: _confidence,
         iou: _iou,
@@ -731,6 +831,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
         enableDetection: true,
+=======
+        confidence: _confidence,
+        iou: _iou,
+        useFp16: _useFp16,
+        enableDetection: _enableDetection,
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         selectedSpeciesNames: _selectedSpeciesNames(),
       );
       await _refresh(silent: true);
@@ -738,13 +844,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showSnackBar('任务已提交');
     } catch (error) {
       if (!mounted) return;
+<<<<<<< HEAD
       if (await _handleYoloDependencyError(error)) return;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       _showSnackBar('创建任务失败：$error');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
   }
 
+<<<<<<< HEAD
   Future<void> _cancelJob(ProcessingJob job) async {
     try {
       await widget.apiClient.cancelJob(job.id);
@@ -840,12 +950,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return true;
   }
 
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   Future<void> _detectCurrentPreviewImage(DetectionItem item) async {
     setState(() => _previewDetecting = true);
     try {
       await widget.apiClient.createJob(
         inputDir: item.path,
         modelPath: _selectedModelPath,
+<<<<<<< HEAD
         classificationModelPath: _selectedClassificationModelPath,
         confidence: _previewConfidenceThreshold,
         iou: _iou,
@@ -855,6 +968,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         batchSize: _processingBatchSize(singleFile: true),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
+=======
+        confidence: _previewConfidenceThreshold,
+        iou: _iou,
+        useFp16: _useFp16,
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         enableDetection: true,
         selectedSpeciesNames: _selectedSpeciesNames(),
       );
@@ -864,7 +982,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showSnackBar('已提交当前图像检测');
     } catch (error) {
       if (!mounted) return;
+<<<<<<< HEAD
       if (await _handleYoloDependencyError(error)) return;
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       _showSnackBar('检测当前图像失败：$error');
     } finally {
       if (mounted) setState(() => _previewDetecting = false);
@@ -882,6 +1003,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         await widget.apiClient.createJob(
           inputDir: item.path,
           modelPath: _selectedModelPath,
+<<<<<<< HEAD
           classificationModelPath: _selectedClassificationModelPath,
           confidence: confidence,
           iou: _iou,
@@ -891,16 +1013,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           batchSize: _processingBatchSize(singleFile: true),
           vidStride: _videoStride(),
           videoMode: _effectiveVideoMode(),
+=======
+          confidence: confidence,
+          iou: _iou,
+          useFp16: _useFp16,
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           enableDetection: true,
           selectedSpeciesNames: _selectedSpeciesNames(),
         );
       }
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
+<<<<<<< HEAD
     } catch (error) {
       if (!mounted) return;
       if (await _handleYoloDependencyError(error)) return;
       _showSnackBar('重新检测失败：$error');
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -931,6 +1061,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     if (!mounted) return updated;
     setState(() {
+<<<<<<< HEAD
       _cacheMarkedSpeciesTypes(speciesName, speciesType);
       _previewMetadataCache[updated.path] = updated;
       _previewItems = _sortMediaItemsForDisplay(
@@ -941,10 +1072,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             )
             .toList(),
       );
+=======
+      _previewMetadataCache[updated.path] = updated;
+      _previewItems = _previewItems
+          .map(
+            (previewItem) =>
+                previewItem.path == updated.path ? updated : previewItem,
+          )
+          .toList();
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     });
     return updated;
   }
 
+<<<<<<< HEAD
   Future<List<DetectionItem>> _markValidationItems(
     List<DetectionItem> items,
     String action, {
@@ -1026,6 +1167,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         .toList();
   }
 
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   void _openFileWithSystem(String path) {
     try {
       if (Platform.isWindows) {
@@ -1151,8 +1294,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           // 标题栏下方的全局进度条
           SizedBox(
             height: 4, // 固定高度防止页面抖动
+<<<<<<< HEAD
             child:
                 (_loading || _previewLoading || _submitting || _validationBusy)
+=======
+            child: (_loading || _previewLoading || _submitting)
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                 ? const LinearProgressIndicator() // 移除 ExcludeSemantics
                 : null,
           ),
@@ -1223,12 +1370,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     return candidates.first;
   }
+<<<<<<< HEAD
 
+=======
+  
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   Widget _buildTabWrapper(int tabIndex, Widget child) {
     final isActive = _selectedIndex == tabIndex;
     return ExcludeSemantics(
       excluding: !isActive,
+<<<<<<< HEAD
       child: FocusScope(canRequestFocus: isActive, child: child),
+=======
+      child: FocusScope(
+        canRequestFocus: isActive,
+        child: child,
+      ),
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     );
   }
 
@@ -1238,6 +1396,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       inputController: _inputController,
       selectedModelPath: _selectedModelPath,
       onModelChanged: (value) => setState(() => _selectedModelPath = value),
+<<<<<<< HEAD
       selectedClassificationModelPath: _selectedClassificationModelPath,
       onClassificationModelChanged: (value) =>
           setState(() => _selectedClassificationModelPath = value ?? ''),
@@ -1245,6 +1404,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onVideoModeChanged: (value) => setState(() => _videoMode = value),
       vidStride: _vidStride,
       onVidStrideChanged: (value) => setState(() => _vidStride = value),
+=======
+      enableDetection: _enableDetection,
+      onEnableDetectionChanged: (value) =>
+          setState(() => _enableDetection = value),
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       useFp16: _useFp16,
       onUseFp16Changed: (value) => setState(() => _useFp16 = value),
       confidence: _confidence,
@@ -1253,10 +1417,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onIouChanged: (value) => setState(() => _iou = value),
       submitting: _submitting,
       onCreateJob: _createJob,
+<<<<<<< HEAD
       onCancelJob: _cancelJob,
       onResumeJob: _resumeJob,
       onDeleteJob: _deleteJob,
       onClearJobs: _clearJobs,
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       jobs: _jobs,
     );
   }
@@ -1275,9 +1442,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget _buildPreviewPage() {
     final inputPath = _inputController.text.trim();
     final jobResults = _jobs.expand((job) => job.results).toList();
+<<<<<<< HEAD
     final items = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(jobResults)
         : _previewItems;
+=======
+    final rawItems = inputPath.isEmpty ? jobResults : _previewItems;
+    final items = rawItems.map(_resolvedPreviewItem).toList();
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final selectedIndex = _safePreviewIndex(items);
     final selectedItem = items.isEmpty ? null : items[selectedIndex];
 
@@ -1310,15 +1482,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget _buildValidationPage() {
     final inputPath = _inputController.text.trim();
     final jobResults = _jobs.expand((job) => job.results).toList();
+<<<<<<< HEAD
     final items = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(jobResults)
         : _previewItems;
+=======
+    final sourceItems = inputPath.isEmpty ? jobResults : _previewItems;
+    final items = sourceItems.map(_resolvedPreviewItem).toList();
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
     return SpeciesValidationScreen(
       apiClient: widget.apiClient,
       inputPath: inputPath,
       items: items,
+<<<<<<< HEAD
       refreshVersion: _previewRefreshRequestId,
+=======
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       autoGroup: _boolSetting(_settingsOrEmpty(), 'auto_group', true),
       autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
@@ -1345,6 +1525,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onLoadMetadata: _loadPreviewMetadata,
       onOpenExternal: _openFileWithSystem,
       onMarkItem: _markValidationItem,
+<<<<<<< HEAD
       onMarkItems: _markValidationItems,
       onQuickMarkUsed: _recordQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
@@ -1352,6 +1533,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (_validationBusy == value || !mounted) return;
         setState(() => _validationBusy = value);
       },
+=======
+      onQuickMarkUsed: _recordQuickMarkUsage,
+      onRedetectItems: _redetectValidationItems,
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     );
   }
 
@@ -1636,4 +1821,8 @@ class _NativeNavigationRailPanel extends StatelessWidget {
 late final PageController _pageController = PageController(
   initialPage: 0,
   keepPage: true,
+<<<<<<< HEAD
 );
+=======
+);
+>>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
