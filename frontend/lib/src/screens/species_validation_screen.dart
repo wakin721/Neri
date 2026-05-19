@@ -444,6 +444,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       null => 0.5,
     };
 
+    // 添加这一行，解析出用于底部交互的 visibleItems
+    final visibleItems = _itemsFromRows(visibleRows);
+
     return LayoutBuilder(
       builder: (context, constraints) {
         const gap = 10.0;
@@ -518,7 +521,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       }
                       return row.item.filename;
                     },
-                    subtitleBuilder: _fileListSubtitle,
+                    subtitleBuilder: (row) => _fileListSubtitle(
+                      row.item,
+                      groupIndexByPath,
+                      buckets,
+                    ),
                     tileColorBuilder: (index, row) {
                       if (!widget.autoGroup) return null;
                       final groupIndex =
@@ -529,6 +536,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         alpha: 0.42,
                       );
                     },
+                    // 修改：重构冗余声明并修复错乱的变量(expandedGroup等)
                     trailingBuilder: (row) {
                       final selected = _isRowSelected(row);
                       final hasError = row.isGroupHeader
@@ -539,10 +547,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       final showDownArrow =
                           row.isGroupHeader && !row.groupExpanded && !selected;
                       final showUpArrow =
-                          row.isGroupHeader && row.groupExpanded;
-                      final showUpArrow =
                           row.isGroupHeader && row.groupExpanded && !selected;
-                     if (!selected &&
+                      
+                      if (!selected &&
                           !hasError &&
                           !showDownArrow &&
                           !showUpArrow) {
@@ -552,7 +559,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (hasError)
-                            if (showDownArrow || showUpArrow) ...[
+                            Icon(Icons.error_outline_rounded, color: colorScheme.error, size: 20),
+                          if (showDownArrow || showUpArrow) ...[
                             if (hasError) const SizedBox(width: 6),
                             Icon(
                               showDownArrow
@@ -563,7 +571,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                             ),
                           ],
                           if (selected) ...[
-                            if (hasError || collapsedGroup || expandedGroup)
+                            if (hasError || row.isGroupHeader)
                               const SizedBox(width: 6),
                             Icon(
                               Icons.check_circle_rounded,
@@ -574,18 +582,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         ],
                       );
                     },
-                    onSelected: (index, item) {
+                    onSelected: (index, row) {
                       setState(() => _activeList = _ValidationListFocus.photos);
-                      _selectItemWithKeyboard(item, visibleItems);
+                      _selectItemWithKeyboard(row.item, visibleItems);
                     },
-                    onMenuOpening: (index, item) {
-                      _prepareBatchContextMenu(item);
+                    onMenuOpening: (index, row) {
+                      _prepareBatchContextMenu(row.item);
                     },
-                    menuChildrenBuilder: (context, index, item) {
-                      return _buildBatchMenuChildren(item, visibleItems);
+                    menuChildrenBuilder: (context, index, row) {
+                      return _buildBatchMenuChildren(row.item, visibleItems);
                     },
-                    onLongPress: (index, item) {
-                      _toggleItemSelection(item);
+                    onLongPress: (index, row) {
+                      _toggleItemSelection(row.item);
                     },
                   ),
                 ),
@@ -2167,7 +2175,101 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (mounted) setState(() => _exporting = false);
     }
   }
+
+  List<_ValidationFileRow> _visibleRows(List<_SpeciesBucket> buckets) {
+    if (_selectedBucketKey == null) return const [];
+    final bucket = _selectedBucketFrom(buckets);
+    final rows = <_ValidationFileRow>[];
+
+    for (var index = 0; index < bucket.groups.length; index++) {
+      final group = bucket.groups[index];
+      if (group.items.isEmpty) continue;
+
+      final signature = _groupSignature(group);
+      final expanded = _expandedGroupSignatures.contains(signature);
+      final isGroup = _useCollapsedGroups && group.items.length > 1;
+
+      if (isGroup) {
+        rows.add(_ValidationFileRow(
+          item: group.items.first,
+          isGroupHeader: true,
+          groupExpanded: expanded,
+          group: group,
+          groupIndex: index,
+          groupIndexByPath: index,
+        ));
+
+        if (expanded) {
+          for (final item in group.items) {
+            rows.add(_ValidationFileRow(
+              item: item,
+              isGroupHeader: false,
+              groupExpanded: true,
+              group: group,
+              groupIndex: index,
+              groupIndexByPath: index,
+            ));
+          }
+        }
+      } else {
+        for (final item in group.items) {
+          rows.add(_ValidationFileRow(
+            item: item,
+            isGroupHeader: false,
+            groupExpanded: false,
+            group: group,
+            groupIndex: index,
+            groupIndexByPath: index,
+          ));
+        }
+      }
+    }
+    return rows;
+  }
+
+  List<DetectionItem> _itemsFromRows(List<_ValidationFileRow> rows) {
+    return rows.map((r) => r.item).toList();
+  }
+
+  bool _hasVisibleSelection(List<_ValidationFileRow> rows) {
+    if (_selectedPath == null) return false;
+    return rows.any((row) =>
+        row.item.path == _selectedPath ||
+        (row.isGroupHeader &&
+            !row.groupExpanded &&
+            row.group.items.any((item) => item.path == _selectedPath)));
+  }
+
+  void _applyRowSelection(_ValidationFileRow row) {
+    _selectedPath = row.item.path;
+    _selectedPaths
+      ..clear()
+      ..add(row.item.path);
+    _selectionAnchorPath = row.item.path;
+  }
+
+  DetectionItem _selectedItemFromRows(List<_ValidationFileRow> rows) {
+    if (rows.isEmpty) {
+      if (widget.items.isEmpty) {
+        throw StateError('No validation item is available.');
+      }
+      return widget.items.first;
+    }
+    for (final row in rows) {
+      if (_isRowSelected(row)) return row.item;
+    }
+    return rows.first.item;
+  }
+
+  bool _isRowSelected(_ValidationFileRow row) {
+    if (row.isGroupHeader && !row.groupExpanded) {
+      return row.group.items.any((item) => item.path == _selectedPath);
+    }
+    return row.item.path == _selectedPath;
+  }
 }
+
+
 
 class _ValidationMenuSelect extends StatelessWidget {
   const _ValidationMenuSelect({
@@ -2371,6 +2473,25 @@ class _ValidationMediaGroup {
   const _ValidationMediaGroup(this.items);
 
   final List<DetectionItem> items;
+}
+
+// 新增 _ValidationFileRow 类
+class _ValidationFileRow {
+  const _ValidationFileRow({
+    required this.item,
+    required this.isGroupHeader,
+    required this.groupExpanded,
+    required this.group,
+    required this.groupIndex,
+    this.groupIndexByPath,
+  });
+
+  final DetectionItem item;
+  final bool isGroupHeader;
+  final bool groupExpanded;
+  final _ValidationMediaGroup group;
+  final int groupIndex;
+  final int? groupIndexByPath;
 }
 
 class _ValidationGroupContext {
