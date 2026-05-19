@@ -1,9 +1,6 @@
-<<<<<<< HEAD
 import 'dart:async';
 import 'dart:math' as math;
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
@@ -76,14 +73,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _dirty = false;
   bool _resettingDraft = false;
   bool _loadingModelClasses = false;
-<<<<<<< HEAD
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   Timer? _maintenanceTimer;
   String? _maintenanceOperation;
   String? _maintenanceMessage;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -108,10 +102,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-<<<<<<< HEAD
     _maintenanceTimer?.cancel();
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     _packageController.removeListener(_handlePackageChanged);
     _packageController.dispose();
     _newQuickMarkController.dispose();
@@ -135,10 +126,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'selected_classification_model',
         settings?.selectedClassificationModel ?? '',
       ),
-<<<<<<< HEAD
       'package_source': _stringSetting(saved, 'package_source', 'official'),
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'batch_size': settings?.gpuAvailable == true
@@ -147,11 +135,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'use_fp16':
           settings?.gpuAvailable == true &&
           _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
-<<<<<<< HEAD
       'use_augment': _boolSetting(saved, 'use_augment', true),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       'video_mode': _stringSetting(saved, 'video_mode', 'all'),
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
@@ -232,7 +217,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-<<<<<<< HEAD
   Future<void> _installPytorch() async {
     final envChoice = _string('pytorch_version', '自动检测');
     final packageSource = _string('package_source', 'official');
@@ -417,8 +401,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   @override
   Widget build(BuildContext context) {
     return Row(
@@ -470,7 +452,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         const VerticalDivider(width: 1),
         Expanded(
-<<<<<<< HEAD
           child: Column(
             children: [
               Padding(
@@ -484,14 +465,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   children: [_buildSelectedSection()],
                 ),
               ),
-=======
-          child: ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildSaveStrip(),
-              _buildSelectedSection(),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
             ],
           ),
         ),
@@ -604,12 +577,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _set('selected_classification_model', value),
                 ),
                 const SizedBox(height: 8),
-<<<<<<< HEAD
-=======
-                _MutedText(
-                  '分类模型目录：${settings?.classificationModelDirectory ?? 'res/model_cls'}',
-                ),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
               ],
             ),
           ),
@@ -676,7 +643,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-<<<<<<< HEAD
           _SettingsPanel(
             title: '高级检测选项',
             subtitle: 'TTA 可能提高准确率但会降低速度，NMS 控制跨类别框合并',
@@ -700,8 +666,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           ..._buildVideoSettingPanels(videoMode, strideLabel),
         ],
       ),
@@ -721,7 +685,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (_loadingModelClasses)
           const Padding(
             padding: EdgeInsets.only(bottom: 12),
-<<<<<<< HEAD
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
@@ -739,16 +702,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             summary: summary,
             onPressed: () => _showSpeciesSelectionDialog(speciesNames),
           ),
-=======
-            child: LinearProgressIndicator(),
-          ),
-        _SummaryDialogButton(
-          summary: summary,
-          onPressed: _loadingModelClasses
-              ? null
-              : () => _showSpeciesSelectionDialog(speciesNames),
-        ),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       ],
     );
   }
@@ -777,12 +730,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .where((item) => item.trim().isNotEmpty)
         .where((item) => optionSet.isEmpty || optionSet.contains(item))
         .toSet();
-<<<<<<< HEAD
     if (cleaned.isEmpty ||
         (options.isNotEmpty && cleaned.length >= options.length)) {
-=======
-    if (cleaned.isEmpty || (options.isNotEmpty && cleaned.length >= options.length)) {
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       return '全部识别';
     }
     return _selectionSummary(cleaned.toList(), emptyLabel: '全部识别');
@@ -904,7 +853,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   List<Widget> _buildVideoSettingPanels(String videoMode, String strideLabel) {
     return [
-<<<<<<< HEAD
       _SettingsPanel(
         title: '视频处理模式',
         subtitle: '全部识别会按帧间隔处理，快速识别只抽取关键帧',
@@ -990,62 +938,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
-=======
-          _SettingsPanel(
-            title: '视频处理模式',
-            subtitle: '全部识别会按帧间隔处理，快速识别只抽取关键帧',
-            icon: Icons.play_circle_outline_rounded,
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(
-                  value: 'all',
-                  icon: Icon(Icons.video_collection_rounded),
-                  label: Text('全部识别'),
-                ),
-                ButtonSegment(
-                  value: 'fast',
-                  icon: Icon(Icons.flash_on_rounded),
-                  label: Text('快速识别'),
-                ),
-              ],
-              selected: {videoMode},
-              onSelectionChanged: (selection) {
-                if (selection.isEmpty) return;
-                _set('video_mode', selection.first);
-              },
-            ),
-          ),
-          _SettingsPanel(
-            title: '跳帧设置',
-            subtitle: videoMode == 'all' ? '全部识别模式下表示帧间隔' : '快速识别模式下表示抽取检测的帧数',
-            icon: Icons.skip_next_rounded,
-            child: _LabeledSlider(
-              label: strideLabel,
-              value: _int('vid_stride').toDouble(),
-              min: 1,
-              max: 30,
-              divisions: 29,
-              valueLabel: _int('vid_stride').toString(),
-              onChanged: (value) => _set('vid_stride', value.round()),
-            ),
-          ),
-          _SettingsPanel(
-            title: '检测过滤',
-            subtitle: '设置检测到的最低帧数比例',
-            icon: Icons.filter_alt_rounded,
-            showDivider: false,
-            child: _LabeledSlider(
-              label: '最低帧数比例',
-              value: _double('min_frame_ratio'),
-              min: 0,
-              max: 0.30,
-              divisions: 30,
-              valueLabel: '${(_double('min_frame_ratio') * 100).round()}%',
-              onChanged: (value) => _set('min_frame_ratio', value),
-            ),
-          ),
-        ];
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   Widget _buildEnvironmentMaintenance() {
@@ -1055,7 +947,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       icon: Icons.construction_rounded,
       child: Column(
         children: [
-<<<<<<< HEAD
           if (_maintenanceInProgress) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: 'Python 包安装源',
@@ -1071,8 +962,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (value) => _set('package_source', value),
             ),
           ),
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           _SettingsPanel(
             title: '安装 PyTorch',
             subtitle: '选择安装环境后执行安装或修复',
@@ -1122,7 +1011,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-<<<<<<< HEAD
                   onPressed: _installingPytorch || _reinstallingPackage
                       ? null
                       : _installPytorch,
@@ -1133,23 +1021,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Text('安装'),
-=======
-                  onPressed: () => widget.onShowMessage(
-                    'Flutter 端暂未直接执行 PyTorch 安装，请在 Python GUI 或命令行中操作。',
-                  ),
-                  child: const Text('安装'),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                 ),
               ],
             ),
           ),
           _SettingsPanel(
             title: '重新安装单个 Python 包',
-<<<<<<< HEAD
             subtitle: '使用 toolkit\\python.exe 强制重新安装指定包',
-=======
-            subtitle: '包名可留空备用',
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
             icon: Icons.extension_rounded,
             showDivider: false,
             child: Row(
@@ -1159,11 +1037,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     controller: _packageController,
                     decoration: const InputDecoration(
                       labelText: '包名',
-<<<<<<< HEAD
                       hintText: '例如 numpy 或 numpy==1.26.4',
-=======
-                      hintText: '例如 numpy',
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                       border: OutlineInputBorder(),
                     ),
                     onChanged: (value) => _draft['package'] = value.trim(),
@@ -1171,7 +1045,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-<<<<<<< HEAD
                   onPressed: _installingPytorch || _reinstallingPackage
                       ? null
                       : _reinstallPythonPackage,
@@ -1182,17 +1055,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Text('重新安装'),
-=======
-                  onPressed: () {
-                    final package = _packageController.text.trim();
-                    widget.onShowMessage(
-                      package.isEmpty
-                          ? '已保留 Python 包维护入口，输入包名后可用于后续安装。'
-                          : 'Flutter 端暂未直接执行 pip 安装：$package',
-                    );
-                  },
-                  child: const Text('安装'),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                 ),
               ],
             ),
@@ -1286,15 +1148,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildQuickMarkEditor() {
-<<<<<<< HEAD
     final configuredMarks = _stringList('quick_mark_list');
     final autoSort = _bool('auto_sort');
     final marks = autoSort
         ? _autoSortedQuickMarks(configuredMarks)
         : configuredMarks;
-=======
-    final marks = _stringList('quick_mark_list');
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     return Column(
       children: [
         _SettingsPanel(
@@ -1305,20 +1163,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Align(
             alignment: Alignment.centerRight,
             child: Switch(
-<<<<<<< HEAD
               value: autoSort,
-=======
-              value: _bool('auto_sort'),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
               onChanged: (value) => _set('auto_sort', value),
             ),
           ),
         ),
         ...List.generate(marks.length, (index) {
-<<<<<<< HEAD
           final configuredIndex = configuredMarks.indexOf(marks[index]);
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
@@ -1333,14 +1184,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       border: OutlineInputBorder(),
                     ),
                     onChanged: (value) {
-<<<<<<< HEAD
                       if (configuredIndex < 0) return;
                       final next = _stringList('quick_mark_list');
                       next[configuredIndex] = value.trim();
-=======
-                      final next = _stringList('quick_mark_list');
-                      next[index] = value.trim();
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                       _draft['quick_mark_list'] = next;
                       _markDirty();
                     },
@@ -1349,14 +1195,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 IconButton(
                   tooltip: '删除',
                   onPressed: () {
-<<<<<<< HEAD
                     if (configuredIndex < 0) return;
                     final next = _stringList('quick_mark_list')
                       ..removeAt(configuredIndex);
-=======
-                    final next = _stringList('quick_mark_list')
-                      ..removeAt(index);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                     _set('quick_mark_list', next);
                   },
                   icon: const Icon(Icons.delete_outline_rounded),
@@ -1546,7 +1387,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-<<<<<<< HEAD
   List<String> _autoSortedQuickMarks(List<String> configuredMarks) {
     final usageCounts = _intMap('quick_mark_usage_counts');
     final history = _stringList('quick_mark_recent_history');
@@ -1587,8 +1427,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return sorted;
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   void _addQuickMark() {
     final value = _newQuickMarkController.text.trim();
     if (value.isEmpty) return;
@@ -1645,13 +1483,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return _stringListSetting(_draft, key, const <String>[]);
   }
 
-<<<<<<< HEAD
   Map<String, int> _intMap(String key) {
     return _intMapSetting(_draft, key);
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   String? _validModelValue(
     String value,
     List<ModelInfo> models, {
@@ -1677,18 +1512,14 @@ class _SettingsMenuButton<T> extends StatelessWidget {
     required this.options,
     required this.onChanged,
     this.placeholder = '请选择',
-<<<<<<< HEAD
     this.minMenuWidth = 180,
     this.maxMenuWidth = 360,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   });
 
   final T? value;
   final List<_SettingsOption<T>> options;
   final ValueChanged<T> onChanged;
   final String placeholder;
-<<<<<<< HEAD
   final double minMenuWidth;
   final double maxMenuWidth;
 
@@ -1767,26 +1598,6 @@ class _SettingsMenuButton<T> extends StatelessWidget {
     }
     return null;
   }
-=======
-
-  @override
-  Widget build(BuildContext context) {
-    return DropdownMenu<T>(
-      enabled: options.isNotEmpty,
-      initialSelection: value,
-      expandedInsets: EdgeInsets.zero,
-      menuStyle: appDropdownMenuStyle(context),
-      hintText: placeholder,
-      dropdownMenuEntries: [
-        for (final option in options)
-          DropdownMenuEntry<T>(value: option.value, label: option.label),
-      ],
-      onSelected: (value) {
-        if (value != null) onChanged(value);
-      },
-    );
-  }
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 }
 
 class _SummaryDialogButton extends StatelessWidget {
@@ -2112,7 +1923,6 @@ class _ColorSwatch extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-<<<<<<< HEAD
     final theme = Theme.of(context);
     final scheme = ColorScheme.fromSeed(
       seedColor: color,
@@ -2154,11 +1964,6 @@ class _ColorSwatch extends StatelessWidget {
             ),
         ],
       ),
-=======
-    final scheme = ColorScheme.fromSeed(
-      seedColor: color,
-      brightness: Theme.of(context).brightness,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     );
 
     return GestureDetector(
@@ -2166,7 +1971,6 @@ class _ColorSwatch extends StatelessWidget {
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 200),
         opacity: disabled ? 0.35 : 1.0,
-<<<<<<< HEAD
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
@@ -2178,65 +1982,12 @@ class _ColorSwatch extends StatelessWidget {
           ),
           alignment: Alignment.center,
           child: palette,
-=======
-        child: Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          alignment: Alignment.center,
-          child: SizedBox(
-            width: 46,
-            height: 46,
-            child: ClipOval(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Column(
-                    children: [
-                      Expanded(
-                        child: Container(color: scheme.primaryContainer),
-                      ),
-                      Expanded(
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Container(color: scheme.tertiaryContainer),
-                            ),
-                            Expanded(child: Container(color: scheme.primary)),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (selected)
-                    Center(
-                      child: Icon(
-                        Icons.check_rounded,
-                        color:
-                            ThemeData.estimateBrightnessForColor(color) ==
-                                Brightness.dark
-                            ? Colors.white
-                            : Colors.black,
-                        size: 24,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         ),
       ),
     );
   }
 }
 
-<<<<<<< HEAD
 class _PaletteCirclePainter extends CustomPainter {
   const _PaletteCirclePainter(this.scheme);
 
@@ -2270,8 +2021,6 @@ class _PaletteCirclePainter extends CustomPainter {
   }
 }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 bool _boolSetting(Map<String, dynamic> values, String key, bool fallback) {
   final value = values[key];
   if (value is bool) return value;
@@ -2319,7 +2068,6 @@ List<String> _stringListSetting(
   }
   return List<String>.from(fallback);
 }
-<<<<<<< HEAD
 
 Map<String, int> _intMapSetting(Map<String, dynamic> values, String key) {
   final value = values[key];
@@ -2334,5 +2082,3 @@ Map<String, int> _intMapSetting(Map<String, dynamic> values, String key) {
     return MapEntry(key.toString(), parsed);
   });
 }
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d

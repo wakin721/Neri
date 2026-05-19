@@ -1,8 +1,5 @@
 import 'package:flutter/material.dart';
-<<<<<<< HEAD
 import 'package:flutter/services.dart';
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
 import '../models/job.dart';
 import '../models/settings.dart';
@@ -17,17 +14,12 @@ class StartScreen extends StatelessWidget {
     required this.inputController,
     required this.selectedModelPath,
     required this.onModelChanged,
-<<<<<<< HEAD
     required this.selectedClassificationModelPath,
     required this.onClassificationModelChanged,
     required this.videoMode,
     required this.onVideoModeChanged,
     required this.vidStride,
     required this.onVidStrideChanged,
-=======
-    required this.enableDetection,
-    required this.onEnableDetectionChanged,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     required this.useFp16,
     required this.onUseFp16Changed,
     required this.confidence,
@@ -36,13 +28,10 @@ class StartScreen extends StatelessWidget {
     required this.onIouChanged,
     required this.submitting,
     required this.onCreateJob,
-<<<<<<< HEAD
     required this.onCancelJob,
     required this.onResumeJob,
     required this.onDeleteJob,
     required this.onClearJobs,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     required this.jobs,
     super.key,
   });
@@ -51,17 +40,12 @@ class StartScreen extends StatelessWidget {
   final TextEditingController inputController;
   final String? selectedModelPath;
   final ValueChanged<String?> onModelChanged;
-<<<<<<< HEAD
   final String? selectedClassificationModelPath;
   final ValueChanged<String?> onClassificationModelChanged;
   final String videoMode;
   final ValueChanged<String> onVideoModeChanged;
   final int vidStride;
   final ValueChanged<int> onVidStrideChanged;
-=======
-  final bool enableDetection;
-  final ValueChanged<bool> onEnableDetectionChanged;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   final bool useFp16;
   final ValueChanged<bool> onUseFp16Changed;
   final double confidence;
@@ -70,13 +54,10 @@ class StartScreen extends StatelessWidget {
   final ValueChanged<double> onIouChanged;
   final bool submitting;
   final VoidCallback onCreateJob;
-<<<<<<< HEAD
   final ValueChanged<ProcessingJob> onCancelJob;
   final ValueChanged<ProcessingJob> onResumeJob;
   final ValueChanged<ProcessingJob> onDeleteJob;
   final VoidCallback onClearJobs;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   final List<ProcessingJob> jobs;
 
   @override
@@ -91,17 +72,12 @@ class StartScreen extends StatelessWidget {
           inputController: inputController,
           selectedModelPath: selectedModelPath,
           onModelChanged: onModelChanged,
-<<<<<<< HEAD
           selectedClassificationModelPath: selectedClassificationModelPath,
           onClassificationModelChanged: onClassificationModelChanged,
           videoMode: videoMode,
           onVideoModeChanged: onVideoModeChanged,
           vidStride: vidStride,
           onVidStrideChanged: onVidStrideChanged,
-=======
-          enableDetection: enableDetection,
-          onEnableDetectionChanged: onEnableDetectionChanged,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
           useFp16: useFp16,
           onUseFp16Changed: onUseFp16Changed,
           confidence: confidence,
@@ -111,7 +87,6 @@ class StartScreen extends StatelessWidget {
           submitting: submitting,
           onCreateJob: onCreateJob,
         ),
-<<<<<<< HEAD
         _JobsCard(
           jobs: jobs,
           onCancelJob: onCancelJob,
@@ -119,9 +94,6 @@ class StartScreen extends StatelessWidget {
           onDeleteJob: onDeleteJob,
           onClearJobs: onClearJobs,
         ),
-=======
-        _JobsCard(jobs: jobs),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       ],
     );
   }
@@ -156,11 +128,7 @@ class _HeroPanel extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-<<<<<<< HEAD
               'Neri: NERI Enables Rapid Identification',
-=======
-              '使用 Flutter Material 3 前端连接 Python 后端，完成批量索引、EXIF 提取、YOLO 识别与结果导出。',
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                 color: colorScheme.onPrimaryContainer,
               ),
@@ -178,17 +146,12 @@ class _CreateJobCard extends StatelessWidget {
     required this.inputController,
     required this.selectedModelPath,
     required this.onModelChanged,
-<<<<<<< HEAD
     required this.selectedClassificationModelPath,
     required this.onClassificationModelChanged,
     required this.videoMode,
     required this.onVideoModeChanged,
     required this.vidStride,
     required this.onVidStrideChanged,
-=======
-    required this.enableDetection,
-    required this.onEnableDetectionChanged,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     required this.useFp16,
     required this.onUseFp16Changed,
     required this.confidence,
@@ -203,17 +166,12 @@ class _CreateJobCard extends StatelessWidget {
   final TextEditingController inputController;
   final String? selectedModelPath;
   final ValueChanged<String?> onModelChanged;
-<<<<<<< HEAD
   final String? selectedClassificationModelPath;
   final ValueChanged<String?> onClassificationModelChanged;
   final String videoMode;
   final ValueChanged<String> onVideoModeChanged;
   final int vidStride;
   final ValueChanged<int> onVidStrideChanged;
-=======
-  final bool enableDetection;
-  final ValueChanged<bool> onEnableDetectionChanged;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   final bool useFp16;
   final ValueChanged<bool> onUseFp16Changed;
   final double confidence;
@@ -223,7 +181,6 @@ class _CreateJobCard extends StatelessWidget {
   final bool submitting;
   final VoidCallback onCreateJob;
 
-<<<<<<< HEAD
   static const _dialogsChannel = MethodChannel('neri/dialogs');
 
   Future<void> _selectInputFolder(BuildContext context) async {
@@ -247,8 +204,6 @@ class _CreateJobCard extends StatelessWidget {
     }
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   @override
   Widget build(BuildContext context) {
     return SectionCard(
@@ -259,7 +214,6 @@ class _CreateJobCard extends StatelessWidget {
         children: [
           TextField(
             controller: inputController,
-<<<<<<< HEAD
             decoration: InputDecoration(
               labelText: '输入文件夹',
               hintText: '/path/to/camera-trap-folder',
@@ -287,30 +241,6 @@ class _CreateJobCard extends StatelessWidget {
           SwitchListTile(
             value: useFp16,
             onChanged: onUseFp16Changed,
-=======
-            decoration: const InputDecoration(
-              labelText: '输入文件夹',
-              hintText: '/path/to/camera-trap-folder',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _ModelSelector(
-            settings: settings,
-            selectedModelPath: selectedModelPath,
-            onChanged: onModelChanged,
-          ),
-          const SizedBox(height: 12),
-          SwitchListTile(
-            value: enableDetection,
-            onChanged: onEnableDetectionChanged,
-            title: const Text('启用 YOLO 识别'),
-            subtitle: const Text('关闭时仅进行快速文件索引和 EXIF 元数据提取。'),
-          ),
-          SwitchListTile(
-            value: useFp16,
-            onChanged: enableDetection ? onUseFp16Changed : null,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
             title: const Text('使用 FP16 加速'),
           ),
           _ProcessingSlider(
@@ -341,7 +271,6 @@ class _CreateJobCard extends StatelessWidget {
   }
 }
 
-<<<<<<< HEAD
 class _StartOptionGrid extends StatelessWidget {
   const _StartOptionGrid({
     required this.settings,
@@ -419,8 +348,6 @@ class _StartOptionGrid extends StatelessWidget {
   }
 }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 class _ModelSelector extends StatelessWidget {
   const _ModelSelector({
     required this.settings,
@@ -457,12 +384,7 @@ class _ModelSelector extends StatelessWidget {
       expandedInsets: EdgeInsets.zero,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('模型文件'),
-<<<<<<< HEAD
       helperText: '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
-=======
-      helperText:
-          '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory} 下的 .pt 文件',
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       leadingIcon: const Icon(Icons.memory_rounded),
       dropdownMenuEntries: [
         for (final model in models)
@@ -473,7 +395,6 @@ class _ModelSelector extends StatelessWidget {
   }
 }
 
-<<<<<<< HEAD
 class _ClassificationModelSelector extends StatelessWidget {
   const _ClassificationModelSelector({
     required this.settings,
@@ -572,8 +493,6 @@ class _VideoStrideSelector extends StatelessWidget {
   }
 }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 class _ProcessingSlider extends StatelessWidget {
   const _ProcessingSlider({
     required this.label,
@@ -605,7 +524,6 @@ class _ProcessingSlider extends StatelessWidget {
 }
 
 class _JobsCard extends StatelessWidget {
-<<<<<<< HEAD
   const _JobsCard({
     required this.jobs,
     required this.onCancelJob,
@@ -619,11 +537,6 @@ class _JobsCard extends StatelessWidget {
   final ValueChanged<ProcessingJob> onResumeJob;
   final ValueChanged<ProcessingJob> onDeleteJob;
   final VoidCallback onClearJobs;
-=======
-  const _JobsCard({required this.jobs});
-
-  final List<ProcessingJob> jobs;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
   @override
   Widget build(BuildContext context) {
@@ -633,7 +546,6 @@ class _JobsCard extends StatelessWidget {
       icon: Icons.insights_rounded,
       child: jobs.isEmpty
           ? const Text('创建任务后，处理进度和识别结果会显示在这里。')
-<<<<<<< HEAD
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -650,20 +562,12 @@ class _JobsCard extends StatelessWidget {
   }
 
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
-=======
-          : Column(children: jobs.map(_buildJobTile).toList()),
-    );
-  }
-
-  Widget _buildJobTile(ProcessingJob job) {
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     return ExpansionTile(
       leading: Icon(_jobIcon(job.state)),
       title: Text(job.message.isEmpty ? job.inputDir : job.message),
       subtitle: LinearProgressIndicator(
         value: job.total == 0 && job.isActive ? null : job.progress,
       ),
-<<<<<<< HEAD
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -691,9 +595,6 @@ class _JobsCard extends StatelessWidget {
           ),
         ],
       ),
-=======
-      trailing: Chip(label: Text('${job.processed}/${job.total}')),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       children: [
         if (job.error != null)
           ListTile(
@@ -728,7 +629,6 @@ class _JobsCard extends StatelessWidget {
       'completed' => Icons.check_circle_rounded,
       'failed' => Icons.error_rounded,
       'running' => Icons.sync_rounded,
-<<<<<<< HEAD
       'cancelled' => Icons.stop_circle_rounded,
       _ => Icons.schedule_rounded,
     };
@@ -780,9 +680,4 @@ class _JobsCard extends StatelessWidget {
     );
     if (confirmed == true) onClearJobs();
   }
-=======
-      _ => Icons.schedule_rounded,
-    };
-  }
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 }

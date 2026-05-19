@@ -21,7 +21,6 @@ typedef MarkValidationItem =
       String? remark,
     });
 
-<<<<<<< HEAD
 typedef MarkValidationItems =
     Future<List<DetectionItem>> Function(
       List<DetectionItem> items,
@@ -32,8 +31,6 @@ typedef MarkValidationItems =
       String? remark,
     });
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 typedef RedetectValidationItems =
     Future<void> Function(
       List<DetectionItem> items, {
@@ -66,10 +63,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.apiClient,
     required this.inputPath,
     required this.items,
-<<<<<<< HEAD
     required this.refreshVersion,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     required this.speciesTypes,
     required this.autoGroup,
     required this.autoSortQuickMarks,
@@ -81,25 +75,17 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onLoadMetadata,
     required this.onOpenExternal,
     required this.onMarkItem,
-<<<<<<< HEAD
     required this.onMarkItems,
     required this.onQuickMarkUsed,
     required this.onRedetectItems,
     required this.onBusyChanged,
-=======
-    required this.onQuickMarkUsed,
-    required this.onRedetectItems,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     super.key,
   });
 
   final NeriApiClient apiClient;
   final String inputPath;
   final List<DetectionItem> items;
-<<<<<<< HEAD
   final int refreshVersion;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   final Map<String, String> speciesTypes;
   final bool autoGroup;
   final bool autoSortQuickMarks;
@@ -111,15 +97,10 @@ class SpeciesValidationScreen extends StatefulWidget {
   final Future<void> Function(DetectionItem item) onLoadMetadata;
   final void Function(String path) onOpenExternal;
   final MarkValidationItem onMarkItem;
-<<<<<<< HEAD
   final MarkValidationItems onMarkItems;
   final Future<void> Function(String speciesName) onQuickMarkUsed;
   final RedetectValidationItems onRedetectItems;
   final ValueChanged<bool> onBusyChanged;
-=======
-  final Future<void> Function(String speciesName) onQuickMarkUsed;
-  final RedetectValidationItems onRedetectItems;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
   @override
   State<SpeciesValidationScreen> createState() =>
@@ -160,10 +141,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   static String? _savedSelectedPath;
   static String? _savedSelectedBucketKey;
   static String _savedSelectedQuantity = '1';
-<<<<<<< HEAD
   static bool _savedShowQuantitySelection = false;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   static String _savedSelectedSpeciesFilter = _globalSpecies;
   static String _savedExportFormat = 'csv';
   static double _savedConfidence = 0.25;
@@ -179,12 +157,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String get _selectedQuantity => _savedSelectedQuantity;
   set _selectedQuantity(String value) => _savedSelectedQuantity = value;
 
-<<<<<<< HEAD
   bool get _showQuantitySelection => _savedShowQuantitySelection;
   set _showQuantitySelection(bool value) => _savedShowQuantitySelection = value;
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   String get _selectedSpeciesFilter => _savedSelectedSpeciesFilter;
   set _selectedSpeciesFilter(String value) =>
       _savedSelectedSpeciesFilter = value;
@@ -211,7 +186,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final List<String> _sessionQuickMarkHistory = <String>[];
   final Set<String> _selectedPaths = <String>{};
   String? _selectionAnchorPath;
-<<<<<<< HEAD
   bool? _bucketCacheAutoGroup;
   String? _bucketCachePathSignature;
   int? _bucketCacheRefreshVersion;
@@ -223,8 +197,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     widget.onBusyChanged(false);
     super.dispose();
   }
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
   @override
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
@@ -234,14 +206,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _selectedBucketKey = null;
       _selectedPaths.clear();
       _selectionAnchorPath = null;
-<<<<<<< HEAD
       _bucketCacheAutoGroup = null;
       _bucketCachePathSignature = null;
       _bucketCacheRefreshVersion = null;
       _bucketCache = const <_SpeciesBucket>[];
       _deferredRegroupGroupSignatures.clear();
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       return;
     }
     final validPaths = widget.items.map((item) => item.path).toSet();
@@ -277,11 +246,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       );
     }
 
-<<<<<<< HEAD
     final buckets = _currentBuckets();
-=======
-    final buckets = _buildBuckets(widget.items);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     if (buckets.isEmpty) {
       _selectedBucketKey = null;
     } else if (_selectedBucketKey == null ||
@@ -368,11 +333,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   void _moveSelectedPhoto(int delta) {
-<<<<<<< HEAD
     final visibleItems = _visibleItems(_currentBuckets());
-=======
-    final visibleItems = _visibleItems(_buildBuckets(widget.items));
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     if (visibleItems.isEmpty) return;
     final currentIndex = visibleItems.indexWhere(
       (item) => item.path == _selectedPath,
@@ -464,15 +425,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final selectedPhotoIndex = visibleItems.indexWhere(
       (item) => item.path == _selectedPath,
     );
-<<<<<<< HEAD
     final selectedBucket = selectedBucketIndex >= 0
         ? buckets[selectedBucketIndex]
         : (buckets.isEmpty ? null : buckets.first);
     final groupIndexByPath = selectedBucket == null
         ? const <String, int>{}
         : _groupIndexByPath(selectedBucket);
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final speciesRatio = switch (_activeList) {
       _ValidationListFocus.species => 0.66,
       _ValidationListFocus.photos => 0.34,
@@ -507,13 +465,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       color: bucket.isValidated ? Colors.green : Colors.orange,
                     ),
                     titleBuilder: (bucket) => bucket.species,
-<<<<<<< HEAD
                     subtitleBuilder: (bucket) => widget.autoGroup
                         ? '${bucket.groups.length} 组 / ${bucket.items.length} 个文件'
                         : '${bucket.items.length} 个文件',
-=======
-                    subtitleBuilder: (bucket) => '${bucket.items.length} 张照片',
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                     // 取消物种栏后面的数字
                     trailingBuilder: (bucket) => null,
                     onSelected: (index, bucket) {
@@ -548,7 +502,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       );
                     },
                     titleBuilder: (item) => item.filename,
-<<<<<<< HEAD
                     subtitleBuilder: (item) =>
                         _fileListSubtitle(item, groupIndexByPath),
                     tileColorBuilder: (index, item) {
@@ -558,38 +511,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                       return colorScheme.surfaceContainerHighest.withValues(
                         alpha: 0.42,
                       );
-=======
-                    subtitleBuilder: (item) {
-                      final manual = item.detectionData['物种名称']
-                          ?.toString()
-                          .trim();
-                      final models = item.detectionBoxes
-                          .map((b) => b.species)
-                          .where((s) => s.isNotEmpty && s != 'Unknown')
-                          .toSet();
-
-                      final parts = <String>[];
-                      if (manual != null &&
-                          manual.isNotEmpty &&
-                          manual != '未知鸟') {
-                        parts.add(manual);
-                      } else if (item.species.isNotEmpty) {
-                        parts.addAll(item.species);
-                      }
-
-                      final modelStrs = models
-                          .where((m) => !parts.contains(m))
-                          .toList();
-                      if (modelStrs.isNotEmpty) {
-                        if (parts.isNotEmpty) {
-                          parts.add('[模型: ${modelStrs.join('、')}]');
-                        } else {
-                          parts.addAll(modelStrs);
-                        }
-                      }
-
-                      return parts.isEmpty ? item.fileType : parts.join(' ');
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                     },
                     trailingBuilder: (item) {
                       final selected = _selectedPaths.contains(item.path);
@@ -722,13 +643,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                               final quantity = _quantityOptions[index];
                               return _QuantityButton(
                                 label: quantity,
-<<<<<<< HEAD
                                 selected:
                                     _showQuantitySelection &&
                                     quantity == _selectedQuantity,
-=======
-                                selected: quantity == _selectedQuantity,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
                                 onPressed: _marking
                                     ? null
                                     : () => _markQuantity(quantity),
@@ -1052,19 +969,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   IconData _fileIcon(DetectionItem item) {
-<<<<<<< HEAD
     return _isImage(item) ? Icons.image_rounded : Icons.movie_rounded;
   }
 
   bool _isImage(DetectionItem item) {
     const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
     return imageTypes.contains(item.fileType.toLowerCase());
-=======
-    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
-    return imageTypes.contains(item.fileType.toLowerCase())
-        ? Icons.image_rounded
-        : Icons.movie_rounded;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   DetectionItem _selectedItem(List<DetectionItem> visibleItems) {
@@ -1093,7 +1003,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   List<_SpeciesBucket> _buildBuckets(List<DetectionItem> items) {
     final map = <String, _SpeciesBucket>{};
-<<<<<<< HEAD
     final groups = widget.autoGroup
         ? _buildAutoGroups(items)
         : [
@@ -1106,12 +1015,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           ? _primarySpeciesForGroup(group)
           : _primarySpecies(group.items.first);
       final isValidated = group.items.every(_isItemValidated);
-=======
-    for (final item in items) {
-      final species = _primarySpecies(item);
-      final isValidated =
-          item.validated == true || item.detectionData['最低置信度'] == '人工校验';
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       final key = '${isValidated ? 1 : 0}::$species';
       map.putIfAbsent(
         key,
@@ -1120,18 +1023,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           isValidated: isValidated,
           species: species,
           items: <DetectionItem>[],
-<<<<<<< HEAD
           groups: <_ValidationMediaGroup>[],
         ),
       );
       map[key]!
         ..items.addAll(group.items)
         ..groups.add(group);
-=======
-        ),
-      );
-      map[key]!.items.add(item);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     }
     final buckets = map.values.toList()
       ..sort((a, b) {
@@ -1143,7 +1040,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return buckets;
   }
 
-<<<<<<< HEAD
   List<_SpeciesBucket> _currentBuckets() {
     final pathSignature = _itemsPathSignature(widget.items);
     final canReuseCache =
@@ -1440,8 +1336,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         .toList();
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   List<DetectionBox> _filteredBoxes(DetectionItem item) {
     return item.detectionBoxes.where((box) {
       final matchesSpecies =
@@ -1453,7 +1347,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }).toList();
   }
 
-<<<<<<< HEAD
   String _finalResultLabel(DetectionItem item) {
     final finalSpecies = item.detectionData['物种名称']?.toString().trim();
     if (finalSpecies != null && finalSpecies.isNotEmpty) {
@@ -1474,8 +1367,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return boxSpecies.isEmpty ? item.fileType : boxSpecies.join('、');
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   String _primarySpecies(DetectionItem item) {
     final raw = item.detectionData['物种名称'];
     if (raw != null && raw.toString().trim().isNotEmpty) {
@@ -1483,11 +1374,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
     if (item.species.isNotEmpty) return item.species.join(',');
     if (item.error != null) return '错误';
-<<<<<<< HEAD
     return '未检测';
-=======
-    return '未知鸟';
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   List<String> _quickMarkSpecies(DetectionItem item) {
@@ -1551,7 +1438,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return candidates;
   }
 
-<<<<<<< HEAD
   Map<String, int> _speciesUsageCounts() {
     final counts = Map<String, int>.from(widget.quickMarkUsageCounts);
     for (final species in _sessionQuickMarkHistory) {
@@ -1564,8 +1450,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return counts;
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   List<String> _uniqueSpecies(Iterable<String> values) {
     final seen = <String>{};
     final result = <String>[];
@@ -1628,11 +1512,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String _typeLabel(String species, [DetectionItem? item]) {
     final manualType = item?.detectionData['物种类型']?.toString().trim();
     if (manualType != null && manualType.isNotEmpty) return manualType;
-<<<<<<< HEAD
     if (species == '空' || species == '未知鸟' || species == '未检测') return '空';
-=======
-    if (species == '空' || species == '未知鸟') return '空';
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final matchedTypes = species
         .split(',')
         .map((name) => name.trim())
@@ -1702,12 +1582,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   void _markQuickSpecies(String species) {
     setState(() {
-<<<<<<< HEAD
       if (_pendingItemPath != _selectedPath) {
         _pendingQuantity = null;
       }
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       _pendingItemPath = _selectedPath;
       _pendingSpeciesName = species;
     });
@@ -1716,15 +1593,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   void _markQuantity(String quantity) {
     setState(() {
-<<<<<<< HEAD
       if (_pendingItemPath != _selectedPath) {
         _pendingSpeciesName = null;
       }
       _selectedQuantity = quantity;
       _showQuantitySelection = true;
-=======
-      _selectedQuantity = quantity;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       _pendingItemPath = _selectedPath;
       _pendingQuantity = quantity;
     });
@@ -1750,10 +1623,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _pendingSpeciesName = null;
     _pendingQuantity = null;
     _pendingItemPath = null;
-<<<<<<< HEAD
     _showQuantitySelection = false;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   Future<void> _markOtherSpecies({List<DetectionItem>? itemsOverride}) async {
@@ -1773,13 +1643,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
     final initialSpecies =
         item.detectionData['物种名称']?.toString() ??
-<<<<<<< HEAD
         (summary.species == '未知鸟' || summary.species == '未检测'
             ? ''
             : summary.species);
-=======
-        (summary.species == '未知鸟' ? '' : summary.species);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final initialCount = _otherDialogCount(item, visibleBoxes, summary);
     final initialType =
         item.detectionData['物种类型']?.toString() ??
@@ -1795,10 +1661,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           initialType: initialType,
           initialRemark: initialRemark,
           speciesTypes: widget.speciesTypes,
-<<<<<<< HEAD
           speciesUsageCounts: _speciesUsageCounts(),
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         );
       },
     );
@@ -1836,7 +1699,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     String? remark,
   }) async {
     if (items.isEmpty || _marking) return;
-<<<<<<< HEAD
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
@@ -1852,24 +1714,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         remark: remark,
       );
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
-=======
-    final visibleBefore = _visibleItems(_buildBuckets(widget.items));
-    final nextPath = _nextPathAfterBatch(visibleBefore, items);
-
-    setState(() => _marking = true);
-    try {
-      DetectionItem? lastUpdated;
-      for (final item in items) {
-        lastUpdated = await widget.onMarkItem(
-          item,
-          action,
-          speciesName: speciesName,
-          speciesCount: speciesCount,
-          speciesType: speciesType,
-          remark: remark,
-        );
-      }
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       if (!mounted) return;
       final usedQuickSpecies =
           action == 'update' &&
@@ -1905,11 +1749,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (!mounted) return;
       _showSnackBar('批量标记失败：$error');
     } finally {
-<<<<<<< HEAD
       _setMarking(false);
-=======
-      if (mounted) setState(() => _marking = false);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     }
   }
 
@@ -1944,11 +1784,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   Future<void> _redetectBatch(List<DetectionItem> items) async {
     if (items.isEmpty || _marking) return;
-<<<<<<< HEAD
     _setMarking(true);
-=======
-    setState(() => _marking = true);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     try {
       await widget.onRedetectItems(items, confidence: _confidence);
       if (!mounted) return;
@@ -1957,11 +1793,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (!mounted) return;
       _showSnackBar('重新检测失败：$error');
     } finally {
-<<<<<<< HEAD
       _setMarking(false);
-=======
-      if (mounted) setState(() => _marking = false);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     }
   }
 
@@ -1972,10 +1804,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     String? speciesCount,
     String? speciesType,
     String? remark,
-<<<<<<< HEAD
     bool nextPhotoOnly = false,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }) async {
     if (widget.items.isEmpty) return;
     final item =
@@ -1984,7 +1813,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           (candidate) => candidate.path == _selectedPath,
           orElse: () => widget.items.first,
         );
-<<<<<<< HEAD
     final visibleItems = _visibleItems(_currentBuckets());
     final currentIndex = visibleItems.indexWhere(
       (candidate) => candidate.path == item.path,
@@ -1997,17 +1825,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _deferRegroupForItems(<DetectionItem>[item]);
 
     _setMarking(true);
-=======
-    final visibleItems = _visibleItems(_buildBuckets(widget.items));
-    final currentIndex = visibleItems.indexWhere(
-      (candidate) => candidate.path == item.path,
-    );
-    final nextPath = currentIndex >= 0 && currentIndex + 1 < visibleItems.length
-        ? visibleItems[currentIndex + 1].path
-        : null;
-
-    setState(() => _marking = true);
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     try {
       final updated = await widget.onMarkItem(
         item,
@@ -2024,7 +1841,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               speciesName.trim().isNotEmpty
           ? speciesName
           : null;
-<<<<<<< HEAD
       final targetItem = nextPath == null
           ? updated
           : visibleItems.firstWhere(
@@ -2039,11 +1855,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           ..clear()
           ..add(targetPath);
         _selectionAnchorPath = targetPath;
-=======
-      setState(() {
-        _lastMarkedItem = action == 'unverified' ? null : updated;
-        _selectedPath = nextPath ?? updated.path;
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         _resetPendingMark();
         if (usedQuickSpecies != null) {
           _sessionQuickMarkHistory.addAll(_splitSpeciesNames(usedQuickSpecies));
@@ -2058,10 +1869,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (usedQuickSpecies != null) {
         unawaited(widget.onQuickMarkUsed(usedQuickSpecies));
       }
-<<<<<<< HEAD
       unawaited(widget.onLoadMetadata(targetItem));
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       final message = action == 'unverified'
           ? '已撤回校验标记'
           : '已标记 ${updated.filename}';
@@ -2070,7 +1878,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (!mounted) return;
       _showSnackBar('标记失败：$error');
     } finally {
-<<<<<<< HEAD
       _setMarking(false);
     }
   }
@@ -2094,23 +1901,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return null;
   }
 
-=======
-      if (mounted) setState(() => _marking = false);
-    }
-  }
-
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   List<String> _splitSpeciesNames(String speciesName) {
     return speciesName
         .replaceAll('，', ',')
         .split(',')
         .map((name) => name.trim())
         .where((name) => name.isNotEmpty && name != '空' && name != 'Unknown')
-<<<<<<< HEAD
         .toList();
-=======
-      .toList();
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   void _showSnackBar(
@@ -2121,11 +1918,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (!mounted || message.isEmpty) return;
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final controller = messenger.showSnackBar(
       SnackBar(
         content: Text(message),
@@ -2256,10 +2049,7 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-<<<<<<< HEAD
     final colorScheme = Theme.of(context).colorScheme;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     return SizedBox(
       width: double.infinity,
       height: 36,
@@ -2267,7 +2057,6 @@ class _ActionButton extends StatelessWidget {
         onPressed: onPressed,
         style: FilledButton.styleFrom(
           padding: const EdgeInsets.symmetric(horizontal: 8),
-<<<<<<< HEAD
           backgroundColor: selected ? colorScheme.primaryContainer : null,
           foregroundColor: selected ? colorScheme.onPrimaryContainer : null,
           side: selected
@@ -2276,14 +2065,6 @@ class _ActionButton extends StatelessWidget {
           textStyle: TextStyle(
             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
           ),
-=======
-          backgroundColor: selected
-              ? Theme.of(context).colorScheme.primaryContainer
-              : null,
-          foregroundColor: selected
-              ? Theme.of(context).colorScheme.onPrimaryContainer
-              : null,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         ),
         child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
       ),
@@ -2304,10 +2085,7 @@ class _QuantityButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-<<<<<<< HEAD
     final colorScheme = Theme.of(context).colorScheme;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     return SizedBox(
       width: double.infinity,
       height: 30,
@@ -2315,7 +2093,6 @@ class _QuantityButton extends StatelessWidget {
         onPressed: onPressed,
         style: FilledButton.styleFrom(
           padding: EdgeInsets.zero,
-<<<<<<< HEAD
           backgroundColor: selected ? colorScheme.primaryContainer : null,
           foregroundColor: selected ? colorScheme.onPrimaryContainer : null,
           side: selected
@@ -2324,14 +2101,6 @@ class _QuantityButton extends StatelessWidget {
           textStyle: TextStyle(
             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
           ),
-=======
-          backgroundColor: selected
-              ? Theme.of(context).colorScheme.primaryContainer
-              : null,
-          foregroundColor: selected
-              ? Theme.of(context).colorScheme.onPrimaryContainer
-              : null,
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
         ),
         child: Text(label),
       ),
@@ -2371,10 +2140,7 @@ class _SpeciesBucket {
     required this.isValidated,
     required this.species,
     required this.items,
-<<<<<<< HEAD
     required this.groups,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   });
 
   factory _SpeciesBucket.empty() {
@@ -2383,10 +2149,7 @@ class _SpeciesBucket {
       isValidated: false,
       species: '',
       items: const <DetectionItem>[],
-<<<<<<< HEAD
       groups: const <_ValidationMediaGroup>[],
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     );
   }
 
@@ -2394,7 +2157,6 @@ class _SpeciesBucket {
   final bool isValidated;
   final String species;
   final List<DetectionItem> items;
-<<<<<<< HEAD
   final List<_ValidationMediaGroup> groups;
 }
 
@@ -2407,8 +2169,6 @@ class _ValidationMediaGroup {
 class _SpeciesVote {
   int count = 0;
   int validatedCount = 0;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 }
 
 class _DetectionSummary {
@@ -2446,10 +2206,7 @@ class _OtherSpeciesDialog extends StatefulWidget {
     required this.initialType,
     required this.initialRemark,
     required this.speciesTypes,
-<<<<<<< HEAD
     required this.speciesUsageCounts,
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   });
 
   final String initialSpecies;
@@ -2457,10 +2214,7 @@ class _OtherSpeciesDialog extends StatefulWidget {
   final String initialType;
   final String initialRemark;
   final Map<String, String> speciesTypes;
-<<<<<<< HEAD
   final Map<String, int> speciesUsageCounts;
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
 
   @override
   State<_OtherSpeciesDialog> createState() => _OtherSpeciesDialogState();
@@ -2520,7 +2274,6 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
         }
       }
     }
-<<<<<<< HEAD
     final originalOrder = <String, int>{};
     var index = 0;
     for (final species in widget.speciesTypes.keys) {
@@ -2533,8 +2286,6 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
       if (usageCompare != 0) return usageCompare;
       return (originalOrder[a] ?? 0).compareTo(originalOrder[b] ?? 0);
     });
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     return matches;
   }
 

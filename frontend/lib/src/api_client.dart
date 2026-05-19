@@ -52,7 +52,6 @@ class NeriApiClient {
         .whereType<Map<String, dynamic>>()
         .map(ModelClassInfo.fromJson)
         .toList();
-<<<<<<< HEAD
   }
 
   Future<MaintenanceStartResponse> installPytorch(
@@ -117,8 +116,6 @@ class NeriApiClient {
     return MaintenanceStatus.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   Future<ProcessingJob> createJob({
@@ -278,7 +275,6 @@ class NeriApiClient {
     return ProcessingJob.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
-<<<<<<< HEAD
   }
 
   Future<ProcessingJob> cancelJob(String id) async {
@@ -305,8 +301,6 @@ class NeriApiClient {
   Future<void> clearJobs() async {
     final response = await _httpClient.delete(_uri('/api/jobs'));
     _ensureSuccess(response);
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   void close() => _httpClient.close();

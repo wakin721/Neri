@@ -102,12 +102,7 @@ class PreviewScreen extends StatelessWidget {
       selectedIndex: selectedIndex,
       leadingBuilder: (item) => Icon(_previewFileIcon(item)),
       titleBuilder: (item) => item.filename,
-<<<<<<< HEAD
       subtitleBuilder: _finalResultLabel,
-=======
-      subtitleBuilder: (item) =>
-          item.species.isEmpty ? item.fileType : item.species.join('、'),
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
       trailingBuilder: (item) =>
           item.error == null ? null : const Icon(Icons.error_outline_rounded),
       onSelected: (index, item) {
@@ -186,7 +181,6 @@ class PreviewScreen extends StatelessWidget {
     }).toList();
   }
 
-<<<<<<< HEAD
   String _finalResultLabel(DetectionItem item) {
     final finalSpecies = item.detectionData['物种名称']?.toString().trim();
     if (finalSpecies != null && finalSpecies.isNotEmpty) {
@@ -207,8 +201,6 @@ class PreviewScreen extends StatelessWidget {
     return boxSpecies.isEmpty ? item.fileType : boxSpecies.join('、');
   }
 
-=======
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   IconData _previewFileIcon(DetectionItem item) {
     return _isPreviewImage(item) ? Icons.image_rounded : Icons.movie_rounded;
   }
@@ -320,21 +312,13 @@ class _ImageInfoCard extends StatelessWidget {
     }
     if (item.species.isNotEmpty) return item.species.join(',');
     if (item.error != null) return '错误';
-<<<<<<< HEAD
     return '未检测';
-=======
-    return '未知鸟';
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
   }
 
   String _typeLabel(String species, DetectionItem item) {
     final manualType = item.detectionData['物种类型']?.toString().trim();
     if (manualType != null && manualType.isNotEmpty) return manualType;
-<<<<<<< HEAD
     if (species == '空' || species == '未知鸟' || species == '未检测') return '空';
-=======
-    if (species == '空' || species == '未知鸟') return '空';
->>>>>>> 4dac94760c5ce962219be6d3fe3b3118e924c10d
     final matchedTypes = species
         .split(',')
         .map((name) => name.trim())
