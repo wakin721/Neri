@@ -71,6 +71,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _submitting = false;
   bool _previewLoading = false;
   bool _validationBusy = false;
+  int _validationBusyRequests = 0;
+  final Set<String> _pendingStartJobIds = <String>{};
+  final Set<String> _pendingStopJobIds = <String>{};
   bool _useFp16 = false;
   bool _previewShowDetections = true;
   bool _previewDetecting = false;
@@ -159,6 +162,55 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     unawaited(_saveThemeSettings(updated));
   }
 
+  void _setValidationBusy(bool value) {
+    if (!mounted) return;
+    final nextCount = value
+        ? _validationBusyRequests + 1
+        : (_validationBusyRequests - 1).clamp(0, 1 << 20).toInt();
+    final nextBusy = nextCount > 0;
+    if (_validationBusyRequests == nextCount && _validationBusy == nextBusy) {
+      return;
+    }
+    setState(() {
+      _validationBusyRequests = nextCount;
+      _validationBusy = nextBusy;
+    });
+  }
+
+  Future<T> _runValidationBusy<T>(Future<T> Function() action) async {
+    _setValidationBusy(true);
+    try {
+      return await action();
+    } finally {
+      _setValidationBusy(false);
+    }
+  }
+
+  bool get _jobTransitionBusy =>
+      _pendingStartJobIds.isNotEmpty || _pendingStopJobIds.isNotEmpty;
+
+  void _syncJobTransitionState(List<ProcessingJob> jobs) {
+    if (_pendingStartJobIds.isEmpty && _pendingStopJobIds.isEmpty) return;
+    final jobsById = {for (final job in jobs) job.id: job};
+    var changed = false;
+
+    final beforeStartCount = _pendingStartJobIds.length;
+    _pendingStartJobIds.removeWhere((id) {
+      final job = jobsById[id];
+      return job == null || !job.isActive || job.processed > 0;
+    });
+    changed = changed || _pendingStartJobIds.length != beforeStartCount;
+
+    final beforeStopCount = _pendingStopJobIds.length;
+    _pendingStopJobIds.removeWhere((id) {
+      final job = jobsById[id];
+      return job == null || !job.isActive;
+    });
+    changed = changed || _pendingStopJobIds.length != beforeStopCount;
+
+    if (changed && mounted) setState(() {});
+  }
+
   void _showSnackBar(String message) {
     if (!mounted || message.isEmpty) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -228,7 +280,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     try {
       final items = await widget.apiClient.fetchPreviewItems(
         inputPath: inputPath,
-        includeCached: false,
+        includeCached: true,
       );
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
@@ -245,7 +297,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (sortedItems.isNotEmpty) {
         unawaited(_loadPreviewMetadata(sortedItems[_selectedPreviewIndex]));
       }
-      unawaited(_refreshPreviewCachedItems(inputPath, requestId));
     } catch (error) {
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
@@ -254,30 +305,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
       _showSnackBar('无法读取输入文件夹预览：$error');
       setState(() => _previewLoading = false);
-    }
-  }
-
-  Future<void> _refreshPreviewCachedItems(
-    String inputPath,
-    int requestId,
-  ) async {
-    try {
-      final cachedItems = await widget.apiClient.fetchPreviewItems(
-        inputPath: inputPath,
-        includeCached: true,
-      );
-      if (!mounted ||
-          _inputController.text.trim() != inputPath ||
-          requestId != _previewRefreshRequestId) {
-        return;
-      }
-      setState(() {
-        _previewItems = _mergePreviewItems(_previewItems, cachedItems);
-        _selectedPreviewIndex = _safePreviewIndex(_previewItems);
-      });
-    } catch (_) {
-      // Cached detection data is a background enhancement; the fast file list
-      // should remain usable if a legacy database is slow or unreadable.
     }
   }
 
@@ -457,6 +484,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           : _settings;
       final jobs = await widget.apiClient.listJobs();
       if (!mounted || settings == null) return;
+      _syncJobTransitionState(jobs);
 
       final firstLoad = _settings == null && shouldFetchSettings;
 
@@ -718,7 +746,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     setState(() => _submitting = true);
     try {
       await _saveLastInputPath(inputPath);
-      await widget.apiClient.createJob(
+      final createdJob = await widget.apiClient.createJob(
         inputDir: inputPath,
         modelPath: _selectedModelPath,
         classificationModelPath: _selectedClassificationModelPath,
@@ -733,6 +761,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         enableDetection: true,
         selectedSpeciesNames: _selectedSpeciesNames(),
       );
+      if (mounted && createdJob.id.isNotEmpty) {
+        setState(() => _pendingStartJobIds.add(createdJob.id));
+      }
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
       _showSnackBar('任务已提交');
@@ -746,12 +777,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _cancelJob(ProcessingJob job) async {
+    if (mounted && job.id.isNotEmpty) {
+      setState(() => _pendingStopJobIds.add(job.id));
+    }
     try {
       await widget.apiClient.cancelJob(job.id);
       await _refresh(silent: true);
       _showSnackBar('已请求停止任务');
     } catch (error) {
       if (!mounted) return;
+      setState(() => _pendingStopJobIds.remove(job.id));
       _showSnackBar('停止任务失败：$error');
     }
   }
@@ -914,35 +949,37 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesType,
     String? remark,
   }) async {
-    final inputPath = _inputController.text.trim();
-    if (inputPath.isEmpty) {
-      throw StateError('请先在开始界面设置输入文件夹。');
-    }
+    return _runValidationBusy(() async {
+      final inputPath = _inputController.text.trim();
+      if (inputPath.isEmpty) {
+        throw StateError('请先在开始界面设置输入文件夹。');
+      }
 
-    final updated = await widget.apiClient.markValidationItem(
-      inputPath: inputPath,
-      filePath: item.path,
-      action: action,
-      speciesName: speciesName,
-      speciesCount: speciesCount,
-      speciesType: speciesType,
-      remark: remark,
-    );
-
-    if (!mounted) return updated;
-    setState(() {
-      _cacheMarkedSpeciesTypes(speciesName, speciesType);
-      _previewMetadataCache[updated.path] = updated;
-      _previewItems = _sortMediaItemsForDisplay(
-        _previewItems
-            .map(
-              (previewItem) =>
-                  previewItem.path == updated.path ? updated : previewItem,
-            )
-            .toList(),
+      final updated = await widget.apiClient.markValidationItem(
+        inputPath: inputPath,
+        filePath: item.path,
+        action: action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
       );
+
+      if (!mounted) return updated;
+      setState(() {
+        _cacheMarkedSpeciesTypes(speciesName, speciesType);
+        _previewMetadataCache[updated.path] = updated;
+        _previewItems = _sortMediaItemsForDisplay(
+          _previewItems
+              .map(
+                (previewItem) =>
+                    previewItem.path == updated.path ? updated : previewItem,
+              )
+              .toList(),
+        );
+      });
+      return updated;
     });
-    return updated;
   }
 
   Future<List<DetectionItem>> _markValidationItems(
@@ -953,43 +990,45 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesType,
     String? remark,
   }) async {
-    final inputPath = _inputController.text.trim();
-    if (inputPath.isEmpty) {
-      throw StateError('请先在开始界面设置输入文件夹。');
-    }
-
-    final updatedItems = <DetectionItem>[];
-    for (final item in items) {
-      final updated = await widget.apiClient.markValidationItem(
-        inputPath: inputPath,
-        filePath: item.path,
-        action: action,
-        speciesName: speciesName,
-        speciesCount: speciesCount,
-        speciesType: speciesType,
-        remark: remark,
-      );
-      updatedItems.add(updated);
-    }
-
-    if (!mounted) return updatedItems;
-    setState(() {
-      _cacheMarkedSpeciesTypes(speciesName, speciesType);
-      final updatedByPath = <String, DetectionItem>{
-        for (final item in updatedItems) item.path: item,
-      };
-      for (final item in updatedItems) {
-        _previewMetadataCache[item.path] = item;
+    return _runValidationBusy(() async {
+      final inputPath = _inputController.text.trim();
+      if (inputPath.isEmpty) {
+        throw StateError('请先在开始界面设置输入文件夹。');
       }
-      _previewItems = _sortMediaItemsForDisplay(
-        _previewItems
-            .map(
-              (previewItem) => updatedByPath[previewItem.path] ?? previewItem,
-            )
-            .toList(),
-      );
+
+      final updatedItems = <DetectionItem>[];
+      for (final item in items) {
+        final updated = await widget.apiClient.markValidationItem(
+          inputPath: inputPath,
+          filePath: item.path,
+          action: action,
+          speciesName: speciesName,
+          speciesCount: speciesCount,
+          speciesType: speciesType,
+          remark: remark,
+        );
+        updatedItems.add(updated);
+      }
+
+      if (!mounted) return updatedItems;
+      setState(() {
+        _cacheMarkedSpeciesTypes(speciesName, speciesType);
+        final updatedByPath = <String, DetectionItem>{
+          for (final item in updatedItems) item.path: item,
+        };
+        for (final item in updatedItems) {
+          _previewMetadataCache[item.path] = item;
+        }
+        _previewItems = _sortMediaItemsForDisplay(
+          _previewItems
+              .map(
+                (previewItem) => updatedByPath[previewItem.path] ?? previewItem,
+              )
+              .toList(),
+        );
+      });
+      return updatedItems;
     });
-    return updatedItems;
   }
 
   void _cacheMarkedSpeciesTypes(String? speciesName, String? speciesType) {
@@ -1152,7 +1191,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           SizedBox(
             height: 4, // 固定高度防止页面抖动
             child:
-                (_loading || _previewLoading || _submitting || _validationBusy)
+                (_loading ||
+                    _previewLoading ||
+                    _previewDetecting ||
+                    _submitting ||
+                    _jobTransitionBusy ||
+                    _validationBusy)
                 ? const LinearProgressIndicator() // 移除 ExcludeSemantics
                 : null,
           ),
@@ -1297,12 +1341,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onConfidenceThresholdChanged: (value) =>
           setState(() => _previewConfidenceThreshold = value),
       detecting: _previewDetecting,
+      loading: _previewLoading,
       onDetectCurrentImage: _detectCurrentPreviewImage,
       onSelected: (index, item) {
         setState(() => _selectedPreviewIndex = index);
         unawaited(_loadPreviewMetadata(item));
       },
       onLoadMetadata: _loadPreviewMetadata,
+      onRefresh: () => _refreshPreviewItems(force: true),
       onOpenExternal: _openFileWithSystem,
     );
   }
@@ -1325,6 +1371,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _settingsOrEmpty(),
         'collapse_groups',
         false,
+      ),
+      autoGroupBurstSize: _intSetting(
+        _settingsOrEmpty(),
+        'auto_group_burst_size',
+        3,
+      ),
+      autoGroupGapSeconds: _intSetting(
+        _settingsOrEmpty(),
+        'auto_group_gap_seconds',
+        30,
       ),
       autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
       quickMarkSpecies: _stringListSetting(
@@ -1354,8 +1410,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onQuickMarkUsed: _recordQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
       onBusyChanged: (value) {
-        if (_validationBusy == value || !mounted) return;
-        setState(() => _validationBusy = value);
+        _setValidationBusy(value);
       },
     );
   }

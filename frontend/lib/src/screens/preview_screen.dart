@@ -23,9 +23,11 @@ class PreviewScreen extends StatelessWidget {
     required this.confidenceThreshold,
     required this.onConfidenceThresholdChanged,
     required this.detecting,
+    required this.loading,
     required this.onDetectCurrentImage,
     required this.onSelected,
     required this.onLoadMetadata,
+    required this.onRefresh,
     required this.onOpenExternal,
     super.key,
   });
@@ -42,13 +44,26 @@ class PreviewScreen extends StatelessWidget {
   final double confidenceThreshold;
   final ValueChanged<double> onConfidenceThresholdChanged;
   final bool detecting;
+  final bool loading;
   final ValueChanged<DetectionItem> onDetectCurrentImage;
   final void Function(int index, DetectionItem item) onSelected;
   final Future<void> Function(DetectionItem item) onLoadMetadata;
+  final Future<void> Function() onRefresh;
   final void Function(String path) onOpenExternal;
 
   @override
   Widget build(BuildContext context) {
+    if (items.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(16),
+        child: _EmptyPreviewState(
+          inputPath: inputPath,
+          loading: loading,
+          onRefresh: onRefresh,
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -208,6 +223,47 @@ class PreviewScreen extends StatelessWidget {
   bool _isPreviewImage(DetectionItem item) {
     const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
     return imageTypes.contains(item.fileType.toLowerCase());
+  }
+}
+
+class _EmptyPreviewState extends StatelessWidget {
+  const _EmptyPreviewState({
+    required this.inputPath,
+    required this.loading,
+    required this.onRefresh,
+  });
+
+  final String inputPath;
+  final bool loading;
+  final Future<void> Function() onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasInputPath = inputPath.trim().isNotEmpty;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.image_search_rounded, size: 56),
+          const SizedBox(height: 12),
+          Text(hasInputPath ? '暂无预览图像。' : '请先在开始界面设置输入文件夹。'),
+          if (hasInputPath) ...[
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: loading ? null : onRefresh,
+              icon: loading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh_rounded),
+              label: const Text('重新获取'),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 

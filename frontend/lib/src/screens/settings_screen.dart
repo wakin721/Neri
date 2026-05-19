@@ -142,6 +142,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
       'collapse_groups': _boolSetting(saved, 'collapse_groups', false),
+      'auto_group_burst_size': _intSetting(saved, 'auto_group_burst_size', 3),
+      'auto_group_gap_seconds': _intSetting(
+        saved,
+        'auto_group_gap_seconds',
+        30,
+      ),
       'auto_sort': _boolSetting(saved, 'auto_sort', false),
       'quick_mark_list': _stringListSetting(
         saved,
@@ -1086,7 +1092,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '折叠分组',
-            subtitle: '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
+            subtitle:
+                '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
             icon: Icons.folder_copy_rounded,
             child: Align(
               alignment: Alignment.centerRight,
@@ -1096,6 +1103,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ? (value) => _set('collapse_groups', value)
                     : null,
               ),
+            ),
+          ),
+          _SettingsPanel(
+            title: '自动分组规则',
+            subtitle: '综合拍摄时间和连拍张数判断事件边界；下一项是配套视频时会优先并入当前组。',
+            icon: Icons.timelapse_rounded,
+            child: Column(
+              children: [
+                _LabeledSlider(
+                  label: '连拍张数',
+                  value: _int('auto_group_burst_size').toDouble(),
+                  min: 1,
+                  max: 10,
+                  divisions: 9,
+                  valueLabel: '${_int('auto_group_burst_size')} 张',
+                  enabled: _bool('auto_group'),
+                  onChanged: (value) =>
+                      _set('auto_group_burst_size', value.round()),
+                ),
+                _LabeledSlider(
+                  label: '时间间隔',
+                  value: _int('auto_group_gap_seconds').toDouble(),
+                  min: 5,
+                  max: 120,
+                  divisions: 23,
+                  valueLabel: '${_int('auto_group_gap_seconds')} 秒',
+                  enabled: _bool('auto_group'),
+                  onChanged: (value) =>
+                      _set('auto_group_gap_seconds', value.round()),
+                ),
+              ],
             ),
           ),
           _buildQuickMarkEditor(),
