@@ -141,6 +141,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
+      'collapse_groups': _boolSetting(saved, 'collapse_groups', false),
       'auto_sort': _boolSetting(saved, 'auto_sort', false),
       'quick_mark_list': _stringListSetting(
         saved,
@@ -1080,6 +1081,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Switch(
                 value: _bool('auto_group'),
                 onChanged: (value) => _set('auto_group', value),
+              ),
+            ),
+          ),
+          _SettingsPanel(
+            title: '折叠分组',
+            subtitle: '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
+            icon: Icons.folder_copy_rounded,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Switch(
+                value: _bool('auto_group') && _bool('collapse_groups'),
+                onChanged: _bool('auto_group')
+                    ? (value) => _set('collapse_groups', value)
+                    : null,
               ),
             ),
           ),

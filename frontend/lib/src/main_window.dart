@@ -1321,6 +1321,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       autoGroup: _boolSetting(_settingsOrEmpty(), 'auto_group', true),
+      collapseGroups: _boolSetting(
+        _settingsOrEmpty(),
+        'collapse_groups',
+        false,
+      ),
       autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
       quickMarkSpecies: _stringListSetting(
         _settingsOrEmpty(),
