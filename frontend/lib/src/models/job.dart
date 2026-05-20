@@ -115,6 +115,25 @@ class DetectionItem {
   final Map<String, dynamic> detectionData;
   final String? error;
   final bool? validated;
+
+  DetectionItem mergeValidationUpdate(DetectionItem update) {
+    return DetectionItem(
+      filename: update.filename.isNotEmpty ? update.filename : filename,
+      path: update.path.isNotEmpty ? update.path : path,
+      fileType: update.fileType.isNotEmpty ? update.fileType : fileType,
+      dateTaken: update.dateTaken ?? dateTaken,
+      modifiedAt: update.modifiedAt ?? modifiedAt,
+      width: update.width ?? width,
+      height: update.height ?? height,
+      sizeBytes: update.sizeBytes ?? sizeBytes,
+      species: update.species,
+      confidence: update.confidence,
+      detectionBoxes: update.detectionBoxes,
+      detectionData: update.detectionData,
+      error: update.error,
+      validated: update.validated,
+    );
+  }
 }
 
 class ProcessingJob {

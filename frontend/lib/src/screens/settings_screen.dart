@@ -158,6 +158,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'auto_group_gap_seconds',
         30,
       ),
+      'undo_steps': _intSetting(saved, 'undo_steps', 1),
       'auto_sort': _boolSetting(saved, 'auto_sort', false),
       'quick_mark_list': _stringListSetting(
         saved,
@@ -294,6 +295,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       widget.onShowMessage('启动 PyTorch 安装失败：$error');
     }
+  }
+
+  Future<void> _installYoloDependencies() async {
+    if (_maintenanceInProgress) return;
+    const envChoice = '自动检测';
+    final packageSource = _string('package_source', 'official');
+    final sourceLabel = _packageSourceLabel(packageSource);
+    final missingText = _missingYoloDependenciesLabel.isEmpty
+        ? 'YOLO 处理依赖'
+        : _missingYoloDependenciesLabel;
+    final confirmed = await _confirmMaintenance(
+      title: '需要安装 YOLO 依赖',
+      message:
+          '当前缺少：$missingText。\n\n安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+          '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
+      confirmLabel: '安装依赖',
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _installingPytorch = true;
+      _maintenanceOperation = 'install_yolo_dependencies';
+      _maintenanceMessage = '正在启动 YOLO 依赖安装...';
+    });
+    try {
+      final response = await widget.apiClient.installYoloDependencies(
+        envChoice: envChoice,
+        packageSource: packageSource,
+      );
+      if (!mounted) return;
+      _startMaintenanceWatch(
+        operation: response.operation.isEmpty
+            ? 'install_yolo_dependencies'
+            : response.operation,
+        message: response.message,
+      );
+      widget.onShowMessage(response.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _installingPytorch = false;
+          _maintenanceOperation = null;
+          _maintenanceMessage = null;
+        });
+      }
+      widget.onShowMessage('启动 YOLO 依赖安装失败：$error');
+    }
+  }
+
+  String _packageSourceLabel(String packageSource) {
+    return switch (packageSource) {
+      'aliyun' => '阿里源',
+      'tsinghua' => '清华源',
+      _ => '官方源',
+    };
   }
 
   Future<void> _reinstallPythonPackage() async {
@@ -571,6 +627,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           if (!detectionEnabled) _buildDetectionDependencyNotice(),
+          if (_maintenanceInProgress) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
             subtitle: '选择用于照片和视频目标检测的模型',
@@ -753,9 +810,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(width: 12),
-          TextButton(
-            onPressed: () => setState(() => _sectionIndex = 1),
-            child: const Text('去安装'),
+          FilledButton(
+            onPressed: _maintenanceInProgress ? null : _installYoloDependencies,
+            child: _installingPytorch
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('安装依赖'),
           ),
         ],
       ),
@@ -1171,6 +1234,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildBasicSettings() {
+    final undoSteps = _int('undo_steps', 1).clamp(1, 50).toInt();
     return SectionCard(
       title: '基础设置',
       subtitle: '校验辅助、快速标记和导出字段',
@@ -1211,6 +1275,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: _SummaryDialogButton(
               summary: _autoGroupRuleSummary(),
               onPressed: _bool('auto_group') ? _showAutoGroupRulesDialog : null,
+            ),
+          ),
+          _SettingsPanel(
+            title: '可撤回记录步数',
+            subtitle: '最多保留多少次校验操作可供逐步撤回；批量标记会作为一次操作整体记录。',
+            icon: Icons.undo_rounded,
+            child: _LabeledSlider(
+              label: '记录步数',
+              value: undoSteps.toDouble(),
+              min: 1,
+              max: 50,
+              divisions: 49,
+              valueLabel: '$undoSteps 步',
+              onChanged: (value) => _set('undo_steps', value.round()),
             ),
           ),
           _buildQuickMarkEditor(),

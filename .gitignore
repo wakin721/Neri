@@ -4,8 +4,6 @@
 *.manifest
 *.spec
 
-res/demo/
-
 # Python
 __pycache__/
 *.py[cod]

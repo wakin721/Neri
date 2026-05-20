@@ -173,6 +173,18 @@ class ValidationMarkRequest(BaseModel):
     remark: str | None = None
 
 
+class ValidationBatchMarkRequest(BaseModel):
+    """Manual validation update for multiple media files."""
+
+    input_path: str = Field(..., min_length=1)
+    file_paths: list[str] = Field(..., min_length=1)
+    action: Literal["correct", "empty", "update", "unverified"] = "update"
+    species_name: str | None = None
+    species_count: str | None = None
+    species_type: str | None = None
+    remark: str | None = None
+
+
 class ValidationExportRequest(BaseModel):
     """Export validated detection data through the existing data processor."""
 

@@ -58,11 +58,14 @@ const validationExportColumns = <String>[
   '备注',
 ];
 
+const double _validationButtonHeight = 40;
+
 class SpeciesValidationScreen extends StatefulWidget {
   const SpeciesValidationScreen({
     required this.apiClient,
     required this.inputPath,
     required this.items,
+    required this.loading,
     required this.refreshVersion,
     required this.speciesTypes,
     required this.autoGroup,
@@ -71,6 +74,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.autoGroupBurstSize,
     required this.autoGroupGapSeconds,
     required this.autoSortQuickMarks,
+    required this.undoSteps,
     required this.quickMarkSpecies,
     required this.quickMarkRecentHistory,
     required this.quickMarkUsageCounts,
@@ -82,13 +86,13 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onMarkItems,
     required this.onQuickMarkUsed,
     required this.onRedetectItems,
-    required this.onBusyChanged,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final String inputPath;
   final List<DetectionItem> items;
+  final bool loading;
   final int refreshVersion;
   final Map<String, String> speciesTypes;
   final bool autoGroup;
@@ -97,6 +101,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final int autoGroupBurstSize;
   final int autoGroupGapSeconds;
   final bool autoSortQuickMarks;
+  final int undoSteps;
   final List<String> quickMarkSpecies;
   final List<String> quickMarkRecentHistory;
   final Map<String, int> quickMarkUsageCounts;
@@ -108,7 +113,6 @@ class SpeciesValidationScreen extends StatefulWidget {
   final MarkValidationItems onMarkItems;
   final Future<void> Function(String speciesName) onQuickMarkUsed;
   final RedetectValidationItems onRedetectItems;
-  final ValueChanged<bool> onBusyChanged;
 
   @override
   State<SpeciesValidationScreen> createState() =>
@@ -116,6 +120,12 @@ class SpeciesValidationScreen extends StatefulWidget {
 }
 
 enum _ValidationListFocus { species, photos }
+
+class _MarkHistoryEntry {
+  _MarkHistoryEntry(Iterable<DetectionItem> items) : items = items.toList();
+
+  final List<DetectionItem> items;
+}
 
 class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   static const _globalSpecies = 'global';
@@ -187,7 +197,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   // 临时状态（标记中、导出中不需要跨界面保存）
   bool _marking = false;
   bool _exporting = false;
-  DetectionItem? _lastMarkedItem;
+  final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   String? _pendingSpeciesName;
   String? _pendingQuantity;
   String? _pendingItemPath;
@@ -210,6 +220,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       const <String, _ValidationGroupIndexEntry>{};
   Map<String, _ValidationMediaGroup> _bucketCacheGroupBySignature =
       const <String, _ValidationMediaGroup>{};
+  Map<String, int> _bucketCacheGroupIndexBySignature = const <String, int>{};
+  int _bucketCacheGroupCount = 0;
   final Map<String, _MediaTimestampCacheEntry> _mediaTimestampCache =
       <String, _MediaTimestampCacheEntry>{};
   final Map<String, String> _groupSpeciesLabelCache = <String, String>{};
@@ -217,16 +229,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final Set<String> _expandedGroupSignatures = <String>{};
 
   bool get _useCollapsedGroups => widget.autoGroup && widget.collapseGroups;
-
-  @override
-  void dispose() {
-    widget.onBusyChanged(false);
-    super.dispose();
-  }
+  int get _undoHistoryLimit => widget.undoSteps.clamp(1, 50).toInt();
+  String get _undoTooltip => '撤回上一步校验';
 
   @override
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.inputPath != widget.inputPath) {
+      _markHistory.clear();
+    }
     if (oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.collapseGroups != widget.collapseGroups ||
         oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
@@ -239,6 +250,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _selectedPath = null;
       _selectedBucketKey = null;
       _selectedPaths.clear();
+      _markHistory.clear();
       _selectionAnchorPath = null;
       _selectedGroupSignature = null;
       _bucketCacheAutoGroup = null;
@@ -253,6 +265,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheItemByPath = const <String, DetectionItem>{};
       _bucketCacheGroupByPath = const <String, _ValidationGroupIndexEntry>{};
       _bucketCacheGroupBySignature = const <String, _ValidationMediaGroup>{};
+      _bucketCacheGroupIndexBySignature = const <String, int>{};
+      _bucketCacheGroupCount = 0;
       _mediaTimestampCache.clear();
       _groupSpeciesLabelCache.clear();
       _deferredRegroupGroupSignatures.clear();
@@ -261,6 +275,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
     final validPaths = widget.items.map((item) => item.path).toSet();
     _selectedPaths.removeWhere((path) => !validPaths.contains(path));
+    _discardMarkHistoryForPaths(
+      _markHistory
+          .expand((entry) => entry.items)
+          .map((item) => item.path)
+          .where((path) => !validPaths.contains(path))
+          .toSet(),
+    );
     if (_selectionAnchorPath != null &&
         !validPaths.contains(_selectionAnchorPath)) {
       _selectionAnchorPath = null;
@@ -290,7 +311,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (widget.items.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(16),
-        child: _EmptyValidationState(onRefresh: widget.onRefresh),
+        child: _EmptyValidationState(
+          loading: widget.loading,
+          onRefresh: widget.onRefresh,
+        ),
       );
     }
 
@@ -334,7 +358,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             children: [
               Expanded(
                 child: widget.items.isEmpty
-                    ? _EmptyValidationState(onRefresh: widget.onRefresh)
+                    ? _EmptyValidationState(
+                        loading: widget.loading,
+                        onRefresh: widget.onRefresh,
+                      )
                     : LayoutBuilder(
                         builder: (context, constraints) {
                           if (constraints.maxWidth < 980) {
@@ -745,6 +772,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         const Divider(height: 14),
                         _ActionButton(
                           label: '其他',
+                          height: _validationButtonHeight,
                           onPressed: _marking ? null : _markOtherSpecies,
                         ),
                       ],
@@ -781,15 +809,21 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                         ),
                         const Divider(height: 14),
                         Tooltip(
-                          message: '撤回本次校验',
-                          child: IconButton.filledTonal(
-                            onPressed: _lastMarkedItem == null || _marking
-                                ? null
-                                : () => _markSelected(
-                                    'unverified',
-                                    itemOverride: _lastMarkedItem,
-                                  ),
-                            icon: const Icon(Icons.undo_rounded),
+                          message: _undoTooltip,
+                          child: SizedBox(
+                            width: _validationButtonHeight,
+                            height: _validationButtonHeight,
+                            child: IconButton.filledTonal(
+                              onPressed: _markHistory.isEmpty || _marking
+                                  ? null
+                                  : _undoRecentMarks,
+                              icon: const Icon(Icons.undo_rounded),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: _validationButtonHeight,
+                                height: _validationButtonHeight,
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -932,6 +966,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(height: 8),
             FilledButton.icon(
               onPressed: _exporting ? null : _exportData,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(0, _validationButtonHeight),
+              ),
               icon: _exporting
                   ? const SizedBox(
                       width: 18,
@@ -1240,12 +1277,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     for (final bucket in buckets) {
       for (var index = 0; index < bucket.groups.length; index++) {
         final group = bucket.groups[index];
+        final signature = _groupSignature(group);
         for (final item in group.items) {
           if (item.path == path) {
             return _ValidationGroupIndexEntry(
-              index: index,
+              index: _globalGroupIndexForSignature(
+                signature,
+                fallback: index,
+              ),
               group: group,
-              signature: _groupSignature(group),
+              signature: signature,
             );
           }
         }
@@ -1387,14 +1428,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
-  List<_SpeciesBucket> _buildBuckets(List<DetectionItem> items) {
-    final map = <String, _SpeciesBucket>{};
-    final groups = widget.autoGroup
+  List<_ValidationMediaGroup> _buildValidationGroups(List<DetectionItem> items) {
+    return widget.autoGroup
         ? _buildAutoGroups(items)
         : [
             for (final item in _sortValidationItems(items))
               _ValidationMediaGroup(<DetectionItem>[item]),
           ];
+  }
+
+  List<_SpeciesBucket> _buildBuckets(List<_ValidationMediaGroup> groups) {
+    final map = <String, _SpeciesBucket>{};
 
     for (final group in groups) {
       final species = widget.autoGroup
@@ -1455,6 +1499,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
     }
 
+    final canDeferRegroup =
+        _deferredRegroupGroupSignatures.isNotEmpty &&
+        _bucketCachePathSignature == pathSignature &&
+        hasSameGroupingSettings;
+    if (canDeferRegroup) {
+      _bucketCacheGroupingSignature = groupingSignature;
+      _updateCachedBucketItems();
+      if (!_hasCompletedDeferredGroup()) {
+        return _bucketCache;
+      }
+    }
+
     return _rebuildBucketCache(pathSignature, groupingSignature);
   }
 
@@ -1471,11 +1527,25 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCacheRefreshVersion = widget.refreshVersion;
     _bucketCacheItemsIdentity = widget.items;
     _groupSpeciesLabelCache.clear();
-    _bucketCache = _buildBuckets(widget.items);
+    final groups = _buildValidationGroups(widget.items);
+    _rebuildGlobalGroupIndexes(groups);
+    _bucketCache = _buildBuckets(groups);
     _rebuildBucketLookups();
     _deferredRegroupGroupSignatures.clear();
     _trimExpandedGroupSignatures();
     return _bucketCache;
+  }
+
+  void _rebuildGlobalGroupIndexes(List<_ValidationMediaGroup> groups) {
+    _bucketCacheGroupCount = groups.length;
+    _bucketCacheGroupIndexBySignature = <String, int>{
+      for (var index = 0; index < groups.length; index++)
+        _groupSignature(groups[index]): index,
+    };
+  }
+
+  int _globalGroupIndexForSignature(String signature, {int fallback = 0}) {
+    return _bucketCacheGroupIndexBySignature[signature] ?? fallback;
   }
 
   void _trimExpandedGroupSignatures() {
@@ -1558,7 +1628,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         final signature = _groupSignature(group);
         groupBySignature[signature] = group;
         final entry = _ValidationGroupIndexEntry(
-          index: index,
+          index: _globalGroupIndexForSignature(signature, fallback: index),
           group: group,
           signature: signature,
         );
@@ -1814,19 +1884,25 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   String _groupHeaderSubtitle(_ValidationFileRow row) {
     final state = row.groupExpanded ? '已展开' : '已折叠';
-    return '第 ${row.groupIndex + 1} 组 · $state';
+    return '${_groupOrdinalLabel(row)} · $state';
   }
 
   String _fileListSubtitle(_ValidationFileRow row) {
     final label = _finalResultLabel(row.item);
     if (!widget.autoGroup) return label;
-    final groupIndex = row.groupIndex;
     if (_useCollapsedGroups && row.group.items.length > 1) {
       final state = row.groupExpanded ? '已展开' : '已折叠';
       final groupSize = row.group.items.length;
-      return '第 ${groupIndex + 1} 组 · $state $groupSize 个文件 · $label';
+      return '${_groupOrdinalLabel(row)} · $state $groupSize 个文件 · $label';
     }
-    return '第 ${groupIndex + 1} 组 · $label';
+    return '${_groupOrdinalLabel(row)} · $label';
+  }
+
+  String _groupOrdinalLabel(_ValidationFileRow row) {
+    final total = _bucketCacheGroupCount;
+    final current = row.groupIndex + 1;
+    if (total <= 0) return '第 $current 组';
+    return '第 $current/$total 组';
   }
 
   List<DetectionItem> _sortValidationItems(List<DetectionItem> items) {
@@ -2295,7 +2371,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           ? speciesName
           : null;
       setState(() {
-        _lastMarkedItem = action == 'unverified' ? null : lastUpdated;
+        if (action == 'unverified') {
+          _discardMarkHistoryForPaths(items.map((item) => item.path).toSet());
+        } else {
+          _recordMarkHistory(updatedItems);
+        }
         final nextSelection = nextPath ?? lastUpdated?.path;
         _selectedPaths.clear();
         if (nextSelection != null) {
@@ -2329,6 +2409,31 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
+  void _recordMarkHistory(Iterable<DetectionItem> items) {
+    final itemsByPath = <String, DetectionItem>{};
+    for (final item in items) {
+      itemsByPath[item.path] = item;
+    }
+    if (itemsByPath.isEmpty) return;
+
+    _discardMarkHistoryForPaths(itemsByPath.keys.toSet());
+    _markHistory.add(_MarkHistoryEntry(itemsByPath.values));
+    if (_markHistory.length > _undoHistoryLimit) {
+      _markHistory.removeRange(
+        0,
+        _markHistory.length - _undoHistoryLimit,
+      );
+    }
+  }
+
+  void _discardMarkHistoryForPaths(Set<String> paths) {
+    if (paths.isEmpty || _markHistory.isEmpty) return;
+    for (final entry in _markHistory) {
+      entry.items.removeWhere((item) => paths.contains(item.path));
+    }
+    _markHistory.removeWhere((entry) => entry.items.isEmpty);
+  }
+
   String? _nextPathAfterBatch(
     List<DetectionItem> visibleItems,
     List<DetectionItem> markedItems,
@@ -2356,6 +2461,54 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
     }
     return null;
+  }
+
+  List<DetectionItem> _recentUndoTargets() {
+    if (_markHistory.isEmpty) return const <DetectionItem>[];
+    final targetsByPath = <String, DetectionItem>{};
+    for (final item in _markHistory.last.items) {
+      targetsByPath[item.path] = item;
+    }
+    return targetsByPath.values.toList();
+  }
+
+  Future<void> _undoRecentMarks() async {
+    if (_marking || _markHistory.isEmpty) return;
+    final targets = _recentUndoTargets();
+    if (targets.isEmpty) return;
+
+    final visibleBefore = _visibleItems(_currentBuckets());
+    final nextPath = _nextPathAfterBatch(visibleBefore, targets);
+    _deferRegroupForItems(targets);
+
+    _setMarking(true);
+    try {
+      final updatedItems = await widget.onMarkItems(targets, 'unverified');
+      final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
+      if (!mounted) return;
+      final targetPaths = targets.map((item) => item.path).toSet();
+      setState(() {
+        _discardMarkHistoryForPaths(targetPaths);
+        final nextSelection = nextPath ?? lastUpdated?.path;
+        _selectedPaths.clear();
+        if (nextSelection != null) {
+          _selectedPath = nextSelection;
+          _selectedPaths.add(nextSelection);
+          _selectionAnchorPath = nextSelection;
+          _setSelectedGroupFromPath(nextSelection);
+        } else {
+          _selectedGroupSignature = null;
+        }
+        _resetPendingMark();
+      });
+      final count = updatedItems.isEmpty ? targets.length : updatedItems.length;
+      _showSnackBar(count == 1 ? '已撤回校验标记' : '已撤回 $count 个校验标记');
+    } catch (error) {
+      if (!mounted) return;
+      _showSnackBar('撤回校验标记失败：$error');
+    } finally {
+      _setMarking(false);
+    }
   }
 
   Future<void> _redetectBatch(List<DetectionItem> items) async {
@@ -2439,7 +2592,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               orElse: () => updated,
             );
       setState(() {
-        _lastMarkedItem = action == 'unverified' ? null : updated;
+        if (action == 'unverified') {
+          _discardMarkHistoryForPaths({item.path});
+        } else {
+          _recordMarkHistory(<DetectionItem>[updated]);
+        }
         final targetPath = targetItem.path;
         _selectedPath = targetPath;
         _selectedPaths
@@ -2475,7 +2632,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   void _setMarking(bool value) {
-    widget.onBusyChanged(value);
     if (!mounted || _marking == value) return;
     setState(() => _marking = value);
   }
@@ -2563,6 +2719,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (group.items.isEmpty) continue;
 
       final signature = _groupSignature(group);
+      final globalGroupIndex = _globalGroupIndexForSignature(
+        signature,
+        fallback: index,
+      );
       final expanded = _expandedGroupSignatures.contains(signature);
       final isGroup = _useCollapsedGroups && group.items.length > 1;
 
@@ -2574,7 +2734,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             isGroupHeader: true,
             groupExpanded: expanded,
             group: group,
-            groupIndex: index,
+            groupIndex: globalGroupIndex,
           ),
         );
 
@@ -2586,7 +2746,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                 isGroupHeader: false,
                 groupExpanded: true,
                 group: group,
-                groupIndex: index,
+                groupIndex: globalGroupIndex,
               ),
             );
           }
@@ -2599,7 +2759,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               isGroupHeader: false,
               groupExpanded: false,
               group: group,
-              groupIndex: index,
+              groupIndex: globalGroupIndex,
             ),
           );
         }
@@ -2775,11 +2935,13 @@ class _ActionButton extends StatelessWidget {
   const _ActionButton({
     required this.label,
     required this.onPressed,
+    this.height = 36,
     this.selected = false,
   });
 
   final String label;
   final VoidCallback? onPressed;
+  final double height;
   final bool selected;
 
   @override
@@ -2787,7 +2949,7 @@ class _ActionButton extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     return SizedBox(
       width: double.infinity,
-      height: 36,
+      height: height,
       child: FilledButton.tonal(
         onPressed: onPressed,
         style: FilledButton.styleFrom(
@@ -2844,8 +3006,12 @@ class _QuantityButton extends StatelessWidget {
 }
 
 class _EmptyValidationState extends StatelessWidget {
-  const _EmptyValidationState({required this.onRefresh});
+  const _EmptyValidationState({
+    required this.loading,
+    required this.onRefresh,
+  });
 
+  final bool loading;
   final Future<void> Function() onRefresh;
 
   @override
@@ -2859,9 +3025,15 @@ class _EmptyValidationState extends StatelessWidget {
           const Text('暂无待校验图像。'),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh_rounded),
-            label: const Text('重新读取'),
+            onPressed: loading ? null : onRefresh,
+            icon: loading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+            label: const Text('重新获取'),
           ),
         ],
       ),

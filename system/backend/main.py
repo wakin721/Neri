@@ -18,8 +18,9 @@ from .models import (
     MaintenanceStatusResponse,
     JobSummary,
     ReinstallPackageRequest,
-    SettingsUpdateRequest,
     SettingsResponse,
+    SettingsUpdateRequest,
+    ValidationBatchMarkRequest,
     ValidationExportRequest,
     ValidationExportResponse,
     ValidationMarkRequest,
@@ -41,6 +42,7 @@ from .services import (
     list_available_models,
     list_model_classes,
     load_species_types,
+    mark_validation_items,
     mark_validation_item,
     missing_yolo_dependencies,
     model_directory,
@@ -71,6 +73,14 @@ def health() -> HealthResponse:
     """Return a simple readiness response for the frontend."""
 
     return HealthResponse(version=__version__)
+
+
+@app.post("/api/shutdown")
+def shutdown(background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Schedule the local backend to exit after the response is flushed."""
+
+    background_tasks.add_task(schedule_backend_shutdown, 0.2)
+    return {"status": "shutting_down"}
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
@@ -317,6 +327,16 @@ def mark_validation(request: ValidationMarkRequest) -> DetectionItem:
 
     try:
         return mark_validation_item(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/validation/mark/batch", response_model=list[DetectionItem])
+def mark_validation_batch(request: ValidationBatchMarkRequest) -> list[DetectionItem]:
+    """Persist multiple manual validation decisions in one batch."""
+
+    try:
+        return mark_validation_items(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

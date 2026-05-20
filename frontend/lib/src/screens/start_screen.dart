@@ -66,6 +66,8 @@ class StartScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final detectionSettingsEnabled =
+        settings == null || settings!.missingYoloDependencies.isEmpty;
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
@@ -73,6 +75,7 @@ class StartScreen extends StatelessWidget {
         _HeroPanel(colorScheme: Theme.of(context).colorScheme),
         _CreateJobCard(
           settings: settings,
+          detectionSettingsEnabled: detectionSettingsEnabled,
           inputController: inputController,
           selectedModelPath: selectedModelPath,
           onModelChanged: onModelChanged,
@@ -149,6 +152,7 @@ class _HeroPanel extends StatelessWidget {
 class _CreateJobCard extends StatelessWidget {
   const _CreateJobCard({
     required this.settings,
+    required this.detectionSettingsEnabled,
     required this.inputController,
     required this.selectedModelPath,
     required this.onModelChanged,
@@ -169,6 +173,7 @@ class _CreateJobCard extends StatelessWidget {
   });
 
   final NeriSettings? settings;
+  final bool detectionSettingsEnabled;
   final TextEditingController inputController;
   final String? selectedModelPath;
   final ValueChanged<String?> onModelChanged;
@@ -234,6 +239,7 @@ class _CreateJobCard extends StatelessWidget {
           const SizedBox(height: 12),
           _StartOptionGrid(
             settings: settings,
+            enabled: detectionSettingsEnabled,
             selectedModelPath: selectedModelPath,
             onChanged: onModelChanged,
             selectedClassificationModelPath: selectedClassificationModelPath,
@@ -246,18 +252,18 @@ class _CreateJobCard extends StatelessWidget {
           const SizedBox(height: 12),
           SwitchListTile(
             value: useFp16,
-            onChanged: onUseFp16Changed,
+            onChanged: detectionSettingsEnabled ? onUseFp16Changed : null,
             title: const Text('使用 FP16 加速'),
           ),
           _ProcessingSlider(
             label: '置信度阈值',
             value: confidence,
-            onChanged: onConfidenceChanged,
+            onChanged: detectionSettingsEnabled ? onConfidenceChanged : null,
           ),
           _ProcessingSlider(
             label: 'IOU 阈值',
             value: iou,
-            onChanged: onIouChanged,
+            onChanged: detectionSettingsEnabled ? onIouChanged : null,
           ),
           const SizedBox(height: 8),
           FilledButton.icon(
@@ -280,6 +286,7 @@ class _CreateJobCard extends StatelessWidget {
 class _StartOptionGrid extends StatelessWidget {
   const _StartOptionGrid({
     required this.settings,
+    required this.enabled,
     required this.selectedModelPath,
     required this.onChanged,
     required this.selectedClassificationModelPath,
@@ -291,6 +298,7 @@ class _StartOptionGrid extends StatelessWidget {
   });
 
   final NeriSettings? settings;
+  final bool enabled;
   final String? selectedModelPath;
   final ValueChanged<String?> onChanged;
   final String? selectedClassificationModelPath;
@@ -320,6 +328,7 @@ class _StartOptionGrid extends StatelessWidget {
               width: itemWidth,
               child: _ModelSelector(
                 settings: settings,
+                enabled: enabled,
                 selectedModelPath: selectedModelPath,
                 onChanged: onChanged,
               ),
@@ -328,6 +337,7 @@ class _StartOptionGrid extends StatelessWidget {
               width: itemWidth,
               child: _ClassificationModelSelector(
                 settings: settings,
+                enabled: enabled,
                 selectedClassificationModelPath:
                     selectedClassificationModelPath,
                 onChanged: onClassificationModelChanged,
@@ -336,6 +346,7 @@ class _StartOptionGrid extends StatelessWidget {
             SizedBox(
               width: itemWidth,
               child: _VideoModeSelector(
+                enabled: enabled,
                 videoMode: videoMode,
                 onChanged: onVideoModeChanged,
               ),
@@ -343,6 +354,7 @@ class _StartOptionGrid extends StatelessWidget {
             SizedBox(
               width: itemWidth,
               child: _VideoStrideSelector(
+                enabled: enabled,
                 vidStride: vidStride,
                 onChanged: onVidStrideChanged,
               ),
@@ -357,11 +369,13 @@ class _StartOptionGrid extends StatelessWidget {
 class _ModelSelector extends StatelessWidget {
   const _ModelSelector({
     required this.settings,
+    required this.enabled,
     required this.selectedModelPath,
     required this.onChanged,
   });
 
   final NeriSettings? settings;
+  final bool enabled;
   final String? selectedModelPath;
   final ValueChanged<String?> onChanged;
 
@@ -377,9 +391,12 @@ class _ModelSelector extends StatelessWidget {
         decoration: InputDecoration(
           labelText: '模型文件',
           helperText:
-              '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型',
+              enabled
+                  ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
+                  : '检测依赖未安装，安装完成后可选择模型',
           prefixIcon: const Icon(Icons.folder_off_rounded),
           border: const OutlineInputBorder(),
+          enabled: enabled,
         ),
         child: const Text('暂无可用模型'),
       );
@@ -388,6 +405,7 @@ class _ModelSelector extends StatelessWidget {
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
+      enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('模型文件'),
       helperText: '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
@@ -396,7 +414,7 @@ class _ModelSelector extends StatelessWidget {
         for (final model in models)
           DropdownMenuEntry<String>(value: model.path, label: model.name),
       ],
-      onSelected: onChanged,
+      onSelected: enabled ? onChanged : null,
     );
   }
 }
@@ -404,11 +422,13 @@ class _ModelSelector extends StatelessWidget {
 class _ClassificationModelSelector extends StatelessWidget {
   const _ClassificationModelSelector({
     required this.settings,
+    required this.enabled,
     required this.selectedClassificationModelPath,
     required this.onChanged,
   });
 
   final NeriSettings? settings;
+  final bool enabled;
   final String? selectedClassificationModelPath;
   final ValueChanged<String?> onChanged;
 
@@ -427,6 +447,7 @@ class _ClassificationModelSelector extends StatelessWidget {
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
+      enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('分类模型'),
       helperText:
@@ -437,14 +458,19 @@ class _ClassificationModelSelector extends StatelessWidget {
         for (final model in models)
           DropdownMenuEntry<String>(value: model.path, label: model.name),
       ],
-      onSelected: onChanged,
+      onSelected: enabled ? onChanged : null,
     );
   }
 }
 
 class _VideoModeSelector extends StatelessWidget {
-  const _VideoModeSelector({required this.videoMode, required this.onChanged});
+  const _VideoModeSelector({
+    required this.enabled,
+    required this.videoMode,
+    required this.onChanged,
+  });
 
+  final bool enabled;
   final String videoMode;
   final ValueChanged<String> onChanged;
 
@@ -454,6 +480,7 @@ class _VideoModeSelector extends StatelessWidget {
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
+      enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频处理模式'),
       helperText: selectedValue == 'fast' ? '抽帧批量识别' : '按帧间隔追踪',
@@ -462,19 +489,23 @@ class _VideoModeSelector extends StatelessWidget {
         DropdownMenuEntry<String>(value: 'all', label: '全部识别'),
         DropdownMenuEntry<String>(value: 'fast', label: '快速识别'),
       ],
-      onSelected: (value) {
-        if (value != null) onChanged(value);
-      },
+      onSelected: enabled
+          ? (value) {
+              if (value != null) onChanged(value);
+            }
+          : null,
     );
   }
 }
 
 class _VideoStrideSelector extends StatelessWidget {
   const _VideoStrideSelector({
+    required this.enabled,
     required this.vidStride,
     required this.onChanged,
   });
 
+  final bool enabled;
   final int vidStride;
   final ValueChanged<int> onChanged;
 
@@ -484,6 +515,7 @@ class _VideoStrideSelector extends StatelessWidget {
     return DropdownMenu<int>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
+      enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频跳帧'),
       helperText: '全部识别为帧间隔，快速识别为抽帧数',
@@ -492,9 +524,11 @@ class _VideoStrideSelector extends StatelessWidget {
         for (var value = 1; value <= 30; value++)
           DropdownMenuEntry<int>(value: value, label: value.toString()),
       ],
-      onSelected: (value) {
-        if (value != null) onChanged(value);
-      },
+      onSelected: enabled
+          ? (value) {
+              if (value != null) onChanged(value);
+            }
+          : null,
     );
   }
 }
@@ -508,7 +542,7 @@ class _ProcessingSlider extends StatelessWidget {
 
   final String label;
   final double value;
-  final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChanged;
 
   @override
   Widget build(BuildContext context) {

@@ -31,6 +31,7 @@ from .models import (
     JobSummary,
     ModelClassInfo,
     ModelInfo,
+    ValidationBatchMarkRequest,
     ValidationExportRequest,
     ValidationExportResponse,
     ValidationMarkRequest,
@@ -1647,26 +1648,101 @@ def _update_species_database(species_name_str: str, species_type_str: str) -> No
     except Exception as e:
         print(f"Failed to auto-update species_database.db: {e}")
 
+
 def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
+    items = mark_validation_items(
+        ValidationBatchMarkRequest(
+            input_path=request.input_path,
+            file_paths=[request.file_path],
+            action=request.action,
+            species_name=request.species_name,
+            species_count=request.species_count,
+            species_type=request.species_type,
+            remark=request.remark,
+        )
+    )
+    if not items:
+        raise ValueError("没有可标记的文件")
+    return items[0]
+
+
+def mark_validation_items(request: ValidationBatchMarkRequest) -> list[DetectionItem]:
     input_path = Path(request.input_path).expanduser().resolve()
-    path = Path(request.file_path).expanduser().resolve()
     if not input_path.exists():
         raise ValueError(f"输入路径不存在: {input_path}")
-    if not path.exists() or not path.is_file():
-        raise ValueError(f"文件不存在: {path}")
 
-    roots = _detection_db_search_roots(input_path, None)
-    existing_data = dict(_load_detection_data_for_path(path, roots))
-    existing_item = _build_metadata_item(path)
+    paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    for raw_path in request.file_paths:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"文件不存在: {path}")
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        paths.append(path)
+    if not paths:
+        return []
+
+    roots = _preview_detection_db_roots(input_path, None, paths)
+    detection_indexes: dict[Path, dict[str, dict[str, Any]]] = {}
+
+    def detection_data_for(path: Path) -> dict[str, Any]:
+        for root in _unique_existing_dirs([path.parent, *roots]):
+            index = detection_indexes.get(root)
+            if index is None:
+                index = _load_detection_index([root], recursive=False)
+                detection_indexes[root] = index
+            data = index.get(path.stem)
+            if isinstance(data, dict):
+                return dict(data)
+        return {}
+
+    updates: list[tuple[Path, dict[str, Any], bool | None]] = []
+    updated_items: list[DetectionItem] = []
+    species_database_updates: set[tuple[str, str]] = set()
+    for path in paths:
+        detection_data, validated = _build_validation_update(
+            request,
+            path,
+            detection_data_for(path),
+        )
+        updates.append((path, detection_data, validated))
+
+        item = _build_fast_metadata_item(path)
+        if detection_data:
+            item = _apply_detection_data(item, detection_data)
+        item = item.model_copy(update={"validated": validated})
+        updated_items.append(item)
+
+        if request.species_type is not None:
+            species_type = request.species_type.strip()
+            species_name = str(detection_data.get("物种名称") or "").strip()
+            if species_name and species_type:
+                species_database_updates.add((species_name, species_type))
+
+    _persist_validation_updates(updates, input_path)
+    for species_name, species_type in species_database_updates:
+        _update_species_database(species_name, species_type)
+
+    return updated_items
+
+
+def _build_validation_update(
+    request: ValidationMarkRequest | ValidationBatchMarkRequest,
+    path: Path,
+    existing_data: dict[str, Any],
+) -> tuple[dict[str, Any], bool | None]:
+    existing_data = dict(existing_data)
+    existing_item = _build_fast_metadata_item(path)
     if existing_data:
         existing_item = _apply_detection_data(existing_item, existing_data)
-
     validated: bool | None = True
     detection_data = existing_data
 
     if request.action == "unverified":
         if detection_data.get("最低置信度") == "人工校验":
-            for key in ["最低置信度", "物种名称", "物种数量", "备注", "检测时间"]:
+            for key in ["最低置信度", "物种名称", "物种类型", "物种数量", "备注", "检测时间"]:
                 detection_data.pop(key, None)
         validated = None
     else:
@@ -1682,7 +1758,11 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
                 species_name = ",".join(existing_item.species)
             species_count = species_count or str(detection_data.get("物种数量") or "").strip()
             if not species_count:
-                species_count = str(max(1, len(existing_item.detection_boxes))) if species_name and species_name != "空" else "空"
+                species_count = (
+                    str(max(1, len(existing_item.detection_boxes)))
+                    if species_name and species_name != "空"
+                    else "空"
+                )
 
         if species_name:
             detection_data["物种名称"] = species_name
@@ -1692,7 +1772,6 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
             species_type = request.species_type.strip()
             if species_type:
                 detection_data["物种类型"] = species_type
-                _update_species_database(detection_data.get("物种名称", ""), species_type)
             else:
                 detection_data.pop("物种类型", None)
         if request.remark is not None:
@@ -1700,8 +1779,7 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
         detection_data["最低置信度"] = "人工校验"
         detection_data["检测时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    _persist_validation_update(path, input_path, detection_data, validated)
-    return _reload_validation_item(path, input_path)
+    return detection_data, validated
 
 
 def export_validation_data(request: ValidationExportRequest) -> ValidationExportResponse:
@@ -1775,29 +1853,56 @@ def _persist_validation_update(
     detection_data: dict[str, Any],
     validated: bool | None,
 ) -> None:
-    from system.detection_db import delete_validation, get_db_path, init_db, upsert_detection, upsert_validation
+    _persist_validation_updates([(path, detection_data, validated)], input_path)
 
-    roots = [path.parent]
-    roots.append(input_path if input_path.is_dir() else input_path.parent)
 
-    seen: set[Path] = set()
-    for root in roots:
-        try:
-            resolved = root.resolve()
-        except OSError:
-            resolved = root
-        if resolved in seen or not resolved.exists() or not resolved.is_dir():
-            continue
-        seen.add(resolved)
+def _persist_validation_updates(
+    updates: Iterable[tuple[Path, dict[str, Any], bool | None]],
+    input_path: Path,
+) -> None:
+    from system.detection_db import (
+        delete_validation_bulk,
+        get_db_path,
+        init_db,
+        upsert_detections_bulk,
+        upsert_validation_bulk,
+    )
 
-        db_path = get_db_path(str(resolved))
+    payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
+    validation_upserts_by_root: dict[Path, list[tuple[str, bool]]] = {}
+    validation_deletes_by_root: dict[Path, list[str]] = {}
+
+    for path, detection_data, validated in updates:
+        roots = [path.parent]
+        roots.append(input_path if input_path.is_dir() else input_path.parent)
+
+        seen: set[Path] = set()
+        for root in roots:
+            try:
+                resolved = root.resolve()
+            except OSError:
+                resolved = root
+            if resolved in seen or not resolved.exists() or not resolved.is_dir():
+                continue
+            seen.add(resolved)
+            payloads_by_root.setdefault(resolved, []).append(
+                (path.stem, path.name, detection_data)
+            )
+            if validated is None:
+                validation_deletes_by_root.setdefault(resolved, []).append(
+                    path.name
+                )
+            else:
+                validation_upserts_by_root.setdefault(resolved, []).append(
+                    (path.name, validated)
+                )
+
+    for root, payloads in payloads_by_root.items():
+        db_path = get_db_path(str(root))
         init_db(db_path)
-        if detection_data:
-            upsert_detection(db_path, path.stem, path.name, detection_data)
-        if validated is None:
-            delete_validation(db_path, path.name)
-        else:
-            upsert_validation(db_path, path.name, validated)
+        upsert_detections_bulk(db_path, payloads)
+        delete_validation_bulk(db_path, validation_deletes_by_root.get(root, []))
+        upsert_validation_bulk(db_path, validation_upserts_by_root.get(root, []))
 
 
 def _build_export_metadata(path: Path) -> dict[str, Any]:

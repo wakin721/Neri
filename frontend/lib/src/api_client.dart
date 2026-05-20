@@ -22,6 +22,11 @@ class NeriApiClient {
     return response.statusCode == 200;
   }
 
+  Future<void> shutdownBackend() async {
+    final response = await _httpClient.post(_uri('/api/shutdown'));
+    _ensureSuccess(response);
+  }
+
   Future<NeriSettings> fetchSettings() async {
     final response = await _httpClient.get(_uri('/api/settings'));
     _ensureSuccess(response);
@@ -231,6 +236,54 @@ class NeriApiClient {
     return DetectionItem.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
+  }
+
+  Future<List<DetectionItem>> markValidationItems({
+    required String inputPath,
+    required List<String> filePaths,
+    required String action,
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/validation/mark/batch'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_paths': filePaths,
+        'action': action,
+        if (speciesName != null) 'species_name': speciesName,
+        if (speciesCount != null) 'species_count': speciesCount,
+        if (speciesType != null) 'species_type': speciesType,
+        if (remark != null) 'remark': remark,
+      }),
+    );
+    try {
+      _ensureSuccess(response);
+    } on ApiException catch (error) {
+      if (error.statusCode != 404) rethrow;
+      final updatedItems = <DetectionItem>[];
+      for (final filePath in filePaths) {
+        updatedItems.add(
+          await markValidationItem(
+            inputPath: inputPath,
+            filePath: filePath,
+            action: action,
+            speciesName: speciesName,
+            speciesCount: speciesCount,
+            speciesType: speciesType,
+            remark: remark,
+          ),
+        );
+      }
+      return updatedItems;
+    }
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DetectionItem.fromJson)
+        .toList();
   }
 
   Future<ValidationExportResult> exportValidationData({

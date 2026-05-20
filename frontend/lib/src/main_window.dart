@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -66,8 +67,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   Timer? _timer;
   Timer? _previewRefreshTimer;
+  Process? _backendProcess;
+  Future<void>? _backendShutdownTask;
   int _previewRefreshRequestId = 0;
   bool _loading = true;
+  bool _backendStarting = false;
+  bool _backendReady = false;
   bool _submitting = false;
   bool _previewLoading = false;
   bool _validationBusy = false;
@@ -78,6 +83,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _previewShowDetections = true;
   bool _previewDetecting = false;
   bool _isMaximized = false;
+  bool _closing = false;
+  bool _showClosingOverlay = false;
   double _confidence = 0.25;
   double _iou = 0.45;
   double _previewConfidenceThreshold = 0.25;
@@ -94,6 +101,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   void initState() {
     super.initState();
     windowManager.addListener(this);
+    unawaited(windowManager.setPreventClose(true));
     _initWindowState();
 
     try {
@@ -102,11 +110,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     _inputController.addListener(_schedulePreviewRefresh);
     _loadLastInputPath();
-    _refresh();
-    _timer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => _refresh(silent: true),
-    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_startBackendAndInitialRefresh());
+    });
   }
 
   @override
@@ -114,10 +120,32 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     windowManager.removeListener(this);
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
+    unawaited(_shutdownBackend().whenComplete(widget.apiClient.close));
     _inputController.dispose();
     _pageController.dispose();
-    widget.apiClient.close();
     super.dispose();
+  }
+
+  @override
+  void onWindowClose() {
+    _requestCloseWindow();
+  }
+
+  void _requestCloseWindow() {
+    if (_closing) return;
+    _closing = true;
+    _timer?.cancel();
+    _previewRefreshTimer?.cancel();
+    if (mounted) {
+      setState(() => _showClosingOverlay = true);
+    }
+    unawaited(_closeWindowAfterBackendShutdown());
+  }
+
+  Future<void> _closeWindowAfterBackendShutdown() async {
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await _shutdownBackend();
+    await windowManager.destroy();
   }
 
   @override
@@ -143,6 +171,242 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted || lastPath == null || lastPath.isEmpty) return;
     setState(() => _inputController.text = lastPath);
     _schedulePreviewRefresh();
+  }
+
+  Future<void> _startBackendAndInitialRefresh() async {
+    if (_backendStarting) return;
+    _backendStarting = true;
+    if (mounted) setState(() => _loading = true);
+    try {
+      await _ensureBackendStarted();
+      final ready = await _waitForBackendReady();
+      if (!mounted) return;
+      if (!ready) {
+        setState(() => _loading = false);
+        _showSnackBar('Python 后端启动超时，请检查 toolkit\\python.exe 和端口 721。');
+        return;
+      }
+      _backendReady = true;
+      await _refresh(includeJobResults: false);
+      unawaited(_refresh(silent: true, includeJobResults: true));
+      unawaited(_refreshPreviewItems(force: true));
+      _timer ??= Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => _refresh(silent: true),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _showSnackBar('启动 Python 后端失败：$error');
+    } finally {
+      _backendStarting = false;
+    }
+  }
+
+  Future<void> _ensureBackendStarted() async {
+    if (await _backendResponds()) return;
+    final projectRoot = _resolveProjectRoot();
+    if (projectRoot == null) {
+      throw StateError('未找到项目根目录，无法定位 toolkit\\python.exe。');
+    }
+    final pythonExe = _fileUnder(projectRoot, [
+      'toolkit',
+      Platform.isWindows ? 'python.exe' : 'python',
+    ]);
+    if (!pythonExe.existsSync()) {
+      throw StateError('未找到 ${pythonExe.path}。');
+    }
+
+    final process = await Process.start(
+      pythonExe.path,
+      const <String>[
+        '-m',
+        'uvicorn',
+        'system.backend.main:app',
+        '--app-dir',
+        '.',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        '721',
+      ],
+      workingDirectory: projectRoot.path,
+      runInShell: false,
+    );
+    _backendProcess = process;
+    process.stdout.transform(utf8.decoder).listen((_) {});
+    process.stderr.transform(utf8.decoder).listen((_) {});
+    unawaited(
+      process.exitCode.then((_) {
+        if (identical(_backendProcess, process)) {
+          _backendProcess = null;
+          _backendReady = false;
+        }
+      }),
+    );
+  }
+
+  Future<bool> _waitForBackendReady() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (DateTime.now().isBefore(deadline)) {
+      if (await _backendResponds()) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
+  Future<bool> _backendResponds() async {
+    try {
+      return await widget.apiClient
+          .health()
+          .timeout(const Duration(milliseconds: 800));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _shutdownBackend() {
+    return _backendShutdownTask ??= _shutdownBackendNow();
+  }
+
+  Future<void> _shutdownBackendNow() async {
+    final process = _backendProcess;
+    _backendReady = false;
+    var shutdownRequested = false;
+
+    try {
+      await widget.apiClient
+          .shutdownBackend()
+          .timeout(const Duration(milliseconds: 800));
+      shutdownRequested = true;
+    } catch (_) {}
+
+    if (process != null) {
+      if (shutdownRequested &&
+          await _waitForProcessExit(process, const Duration(seconds: 5))) {
+        if (identical(_backendProcess, process)) {
+          _backendProcess = null;
+        }
+        return;
+      }
+      await _terminateBackendProcess(process);
+      if (identical(_backendProcess, process)) {
+        _backendProcess = null;
+      }
+    } else {
+      if (shutdownRequested &&
+          await _waitForBackendStopped(const Duration(seconds: 5))) {
+        return;
+      }
+      await _terminateBackendPortOwner();
+    }
+  }
+
+  Future<bool> _waitForBackendStopped(Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (!await _backendResponds()) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    return !await _backendResponds();
+  }
+
+  Future<bool> _waitForProcessExit(Process process, Duration timeout) async {
+    try {
+      await process.exitCode.timeout(timeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _terminateBackendProcess(Process process) async {
+    if (Platform.isWindows) {
+      try {
+        await _taskkillProcessTree(process.pid);
+        return;
+      } catch (_) {
+        process.kill();
+      }
+    } else {
+      process.kill(ProcessSignal.sigterm);
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 2));
+        return;
+      } catch (_) {
+        process.kill(ProcessSignal.sigkill);
+      }
+    }
+  }
+
+  Future<void> _terminateBackendPortOwner() async {
+    if (!Platform.isWindows) return;
+    final ownerPid = await _windowsListeningPortOwner(721);
+    if (ownerPid == null || ownerPid == pid) return;
+    try {
+      await _taskkillProcessTree(ownerPid);
+    } catch (_) {}
+  }
+
+  Future<void> _taskkillProcessTree(int targetPid) async {
+    await Process.run('taskkill', [
+      '/PID',
+      targetPid.toString(),
+      '/T',
+      '/F',
+    ]).timeout(const Duration(seconds: 3));
+  }
+
+  Future<int?> _windowsListeningPortOwner(int port) async {
+    try {
+      final result = await Process.run('netstat', [
+        '-ano',
+        '-p',
+        'tcp',
+      ]).timeout(const Duration(seconds: 2));
+      final output = '${result.stdout}\n${result.stderr}';
+      final portSuffix = ':$port';
+      for (final line in output.split('\n')) {
+        final trimmed = line.trim();
+        if (!trimmed.contains('LISTENING')) continue;
+        final columns = trimmed.split(RegExp(r'\s+'));
+        if (columns.length < 5) continue;
+        final localAddress = columns[1];
+        if (!localAddress.endsWith(portSuffix)) continue;
+        return int.tryParse(columns.last);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Directory? _resolveProjectRoot() {
+    final bases = <Directory>[
+      Directory.current,
+      File(Platform.resolvedExecutable).parent,
+    ];
+    final visited = <String>{};
+    for (final base in bases) {
+      var current = base.absolute;
+      for (var depth = 0; depth < 8; depth++) {
+        final path = current.path;
+        if (visited.add(path) &&
+            _fileUnder(current, [
+              'toolkit',
+              Platform.isWindows ? 'python.exe' : 'python',
+            ]).existsSync() &&
+            _fileUnder(current, ['system', 'backend', 'main.py']).existsSync()) {
+          return current;
+        }
+        final parent = current.parent;
+        if (parent.path == current.path) break;
+        current = parent;
+      }
+    }
+    return null;
+  }
+
+  File _fileUnder(Directory root, List<String> parts) {
+    return File([root.path, ...parts].join(Platform.pathSeparator));
   }
 
   Future<void> _saveLastInputPath(String path) async {
@@ -264,6 +528,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _refreshPreviewItems({bool force = false}) async {
+    if (!_backendReady) return;
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) return;
     if (!force && _previewLoadedPath == inputPath && _previewItems.isNotEmpty) {
@@ -362,6 +627,40 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       for (final item in updates)
         if (!seen.contains(item.path)) item,
     ]);
+  }
+
+  List<DetectionItem> _replacePreviewItems(
+    List<DetectionItem> currentItems,
+    Iterable<DetectionItem> updates,
+  ) {
+    final updateByPath = <String, DetectionItem>{
+      for (final item in updates)
+        if (item.path.isNotEmpty) item.path: item,
+    };
+    if (updateByPath.isEmpty) return currentItems;
+
+    var appended = false;
+    final seen = currentItems.map((item) => item.path).toSet();
+    final nextItems = <DetectionItem>[
+      for (final item in currentItems) updateByPath[item.path] ?? item,
+    ];
+    for (final item in updateByPath.values) {
+      if (seen.contains(item.path)) continue;
+      nextItems.add(item);
+      appended = true;
+    }
+    return appended ? _sortMediaItemsForDisplay(nextItems) : nextItems;
+  }
+
+  DetectionItem _mergeValidationUpdate(
+    DetectionItem fallback,
+    DetectionItem update,
+  ) {
+    final current = _previewItems.firstWhere(
+      (item) => item.path == update.path,
+      orElse: () => fallback,
+    );
+    return current.mergeValidationUpdate(update);
   }
 
   List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) {
@@ -477,6 +776,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _refresh({
     bool silent = false,
     bool reloadSettings = false,
+    bool includeJobResults = true,
   }) async {
     if (!silent) {
       setState(() => _loading = true);
@@ -488,11 +788,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings()
           : _settings;
-      final summariesOnly = silent && _jobProcessingBusy;
+      final summariesOnly = !includeJobResults || (silent && _jobProcessingBusy);
       var jobs = await widget.apiClient.listJobs(
         includeResults: !summariesOnly,
       );
-      if (summariesOnly && jobs.every((job) => !job.isWorkerActive)) {
+      if (summariesOnly &&
+          includeJobResults &&
+          jobs.every((job) => !job.isWorkerActive)) {
         jobs = await widget.apiClient.listJobs();
       } else if (summariesOnly) {
         jobs = _mergeJobSummariesWithCachedResults(jobs);
@@ -589,6 +891,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
     } catch (error) {
       if (!mounted) return;
+      _backendReady = false;
       setState(() => _loading = false);
       if (!silent) _showSnackBar('无法连接 Python 后端：$error');
     }
@@ -1014,21 +1317,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesType: speciesType,
         remark: remark,
       );
+      final merged = _mergeValidationUpdate(item, updated);
 
-      if (!mounted) return updated;
+      if (!mounted) return merged;
       setState(() {
         _cacheMarkedSpeciesTypes(speciesName, speciesType);
-        _previewMetadataCache[updated.path] = updated;
-        _previewItems = _sortMediaItemsForDisplay(
-          _previewItems
-              .map(
-                (previewItem) =>
-                    previewItem.path == updated.path ? updated : previewItem,
-              )
-              .toList(),
-        );
+        _previewMetadataCache[merged.path] = merged;
+        _previewItems = _replacePreviewItems(_previewItems, [merged]);
       });
-      return updated;
+      return merged;
     });
   }
 
@@ -1046,36 +1343,33 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         throw StateError('请先在开始界面设置输入文件夹。');
       }
 
-      final updatedItems = <DetectionItem>[];
-      for (final item in items) {
-        final updated = await widget.apiClient.markValidationItem(
-          inputPath: inputPath,
-          filePath: item.path,
-          action: action,
-          speciesName: speciesName,
-          speciesCount: speciesCount,
-          speciesType: speciesType,
-          remark: remark,
-        );
-        updatedItems.add(updated);
-      }
+      final rawUpdatedItems = await widget.apiClient.markValidationItems(
+        inputPath: inputPath,
+        filePaths: items.map((item) => item.path).toList(),
+        action: action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+      );
+      final fallbackByPath = <String, DetectionItem>{
+        for (final item in items) item.path: item,
+      };
+      final updatedItems = <DetectionItem>[
+        for (final updated in rawUpdatedItems)
+          _mergeValidationUpdate(
+            fallbackByPath[updated.path] ?? updated,
+            updated,
+          ),
+      ];
 
       if (!mounted) return updatedItems;
       setState(() {
         _cacheMarkedSpeciesTypes(speciesName, speciesType);
-        final updatedByPath = <String, DetectionItem>{
-          for (final item in updatedItems) item.path: item,
-        };
         for (final item in updatedItems) {
           _previewMetadataCache[item.path] = item;
         }
-        _previewItems = _sortMediaItemsForDisplay(
-          _previewItems
-              .map(
-                (previewItem) => updatedByPath[previewItem.path] ?? previewItem,
-              )
-              .toList(),
-        );
+        _previewItems = _replacePreviewItems(_previewItems, updatedItems);
       });
       return updatedItems;
     });
@@ -1173,11 +1467,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               ),
               IconButton(
                 tooltip: '刷新',
-                onPressed: _loading
+                onPressed: _loading || _previewLoading
                     ? null
                     : () async {
-                        await _refresh();
-                        await _refreshPreviewItems(force: true);
+                        if (!_backendReady) {
+                          await _startBackendAndInitialRefresh();
+                        } else {
+                          await _refresh(includeJobResults: false);
+                          unawaited(
+                            _refresh(silent: true, includeJobResults: true),
+                          );
+                          unawaited(_refreshPreviewItems(force: true));
+                        }
                       },
                 icon: const Icon(Icons.refresh_rounded),
               ),
@@ -1226,7 +1527,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                         return Theme.of(context).colorScheme.onSurfaceVariant;
                       }),
                     ),
-                    onPressed: () => windowManager.close(),
+                    onPressed: _requestCloseWindow,
                   );
                 },
               ),
@@ -1235,54 +1536,57 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           ),
         ),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          // 标题栏下方的全局进度条
-          SizedBox(
-            height: 4, // 固定高度防止页面抖动
-            child:
-                (_loading ||
-                    _previewLoading ||
-                    _previewDetecting ||
-                    _submitting ||
-                    _jobProcessingBusy ||
-                    _jobTransitionBusy ||
-                    _validationBusy)
-                ? const LinearProgressIndicator() // 移除 ExcludeSemantics
-                : null,
-          ),
-          // 原有的主体内容区域
-          Expanded(
-            child: Row(
-              children: [
-                _NativeNavigationRail(
-                  selectedIndex: _selectedIndex,
-                  entries: _navigationItems,
-                  onDestinationSelected: (index) {
-                    setState(() => _selectedIndex = index);
-                    _pageController.jumpToPage(index);
-                    if (index == 1 || index == 2) {
-                      unawaited(_refreshPreviewItems());
-                    }
-                  },
+          Column(
+            children: [
+              // 标题栏下方的全局进度条
+              SizedBox(
+                height: 4, // 固定高度防止页面抖动
+                child:
+                    (_loading ||
+                        _previewDetecting ||
+                        _submitting ||
+                        _jobTransitionBusy ||
+                        _validationBusy)
+                    ? const LinearProgressIndicator() // 移除 ExcludeSemantics
+                    : null,
+              ),
+              // 原有的主体内容区域
+              Expanded(
+                child: Row(
+                  children: [
+                    _NativeNavigationRail(
+                      selectedIndex: _selectedIndex,
+                      entries: _navigationItems,
+                      onDestinationSelected: (index) {
+                        setState(() => _selectedIndex = index);
+                        _pageController.jumpToPage(index);
+                        if (index == 1 || index == 2) {
+                          unawaited(_refreshPreviewItems());
+                        }
+                      },
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      // 使用 IndexedStack 保持所有页面的状态（包括滚动位置和局部过滤选项）
+                      child: PageView(
+                        controller: _pageController,
+                        physics: const NeverScrollableScrollPhysics(),
+                        children: [
+                          _buildStartScreen(),
+                          _buildPreviewPage(),
+                          _buildValidationPage(),
+                          _buildSettingsScreen(),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  // 使用 IndexedStack 保持所有页面的状态（包括滚动位置和局部过滤选项）
-                  child: PageView(
-                    controller: _pageController,
-                    physics: const NeverScrollableScrollPhysics(),
-                    children: [
-                      _buildStartScreen(),
-                      _buildPreviewPage(),
-                      _buildValidationPage(),
-                      _buildSettingsScreen(),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
+          if (_showClosingOverlay) _ClosingOverlay(),
         ],
       ),
     );
@@ -1415,6 +1719,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       apiClient: widget.apiClient,
       inputPath: inputPath,
       items: items,
+      loading: _previewLoading,
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       autoGroup: _boolSetting(_settingsOrEmpty(), 'auto_group', true),
@@ -1439,6 +1744,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         30,
       ),
       autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
+      undoSteps: _intSetting(_settingsOrEmpty(), 'undo_steps', 1)
+          .clamp(1, 50)
+          .toInt(),
       quickMarkSpecies: _stringListSetting(
         _settingsOrEmpty(),
         'quick_mark_list',
@@ -1465,9 +1773,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onMarkItems: _markValidationItems,
       onQuickMarkUsed: _recordQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
-      onBusyChanged: (value) {
-        _setValidationBusy(value);
-      },
     );
   }
 
@@ -1500,6 +1805,43 @@ class _NavigationRailEntry {
   final String label;
   final IconData icon;
   final IconData selectedIcon;
+}
+
+class _ClosingOverlay extends StatelessWidget {
+  const _ClosingOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Positioned.fill(
+      child: ColoredBox(
+        color: scheme.scrim.withValues(alpha: 0.36),
+        child: Center(
+          child: Card(
+            elevation: 6,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.6,
+                      color: scheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  const Text('正在关闭 Python 后端，完成后窗口会自动退出。'),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // Kept for the legacy rail implementation below; the active sidebar uses a
