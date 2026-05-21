@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -41,6 +42,11 @@ const _defaultQuickMarks = <String>[
   '黑翅长脚鹬',
   '未知鸟',
 ];
+
+const _releaseNotesUrl =
+    'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
+const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
+const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -495,6 +501,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  void _openExternalUrl(String url) {
+    try {
+      if (Platform.isWindows) {
+        unawaited(Process.run('cmd', ['/c', 'start', '', url]));
+      } else if (Platform.isMacOS) {
+        unawaited(Process.run('open', [url]));
+      } else if (Platform.isLinux) {
+        unawaited(Process.run('xdg-open', [url]));
+      } else {
+        widget.onShowMessage(url);
+      }
+    } catch (_) {
+      widget.onShowMessage(url);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Row(
@@ -539,7 +561,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               NavigationDrawerDestination(
                 icon: Icon(Icons.info_outline_rounded),
                 selectedIcon: Icon(Icons.info_rounded),
-                label: Text('项目信息'),
+                label: Text('关于'),
               ),
             ],
           ),
@@ -1437,10 +1459,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildProjectSettings() {
     return SectionCard(
-      title: '项目信息',
-      subtitle: '后端版本与媒体格式',
+      title: '关于',
+      subtitle: '版本、更新说明和项目入口',
       icon: Icons.info_rounded,
-      child: _ProjectInfo(settings: widget.settings),
+      child: _AboutInfo(settings: widget.settings, onOpenUrl: _openExternalUrl),
     );
   }
 
@@ -1641,6 +1663,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildUpdateSettings() {
     return Column(
       children: [
+        _SoftwareVersionInfo(
+          settings: widget.settings,
+          onReleaseNotes: () => _openExternalUrl(_releaseNotesUrl),
+        ),
+        const SizedBox(height: 12),
         _SettingsPanel(
           title: '更新通道',
           subtitle: '选择稳定版或预览版更新来源',
@@ -2167,25 +2194,172 @@ class _AppearanceControls extends StatelessWidget {
   }
 }
 
-class _ProjectInfo extends StatelessWidget {
-  const _ProjectInfo({required this.settings});
+class _SoftwareVersionInfo extends StatelessWidget {
+  const _SoftwareVersionInfo({
+    required this.settings,
+    required this.onReleaseNotes,
+  });
 
   final NeriSettings? settings;
+  final VoidCallback onReleaseNotes;
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final version = settings?.appVersion.isNotEmpty == true
+        ? settings!.appVersion
+        : '未读取到版本信息';
+
     return Card.outlined(
       margin: EdgeInsets.zero,
-      child: ListTile(
-        leading: const Icon(Icons.info_outline_rounded),
-        title: const Text('项目配置'),
-        subtitle: Text(
-          settings == null
-              ? '未读取到后端配置'
-              : '版本 ${settings!.appVersion} · 图像 ${settings!.supportedImageExtensions.join(' ')} · 视频 ${settings!.supportedVideoExtensions.join(' ')}',
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(Icons.verified_rounded, color: scheme.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('当前版本', style: Theme.of(context).textTheme.titleSmall),
+                  const SizedBox(height: 4),
+                  Text(
+                    version,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            TextButton.icon(
+              onPressed: onReleaseNotes,
+              icon: const Icon(Icons.article_outlined),
+              label: const Text('更新说明'),
+            ),
+          ],
         ),
       ),
     );
+  }
+}
+
+class _AboutInfo extends StatelessWidget {
+  const _AboutInfo({required this.settings, required this.onOpenUrl});
+
+  final NeriSettings? settings;
+  final ValueChanged<String> onOpenUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final version = settings?.appVersion.isNotEmpty == true
+        ? settings!.appVersion
+        : '未读取到版本信息';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          child: Row(
+            children: [
+              _AboutLogo(color: scheme.primary),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Neri',
+                      style: textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'NERI Enables Rapid Identification',
+                      style: textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        Card.outlined(
+          margin: EdgeInsets.zero,
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.tag_rounded),
+                title: const Text('版本号'),
+                subtitle: Text(version),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.article_outlined),
+                title: const Text('更新说明'),
+                subtitle: const Text('查看版本更新记录'),
+                trailing: const Icon(Icons.open_in_new_rounded),
+                onTap: () => onOpenUrl(_releaseNotesUrl),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.feedback_outlined),
+                title: const Text('反馈建议'),
+                subtitle: const Text('提交问题或功能建议'),
+                trailing: const Icon(Icons.open_in_new_rounded),
+                onTap: () => onOpenUrl(_feedbackUrl),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.code_rounded),
+                title: const Text('源代码'),
+                subtitle: const Text('查看 GitHub 项目仓库'),
+                trailing: const Icon(Icons.open_in_new_rounded),
+                onTap: () => onOpenUrl(_sourceCodeUrl),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AboutLogo extends StatelessWidget {
+  const _AboutLogo({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final logoFile = _resolveLogoFile();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.file(
+        logoFile,
+        width: 56,
+        height: 56,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stackTrace) {
+          return Icon(Icons.camera_outdoor_rounded, size: 48, color: color);
+        },
+      ),
+    );
+  }
+
+  File _resolveLogoFile() {
+    final candidates = <File>[File('res/logo.png'), File('../res/logo.png')];
+    for (final file in candidates) {
+      if (file.existsSync()) return file;
+    }
+    return candidates.first;
   }
 }
 

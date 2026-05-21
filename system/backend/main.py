@@ -1,5 +1,10 @@
 """FastAPI entrypoint for the Flutter-based Neri client."""
 
+import ctypes
+import os
+import threading
+import time
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -66,6 +71,68 @@ app.add_middleware(
 
 job_manager = ProcessingJobManager()
 settings_manager = SettingsManager()
+
+
+def _start_parent_watchdog() -> None:
+    """Exit this backend if the owning Flutter process disappears."""
+
+    parent_pid_text = os.environ.get("NERI_PARENT_PID")
+    if not parent_pid_text:
+        return
+    try:
+        parent_pid = int(parent_pid_text)
+    except ValueError:
+        return
+    if parent_pid <= 0:
+        return
+
+    def _watch_windows_parent() -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        synchronize = 0x00100000
+        infinite = 0xFFFFFFFF
+        handle = kernel32.OpenProcess(synchronize, False, parent_pid)
+        if not handle:
+            # ERROR_INVALID_PARAMETER means the parent PID no longer exists.
+            # Other failures, such as access-denied across integrity levels,
+            # should not make the backend immediately exit after startup.
+            if ctypes.get_last_error() == 87:
+                os._exit(0)
+            return
+        try:
+            kernel32.WaitForSingleObject(handle, infinite)
+        finally:
+            kernel32.CloseHandle(handle)
+        os._exit(0)
+
+    def _watch_posix_parent() -> None:
+        while True:
+            try:
+                os.kill(parent_pid, 0)
+            except OSError:
+                os._exit(0)
+            time.sleep(1)
+
+    target = _watch_windows_parent if os.name == "nt" else _watch_posix_parent
+    thread = threading.Thread(
+        target=target,
+        name="neri-parent-watchdog",
+        daemon=True,
+    )
+    thread.start()
+
+
+_start_parent_watchdog()
 
 
 @app.get("/api/health", response_model=HealthResponse)

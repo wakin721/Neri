@@ -18,6 +18,8 @@ import 'screens/start_screen.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
+enum _CloseDialogPhase { confirming, closing, restoring }
+
 class MainWindow extends StatefulWidget {
   const MainWindow({
     required this.apiClient,
@@ -69,7 +71,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Timer? _previewRefreshTimer;
   Process? _backendProcess;
   Future<void>? _backendShutdownTask;
+  Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
+  int _closeFlowId = 0;
   bool _loading = true;
   bool _backendStarting = false;
   bool _backendReady = false;
@@ -85,6 +89,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _isMaximized = false;
   bool _closing = false;
   bool _showClosingOverlay = false;
+  bool _closeBackendStopped = false;
+  _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
   double _confidence = 0.25;
   double _iou = 0.45;
   double _previewConfidenceThreshold = 0.25;
@@ -120,9 +126,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     windowManager.removeListener(this);
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
-    unawaited(_shutdownBackend().whenComplete(widget.apiClient.close));
+    if (_closing) {
+      widget.apiClient.close();
+    } else {
+      unawaited(
+        _shutdownBackend()
+            .catchError((_) {})
+            .whenComplete(widget.apiClient.close),
+      );
+    }
     _inputController.dispose();
-    _pageController.dispose();
     super.dispose();
   }
 
@@ -131,21 +144,101 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _requestCloseWindow();
   }
 
+  bool get _closeFlowBlocksBackendStartup =>
+      _closing && _closeDialogPhase != _CloseDialogPhase.restoring;
+
   void _requestCloseWindow() {
     if (_closing) return;
+    final flowId = ++_closeFlowId;
     _closing = true;
     _timer?.cancel();
+    _timer = null;
     _previewRefreshTimer?.cancel();
+    _previewRefreshTimer = null;
+    _previewRefreshRequestId++;
     if (mounted) {
-      setState(() => _showClosingOverlay = true);
+      setState(() {
+        _closeBackendStopped = false;
+        _closeDialogPhase = _CloseDialogPhase.confirming;
+        _showClosingOverlay = true;
+      });
     }
-    unawaited(_closeWindowAfterBackendShutdown());
+    final shutdownTask = _shutdownBackend();
+    _closeBackendShutdownTask = shutdownTask;
+    unawaited(
+      shutdownTask.catchError((_) {}).whenComplete(() {
+        if (!mounted || !_showClosingOverlay || flowId != _closeFlowId) return;
+        if (_closeDialogPhase == _CloseDialogPhase.confirming) {
+          setState(() => _closeBackendStopped = true);
+        }
+      }),
+    );
   }
 
-  Future<void> _closeWindowAfterBackendShutdown() async {
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    await _shutdownBackend();
-    await windowManager.destroy();
+  void _confirmCloseWindow() {
+    if (!_closing || _closeDialogPhase == _CloseDialogPhase.closing) return;
+    final flowId = _closeFlowId;
+    if (mounted) {
+      setState(() => _closeDialogPhase = _CloseDialogPhase.closing);
+    }
+    unawaited(_finishCloseWindow(flowId));
+  }
+
+  void _cancelCloseWindow() {
+    if (!_closing || _closeDialogPhase != _CloseDialogPhase.confirming) return;
+    final shutdownTask = _closeBackendShutdownTask;
+    final flowId = ++_closeFlowId;
+    if (mounted) {
+      setState(() => _closeDialogPhase = _CloseDialogPhase.restoring);
+    }
+    unawaited(_restartBackendAfterCloseCancelled(shutdownTask, flowId));
+  }
+
+  Future<void> _finishCloseWindow(int flowId) async {
+    if (!mounted || flowId != _closeFlowId) return;
+    try {
+      await windowManager
+          .setPreventClose(false)
+          .timeout(const Duration(milliseconds: 200));
+    } catch (_) {}
+    if (!mounted || flowId != _closeFlowId) return;
+
+    try {
+      await windowManager.destroy().timeout(const Duration(milliseconds: 300));
+    } catch (_) {}
+    if (_closing && flowId == _closeFlowId) {
+      exit(0);
+    }
+  }
+
+  Future<void> _restartBackendAfterCloseCancelled(
+    Future<void>? shutdownTask,
+    int flowId,
+  ) async {
+    try {
+      if (shutdownTask != null) {
+        await shutdownTask.catchError((_) {});
+      }
+      while (_backendStarting) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (!mounted || flowId != _closeFlowId) return;
+      await _startBackendAndInitialRefresh();
+    } catch (error) {
+      if (mounted && flowId == _closeFlowId) {
+        _showSnackBar('重启 Python 后端失败：$error');
+      }
+    } finally {
+      if (mounted && flowId == _closeFlowId) {
+        setState(() {
+          _closing = false;
+          _showClosingOverlay = false;
+          _closeBackendStopped = false;
+          _closeBackendShutdownTask = null;
+          _closeDialogPhase = _CloseDialogPhase.confirming;
+        });
+      }
+    }
   }
 
   @override
@@ -174,22 +267,29 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _startBackendAndInitialRefresh() async {
+    if (_closeFlowBlocksBackendStartup) return;
     if (_backendStarting) return;
     _backendStarting = true;
     if (mounted) setState(() => _loading = true);
     try {
       await _ensureBackendStarted();
+      if (_closeFlowBlocksBackendStartup) {
+        if (mounted) setState(() => _loading = false);
+        return;
+      }
       final ready = await _waitForBackendReady();
       if (!mounted) return;
+      if (_closeFlowBlocksBackendStartup) {
+        setState(() => _loading = false);
+        return;
+      }
       if (!ready) {
         setState(() => _loading = false);
         _showSnackBar('Python 后端启动超时，请检查 toolkit\\python.exe 和端口 721。');
         return;
       }
       _backendReady = true;
-      await _refresh(includeJobResults: false);
-      unawaited(_refresh(silent: true, includeJobResults: true));
-      unawaited(_refreshPreviewItems(force: true));
+      await _refreshInitialPageData();
       _timer ??= Timer.periodic(
         const Duration(seconds: 2),
         (_) => _refresh(silent: true),
@@ -201,6 +301,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } finally {
       _backendStarting = false;
     }
+  }
+
+  Future<void> _refreshInitialPageData() async {
+    await _refresh(includeJobResults: true, finishLoading: false);
+    if (!mounted || _closeFlowBlocksBackendStartup) return;
+    if (_inputController.text.trim().isEmpty) {
+      _stopGlobalLoading();
+      return;
+    }
+    _previewRefreshTimer?.cancel();
+    _previewRefreshTimer = null;
+    await _refreshPreviewItems(force: true, finishGlobalLoading: true);
+  }
+
+  void _stopGlobalLoading() {
+    if (!mounted || !_loading) return;
+    setState(() => _loading = false);
   }
 
   Future<void> _ensureBackendStarted() async {
@@ -231,6 +348,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         '721',
       ],
       workingDirectory: projectRoot.path,
+      environment: <String, String>{'NERI_PARENT_PID': pid.toString()},
+      includeParentEnvironment: true,
       runInShell: false,
     );
     _backendProcess = process;
@@ -257,16 +376,29 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Future<bool> _backendResponds() async {
     try {
-      return await widget.apiClient
-          .health()
-          .timeout(const Duration(milliseconds: 800));
+      return await widget.apiClient.health().timeout(
+        const Duration(milliseconds: 800),
+      );
     } catch (_) {
       return false;
     }
   }
 
   Future<void> _shutdownBackend() {
-    return _backendShutdownTask ??= _shutdownBackendNow();
+    final currentTask = _backendShutdownTask;
+    if (currentTask != null) return currentTask;
+    final task = _shutdownBackendNow();
+    _backendShutdownTask = task;
+    unawaited(
+      task
+          .whenComplete(() {
+            if (identical(_backendShutdownTask, task)) {
+              _backendShutdownTask = null;
+            }
+          })
+          .catchError((_) {}),
+    );
+    return task;
   }
 
   Future<void> _shutdownBackendNow() async {
@@ -274,16 +406,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _backendReady = false;
     var shutdownRequested = false;
 
+    if (process == null &&
+        !await _backendPortOpen(const Duration(milliseconds: 250))) {
+      return;
+    }
+
     try {
-      await widget.apiClient
-          .shutdownBackend()
-          .timeout(const Duration(milliseconds: 800));
+      await widget.apiClient.shutdownBackend().timeout(
+        const Duration(milliseconds: 800),
+      );
       shutdownRequested = true;
     } catch (_) {}
 
     if (process != null) {
       if (shutdownRequested &&
-          await _waitForProcessExit(process, const Duration(seconds: 5))) {
+          await _waitForProcessExit(
+            process,
+            const Duration(milliseconds: 1500),
+          )) {
         if (identical(_backendProcess, process)) {
           _backendProcess = null;
         }
@@ -295,7 +435,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
     } else {
       if (shutdownRequested &&
-          await _waitForBackendStopped(const Duration(seconds: 5))) {
+          await _waitForBackendStopped(const Duration(milliseconds: 1500))) {
         return;
       }
       await _terminateBackendPortOwner();
@@ -317,6 +457,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  Future<bool> _backendPortOpen(Duration timeout) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect('127.0.0.1', 721, timeout: timeout);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.destroy();
     }
   }
 
@@ -394,7 +546,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               'toolkit',
               Platform.isWindows ? 'python.exe' : 'python',
             ]).existsSync() &&
-            _fileUnder(current, ['system', 'backend', 'main.py']).existsSync()) {
+            _fileUnder(current, [
+              'system',
+              'backend',
+              'main.py',
+            ]).existsSync()) {
           return current;
         }
         final parent = current.parent;
@@ -506,6 +662,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   void _schedulePreviewRefresh() {
     _previewRefreshTimer?.cancel();
+    if (_closeFlowBlocksBackendStartup) return;
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
       _previewRefreshRequestId++;
@@ -527,11 +684,25 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
-  Future<void> _refreshPreviewItems({bool force = false}) async {
-    if (!_backendReady) return;
+  Future<void> _refreshPreviewItems({
+    bool force = false,
+    bool finishGlobalLoading = false,
+  }) async {
+    if (_closeFlowBlocksBackendStartup) {
+      if (finishGlobalLoading) _stopGlobalLoading();
+      return;
+    }
+    if (!_backendReady) {
+      if (finishGlobalLoading) _stopGlobalLoading();
+      return;
+    }
     final inputPath = _inputController.text.trim();
-    if (inputPath.isEmpty) return;
+    if (inputPath.isEmpty) {
+      if (finishGlobalLoading) _stopGlobalLoading();
+      return;
+    }
     if (!force && _previewLoadedPath == inputPath && _previewItems.isNotEmpty) {
+      if (finishGlobalLoading) _stopGlobalLoading();
       return;
     }
 
@@ -556,6 +727,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
           requestId != _previewRefreshRequestId) {
+        if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
       final sortedItems = _sortMediaItemsForDisplay(items);
@@ -563,6 +735,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _previewItems = sortedItems;
         _previewLoadedPath = inputPath;
         _previewLoading = false;
+        if (finishGlobalLoading) {
+          _loading = false;
+        }
         _selectedPreviewIndex = _safePreviewIndex(sortedItems);
       });
       if (sortedItems.isNotEmpty) {
@@ -572,14 +747,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
           requestId != _previewRefreshRequestId) {
+        if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
       _showSnackBar('无法读取输入文件夹预览：$error');
-      setState(() => _previewLoading = false);
+      setState(() {
+        _previewLoading = false;
+        if (finishGlobalLoading) {
+          _loading = false;
+        }
+      });
     }
   }
 
   Future<void> _loadPreviewMetadata(DetectionItem item) async {
+    if (_closeFlowBlocksBackendStartup) return;
     if (item.path.isEmpty ||
         _previewMetadataCache.containsKey(item.path) ||
         _previewMetadataLoading.contains(item.path)) {
@@ -592,7 +774,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         filePath: item.path,
         inputPath: _inputController.text.trim(),
       );
-      if (!mounted) return;
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
       setState(() {
         _previewMetadataCache[item.path] = fullItem;
         _previewItems = _sortMediaItemsForDisplay(
@@ -777,7 +959,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     bool silent = false,
     bool reloadSettings = false,
     bool includeJobResults = true,
+    bool finishLoading = true,
   }) async {
+    if (_closeFlowBlocksBackendStartup) return;
     if (!silent) {
       setState(() => _loading = true);
     }
@@ -788,7 +972,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings()
           : _settings;
-      final summariesOnly = !includeJobResults || (silent && _jobProcessingBusy);
+      final summariesOnly =
+          !includeJobResults || (silent && _jobProcessingBusy);
       var jobs = await widget.apiClient.listJobs(
         includeResults: !summariesOnly,
       );
@@ -799,7 +984,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       } else if (summariesOnly) {
         jobs = _mergeJobSummariesWithCachedResults(jobs);
       }
-      if (!mounted || settings == null) return;
+      if (!mounted || _closeFlowBlocksBackendStartup || settings == null) {
+        return;
+      }
       _syncJobTransitionState(jobs);
 
       final firstLoad = _settings == null && shouldFetchSettings;
@@ -886,11 +1073,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
 
       // 清理加载状态
-      if (!silent && _loading) {
+      if (!silent && finishLoading && _loading) {
         setState(() => _loading = false);
       }
     } catch (error) {
       if (!mounted) return;
+      if (_closeFlowBlocksBackendStartup) return;
       _backendReady = false;
       setState(() => _loading = false);
       if (!silent) _showSnackBar('无法连接 Python 后端：$error');
@@ -1443,153 +1631,164 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final colorScheme = Theme.of(context).colorScheme;
     final titleBarColor = colorScheme.surfaceContainerHigh;
 
-    return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(kToolbarHeight),
-        child: DragToMoveArea(
-          child: AppBar(
-            backgroundColor: titleBarColor,
-            surfaceTintColor: Colors.transparent,
-            scrolledUnderElevation: 0,
-            titleSpacing: 12,
-            title: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildTitleLogo(size: 28),
-                const SizedBox(width: 10),
-                Text(_pageTitles[_selectedIndex]),
-              ],
-            ),
-            actions: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Center(child: Text(_settings?.appTitle ?? 'Neri')),
-              ),
-              IconButton(
-                tooltip: '刷新',
-                onPressed: _loading || _previewLoading
-                    ? null
-                    : () async {
-                        if (!_backendReady) {
-                          await _startBackendAndInitialRefresh();
-                        } else {
-                          await _refresh(includeJobResults: false);
-                          unawaited(
-                            _refresh(silent: true, includeJobResults: true),
-                          );
-                          unawaited(_refreshPreviewItems(force: true));
-                        }
-                      },
-                icon: const Icon(Icons.refresh_rounded),
-              ),
-              const SizedBox(width: 8),
-              const VerticalDivider(indent: 14, endIndent: 14),
-              const SizedBox(width: 8),
-              IconButton(
-                tooltip: '最小化',
-                icon: const Icon(Icons.remove_rounded, size: 20),
-                onPressed: () => windowManager.minimize(),
-              ),
-              IconButton(
-                tooltip: _isMaximized ? '向下还原' : '最大化',
-                icon: Icon(
-                  _isMaximized
-                      ? Icons.filter_none_rounded
-                      : Icons.crop_square_rounded,
-                  size: 18,
+    final content = Stack(
+      fit: StackFit.expand,
+      children: [
+        Scaffold(
+          appBar: PreferredSize(
+            preferredSize: const Size.fromHeight(kToolbarHeight),
+            child: DragToMoveArea(
+              child: AppBar(
+                backgroundColor: titleBarColor,
+                surfaceTintColor: Colors.transparent,
+                scrolledUnderElevation: 0,
+                titleSpacing: 12,
+                title: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildTitleLogo(size: 28),
+                    const SizedBox(width: 10),
+                    Text(_pageTitles[_selectedIndex]),
+                  ],
                 ),
-                onPressed: () async {
-                  if (await windowManager.isMaximized()) {
-                    await windowManager.unmaximize();
-                  } else {
-                    await windowManager.maximize();
-                  }
-                },
-              ),
-              Builder(
-                builder: (context) {
-                  return IconButton(
-                    tooltip: '关闭',
-                    icon: const Icon(Icons.close_rounded, size: 20),
-                    style: ButtonStyle(
-                      overlayColor: WidgetStateProperty.resolveWith((states) {
-                        if (states.contains(WidgetState.hovered)) {
-                          return Colors.red.withValues(alpha: 0.9);
-                        }
-                        return null;
-                      }),
-                      foregroundColor: WidgetStateProperty.resolveWith((
-                        states,
-                      ) {
-                        if (states.contains(WidgetState.hovered)) {
-                          return Colors.white;
-                        }
-                        return Theme.of(context).colorScheme.onSurfaceVariant;
-                      }),
+                actions: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Center(child: Text(_settings?.appTitle ?? 'Neri')),
+                  ),
+                  IconButton(
+                    tooltip: '刷新',
+                    onPressed: _loading || _previewLoading
+                        ? null
+                        : () async {
+                            if (!_backendReady) {
+                              await _startBackendAndInitialRefresh();
+                            } else {
+                              await _refreshInitialPageData();
+                            }
+                          },
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
+                  const SizedBox(width: 8),
+                  const VerticalDivider(indent: 14, endIndent: 14),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: '最小化',
+                    icon: const Icon(Icons.remove_rounded, size: 20),
+                    onPressed: () => windowManager.minimize(),
+                  ),
+                  IconButton(
+                    tooltip: _isMaximized ? '向下还原' : '最大化',
+                    icon: Icon(
+                      _isMaximized
+                          ? Icons.filter_none_rounded
+                          : Icons.crop_square_rounded,
+                      size: 18,
                     ),
-                    onPressed: _requestCloseWindow,
-                  );
-                },
+                    onPressed: () async {
+                      if (await windowManager.isMaximized()) {
+                        await windowManager.unmaximize();
+                      } else {
+                        await windowManager.maximize();
+                      }
+                    },
+                  ),
+                  Builder(
+                    builder: (context) {
+                      return IconButton(
+                        tooltip: '关闭',
+                        icon: const Icon(Icons.close_rounded, size: 20),
+                        style: ButtonStyle(
+                          overlayColor: WidgetStateProperty.resolveWith((
+                            states,
+                          ) {
+                            if (states.contains(WidgetState.hovered)) {
+                              return Colors.red.withValues(alpha: 0.9);
+                            }
+                            return null;
+                          }),
+                          foregroundColor: WidgetStateProperty.resolveWith((
+                            states,
+                          ) {
+                            if (states.contains(WidgetState.hovered)) {
+                              return Colors.white;
+                            }
+                            return Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant;
+                          }),
+                        ),
+                        onPressed: _requestCloseWindow,
+                      );
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ),
-              const SizedBox(width: 8),
+            ),
+          ),
+          body: Stack(
+            children: [
+              Column(
+                children: [
+                  // 标题栏下方的全局进度条
+                  SizedBox(
+                    height: 4, // 固定高度防止页面抖动
+                    child:
+                        (_loading ||
+                            _previewDetecting ||
+                            _submitting ||
+                            _jobTransitionBusy ||
+                            _validationBusy)
+                        ? const ExcludeSemantics(
+                            child: LinearProgressIndicator(),
+                          )
+                        : null,
+                  ),
+                  // 原有的主体内容区域
+                  Expanded(
+                    child: Row(
+                      children: [
+                        _NativeNavigationRail(
+                          selectedIndex: _selectedIndex,
+                          entries: _navigationItems,
+                          onDestinationSelected: (index) {
+                            setState(() => _selectedIndex = index);
+                            if (index == 1 || index == 2) {
+                              unawaited(_refreshPreviewItems());
+                            }
+                          },
+                        ),
+                        const VerticalDivider(width: 1),
+                        Expanded(
+                          child: IndexedStack(
+                            index: _selectedIndex,
+                            children: [
+                              _buildTabWrapper(0, _buildStartScreen()),
+                              _buildTabWrapper(1, _buildPreviewPage()),
+                              _buildTabWrapper(2, _buildValidationPage()),
+                              _buildTabWrapper(3, _buildSettingsScreen()),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
-      ),
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              // 标题栏下方的全局进度条
-              SizedBox(
-                height: 4, // 固定高度防止页面抖动
-                child:
-                    (_loading ||
-                        _previewDetecting ||
-                        _submitting ||
-                        _jobTransitionBusy ||
-                        _validationBusy)
-                    ? const LinearProgressIndicator() // 移除 ExcludeSemantics
-                    : null,
-              ),
-              // 原有的主体内容区域
-              Expanded(
-                child: Row(
-                  children: [
-                    _NativeNavigationRail(
-                      selectedIndex: _selectedIndex,
-                      entries: _navigationItems,
-                      onDestinationSelected: (index) {
-                        setState(() => _selectedIndex = index);
-                        _pageController.jumpToPage(index);
-                        if (index == 1 || index == 2) {
-                          unawaited(_refreshPreviewItems());
-                        }
-                      },
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(
-                      // 使用 IndexedStack 保持所有页面的状态（包括滚动位置和局部过滤选项）
-                      child: PageView(
-                        controller: _pageController,
-                        physics: const NeverScrollableScrollPhysics(),
-                        children: [
-                          _buildStartScreen(),
-                          _buildPreviewPage(),
-                          _buildValidationPage(),
-                          _buildSettingsScreen(),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+        if (_showClosingOverlay)
+          _ClosingOverlay(
+            phase: _closeDialogPhase,
+            backendStopped: _closeBackendStopped,
+            onCancel: _cancelCloseWindow,
+            onConfirm: _confirmCloseWindow,
           ),
-          if (_showClosingOverlay) _ClosingOverlay(),
-        ],
-      ),
+      ],
     );
+    return Platform.isWindows ? ExcludeSemantics(child: content) : content;
   }
 
   Widget _buildTitleLogo({double size = 26}) {
@@ -1744,9 +1943,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         30,
       ),
       autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
-      undoSteps: _intSetting(_settingsOrEmpty(), 'undo_steps', 1)
-          .clamp(1, 50)
-          .toInt(),
+      undoSteps: _intSetting(
+        _settingsOrEmpty(),
+        'undo_steps',
+        1,
+      ).clamp(1, 50).toInt(),
       quickMarkSpecies: _stringListSetting(
         _settingsOrEmpty(),
         'quick_mark_list',
@@ -1808,37 +2009,109 @@ class _NavigationRailEntry {
 }
 
 class _ClosingOverlay extends StatelessWidget {
-  const _ClosingOverlay();
+  const _ClosingOverlay({
+    required this.phase,
+    required this.backendStopped,
+    required this.onCancel,
+    required this.onConfirm,
+  });
+
+  final _CloseDialogPhase phase;
+  final bool backendStopped;
+  final VoidCallback onCancel;
+  final VoidCallback onConfirm;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final showActions = phase == _CloseDialogPhase.confirming;
+    final showProgress =
+        phase != _CloseDialogPhase.confirming || !backendStopped;
+    final title = switch (phase) {
+      _CloseDialogPhase.confirming => '关闭程序？',
+      _CloseDialogPhase.closing => '正在关闭',
+      _CloseDialogPhase.restoring => '正在恢复',
+    };
+    final message = switch (phase) {
+      _CloseDialogPhase.confirming =>
+        backendStopped
+            ? 'Python 后端已关闭。确认后将退出程序，取消会重新启动后端。'
+            : '正在先关闭 Python 后端。确认后将立即退出程序，取消会重新启动后端。',
+      _CloseDialogPhase.closing => '正在退出程序。若后端仍在收尾，会随主程序退出自动结束。',
+      _CloseDialogPhase.restoring => '正在重新启动 Python 后端，请稍候。',
+    };
+
     return Positioned.fill(
-      child: ColoredBox(
-        color: scheme.scrim.withValues(alpha: 0.36),
-        child: Center(
-          child: Card(
-            elevation: 6,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.6,
-                      color: scheme.primary,
-                    ),
+      child: Stack(
+        children: [
+          ModalBarrier(
+            dismissible: false,
+            color: scheme.scrim.withValues(alpha: 0.36),
+          ),
+          Center(
+            child: Card(
+              elevation: 6,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 18),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showProgress) ...[
+                            SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.6,
+                                color: scheme.primary,
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                          ],
+                          Expanded(
+                            child: Text(
+                              title,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        message,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      if (showActions) ...[
+                        const SizedBox(height: 18),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: onCancel,
+                              child: const Text('取消'),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton(
+                              onPressed: onConfirm,
+                              child: const Text('关闭'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(width: 14),
-                  const Text('正在关闭 Python 后端，完成后窗口会自动退出。'),
-                ],
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -2091,8 +2364,3 @@ class _NativeNavigationRailPanel extends StatelessWidget {
     );
   }
 }
-
-late final PageController _pageController = PageController(
-  initialPage: 0,
-  keepPage: true,
-);

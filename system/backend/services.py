@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -1817,6 +1818,8 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
     if earliest_date:
         processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
 
+    processed_data.sort(key=_export_filename_sort_key)
+
     output_path = _resolve_validation_export_path(input_path, request)
     columns = request.columns_to_export or DEFAULT_EXPORT_COLUMNS
     success = DataProcessor.export_to_excel(
@@ -1835,6 +1838,20 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
         file_format=request.file_format,
         exported_count=len(processed_data),
     )
+
+
+_FILENAME_SORT_PART_PATTERN = re.compile(r"\d+|\D+")
+
+
+def _export_filename_sort_key(row: dict[str, Any]) -> tuple[tuple[int, int | str, int | str], ...]:
+    filename = str(row.get("文件名") or row.get("filename") or "")
+    parts: list[tuple[int, int | str, int | str]] = []
+    for part in _FILENAME_SORT_PART_PATTERN.findall(filename):
+        if part.isdigit():
+            parts.append((0, int(part), len(part)))
+        else:
+            parts.append((1, part.casefold(), part))
+    return tuple(parts)
 
 
 def _reload_validation_item(path: Path, input_path: Path) -> DetectionItem:
