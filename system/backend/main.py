@@ -12,10 +12,14 @@ from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SU
 from system.settings_manager import SettingsManager
 
 from . import __version__
+from .debug_info import installed_packages, list_debug_logs, read_debug_log, runtime_diagnostics
 from .models import (
     CreateJobRequest,
+    DebugLogContent,
+    DebugLogInfo,
     DetectionItem,
     HealthResponse,
+    InstalledPackageInfo,
     InstallPytorchRequest,
     InstallYoloDependenciesRequest,
     ModelClassInfo,
@@ -23,6 +27,7 @@ from .models import (
     MaintenanceStatusResponse,
     JobSummary,
     ReinstallPackageRequest,
+    RuntimeDiagnostics,
     SettingsResponse,
     SettingsUpdateRequest,
     ValidationBatchMarkRequest,
@@ -256,6 +261,42 @@ def maintenance_status() -> MaintenanceStatusResponse:
     """Return the last environment-maintenance status."""
 
     return MaintenanceStatusResponse(**read_maintenance_status())
+
+
+@app.get("/api/debug/packages", response_model=list[InstalledPackageInfo])
+def debug_packages() -> list[InstalledPackageInfo]:
+    """Return installed Python packages for diagnostics."""
+
+    return [InstalledPackageInfo(**item) for item in installed_packages()]
+
+
+@app.get("/api/debug/runtime", response_model=RuntimeDiagnostics)
+def debug_runtime() -> RuntimeDiagnostics:
+    """Return runtime PyTorch and GPU diagnostics."""
+
+    return RuntimeDiagnostics(**runtime_diagnostics())
+
+
+@app.get("/api/debug/logs", response_model=list[DebugLogInfo])
+def debug_logs() -> list[DebugLogInfo]:
+    """Return software log files available for diagnostics."""
+
+    return [DebugLogInfo(**item) for item in list_debug_logs()]
+
+
+@app.get("/api/debug/logs/content", response_model=DebugLogContent)
+def debug_log_content(
+    path: str = Query(..., min_length=1),
+    max_bytes: int = Query(200_000, ge=1024, le=1_000_000),
+) -> DebugLogContent:
+    """Return readable content for one whitelisted software log."""
+
+    try:
+        return DebugLogContent(**read_debug_log(path, max_bytes=max_bytes))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/environment/install-pytorch", response_model=MaintenanceStartResponse, status_code=202)

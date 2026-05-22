@@ -209,6 +209,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool? _bucketCacheAutoGroupDetectBurst;
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
+  double? _bucketCacheConfidence;
   String? _bucketCachePathSignature;
   String? _bucketCacheGroupingSignature;
   int? _bucketCacheRefreshVersion;
@@ -257,6 +258,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheAutoGroupDetectBurst = null;
       _bucketCacheBurstSize = null;
       _bucketCacheGapSeconds = null;
+      _bucketCacheConfidence = null;
       _bucketCachePathSignature = null;
       _bucketCacheGroupingSignature = null;
       _bucketCacheRefreshVersion = null;
@@ -306,7 +308,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   @override
   Widget build(BuildContext context) {
     if (widget.inputPath.isEmpty) {
-      return const Center(child: Text('请先在开始界面设置输入文件夹。'));
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: _EmptyValidationInputState(),
+      );
     }
     if (widget.items.isEmpty) {
       return Padding(
@@ -1281,10 +1286,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         for (final item in group.items) {
           if (item.path == path) {
             return _ValidationGroupIndexEntry(
-              index: _globalGroupIndexForSignature(
-                signature,
-                fallback: index,
-              ),
+              index: _globalGroupIndexForSignature(signature, fallback: index),
               group: group,
               signature: signature,
             );
@@ -1428,7 +1430,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
-  List<_ValidationMediaGroup> _buildValidationGroups(List<DetectionItem> items) {
+  List<_ValidationMediaGroup> _buildValidationGroups(
+    List<DetectionItem> items,
+  ) {
     return widget.autoGroup
         ? _buildAutoGroups(items)
         : [
@@ -1443,7 +1447,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     for (final group in groups) {
       final species = widget.autoGroup
           ? _groupSpeciesLabel(group)
-          : _primarySpecies(group.items.first);
+          : _primarySpeciesAfterConfidenceFilter(group.items.first);
       final isValidated = group.items.every(_isItemValidated);
       final key = '${isValidated ? 1 : 0}::$species';
       map.putIfAbsent(
@@ -1476,6 +1480,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
         _bucketCacheBurstSize == widget.autoGroupBurstSize &&
         _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
+        _bucketCacheConfidence == _confidence &&
         _bucketCacheRefreshVersion == widget.refreshVersion;
 
     if (hasSameGroupingSettings &&
@@ -1522,6 +1527,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
+    _bucketCacheConfidence = _confidence;
     _bucketCachePathSignature = pathSignature;
     _bucketCacheGroupingSignature = groupingSignature;
     _bucketCacheRefreshVersion = widget.refreshVersion;
@@ -1579,7 +1585,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             item.detectionData['拍摄时间']?.toString() ?? '',
             item.modifiedAt ?? '',
             item.fileType,
-            _primarySpecies(item),
+            _primarySpeciesAfterConfidenceFilter(item),
             _isItemValidated(item),
             item.error ?? '',
           ].join('\u001d'),
@@ -1786,7 +1792,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final fallbackVotes = <String, _SpeciesVote>{};
 
     for (final item in group.items) {
-      final speciesNames = _splitGroupSpeciesNames(_primarySpecies(item));
+      final speciesNames = _splitGroupSpeciesNames(
+        _primarySpeciesAfterConfidenceFilter(item),
+      );
       final validSpeciesNames = speciesNames
           .where((species) => !_isFallbackSpecies(species))
           .toList();
@@ -1856,7 +1864,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   bool _hasValidSpecies(DetectionItem item) {
     return _splitGroupSpeciesNames(
-      _primarySpecies(item),
+      _primarySpeciesAfterConfidenceFilter(item),
     ).any((species) => !_isFallbackSpecies(species));
   }
 
@@ -1990,12 +1998,79 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           _selectedSpeciesFilter == _globalSpecies ||
           box.species == _selectedSpeciesFilter;
       final confidence = box.confidence;
-      final matchesConfidence = confidence == null || confidence >= _confidence;
+      final matchesConfidence = _passesConfidenceFilter(confidence);
       return matchesSpecies && matchesConfidence && box.bbox.length >= 4;
     }).toList();
   }
 
+  List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
+    return item.detectionBoxes
+        .where(
+          (box) =>
+              _passesConfidenceFilter(box.confidence) && box.bbox.length >= 4,
+        )
+        .toList();
+  }
+
+  bool _passesConfidenceFilter(double? confidence) {
+    return confidence == null || confidence >= _confidence;
+  }
+
+  bool _isManualDetection(DetectionItem item) {
+    return item.detectionData['最低置信度'] == '人工校验';
+  }
+
+  double? _itemConfidence(DetectionItem item) {
+    if (item.confidence != null) return item.confidence;
+    final raw = item.detectionData['最低置信度'];
+    if (raw is num) return raw.toDouble();
+    return double.tryParse(raw?.toString() ?? '');
+  }
+
+  bool _isFilteredOutByConfidence(DetectionItem item) {
+    if (_isManualDetection(item)) return false;
+    if (_confidenceFilteredBoxes(item).isNotEmpty) return false;
+    if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final confidence = _itemConfidence(item);
+    return confidence != null && confidence < _confidence;
+  }
+
+  bool _isFilteredOutByVisibleFilters(
+    DetectionItem item,
+    List<DetectionBox> visibleBoxes,
+  ) {
+    if (_isManualDetection(item) || visibleBoxes.isNotEmpty) return false;
+    if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final confidence = _itemConfidence(item);
+    return confidence != null && confidence < _confidence;
+  }
+
+  String _primarySpeciesAfterConfidenceFilter(DetectionItem item) {
+    if (_isManualDetection(item)) return _primarySpecies(item);
+
+    final boxes = _confidenceFilteredBoxes(item);
+    if (boxes.isNotEmpty) {
+      final counts = _isVideo(item)
+          ? _trackCountsBySpecies(boxes)
+          : _boxCountsBySpecies(boxes);
+      final species = counts.keys
+          .map((name) => name.trim())
+          .where((name) => name.isNotEmpty)
+          .toList();
+      if (species.isNotEmpty) return species.join(',');
+    }
+
+    if (_isFilteredOutByConfidence(item)) return '空';
+    return _primarySpecies(item);
+  }
+
   String _finalResultLabel(DetectionItem item) {
+    final filteredSpecies = _primarySpeciesAfterConfidenceFilter(item);
+    final primarySpecies = _primarySpecies(item);
+    if (filteredSpecies == '空' || filteredSpecies != primarySpecies) {
+      return filteredSpecies;
+    }
+
     final finalSpecies = item.detectionData['物种名称']?.toString().trim();
     if (finalSpecies != null && finalSpecies.isNotEmpty) {
       return finalSpecies;
@@ -2139,6 +2214,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             .reduce((a, b) => a < b ? a : b)
             .toStringAsFixed(2);
       }
+    } else if (_isFilteredOutByVisibleFilters(item, visibleBoxes)) {
+      species = '空';
+      count = '空';
     }
 
     if (count.trim().isEmpty) {
@@ -2419,10 +2497,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _discardMarkHistoryForPaths(itemsByPath.keys.toSet());
     _markHistory.add(_MarkHistoryEntry(itemsByPath.values));
     if (_markHistory.length > _undoHistoryLimit) {
-      _markHistory.removeRange(
-        0,
-        _markHistory.length - _undoHistoryLimit,
-      );
+      _markHistory.removeRange(0, _markHistory.length - _undoHistoryLimit);
     }
   }
 
@@ -3006,10 +3081,7 @@ class _QuantityButton extends StatelessWidget {
 }
 
 class _EmptyValidationState extends StatelessWidget {
-  const _EmptyValidationState({
-    required this.loading,
-    required this.onRefresh,
-  });
+  const _EmptyValidationState({required this.loading, required this.onRefresh});
 
   final bool loading;
   final Future<void> Function() onRefresh;
@@ -3035,6 +3107,24 @@ class _EmptyValidationState extends StatelessWidget {
                 : const Icon(Icons.refresh_rounded),
             label: const Text('重新获取'),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyValidationInputState extends StatelessWidget {
+  const _EmptyValidationInputState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.fact_check_outlined, size: 56),
+          SizedBox(height: 12),
+          Text('请先在开始界面设置输入文件夹。'),
         ],
       ),
     );

@@ -217,6 +217,8 @@ class _CreateJobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final fp16Enabled =
+        detectionSettingsEnabled && settings?.gpuAvailable == true;
     return SectionCard(
       title: '新建处理任务',
       subtitle: '输入本机路径，由 Python 后端读取和处理文件。',
@@ -251,9 +253,14 @@ class _CreateJobCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           SwitchListTile(
-            value: useFp16,
-            onChanged: detectionSettingsEnabled ? onUseFp16Changed : null,
+            value: fp16Enabled && useFp16,
+            onChanged: fp16Enabled ? onUseFp16Changed : null,
             title: const Text('使用 FP16 加速'),
+            subtitle: Text(
+              fp16Enabled
+                  ? '需要支持半精度推理的 GPU 或 Intel XPU'
+                  : '未检测到 GPU / Intel XPU，已禁用 FP16',
+            ),
           ),
           _ProcessingSlider(
             label: '置信度阈值',
@@ -390,10 +397,9 @@ class _ModelSelector extends StatelessWidget {
       return InputDecorator(
         decoration: InputDecoration(
           labelText: '模型文件',
-          helperText:
-              enabled
-                  ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
-                  : '检测依赖未安装，安装完成后可选择模型',
+          helperText: enabled
+              ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
+              : '检测依赖未安装，安装完成后可选择模型',
           prefixIcon: const Icon(Icons.folder_off_rounded),
           border: const OutlineInputBorder(),
           enabled: enabled,
@@ -698,12 +704,16 @@ class _JobsCard extends StatelessWidget {
     BuildContext context,
     ProcessingJob job,
   ) async {
+    final inputPath = job.inputDir.trim().isEmpty ? '未知路径' : job.inputDir;
+    final status = job.message.trim();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除任务？'),
         content: Text(
-          '将从任务进度中删除“${job.message.isEmpty ? job.inputDir : job.message}”。',
+          status.isEmpty
+              ? '将从任务进度中删除：\n$inputPath'
+              : '将从任务进度中删除：\n$inputPath\n\n当前状态：$status',
         ),
         actions: [
           TextButton(

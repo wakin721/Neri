@@ -1177,6 +1177,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return gpuAvailable ? savedBatchSize.clamp(1, 64).toInt() : 1;
   }
 
+  bool _effectiveUseFp16() {
+    return _settings?.gpuAvailable == true && _useFp16;
+  }
+
   int _videoStride() {
     return _vidStride.clamp(1, 120).toInt();
   }
@@ -1285,7 +1289,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         classificationModelPath: _selectedClassificationModelPath,
         confidence: _confidence,
         iou: _iou,
-        useFp16: _useFp16,
+        useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(),
@@ -1425,7 +1429,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         classificationModelPath: _selectedClassificationModelPath,
         confidence: _previewConfidenceThreshold,
         iou: _iou,
-        useFp16: _useFp16,
+        useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(singleFile: true),
@@ -1461,7 +1465,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           classificationModelPath: _selectedClassificationModelPath,
           confidence: confidence,
           iou: _iou,
-          useFp16: _useFp16,
+          useFp16: _effectiveUseFp16(),
           useAugment: _useAugment(),
           useAgnosticNms: _useAgnosticNms(),
           batchSize: _processingBatchSize(singleFile: true),
@@ -1843,7 +1847,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onVideoModeChanged: (value) => setState(() => _videoMode = value),
       vidStride: _vidStride,
       onVidStrideChanged: (value) => setState(() => _vidStride = value),
-      useFp16: _useFp16,
+      useFp16: _effectiveUseFp16(),
       onUseFp16Changed: (value) => setState(() => _useFp16 = value),
       confidence: _confidence,
       onConfidenceChanged: (value) => setState(() => _confidence = value),

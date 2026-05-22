@@ -123,6 +123,43 @@ class NeriApiClient {
     );
   }
 
+  Future<List<InstalledPackageInfo>> fetchInstalledPackages() async {
+    final response = await _httpClient.get(_uri('/api/debug/packages'));
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(InstalledPackageInfo.fromJson)
+        .toList();
+  }
+
+  Future<RuntimeDiagnostics> fetchRuntimeDiagnostics() async {
+    final response = await _httpClient.get(_uri('/api/debug/runtime'));
+    _ensureSuccess(response);
+    return RuntimeDiagnostics.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DebugLogInfo>> fetchDebugLogs() async {
+    final response = await _httpClient.get(_uri('/api/debug/logs'));
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DebugLogInfo.fromJson)
+        .toList();
+  }
+
+  Future<DebugLogContent> fetchDebugLogContent(String path) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/debug/logs/content',
+    ).replace(queryParameters: {'path': path});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DebugLogContent.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   Future<ProcessingJob> createJob({
     required String inputDir,
     String? outputDir,
@@ -464,4 +501,108 @@ class MaintenanceStatus {
   final String message;
   final String? logPath;
   final String? error;
+}
+
+class InstalledPackageInfo {
+  const InstalledPackageInfo({required this.name, required this.version});
+
+  factory InstalledPackageInfo.fromJson(Map<String, dynamic> json) {
+    return InstalledPackageInfo(
+      name: json['name'] as String? ?? '',
+      version: json['version'] as String? ?? '',
+    );
+  }
+
+  final String name;
+  final String version;
+}
+
+class RuntimeDiagnostics {
+  const RuntimeDiagnostics({
+    required this.pytorchInstalled,
+    required this.gpuAvailable,
+    this.backendVersion = '',
+    this.pytorchVersion,
+    this.pytorchCudaVersion,
+    this.gpuDevices = const <String>[],
+    this.hardwareGpus = const <String>[],
+    this.error,
+  });
+
+  factory RuntimeDiagnostics.fromJson(Map<String, dynamic> json) {
+    return RuntimeDiagnostics(
+      backendVersion: json['backend_version'] as String? ?? '',
+      pytorchInstalled: json['pytorch_installed'] as bool? ?? false,
+      pytorchVersion: json['pytorch_version'] as String?,
+      pytorchCudaVersion: json['pytorch_cuda_version'] as String?,
+      gpuAvailable: json['gpu_available'] as bool? ?? false,
+      gpuDevices: (json['gpu_devices'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList(),
+      hardwareGpus:
+          (json['hardware_gpus'] as List<dynamic>? ?? const <dynamic>[])
+              .map((item) => item.toString())
+              .where((item) => item.isNotEmpty)
+              .toList(),
+      error: json['error'] as String?,
+    );
+  }
+
+  final bool pytorchInstalled;
+  final String backendVersion;
+  final String? pytorchVersion;
+  final String? pytorchCudaVersion;
+  final bool gpuAvailable;
+  final List<String> gpuDevices;
+  final List<String> hardwareGpus;
+  final String? error;
+}
+
+class DebugLogInfo {
+  const DebugLogInfo({
+    required this.name,
+    required this.path,
+    required this.sizeBytes,
+    this.modifiedAt,
+  });
+
+  factory DebugLogInfo.fromJson(Map<String, dynamic> json) {
+    return DebugLogInfo(
+      name: json['name'] as String? ?? '',
+      path: json['path'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int? ?? 0,
+      modifiedAt: json['modified_at'] as String?,
+    );
+  }
+
+  final String name;
+  final String path;
+  final int sizeBytes;
+  final String? modifiedAt;
+}
+
+class DebugLogContent extends DebugLogInfo {
+  const DebugLogContent({
+    required super.name,
+    required super.path,
+    required super.sizeBytes,
+    required this.content,
+    super.modifiedAt,
+    this.truncated = false,
+  });
+
+  factory DebugLogContent.fromJson(Map<String, dynamic> json) {
+    return DebugLogContent(
+      name: json['name'] as String? ?? '',
+      path: json['path'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int? ?? 0,
+      modifiedAt: json['modified_at'] as String?,
+      content: json['content'] as String? ?? '',
+      truncated: json['truncated'] as bool? ?? false,
+    );
+  }
+
+  final String content;
+  final bool truncated;
 }
