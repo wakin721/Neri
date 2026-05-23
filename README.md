@@ -108,9 +108,9 @@
 
   建议（但非强制）你的 Windows 系统配备 NVIDIA GPU，因为这样能使用更高精度的模型，且更加快速。
 
-  在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch，若安装失败，可尝试手动安装。
+  在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch；若未检测到NVIDIA显卡，则会继续检测Intel显卡，支持Intel Arc A/B系列独显，以及搭载Intel Arc Graphics的Core Ultra Meteor Lake-H、Arrow Lake-H、Lunar Lake和Panther Lake平台时自动安装xpu版本的Pytorch，其他Intel显卡会自动回退到CPU版本。若安装失败，可尝试手动安装。
 
-  在使用Intel gpu（包括集显和独显）的情况下暂时无法自动下载xpu版本的Pytorch，请等待程序第一次安装完依赖后进入高级设置-环境维护-安装Pytorch中选择Intel xpu进行安装。请在使用时检查是否已经安装Intel显卡驱动，有关安装指南，请访问[Intel GPU 驱动程序安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
+  在使用Intel gpu（包括集显和独显）的情况下，请在使用时检查是否已经安装Intel显卡驱动，有关安装指南，请访问[Intel GPU 驱动程序安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
   
   >*有关英特尔 GPU的Pytorch官方[入门指南](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)*
   

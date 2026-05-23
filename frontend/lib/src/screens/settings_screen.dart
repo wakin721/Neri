@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api_client.dart';
 import '../models/settings.dart';
@@ -47,6 +48,10 @@ const _releaseNotesUrl =
     'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
+const _frontendVersion = '3.0.3-beta+303';
+const _debugModeKey = 'debug_mode';
+const _debugTapThreshold = 5;
+const _debugTapResetDuration = Duration(seconds: 3);
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -81,6 +86,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loadingModelClasses = false;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
+  bool _debugModeSaving = false;
   Timer? _maintenanceTimer;
   String? _maintenanceOperation;
   String? _maintenanceMessage;
@@ -183,6 +189,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       'update_channel': _stringSetting(saved, 'update_channel', 'Preview'),
       'update_mirror': _stringSetting(saved, 'update_mirror', 'KKGitHub'),
+      _debugModeKey: _boolSetting(saved, _debugModeKey, false),
     };
     _resettingDraft = true;
     _packageController.text = _stringSetting(saved, 'package', '');
@@ -265,6 +272,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _installPytorch() async {
     final envChoice = _string('pytorch_version', '自动检测');
     final packageSource = _string('package_source', 'official');
+    final sourceLabel = _packageSourceLabel(packageSource);
     final confirmed = await _confirmMaintenance(
       title: '安装 PyTorch',
       message:
@@ -273,20 +281,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (confirmed != true) return;
 
+    final installUltralytics = _missingYoloDependencies.contains('ultralytics')
+        ? await _confirmInstallUltralyticsWithPytorch(sourceLabel)
+        : false;
+    if (installUltralytics == null || !mounted) return;
+
     setState(() {
       _installingPytorch = true;
-      _maintenanceOperation = 'install_pytorch';
-      _maintenanceMessage = '正在启动 PyTorch 安装...';
+      _maintenanceOperation = installUltralytics
+          ? 'install_yolo_dependencies'
+          : 'install_pytorch';
+      _maintenanceMessage = installUltralytics
+          ? '正在启动 PyTorch 和 ultralytics 安装...'
+          : '正在启动 PyTorch 安装...';
     });
     try {
-      final response = await widget.apiClient.installPytorch(
-        envChoice,
-        packageSource: packageSource,
-      );
+      final response = installUltralytics
+          ? await widget.apiClient.installYoloDependencies(
+              envChoice: envChoice,
+              packageSource: packageSource,
+            )
+          : await widget.apiClient.installPytorch(
+              envChoice,
+              packageSource: packageSource,
+            );
       if (!mounted) return;
       _startMaintenanceWatch(
         operation: response.operation.isEmpty
-            ? 'install_pytorch'
+            ? (installUltralytics
+                  ? 'install_yolo_dependencies'
+                  : 'install_pytorch')
             : response.operation,
         message: response.message,
       );
@@ -301,6 +325,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       widget.onShowMessage('启动 PyTorch 安装失败：$error');
     }
+  }
+
+  Future<bool?> _confirmInstallUltralyticsWithPytorch(String sourceLabel) {
+    return showDialog<bool?>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('同时安装 ultralytics？'),
+        content: Text(
+          '当前未安装 ultralytics。它是 YOLO 检测需要的运行库。\n\n是否在安装 PyTorch 后继续从$sourceLabel安装 ultralytics？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('仅安装 PyTorch'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('同时安装'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _installYoloDependencies() async {
@@ -517,48 +567,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _setDebugMode(bool enabled) async {
+    final previous = _bool(_debugModeKey);
+    if (_debugModeSaving || previous == enabled) {
+      if (previous && enabled) widget.onShowMessage('调试模式已开启');
+      return;
+    }
+
+    setState(() {
+      _debugModeSaving = true;
+      _draft[_debugModeKey] = enabled;
+    });
+
+    try {
+      await widget.onSaveSettings(<String, dynamic>{_debugModeKey: enabled});
+      if (!mounted) return;
+      setState(() => _debugModeSaving = false);
+      widget.onShowMessage(enabled ? '调试模式已开启' : '调试模式已关闭');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _draft[_debugModeKey] = previous;
+        _debugModeSaving = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final debugModeEnabled = _bool(_debugModeKey);
+    final selectedIndex = _sectionIndex
+        .clamp(0, debugModeEnabled ? 6 : 5)
+        .toInt();
+
     return Row(
       children: [
         SizedBox(
           width: 260,
           child: NavigationDrawer(
-            selectedIndex: _sectionIndex,
+            selectedIndex: selectedIndex,
             onDestinationSelected: (index) {
               setState(() => _sectionIndex = index);
             },
-            children: const [
-              Padding(
+            children: [
+              const Padding(
                 padding: EdgeInsets.fromLTRB(28, 20, 16, 12),
                 child: Text('设置', style: TextStyle(fontSize: 18)),
               ),
-              NavigationDrawerDestination(
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.tune_outlined),
                 selectedIcon: Icon(Icons.tune_rounded),
                 label: Text('检测设置'),
               ),
-              NavigationDrawerDestination(
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.construction_outlined),
                 selectedIcon: Icon(Icons.construction_rounded),
                 label: Text('环境维护'),
               ),
-              NavigationDrawerDestination(
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.fact_check_outlined),
                 selectedIcon: Icon(Icons.fact_check_rounded),
                 label: Text('基础设置'),
               ),
-              NavigationDrawerDestination(
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.palette_outlined),
                 selectedIcon: Icon(Icons.palette_rounded),
                 label: Text('外观主题'),
               ),
-              NavigationDrawerDestination(
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.system_update_alt_rounded),
                 selectedIcon: Icon(Icons.system_update_alt_rounded),
                 label: Text('软件更新'),
               ),
-              NavigationDrawerDestination(
+              if (debugModeEnabled)
+                const NavigationDrawerDestination(
+                  icon: Icon(Icons.bug_report_outlined),
+                  selectedIcon: Icon(Icons.bug_report_rounded),
+                  label: Text('调试模式'),
+                ),
+              const NavigationDrawerDestination(
                 icon: Icon(Icons.info_outline_rounded),
                 selectedIcon: Icon(Icons.info_rounded),
                 label: Text('关于'),
@@ -589,6 +676,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildSelectedSection() {
+    final debugModeEnabled = _bool(_debugModeKey);
+    if (_sectionIndex == 5 && debugModeEnabled) {
+      return _buildDebugSettings();
+    }
+
     return switch (_sectionIndex) {
       0 => _buildDetectionSettings(),
       1 => _buildEnvironmentMaintenance(),
@@ -1457,12 +1549,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildDebugSettings() {
+    return SectionCard(
+      title: '调试模式',
+      subtitle: '当前环境、依赖、已安装库和软件日志',
+      icon: Icons.bug_report_rounded,
+      child: _DebugInfoPanel(
+        settings: widget.settings,
+        apiClient: widget.apiClient,
+        debugModeSaving: _debugModeSaving,
+        onDebugModeChanged: _setDebugMode,
+        onShowMessage: widget.onShowMessage,
+      ),
+    );
+  }
+
   Widget _buildProjectSettings() {
+    final debugModeEnabled = _bool(_debugModeKey);
     return SectionCard(
       title: '关于',
       subtitle: '版本、更新说明和项目入口',
       icon: Icons.info_rounded,
-      child: _AboutInfo(settings: widget.settings, onOpenUrl: _openExternalUrl),
+      child: _AboutInfo(
+        settings: widget.settings,
+        debugModeEnabled: debugModeEnabled,
+        debugModeSaving: _debugModeSaving,
+        onDebugModeChanged: _setDebugMode,
+        onOpenUrl: _openExternalUrl,
+        onShowMessage: widget.onShowMessage,
+      ),
     );
   }
 
@@ -2245,16 +2360,612 @@ class _SoftwareVersionInfo extends StatelessWidget {
   }
 }
 
-class _AboutInfo extends StatelessWidget {
-  const _AboutInfo({required this.settings, required this.onOpenUrl});
+class _DebugInfoPanel extends StatefulWidget {
+  const _DebugInfoPanel({
+    required this.settings,
+    required this.apiClient,
+    required this.debugModeSaving,
+    required this.onDebugModeChanged,
+    required this.onShowMessage,
+  });
 
   final NeriSettings? settings;
+  final NeriApiClient apiClient;
+  final bool debugModeSaving;
+  final ValueChanged<bool> onDebugModeChanged;
+  final ValueChanged<String> onShowMessage;
+
+  @override
+  State<_DebugInfoPanel> createState() => _DebugInfoPanelState();
+}
+
+class _DebugInfoPanelState extends State<_DebugInfoPanel> {
+  late Future<RuntimeDiagnostics> _runtimeFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _runtimeFuture = widget.apiClient.fetchRuntimeDiagnostics();
+  }
+
+  void _refreshRuntime() {
+    setState(() {
+      _runtimeFuture = widget.apiClient.fetchRuntimeDiagnostics();
+    });
+  }
+
+  Future<void> _copyDebugInfo() async {
+    RuntimeDiagnostics? runtime;
+    try {
+      runtime = await _runtimeFuture;
+    } catch (_) {}
+    await Clipboard.setData(
+      ClipboardData(
+        text: _debugInfoText(
+          settings: widget.settings,
+          apiClient: widget.apiClient,
+          debugModeEnabled: true,
+          runtime: runtime,
+        ),
+      ),
+    );
+    widget.onShowMessage('调试信息已复制');
+  }
+
+  void _showInstalledPackages(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _InstalledPackagesDialog(
+        apiClient: widget.apiClient,
+        onShowMessage: widget.onShowMessage,
+      ),
+    );
+  }
+
+  void _showSoftwareLogs(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _SoftwareLogsDialog(
+        apiClient: widget.apiClient,
+        onShowMessage: widget.onShowMessage,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final missing =
+        widget.settings?.missingYoloDependencies ?? const <String>[];
+    final dependenciesLabel = missing.isEmpty ? '完整' : missing.join('、');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: true,
+          onChanged: widget.debugModeSaving ? null : widget.onDebugModeChanged,
+          secondary: const Icon(Icons.bug_report_rounded),
+          title: const Text('调试模式'),
+          subtitle: const Text('已开启'),
+        ),
+        Divider(height: 1, color: scheme.outlineVariant),
+        const SizedBox(height: 12),
+        _DebugFactRow(label: '后端地址', value: widget.apiClient.baseUrl),
+        _DebugFactRow(
+          label: '运行平台',
+          value:
+              '${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+        ),
+        _DebugFactRow(label: '前端版本', value: _frontendVersion),
+        FutureBuilder<RuntimeDiagnostics>(
+          future: _runtimeFuture,
+          builder: (context, snapshot) {
+            final fallback = widget.settings?.appVersion ?? '';
+            final value = switch (snapshot.connectionState) {
+              ConnectionState.done when snapshot.hasData =>
+                snapshot.data!.backendVersion.isNotEmpty
+                    ? snapshot.data!.backendVersion
+                    : fallback,
+              ConnectionState.done when snapshot.hasError =>
+                fallback.isEmpty ? '读取失败：${snapshot.error}' : fallback,
+              _ => fallback.isEmpty ? '正在读取后端版本...' : fallback,
+            };
+            return _DebugFactRow(label: '后端版本', value: value);
+          },
+        ),
+        FutureBuilder<RuntimeDiagnostics>(
+          future: _runtimeFuture,
+          builder: (context, snapshot) {
+            final value = switch (snapshot.connectionState) {
+              ConnectionState.done when snapshot.hasData => _runtimeGpuStatus(
+                snapshot.data!,
+              ),
+              ConnectionState.done when snapshot.hasError =>
+                '读取失败：${snapshot.error}',
+              _ => '正在读取显卡与 PyTorch 信息...',
+            };
+            return _DebugFactRow(
+              label: 'GPU 状态',
+              value: value,
+              trailing: IconButton(
+                tooltip: '刷新',
+                onPressed: _refreshRuntime,
+                icon: const Icon(Icons.refresh_rounded),
+              ),
+            );
+          },
+        ),
+        _DebugFactRow(label: 'YOLO 依赖', value: dependenciesLabel),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: _copyDebugInfo,
+              icon: const Icon(Icons.content_copy_rounded),
+              label: const Text('复制调试信息'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _showInstalledPackages(context),
+              icon: const Icon(Icons.inventory_2_outlined),
+              label: const Text('已安装库'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _showSoftwareLogs(context),
+              icon: const Icon(Icons.receipt_long_outlined),
+              label: const Text('软件日志'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _DebugFactRow extends StatelessWidget {
+  const _DebugFactRow({
+    required this.label,
+    required this.value,
+    this.trailing,
+  });
+
+  final String label;
+  final String value;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final scheme = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(
+              label,
+              style: textTheme.bodyMedium?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+        ],
+      ),
+    );
+  }
+}
+
+class _InstalledPackagesDialog extends StatefulWidget {
+  const _InstalledPackagesDialog({
+    required this.apiClient,
+    required this.onShowMessage,
+  });
+
+  final NeriApiClient apiClient;
+  final ValueChanged<String> onShowMessage;
+
+  @override
+  State<_InstalledPackagesDialog> createState() =>
+      _InstalledPackagesDialogState();
+}
+
+class _InstalledPackagesDialogState extends State<_InstalledPackagesDialog> {
+  late final Future<List<InstalledPackageInfo>> _packagesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _packagesFuture = widget.apiClient.fetchInstalledPackages();
+  }
+
+  Future<void> _copyPackages(List<InstalledPackageInfo> packages) async {
+    final text = packages
+        .map((package) => '${package.name}==${package.version}')
+        .join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    widget.onShowMessage('已安装库列表已复制');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('已安装库'),
+      content: SizedBox(
+        width: 560,
+        height: 520,
+        child: FutureBuilder<List<InstalledPackageInfo>>(
+          future: _packagesFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return _DebugDialogMessage(
+                icon: Icons.error_outline_rounded,
+                message: '读取已安装库失败：${snapshot.error}',
+              );
+            }
+
+            final packages = snapshot.data ?? const <InstalledPackageInfo>[];
+            if (packages.isEmpty) {
+              return const _DebugDialogMessage(
+                icon: Icons.inventory_2_outlined,
+                message: '未读取到已安装库。',
+              );
+            }
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: Text('${packages.length} 个库')),
+                    TextButton.icon(
+                      onPressed: () => _copyPackages(packages),
+                      icon: const Icon(Icons.copy_rounded),
+                      label: const Text('复制全部'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: packages.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final package = packages[index];
+                      return ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(
+                          package.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: SelectableText(package.version),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}
+
+class _SoftwareLogsDialog extends StatefulWidget {
+  const _SoftwareLogsDialog({
+    required this.apiClient,
+    required this.onShowMessage,
+  });
+
+  final NeriApiClient apiClient;
+  final ValueChanged<String> onShowMessage;
+
+  @override
+  State<_SoftwareLogsDialog> createState() => _SoftwareLogsDialogState();
+}
+
+class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
+  late final Future<List<DebugLogInfo>> _logsFuture;
+  DebugLogInfo? _selectedLog;
+  Future<DebugLogContent>? _contentFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _logsFuture = widget.apiClient.fetchDebugLogs();
+  }
+
+  void _selectLog(DebugLogInfo log) {
+    setState(() {
+      _selectedLog = log;
+      _contentFuture = widget.apiClient.fetchDebugLogContent(log.path);
+    });
+  }
+
+  Future<void> _copyLog(DebugLogContent log) async {
+    await Clipboard.setData(ClipboardData(text: log.content));
+    widget.onShowMessage('日志内容已复制');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('软件日志'),
+      content: SizedBox(
+        width: 820,
+        height: 560,
+        child: FutureBuilder<List<DebugLogInfo>>(
+          future: _logsFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return _DebugDialogMessage(
+                icon: Icons.error_outline_rounded,
+                message: '读取软件日志失败：${snapshot.error}',
+              );
+            }
+
+            final logs = snapshot.data ?? const <DebugLogInfo>[];
+            if (logs.isEmpty) {
+              return const _DebugDialogMessage(
+                icon: Icons.receipt_long_outlined,
+                message: '未找到软件日志。',
+              );
+            }
+
+            return Row(
+              children: [
+                SizedBox(
+                  width: 260,
+                  child: ListView.separated(
+                    itemCount: logs.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final log = logs[index];
+                      return ListTile(
+                        dense: true,
+                        selected: log.path == _selectedLog?.path,
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(
+                          log.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(_formatBytes(log.sizeBytes)),
+                        onTap: () => _selectLog(log),
+                      );
+                    },
+                  ),
+                ),
+                const VerticalDivider(width: 24),
+                Expanded(child: _buildSelectedLogContent()),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSelectedLogContent() {
+    final future = _contentFuture;
+    if (future == null) {
+      return const _DebugDialogMessage(
+        icon: Icons.receipt_long_outlined,
+        message: '选择一个日志查看内容。',
+      );
+    }
+
+    return FutureBuilder<DebugLogContent>(
+      future: future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return _DebugDialogMessage(
+            icon: Icons.error_outline_rounded,
+            message: '读取日志内容失败：${snapshot.error}',
+          );
+        }
+
+        final log = snapshot.data;
+        if (log == null) {
+          return const _DebugDialogMessage(
+            icon: Icons.receipt_long_outlined,
+            message: '日志内容为空。',
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    log.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _copyLog(log),
+                  icon: const Icon(Icons.copy_rounded),
+                  label: const Text('复制'),
+                ),
+              ],
+            ),
+            Text(
+              '${_formatBytes(log.sizeBytes)}'
+              '${log.modifiedAt == null ? '' : ' · ${_formatLogTime(log.modifiedAt)}'}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            if (log.truncated)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '内容过长，仅显示末尾部分。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    log.content.isEmpty ? '日志为空。' : log.content,
+                    style: const TextStyle(
+                      fontFamily: 'Consolas',
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _DebugDialogMessage extends StatelessWidget {
+  const _DebugDialogMessage({required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 32, color: scheme.onSurfaceVariant),
+          const SizedBox(height: 12),
+          Text(message, textAlign: TextAlign.center),
+        ],
+      ),
+    );
+  }
+}
+
+class _AboutInfo extends StatefulWidget {
+  const _AboutInfo({
+    required this.settings,
+    required this.debugModeEnabled,
+    required this.debugModeSaving,
+    required this.onDebugModeChanged,
+    required this.onOpenUrl,
+    required this.onShowMessage,
+  });
+
+  final NeriSettings? settings;
+  final bool debugModeEnabled;
+  final bool debugModeSaving;
+  final ValueChanged<bool> onDebugModeChanged;
   final ValueChanged<String> onOpenUrl;
+  final ValueChanged<String> onShowMessage;
+
+  @override
+  State<_AboutInfo> createState() => _AboutInfoState();
+}
+
+class _AboutInfoState extends State<_AboutInfo> {
+  int _versionTapCount = 0;
+  Timer? _versionTapResetTimer;
+
+  @override
+  void didUpdateWidget(covariant _AboutInfo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.debugModeEnabled != widget.debugModeEnabled) {
+      _versionTapResetTimer?.cancel();
+      _versionTapCount = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _versionTapResetTimer?.cancel();
+    super.dispose();
+  }
+
+  void _handleVersionTap() {
+    if (widget.debugModeSaving) {
+      widget.onShowMessage('调试模式正在保存');
+      return;
+    }
+    if (widget.debugModeEnabled) {
+      widget.onShowMessage('调试模式已开启');
+      return;
+    }
+
+    final nextCount = _versionTapCount + 1;
+    final remaining = _debugTapThreshold - nextCount;
+    _versionTapResetTimer?.cancel();
+
+    if (remaining <= 0) {
+      setState(() => _versionTapCount = 0);
+      widget.onDebugModeChanged(true);
+      return;
+    }
+
+    setState(() => _versionTapCount = nextCount);
+    if (remaining <= 2) {
+      widget.onShowMessage('再点击 $remaining 次开启调试模式');
+    }
+    _versionTapResetTimer = Timer(_debugTapResetDuration, () {
+      if (!mounted) return;
+      setState(() => _versionTapCount = 0);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final settings = widget.settings;
     final version = settings?.appVersion.isNotEmpty == true
         ? settings!.appVersion
         : '未读取到版本信息';
@@ -2299,6 +3010,16 @@ class _AboutInfo extends StatelessWidget {
                 leading: const Icon(Icons.tag_rounded),
                 title: const Text('版本号'),
                 subtitle: Text(version),
+                trailing: widget.debugModeEnabled
+                    ? Tooltip(
+                        message: '调试模式已开启',
+                        child: Icon(
+                          Icons.bug_report_rounded,
+                          color: scheme.primary,
+                        ),
+                      )
+                    : null,
+                onTap: _handleVersionTap,
               ),
               const Divider(height: 1),
               ListTile(
@@ -2306,7 +3027,7 @@ class _AboutInfo extends StatelessWidget {
                 title: const Text('更新说明'),
                 subtitle: const Text('查看版本更新记录'),
                 trailing: const Icon(Icons.open_in_new_rounded),
-                onTap: () => onOpenUrl(_releaseNotesUrl),
+                onTap: () => widget.onOpenUrl(_releaseNotesUrl),
               ),
               const Divider(height: 1),
               ListTile(
@@ -2314,7 +3035,7 @@ class _AboutInfo extends StatelessWidget {
                 title: const Text('反馈建议'),
                 subtitle: const Text('提交问题或功能建议'),
                 trailing: const Icon(Icons.open_in_new_rounded),
-                onTap: () => onOpenUrl(_feedbackUrl),
+                onTap: () => widget.onOpenUrl(_feedbackUrl),
               ),
               const Divider(height: 1),
               ListTile(
@@ -2322,7 +3043,7 @@ class _AboutInfo extends StatelessWidget {
                 title: const Text('源代码'),
                 subtitle: const Text('查看 GitHub 项目仓库'),
                 trailing: const Icon(Icons.open_in_new_rounded),
-                onTap: () => onOpenUrl(_sourceCodeUrl),
+                onTap: () => widget.onOpenUrl(_sourceCodeUrl),
               ),
             ],
           ),
@@ -2413,50 +3134,89 @@ class _ColorSwatch extends StatelessWidget {
         ? Colors.white
         : theme.colorScheme.onSurface;
 
-    final palette = SizedBox(
-      width: 46,
-      height: 46,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          CustomPaint(
-            size: const Size.square(46),
-            painter: _PaletteCirclePainter(scheme),
-          ),
-          if (selected)
-            Container(
-              width: 29,
-              height: 29,
-              decoration: BoxDecoration(
-                color: Color.alphaBlend(
-                  scheme.primary.withValues(alpha: 0.08),
-                  theme.colorScheme.surface,
-                ),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(Icons.check_rounded, color: checkColor, size: 20),
-            ),
-        ],
-      ),
-    );
-
     return GestureDetector(
       onTap: onTap,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 200),
-        opacity: disabled ? 0.35 : 1.0,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            color: tileColor,
-            borderRadius: BorderRadius.circular(18),
-          ),
-          alignment: Alignment.center,
-          child: palette,
-        ),
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(end: selected ? 1 : 0),
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutBack,
+        builder: (context, selectedAmount, _) {
+          final selectedProgress = selectedAmount.clamp(0.0, 1.0).toDouble();
+          final ringAlpha = (0.12 + selectedProgress * 0.18)
+              .clamp(0.0, 1.0)
+              .toDouble();
+          final palette = Transform.scale(
+            scale: 1 + selectedProgress * 0.08,
+            child: SizedBox(
+              width: 46,
+              height: 46,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CustomPaint(
+                    size: const Size.square(46),
+                    painter: _PaletteCirclePainter(scheme),
+                  ),
+                  Opacity(
+                    opacity: selectedProgress,
+                    child: Transform.scale(
+                      scale: 0.72 + selectedProgress * 0.28,
+                      child: Container(
+                        width: 29,
+                        height: 29,
+                        decoration: BoxDecoration(
+                          color: Color.alphaBlend(
+                            scheme.primary.withValues(alpha: 0.08),
+                            theme.colorScheme.surface,
+                          ),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.check_rounded,
+                          color: checkColor,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+
+          return AnimatedOpacity(
+            duration: const Duration(milliseconds: 200),
+            opacity: disabled ? 0.35 : 1.0,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: tileColor,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: scheme.primary.withValues(
+                    alpha: selectedProgress == 0 ? 0.0 : ringAlpha,
+                  ),
+                  width: 1 + selectedProgress * 2,
+                ),
+                boxShadow: [
+                  if (selectedProgress > 0)
+                    BoxShadow(
+                      color: scheme.primary.withValues(
+                        alpha: 0.10 * selectedProgress,
+                      ),
+                      blurRadius: 12 * selectedProgress,
+                      spreadRadius: 1 * selectedProgress,
+                    ),
+                ],
+              ),
+              alignment: Alignment.center,
+              child: palette,
+            ),
+          );
+        },
       ),
     );
   }
@@ -2492,6 +3252,73 @@ class _PaletteCirclePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _PaletteCirclePainter oldDelegate) {
     return oldDelegate.scheme != scheme;
+  }
+}
+
+String _debugInfoText({
+  required NeriSettings? settings,
+  required NeriApiClient apiClient,
+  required bool debugModeEnabled,
+  RuntimeDiagnostics? runtime,
+}) {
+  final missing = settings?.missingYoloDependencies ?? const <String>[];
+  final backendVersion = runtime?.backendVersion.isNotEmpty == true
+      ? runtime!.backendVersion
+      : settings?.appVersion ?? '';
+  return <String>[
+    'Neri debug information',
+    'Frontend version: $_frontendVersion',
+    'Backend version: $backendVersion',
+    'Backend URL: ${apiClient.baseUrl}',
+    'Debug mode: $debugModeEnabled',
+    'Platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+    'GPU status: ${runtime == null ? settings?.gpuAvailable ?? false : _runtimeGpuStatus(runtime)}',
+    'Missing YOLO dependencies: ${missing.isEmpty ? 'none' : missing.join(', ')}',
+    'Model directory: ${settings?.modelDirectory ?? ''}',
+    'Classification model directory: ${settings?.classificationModelDirectory ?? ''}',
+    'Detection model count: ${settings?.availableModels.length ?? 0}',
+    'Classification model count: ${settings?.availableClassificationModels.length ?? 0}',
+  ].join('\n');
+}
+
+String _runtimeGpuStatus(RuntimeDiagnostics runtime) {
+  final pytorchVersion = runtime.pytorchInstalled
+      ? 'PyTorch ${runtime.pytorchVersion?.isNotEmpty == true ? runtime.pytorchVersion : '未知版本'}'
+      : 'PyTorch 未安装';
+  final cudaVersion = runtime.pytorchCudaVersion?.isNotEmpty == true
+      ? 'CUDA ${runtime.pytorchCudaVersion}'
+      : null;
+  final deviceNames = runtime.gpuDevices.isNotEmpty
+      ? runtime.gpuDevices
+      : runtime.hardwareGpus;
+  final devices = deviceNames.isEmpty ? '未读取到显卡信息' : deviceNames.join('、');
+  final status = runtime.gpuAvailable ? '可用' : '不可用';
+  final parts = <String>[status, devices, pytorchVersion];
+  if (cudaVersion != null) parts.add(cudaVersion);
+  if (runtime.error?.isNotEmpty == true) {
+    parts.add('诊断信息：${runtime.error}');
+  }
+  return parts.join(' · ');
+}
+
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  const units = <String>['KB', 'MB', 'GB'];
+  var value = bytes / 1024;
+  var index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[index]}';
+}
+
+String _formatLogTime(String? value) {
+  if (value == null || value.isEmpty) return '';
+  try {
+    return DateTime.parse(value).toLocal().toString().split('.').first;
+  } catch (_) {
+    return value;
   }
 }
 

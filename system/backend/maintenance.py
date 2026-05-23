@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -21,6 +22,8 @@ BACKEND_PORT = "721"
 BACKEND_APP = "system.backend.main:app"
 ACTIVE_STATES = {"starting", "waiting_for_backend", "running", "restarting"}
 ULTRALYTICS_PACKAGE_SPEC = "ultralytics>=8.4.13"
+PYTORCH_CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu"
+PYTORCH_XPU_INDEX_URL = "https://download.pytorch.org/whl/xpu"
 PIP_SOURCES = {
     "official": ("官方源", "https://pypi.org/simple"),
     "aliyun": ("阿里源", "https://mirrors.aliyun.com/pypi/simple"),
@@ -363,19 +366,31 @@ def _resolve_pytorch_index(env_choice: str) -> tuple[str, str]:
     if choice == "自动检测":
         return _auto_detect_pytorch_index()
     if "XPU" in choice.upper():
-        return "Intel XPU", "https://download.pytorch.org/whl/xpu"
+        return "Intel XPU", PYTORCH_XPU_INDEX_URL
     if "CPU" in choice.upper():
-        return "CPU Only", "https://download.pytorch.org/whl/cpu"
+        return "CPU Only", PYTORCH_CPU_INDEX_URL
 
     match = re.search(r"CUDA\s*(\d+)\.(\d+)", choice, flags=re.IGNORECASE)
     if match:
         major, minor = match.groups()
         return f"CUDA {major}.{minor}", f"https://download.pytorch.org/whl/cu{major}{minor}"
 
-    return "CPU Only", "https://download.pytorch.org/whl/cpu"
+    return "CPU Only", PYTORCH_CPU_INDEX_URL
 
 
 def _auto_detect_pytorch_index() -> tuple[str, str]:
+    cuda_choice = _detect_nvidia_cuda_pytorch_index()
+    if cuda_choice is not None:
+        return cuda_choice
+
+    intel_choice = _detect_intel_xpu_pytorch_index()
+    if intel_choice is not None:
+        return intel_choice
+
+    return "CPU Only (未检测到支持的 GPU)", PYTORCH_CPU_INDEX_URL
+
+
+def _detect_nvidia_cuda_pytorch_index() -> tuple[str, str] | None:
     try:
         result = subprocess.run(
             ["nvidia-smi"],
@@ -386,10 +401,10 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
             timeout=10,
         )
     except Exception:
-        return "CPU Only (自动检测失败)", "https://download.pytorch.org/whl/cpu"
+        return None
 
     if result.returncode != 0:
-        return "CPU Only (未检测到 NVIDIA GPU)", "https://download.pytorch.org/whl/cpu"
+        return None
 
     match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", result.stdout)
     if not match:
@@ -408,7 +423,124 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
         return f"CUDA 12.1 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu121"
     if major >= 11 and minor >= 8:
         return f"CUDA 11.8 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu118"
-    return f"CPU Only (CUDA {major}.{minor} 过旧)", "https://download.pytorch.org/whl/cpu"
+    return f"CPU Only (CUDA {major}.{minor} 过旧)", PYTORCH_CPU_INDEX_URL
+
+
+def _detect_intel_xpu_pytorch_index() -> tuple[str, str] | None:
+    gpu_names = _windows_video_controller_names()
+    intel_gpu_names = [
+        name for name in gpu_names if "intel" in _normalize_hardware_name(name)
+    ]
+    if not intel_gpu_names:
+        return None
+
+    cpu_names = _windows_processor_names()
+    for gpu_name in intel_gpu_names:
+        if _is_supported_intel_xpu_gpu(gpu_name, cpu_names):
+            return f"Intel XPU (检测到 {gpu_name})", PYTORCH_XPU_INDEX_URL
+
+    return f"CPU Only (Intel GPU 暂不支持 XPU: {intel_gpu_names[0]})", PYTORCH_CPU_INDEX_URL
+
+
+def _is_supported_intel_xpu_gpu(gpu_name: str, cpu_names: Sequence[str]) -> bool:
+    gpu_text = _normalize_hardware_name(gpu_name)
+    if "intel" not in gpu_text or "arc" not in gpu_text:
+        return False
+
+    if re.search(r"\barc\b.*\b[ab]\s*series\b", gpu_text):
+        return True
+    if re.search(r"\barc\b.*\b[ab]\d{2,4}m?\b", gpu_text):
+        return True
+    if re.search(r"\barc\b.*\b1[34]0[vt]\b", gpu_text):
+        return True
+
+    return any(_is_supported_core_ultra_arc_cpu(name) for name in cpu_names)
+
+
+def _is_supported_core_ultra_arc_cpu(cpu_name: str) -> bool:
+    cpu_text = _normalize_hardware_name(cpu_name)
+    if "core" not in cpu_text or "ultra" not in cpu_text:
+        return False
+    if any(
+        codename in cpu_text
+        for codename in ("meteor lake", "arrow lake", "lunar lake", "panther lake")
+    ):
+        return True
+
+    for model, suffix in re.findall(r"\b([123]\d{2})([a-z]{1,2})\b", cpu_text):
+        generation = int(model[0])
+        suffix = suffix.lower()
+        if generation == 1 and suffix.startswith("h"):
+            return True
+        if generation == 2 and (suffix.startswith("h") or suffix.startswith("v")):
+            return True
+        if generation == 3:
+            return True
+    return False
+
+
+def _windows_video_controller_names() -> list[str]:
+    names = _powershell_cim_property_values("Win32_VideoController", "Name")
+    if names:
+        return names
+    return _wmic_property_values(["wmic", "path", "win32_VideoController", "get", "Name"])
+
+
+def _windows_processor_names() -> list[str]:
+    names = _powershell_cim_property_values("Win32_Processor", "Name")
+    if names:
+        return names
+    return _wmic_property_values(["wmic", "cpu", "get", "Name"])
+
+
+def _powershell_cim_property_values(cim_class: str, property_name: str) -> list[str]:
+    if os.name != "nt":
+        return []
+    command = f"Get-CimInstance {cim_class} | Select-Object -ExpandProperty {property_name}"
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return _clean_command_lines(result.stdout)
+
+
+def _wmic_property_values(command: Sequence[str]) -> list[str]:
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            list(command),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line for line in _clean_command_lines(result.stdout) if line.lower() != "name"]
+
+
+def _clean_command_lines(output: str) -> list[str]:
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _normalize_hardware_name(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value)
+    text = text.encode("ascii", "ignore").decode("ascii").lower()
+    text = re.sub(r"[\(\)\[\],._+\-/]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _start_backend() -> None:

@@ -107,6 +107,42 @@ class MaintenanceStatusResponse(BaseModel):
     error: str | None = None
 
 
+class InstalledPackageInfo(BaseModel):
+    """One Python package visible to the running backend environment."""
+
+    name: str
+    version: str
+
+
+class DebugLogInfo(BaseModel):
+    """Metadata for a readable software log file."""
+
+    name: str
+    path: str
+    size_bytes: int
+    modified_at: str | None = None
+
+
+class DebugLogContent(DebugLogInfo):
+    """Readable log content, optionally truncated to its latest bytes."""
+
+    content: str
+    truncated: bool = False
+
+
+class RuntimeDiagnostics(BaseModel):
+    """Runtime details useful while debugging the local environment."""
+
+    backend_version: str = ""
+    pytorch_installed: bool = False
+    pytorch_version: str | None = None
+    pytorch_cuda_version: str | None = None
+    gpu_available: bool = False
+    gpu_devices: list[str] = Field(default_factory=list)
+    hardware_gpus: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class ProcessingOptions(BaseModel):
     """Options that mirror the current desktop advanced processing controls."""
 

@@ -1357,59 +1357,12 @@ class AdvancedPage(QWidget):
 
             if env_choice == "自动检测":
                 try:
-                    # 运行 nvidia-smi 获取详细信息
-                    result = subprocess.run(
-                        ["nvidia-smi"],
-                        capture_output=True,
-                        text=True,
-                        encoding='gbk',
-                        errors='ignore',
-                        timeout=10,
-                        shell=True
-                    )
+                    from system.backend.maintenance import _resolve_pytorch_index
 
-                    if result.returncode == 0:
-                        # 从 nvidia-smi 输出中提取 CUDA 版本
-                        match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
-                        if match:
-                            major, minor = match.groups()
-                            cuda_major = int(major)
-                            cuda_minor = int(minor)
-
-                            # 根据 CUDA 版本选择对应的 PyTorch 版本
-                            if cuda_major >= 13:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu130"
-                                actual_env = f"CUDA 13.0 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 8:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu128"
-                                actual_env = f"CUDA 12.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 6:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu126"
-                                actual_env = f"CUDA 12.6 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 4:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu124"
-                                actual_env = f"CUDA 12.4 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 1:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu121"
-                                actual_env = f"CUDA 12.1 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 11 and cuda_minor >= 8:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu118"
-                                actual_env = f"CUDA 11.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            else:
-                                # 旧版本CUDA，使用CPU版本
-                                index_url = "--index-url https://download.pytorch.org/whl/cpu"
-                                actual_env = f"CPU Only (CUDA版本过旧: {cuda_major}.{cuda_minor})"
-                        else:
-                            # 有 nvidia-smi 但没匹配到具体版本，给一个兼容性最好的默认版本
-                            index_url = "--index-url https://download.pytorch.org/whl/cu124"
-                            actual_env = "CUDA 12.4 (自动检测 - 未识别具体版本)"
-                    else:
-                        # nvidia-smi 执行失败，说明可能没装驱动或没显卡，回退CPU
-                        index_url = "--index-url https://download.pytorch.org/whl/cpu"
-                        actual_env = "CPU Only (未检测到 NVIDIA GPU)"
-
+                    actual_env, detected_index_url = _resolve_pytorch_index(env_choice)
+                    index_url = f"--index-url {detected_index_url}"
                 except Exception as e:
-                    logger.warning(f"自动检测 CUDA 版本失败: {e}")
+                    logger.warning(f"自动检测 PyTorch 安装环境失败: {e}")
                     # 发生异常，回退CPU
                     index_url = "--index-url https://download.pytorch.org/whl/cpu"
                     actual_env = "CPU Only (自动检测出错)"
