@@ -1,175 +1,180 @@
-<div align="left">
-<a href="/README.md">中文</a>&nbsp;|&nbsp;
-<a href="/res/demo/README_en.md">English</a> &nbsp;|&nbsp;
-<a href="/res/demo/README_Update.md">更新日志</a> &nbsp;
-</div>
-
 <div align="center">
-<img src="res/logo.png" alt="Logo" width="120" height="120">
-<h1 align="center">Neri - 红外相机图像智能处理工具</h1>
+  <img src="res/logo.png" alt="Neri Logo" width="110" height="110">
+  <h1>Neri</h1>
+  <p><strong>NERI Enables Rapid Identification</strong></p>
+  <p>红外相机图像智能处理工具</p>
 </div>
 
 <div align="center">
 
-</div>
+[![Stars](https://img.shields.io/github/stars/wakin721/Neri?style=for-the-badge&label=Stars&color=FFD9DC&labelColor=FFEBEB&logo=github&logoColor=black)](https://github.com/wakin721/Neri)
+[![Website](https://img.shields.io/badge/官网-myneri.top-blue?style=for-the-badge&labelColor=E8F4FD&color=B3D9F7&logo=googlechrome&logoColor=black)](https://myneri.top/)
+[![License](https://img.shields.io/github/license/wakin721/Neri?style=for-the-badge&colorA=F0FFF0&colorB=C8F0C8&logoColor=black)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/wakin721/Neri?style=for-the-badge&colorA=FFF8E8&colorB=FFE8A8&logo=github&logoColor=black)](https://github.com/wakin721/Neri/releases)
+
 </div>
 
-</p>
+<div align="center">
+
+[中文](README.md) &nbsp;·&nbsp; [English](res/demo/README_en.md) &nbsp;·&nbsp; [更新日志](res/demo/README_Update.md) &nbsp;·&nbsp; [🌐 官网](https://myneri.top/)
+
+</div>
+
+<br>
+
 <p align="center">
- <img src="https://img.shields.io/github/stars/wakin721/Neri?style=for-the-badge&colorA=FFEBEB&colorB=FFD9DC&logo=github&logoColor=black">
-  </a>
+  <img src="https://github.com/wakin721/Neri/blob/main/res/demo/demo1.png" width="780px">
 </p>
 
+<br>
 
-### 📖 项目简介
-  Neri (NERI Enables Rapid Identification) 是一款专为处理红外相机影像数据设计的智能桌面应用。它基于 YOLO (You Only Look Once) 目标检测模型，能够高效、自动地识别和处理大批量由红外相机拍摄的野生动物照片。本工具旨在为生态保护工作者、野生动物研究人员和爱好者提供一个强大的数据整理和分析平台，将繁琐的手动筛选工作自动化，极大地提升科研和监测效率。
-  <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/demo1.png" width="750px">
-</p>
- 
+## 📖 项目简介
 
-## 目录
+**Neri** 是一款专为处理红外相机影像数据设计的智能桌面应用。它基于 **YOLO (You Only Look Once)** 目标检测模型，能够高效、自动地识别和处理大批量由红外相机拍摄的野生动物照片。
 
-- [主要功能](#-主要功能)
-- [快速开始](#-快速开始)
-- [使用指南](#-使用指南)
-  - [快速使用](#快速使用)
-  - [高级设置](#高级设置)
-  - [使用显卡对模型加速](#使用nvidia-cudaintel-xpu加速)
-- [未来蓝图](#%EF%B8%8F-未来蓝图)
-- [Warning](#%EF%B8%8F-warning)
-- [联系我们](#-联系我们)
-- [鸣谢](#鸣谢)
+本工具旨在为生态保护工作者、野生动物研究人员和爱好者提供一个强大的数据整理和分析平台，将繁琐的手动筛选工作自动化，极大地提升科研和监测效率。
+
+<br>
 
 ## ✨ 主要功能
 
-  🎯 基于YOLO的智能识别: 采用先进的 YOLO 模型，快速准确地识别图像中的野生动物。
+| 功能 | 描述 |
+|------|------|
+| 🎯 **智能识别** | 采用先进的 YOLO 模型，快速准确地识别图像中的野生动物 |
+| 🖼️ **批量处理** | 支持一次性导入整个文件夹的图片或视频，实现全自动化的数据处理流程 |
+| 📄 **EXIF 提取** | 自动读取并整合照片的 EXIF 元数据，如拍摄时间等关键信息 |
+| 📊 **灵活导出** | 可将识别结果一键导出为 `.csv` 或 `.xlsx` 格式，便于后续统计分析 |
+| ⚙️ **高度可定制** | 提供高级选项，允许用户替换或更新 YOLO 模型，适应不同地区和物种的识别需求 |
 
-  🖼️ 强大的批量处理: 支持一次性导入整个文件夹的图片或视频，实现全自动化的数据处理流程。
-
-  📄 详细的EXIF数据提取: 自动读取并整合照片的 EXIF 元数据，如拍摄时间等关键信息。
-
-  📊 灵活的结果导出: 可将识别结果（物种、数量、时间等）和元数据一键导出为 csv或者Excel (.xlsx) 格式，便于进行后续的统计分析和报告撰写。
-
-  ⚙️ 模型高度可定制: 提供高级选项，允许用户替换或更新 YOLO 模型，以适应不同地区和物种的识别需求。
-
-
+<br>
 
 ## 🚀 快速开始
 
-  本程序无需安装，解压即用。
+> 本程序**无需安装**，解压即用。
 
-  下载程序: 前往[下载](https://github.com/wakin721/Neri/releases)页面，下载最新版本的 .zip 或者.7z压缩包。
+**第一步：** 前往 [Releases 页面](https://github.com/wakin721/Neri/releases) 下载最新版本的 `.zip` 或 `.7z` 压缩包。
 
-  解压文件: 将下载的压缩包解压到您希望存放程序的任意位置。
+**第二步：** 将下载的压缩包解压到您希望存放程序的任意位置。
 
-  运行程序: 进入解压后的文件夹，双击运行 Neri.exe 即可启动程序，首次使用需联网下载相关依赖，后续可断网使用。
+**第三步：** 进入解压后的文件夹，双击运行 `Neri.exe` 即可启动程序。
+
+> ⚠️ 首次使用需联网下载相关依赖，后续可断网使用。
+
+<br>
 
 ## 💡 使用指南
 
-  ### 快速使用
-  启动程序后，点击 “选择图片” 按钮，选择包含红外相机照片的文件夹。
+### 快速使用
 
-  点击"开始处理"按钮，程序将自动开始批量识别图像中的动物，并在界面上实时显示进度。
+```
+1. 启动程序后，点击 "选择图片" 按钮，选择包含红外相机照片的文件夹
+2. 点击 "开始处理" 按钮，程序将自动开始批量识别图像中的动物，并在界面上实时显示进度
+3. 识别完成后，点击 "校验检验" 按钮，可以详细查看每张照片的识别结果，并根据识别情况进行纠正
+4. 在预览页面，点击 "导出" 即可将所有分析数据保存为 .xlsx 或 .csv 文件
+```
 
-  识别完成后，点击 “校验检验” 按钮，可以详细查看每张照片的识别结果。并根据识别情况进行纠正。
-  
-  在预览页面，点击 “导出” 即可将所有分析数据保存为 .xlsx或者为.csv 文件，以供进一步使用。
+---
 
-  ### 高级设置
+### 高级设置
 
-  高级设置分为四个分组框：模型参数设置、视频检测设置、环境维护和软件设置。
+高级设置分为四个分组框：**模型参数设置**、**视频检测设置**、**环境维护**和**软件设置**。
 
-  ***模型参数设置：***
+#### 🔧 模型参数设置
 
-  **模型管理**
-  - **选择可用模型：** 模型目录位于res/model以及res/cls_model文件夹下，目前仅支持.pt为结尾的模型文件，可自行更换。
+**模型管理**
 
-  **检测阈值设置**
-  - **IOU阈值：** 控制对象检测中非极大值抑制（NMS）的重叠阈值。较高的值会减少重叠框，但可能导致部分目标漏检。
-  - **置信度阈值：** 检测对象的最小置信度分数。较高的值只显示高置信度的检测结果，减少误检。
+- 模型目录位于 `res/model` 以及 `res/cls_model` 文件夹下
+- 目前仅支持 `.pt` 结尾的模型文件，可自行更换
 
-  **模型加速选项**
-  - **使用FP16加速：** 使用半精度浮点数进行推理，可以加快速度但可能会略微降低精度。需要兼容的NVIDIA GPU。
+**检测阈值设置**
 
-  **高级检测选项**
-  - **使用数据增强：** 在测试时使用数据增强（TTA），通过对输入图像进行多种变换并综合结果，可能会提高准确性，但会显著降低处理速度。
-  - **使用类别无关NMS：** 在所有类别上一起执行NMS，对于检测多种相互重叠的物种可能有用。
+| 参数 | 说明 |
+|------|------|
+| **IOU 阈值** | 控制 NMS 的重叠阈值。较高的值会减少重叠框，但可能导致部分目标漏检 |
+| **置信度阈值** | 检测对象的最小置信度分数。较高的值减少误检，但可能漏掉低置信度的真实目标 |
 
-  ***视频检测设置：***
+**加速与高级选项**
 
-  **跳帧处理**
-  - **帧间隔：** 设置视频处理时的跳帧间隔，以加快处理视频的速度。
+| 选项 | 说明 |
+|------|------|
+| **FP16 加速** | 使用半精度浮点数进行推理，加快速度但可能略微降低精度（需要兼容的 NVIDIA GPU） |
+| **数据增强 (TTA)** | 通过多种变换综合结果提高准确性，但会显著降低处理速度 |
+| **类别无关 NMS** | 在所有类别上一起执行 NMS，对检测多种相互重叠的物种可能有用 |
 
-  **检测过滤**
-  - **最低帧数比例：** 如果某个目标（TrackID）在视频中出现的总帧数占视频总帧数的，则该目标将被视为误检或无效目标，不会在结果中显示。
+#### 🎬 视频检测设置
 
-  ### 使用Nvidia CUDA/Intel xpu加速
+| 参数 | 说明 |
+|------|------|
+| **帧间隔** | 设置视频处理时的跳帧间隔，以加快处理视频的速度 |
+| **最低帧数比例** | 若某个目标在视频中出现的总帧数占视频总帧数低于此值，则该目标将被视为误检，不会在结果中显示 |
 
-  建议（但非强制）你的 Windows 系统配备 NVIDIA GPU，因为这样能使用更高精度的模型，且更加快速。
+---
 
-  在第一次运行程序的时候会自动检测NVIDIA显卡和CUDA并且尝试自动安装对应版本的Pytorch；若未检测到NVIDIA显卡，则会继续检测Intel显卡，支持Intel Arc A/B系列独显，以及搭载Intel Arc Graphics的Core Ultra Meteor Lake-H、Arrow Lake-H、Lunar Lake和Panther Lake平台时自动安装xpu版本的Pytorch，其他Intel显卡会自动回退到CPU版本。若安装失败，可尝试手动安装。
+### 使用 NVIDIA CUDA / Intel XPU 加速
 
-  在使用Intel gpu（包括集显和独显）的情况下，请在使用时检查是否已经安装Intel显卡驱动，有关安装指南，请访问[Intel GPU 驱动程序安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
-  
-  >*有关英特尔 GPU的Pytorch官方[入门指南](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)*
-  
-  如何查看CUDA版本并且安装CUDA支持的Pytorch？
-  
-  1.右键点击桌面，选择“NVIDIA控制面板”。
+> 建议（但非强制）配备 NVIDIA GPU，以使用更高精度的模型并获得更快的推理速度。
 
-  2.在控制面板的菜单栏中，选择“帮助”，然后点击“系统信息”。
+**自动检测逻辑：**
+
+```
+首次运行时自动检测
+  ├── 检测到 NVIDIA GPU → 自动安装对应 CUDA 版本的 PyTorch
+  ├── 未检测到 NVIDIA → 继续检测 Intel GPU
+  │     ├── 支持的 Intel Arc 独显 / Core Ultra 平台 → 安装 XPU 版本
+  │     └── 其他 Intel 显卡 → 回退到 CPU 版本
+  └── 安装失败 → 可尝试手动安装
+```
+
+> 使用 Intel GPU 时，请确保已安装 Intel 显卡驱动：[Intel GPU 驱动安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
+>
+> 参考：[Intel GPU PyTorch 官方入门指南](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
+
+**如何查看 CUDA 版本并安装对应 PyTorch：**
+
+**步骤 1：** 右键点击桌面，选择 "NVIDIA 控制面板"
+
+**步骤 2：** 在菜单栏选择 "帮助" → "系统信息"
+
 <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda1.png" width="750px">
-</p>
-  3.在弹出的窗口中，查看“显示”下的信息，找到“NVCUDA64.DLL”等相关文件，即可看到对应的CUDA版本。
-  <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda2.png">
-</p>
-  4.在高级设置-环境维护-安装Pytorch中选择对应版本进行安装
-  <p align="center">
-   <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda3.png" width="750px">
+  <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda1.png" width="720px">
 </p>
 
-  **模型管理**
+**步骤 3：** 在弹出的窗口中找到 "NVCUDA64.DLL" 相关文件，即可查看对应的 CUDA 版本
 
-  建议仅使用cpu的使用11n和11s模型防止推理过慢，建议配置gpu的使用11x模型以获得最高的推理精度。
+<p align="center">
+  <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda2.png">
+</p>
+
+**步骤 4：** 在 **高级设置 → 环境维护 → 安装 PyTorch** 中选择对应版本安装
+
+<p align="center">
+  <img src="https://github.com/wakin721/Neri/blob/main/res/demo/cuda3.png" width="720px">
+</p>
+
+**模型选择建议：**
+
+| 硬件配置 | 推荐模型 | 说明 |
+|----------|----------|------|
+| 仅 CPU | `11n` / `11s` | 防止推理过慢 |
+| 配备 GPU | `11x` | 获得最高的推理精度 |
+
+<br>
 
 ## 🗺️ 未来蓝图
 
-  我们计划在未来的版本中加入更多功能：
+- [x] 引入更高效的 YOLO 模型版本，进一步提升识别速度和准确率（已加入对 YOLO26 的支持）
+- [x] 增加对红外相机视频数据的识别和分析功能
+- [x] 支持更多样化的数据筛选和标记功能
+- [ ] 开发物种丰度、活动规律等自动化数据分析和图表生成模块
 
-  [1] 引入更高效的 YOLO 模型版本，进一步提升识别速度和准确率。✅️（已加入对yolo26的支持）
-
-  [2] 增加对红外相机视频数据的识别和分析功能。✅️（已实现）
-
-  [3] 开发物种丰度、活动规律等自动化数据分析和图表生成模块。
-
-  [4] 支持更多样化的数据筛选和标记功能。✅️（已实现）
-
-## ⚠️ Warning
-
-  项目仍然处于开发中，切勿过分依赖本项目。程序内置的模型仅为测试使用，暂无提供更多物种的识别。
-
-
-
-
-## 📧 联系我们
-
-  作者: 和錦わきん
-
-  如果您在使用过程中遇到任何问题或有任何建议，欢迎通过 Issues 与我们联系。
-  
-## 鸣谢
-
-  感谢北纬44度的Suger为本项目提供logo
+<br>
 
 ## 🧪 Flutter Material 3 前端与 Python 后端（实验性）
 
 本分支新增了面向跨平台客户端的前后端拆分实现：
 
-- `system/backend/`：基于 FastAPI 的 Python 后端，复用现有 `system/` 中的配置、EXIF 元数据提取和 YOLO 图像处理模块。
-- `frontend/`：基于 Flutter 的 Material 3 前端，在最左侧使用 NavigationRail 区分开始界面、图像预览、物种校验、设置和关于界面，并提供后端连接状态、任务创建、阈值设置、进度轮询、上次输入路径记忆、自动使用 `res/model` 模型文件夹，以及可随窗口大小切换排布的图像预览。
+- **`system/backend/`** — 基于 FastAPI 的 Python 后端，复用现有 `system/` 中的配置、EXIF 元数据提取和 YOLO 图像处理模块
+- **`frontend/`** — 基于 Flutter 的 Material 3 前端，使用 NavigationRail 区分各界面，支持进度轮询、路径记忆、模型文件夹自动识别和自适应图像预览排布
 
 ### 启动 Python 后端
 
@@ -188,4 +193,34 @@ flutter pub get
 flutter run
 ```
 
-默认连接 `http://127.0.0.1:721`。当前前端使用本机文件夹路径提交任务，因此桌面端运行体验最佳。
+> 默认连接 `http://127.0.0.1:721`。当前前端使用本机文件夹路径提交任务，桌面端运行体验最佳。
+
+<br>
+
+## ⚠️ 注意事项
+
+> 项目仍处于开发中，请勿过分依赖本项目的识别结果。程序内置的模型仅供测试使用，暂不提供更多物种的识别。
+
+<br>
+
+## 📧 联系我们
+
+**作者：** 和錦わきん
+
+**官网：** [https://myneri.top/](https://myneri.top/)
+
+如果您在使用过程中遇到任何问题或有任何建议，欢迎通过 [Issues](https://github.com/wakin721/Neri/issues) 与我们联系。
+
+<br>
+
+## 🙏 鸣谢
+
+感谢 **北纬44度的Suger** 为本项目提供 Logo
+
+<br>
+
+---
+
+<div align="center">
+  <sub>Made with ❤️ by 和錦わきん &nbsp;·&nbsp; <a href="https://myneri.top/">myneri.top</a></sub>
+</div>
