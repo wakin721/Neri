@@ -222,5 +222,5 @@ flutter run
 ---
 
 <div align="center">
-  <sub>Made with ❤️ by 和錦わきん &nbsp;·&nbsp; <a href="https://myneri.top/">myneri.top</a></sub>
+  <sub>Made by 和錦わきん &nbsp;·&nbsp; <a href="https://myneri.top/">myneri.top</a></sub>
 </div>
