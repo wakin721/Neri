@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="浏览 Neri 的 Material 3 前端功能截图，包括开始界面、模型设置、CUDA 检查和依赖安装。"
+    />
+    <title>功能截图 | Neri</title>
+    <link rel="icon" href="../res/ico.ico" />
+    <link rel="stylesheet" href="styles.css?v=md3-ref-1" />
+  </head>
+  <body>
+    <header class="top-app-bar" data-elevated="false">
+      <a class="brand" href="index.html" aria-label="Neri 首页">
+        <img src="../res/logo.png" alt="" class="brand-logo" />
+        <span class="brand-copy">
+          <strong>Neri</strong>
+          <span>Rapid Identification</span>
+        </span>
+      </a>
+
+      <nav class="nav-links" aria-label="主导航">
+        <a href="index.html">主页</a>
+        <a href="download.html">下载</a>
+        <a href="screenshots.html" aria-current="page">功能截图</a>
+        <a href="changelog.html">更新日志</a>
+        <a href="docs.html">使用文档</a>
+      </nav>
+
+      <div class="app-actions">
+        <button class="icon-button" id="themeToggle" type="button" aria-label="切换深浅色">
+          <span class="icon sun" aria-hidden="true"></span>
+        </button>
+        <button class="icon-button menu-button" id="menuToggle" type="button" aria-label="打开导航">
+          <span class="menu-lines" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <main class="page-main">
+      <section class="page-hero" aria-labelledby="screenshots-title">
+        <p class="eyebrow">Screenshots</p>
+        <h1 id="screenshots-title">功能截图</h1>
+        <p>
+          这里集中展示 Neri 的关键界面与 GPU 配置流程。官网直接复用仓库内已有素材，后续新增截图时只需放入 `res/demo` 并补充页面条目。
+        </p>
+      </section>
+
+      <section class="section compact-section" aria-label="截图列表">
+        <div class="screenshot-grid">
+          <figure class="screenshot-card screenshot-card-large">
+            <img src="../res/demo/demo1.png" alt="Neri 开始界面与处理任务设置截图" />
+            <figcaption>
+              <strong>开始界面</strong>
+              <span>选择输入文件夹、模型文件、视频处理方式，并调整置信度与 IOU 阈值。</span>
+            </figcaption>
+          </figure>
+
+          <figure class="screenshot-card">
+            <img src="../res/demo/cuda3.png" alt="Neri 环境维护与 PyTorch 安装截图" />
+            <figcaption>
+              <strong>环境维护</strong>
+              <span>在高级设置中选择对应 PyTorch 版本，方便启用 CUDA 或 XPU 推理。</span>
+            </figcaption>
+          </figure>
+
+          <figure class="screenshot-card">
+            <img src="../res/demo/cuda1.png" alt="NVIDIA 控制面板系统信息入口截图" />
+            <figcaption>
+              <strong>CUDA 检查入口</strong>
+              <span>通过 NVIDIA 控制面板查看系统信息，确认本机 CUDA 相关组件。</span>
+            </figcaption>
+          </figure>
+
+          <figure class="screenshot-card">
+            <img src="../res/demo/cuda2.png" alt="NVIDIA 系统信息中 CUDA 文件版本截图" />
+            <figcaption>
+              <strong>CUDA 版本信息</strong>
+              <span>根据系统信息中的 `NVCUDA64.DLL` 等条目判断对应 CUDA 版本。</span>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Neri · Material 3 Flutter frontend</span>
+      <a href="docs.html#gpu">查看 GPU 文档</a>
+    </footer>
+
+    <script src="main.js?v=md3-ref-1"></script>
+  </body>
+</html>

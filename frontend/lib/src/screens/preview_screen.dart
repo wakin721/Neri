@@ -6,6 +6,7 @@ import '../models/job.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/selectable_list_card.dart';
+import '../widgets/workspace_split_metrics.dart';
 
 const previewAllSpeciesLabel = '全局设置';
 
@@ -65,7 +66,7 @@ class PreviewScreen extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(previewPagePadding),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -90,12 +91,12 @@ class PreviewScreen extends StatelessWidget {
     final useHorizontalLayout = availableWidth >= 900;
 
     if (useHorizontalLayout) {
-      final listWidth = (availableWidth * 0.20).clamp(200.0, 300.0).toDouble();
+      final listWidth = previewLeadingPaneWidth(availableWidth);
       return Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(width: listWidth, child: _buildFileList(context)),
-          const VerticalDivider(width: 24),
+          const VerticalDivider(width: previewWorkspaceDividerWidth),
           Expanded(child: _buildPreviewDetail(context, item)),
         ],
       );

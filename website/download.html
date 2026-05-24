@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="下载 Neri 红外相机影像智能处理工具，查看 Windows 使用建议、GPU 加速说明与源码入口。"
+    />
+    <title>下载 | Neri</title>
+    <link rel="icon" href="../res/ico.ico" />
+    <link rel="stylesheet" href="styles.css?v=md3-ref-1" />
+  </head>
+  <body>
+    <header class="top-app-bar" data-elevated="false">
+      <a class="brand" href="index.html" aria-label="Neri 首页">
+        <img src="../res/logo.png" alt="" class="brand-logo" />
+        <span class="brand-copy">
+          <strong>Neri</strong>
+          <span>Rapid Identification</span>
+        </span>
+      </a>
+
+      <nav class="nav-links" aria-label="主导航">
+        <a href="index.html">主页</a>
+        <a href="download.html" aria-current="page">下载</a>
+        <a href="screenshots.html">功能截图</a>
+        <a href="changelog.html">更新日志</a>
+        <a href="docs.html">使用文档</a>
+      </nav>
+
+      <div class="app-actions">
+        <button class="icon-button" id="themeToggle" type="button" aria-label="切换深浅色">
+          <span class="icon sun" aria-hidden="true"></span>
+        </button>
+        <button class="icon-button menu-button" id="menuToggle" type="button" aria-label="打开导航">
+          <span class="menu-lines" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <main class="page-main">
+      <section class="page-hero" aria-labelledby="download-title">
+        <p class="eyebrow">Download</p>
+        <h1 id="download-title">下载 Neri</h1>
+        <p>
+          Neri 面向本地红外相机数据处理场景，推荐在 Windows 桌面环境中解压使用。
+          若设备配备 NVIDIA 或 Intel GPU，可按文档启用对应推理加速。
+        </p>
+        <div class="hero-actions">
+          <a class="button button-filled" href="https://github.com/wakin721/Neri/releases">
+            <img src="../res/icon/play.svg" alt="" />
+            前往 Releases
+          </a>
+          <a class="button button-outlined" href="https://github.com/wakin721/Neri">
+            <img src="../res/icon/info.svg" alt="" />
+            GitHub 仓库
+          </a>
+        </div>
+      </section>
+
+      <section class="section compact-section" aria-labelledby="download-options-title">
+        <div class="section-heading">
+          <p class="eyebrow">安装方式</p>
+          <h2 id="download-options-title">选择适合你的版本</h2>
+        </div>
+
+        <div class="download-grid">
+          <article class="card download-card">
+            <span class="stack-label">推荐</span>
+            <h3>发布版压缩包</h3>
+            <p>从 Releases 下载最新的 `.zip` 或 `.7z` 压缩包，解压后双击 `Neri.exe` 启动。</p>
+            <a class="button button-filled" href="https://github.com/wakin721/Neri/releases">
+              <img src="../res/icon/play.svg" alt="" />
+              下载发布版
+            </a>
+          </article>
+          <article class="card download-card">
+            <span class="stack-label">开发者</span>
+            <h3>源码运行</h3>
+            <p>适合需要调试后端、替换模型或参与开发的用户，可分别启动 FastAPI 后端与 Flutter 前端。</p>
+            <a class="button button-outlined" href="docs.html#developer">
+              <img src="../res/icon/info.svg" alt="" />
+              查看运行命令
+            </a>
+          </article>
+        </div>
+      </section>
+
+      <section class="section compact-section" aria-labelledby="requirements-title">
+        <div class="section-heading">
+          <p class="eyebrow">运行建议</p>
+          <h2 id="requirements-title">更稳定的本地处理环境</h2>
+        </div>
+        <div class="requirements">
+          <article class="requirement-item">
+            <h3>Windows 桌面</h3>
+            <p>当前发布版以 Windows 桌面使用为主，暂不支持 Windows 7。</p>
+          </article>
+          <article class="requirement-item">
+            <h3>可用存储空间</h3>
+            <p>模型文件、依赖与批量影像会占用较多空间，建议预留充足磁盘容量。</p>
+          </article>
+          <article class="requirement-item">
+            <h3>GPU 加速</h3>
+            <p>NVIDIA CUDA 与 Intel XPU 可提升推理速度，Intel GPU 支持仍为实验性。</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Neri · NERI Enables Rapid Identification</span>
+      <a href="docs.html">使用文档</a>
+    </footer>
+
+    <script src="main.js?v=md3-ref-1"></script>
+  </body>
+</html>

@@ -10,6 +10,7 @@ import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
+import '../widgets/workspace_split_metrics.dart';
 
 const _defaultExportColumns = <String>[
   '文件名',
@@ -46,6 +47,7 @@ const _defaultQuickMarks = <String>[
 
 const _releaseNotesUrl =
     'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
+const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = '3.0.3-beta+303';
@@ -600,78 +602,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .clamp(0, debugModeEnabled ? 6 : 5)
         .toInt();
 
-    return Row(
-      children: [
-        SizedBox(
-          width: 260,
-          child: NavigationDrawer(
-            selectedIndex: selectedIndex,
-            onDestinationSelected: (index) {
-              setState(() => _sectionIndex = index);
-            },
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(28, 20, 16, 12),
-                child: Text('设置', style: TextStyle(fontSize: 18)),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final drawerWidth = previewDistanceToLeadingDivider(
+          constraints.maxWidth,
+        );
+
+        return Row(
+          children: [
+            SizedBox(
+              width: drawerWidth,
+              child: NavigationDrawer(
+                selectedIndex: selectedIndex,
+                onDestinationSelected: (index) {
+                  setState(() => _sectionIndex = index);
+                },
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(28, 20, 16, 12),
+                    child: Text('设置', style: TextStyle(fontSize: 18)),
+                  ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.tune_outlined),
+                    selectedIcon: Icon(Icons.tune_rounded),
+                    label: Text('检测设置'),
+                  ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.construction_outlined),
+                    selectedIcon: Icon(Icons.construction_rounded),
+                    label: Text('环境维护'),
+                  ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.fact_check_outlined),
+                    selectedIcon: Icon(Icons.fact_check_rounded),
+                    label: Text('基础设置'),
+                  ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.palette_outlined),
+                    selectedIcon: Icon(Icons.palette_rounded),
+                    label: Text('外观主题'),
+                  ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.system_update_alt_rounded),
+                    selectedIcon: Icon(Icons.system_update_alt_rounded),
+                    label: Text('软件更新'),
+                  ),
+                  if (debugModeEnabled)
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.bug_report_outlined),
+                      selectedIcon: Icon(Icons.bug_report_rounded),
+                      label: Text('调试模式'),
+                    ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.info_outline_rounded),
+                    selectedIcon: Icon(Icons.info_rounded),
+                    label: Text('关于'),
+                  ),
+                ],
               ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.tune_outlined),
-                selectedIcon: Icon(Icons.tune_rounded),
-                label: Text('检测设置'),
+            ),
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                    child: _buildSaveStrip(),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.all(16),
+                      children: [_buildSelectedSection()],
+                    ),
+                  ),
+                ],
               ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.construction_outlined),
-                selectedIcon: Icon(Icons.construction_rounded),
-                label: Text('环境维护'),
-              ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.fact_check_outlined),
-                selectedIcon: Icon(Icons.fact_check_rounded),
-                label: Text('基础设置'),
-              ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.palette_outlined),
-                selectedIcon: Icon(Icons.palette_rounded),
-                label: Text('外观主题'),
-              ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.system_update_alt_rounded),
-                selectedIcon: Icon(Icons.system_update_alt_rounded),
-                label: Text('软件更新'),
-              ),
-              if (debugModeEnabled)
-                const NavigationDrawerDestination(
-                  icon: Icon(Icons.bug_report_outlined),
-                  selectedIcon: Icon(Icons.bug_report_rounded),
-                  label: Text('调试模式'),
-                ),
-              const NavigationDrawerDestination(
-                icon: Icon(Icons.info_outline_rounded),
-                selectedIcon: Icon(Icons.info_rounded),
-                label: Text('关于'),
-              ),
-            ],
-          ),
-        ),
-        const VerticalDivider(width: 1),
-        Expanded(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: _buildSaveStrip(),
-              ),
-              Expanded(
-                child: ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.all(16),
-                  children: [_buildSelectedSection()],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1568,7 +1578,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final debugModeEnabled = _bool(_debugModeKey);
     return SectionCard(
       title: '关于',
-      subtitle: '版本、更新说明和项目入口',
+      subtitle: '版本、更新说明、官网和项目入口',
       icon: Icons.info_rounded,
       child: _AboutInfo(
         settings: widget.settings,
@@ -3028,6 +3038,14 @@ class _AboutInfoState extends State<_AboutInfo> {
                 subtitle: const Text('查看版本更新记录'),
                 trailing: const Icon(Icons.open_in_new_rounded),
                 onTap: () => widget.onOpenUrl(_releaseNotesUrl),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.language_rounded),
+                title: const Text('官网'),
+                subtitle: const Text('访问 Neri 官方网站'),
+                trailing: const Icon(Icons.open_in_new_rounded),
+                onTap: () => widget.onOpenUrl(_officialWebsiteUrl),
               ),
               const Divider(height: 1),
               ListTile(

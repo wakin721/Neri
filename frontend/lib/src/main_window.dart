@@ -2153,7 +2153,7 @@ class _NativeNavigationRail extends StatelessWidget {
   final List<_NavigationRailEntry> entries;
   final ValueChanged<int> onDestinationSelected;
 
-  static const _width = 96.0;
+  static const _width = 80.0;
 
   @override
   Widget build(BuildContext context) {
