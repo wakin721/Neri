@@ -1505,7 +1505,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
-        batchSize: _processingBatchSize(singleFile: true),
+        batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
         enableDetection: true,

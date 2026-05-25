@@ -11,10 +11,12 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import logging
 import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -38,6 +40,8 @@ from .models import (
     ValidationExportResponse,
     ValidationMarkRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class JobNotFoundError(KeyError):
@@ -498,6 +502,7 @@ class ProcessingJobManager:
             if job_id in self._deleted_jobs:
                 return
             self._active_job_ids.add(job_id)
+        detector = None
         try:
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, initial_results)
@@ -540,7 +545,6 @@ class ProcessingJobManager:
             detection_index = (
                 _load_detection_index(detection_db_roots) if request.options.enable_detection else {}
             )
-            detector = None
             if request.options.enable_detection:
                 detector = _load_detector(
                     request.options.model_path,
@@ -571,64 +575,177 @@ class ProcessingJobManager:
                 ]
                 batch_size = max(1, int(request.options.batch_size or 1))
 
-                for batch in _chunked(image_files, batch_size):
-                    if self._is_cancelled(job_id):
-                        self._mark_cancelled(job_id, results)
+                image_batches = list(_chunked(image_files, batch_size))
+                image_preload_workers = 1
+                image_preload_lookahead = min(2, len(image_batches))
+                preload_executor = (
+                    ThreadPoolExecutor(max_workers=image_preload_workers)
+                    if image_batches and hasattr(detector, "preload_batch_data")
+                    else None
+                )
+                preload_futures: dict[int, Any] = {}
+
+                def submit_preload(batch_index: int) -> None:
+                    if preload_executor is None or batch_index >= len(image_batches):
                         return
-                    batch_items: list[DetectionItem] = []
-                    for path in batch:
+                    if batch_index in preload_futures:
+                        return
+                    preload_futures[batch_index] = preload_executor.submit(
+                        detector.preload_batch_data,
+                        [str(path) for path in image_batches[batch_index]],
+                    )
+
+                def fill_preload_queue(current_batch_index: int) -> None:
+                    if preload_executor is None:
+                        return
+                    end_index = min(
+                        len(image_batches),
+                        current_batch_index + image_preload_lookahead,
+                    )
+                    for preload_index in range(current_batch_index, end_index):
+                        submit_preload(preload_index)
+
+                def take_preloaded(batch_index: int):
+                    future = preload_futures.pop(batch_index, None)
+                    if future is None:
+                        return None
+                    try:
+                        return future.result()
+                    except Exception as exc:
+                        logger.warning("Image batch preload failed: %s", exc)
+                        return None
+
+                fill_preload_queue(0)
+                try:
+                    for batch_index, batch in enumerate(image_batches):
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
+                        batch_started = time.perf_counter()
+                        fill_preload_queue(batch_index)
+                        metadata_started = time.perf_counter()
+                        batch_items: list[DetectionItem] = []
+                        for path in batch:
+                            item = _build_metadata_item(path)
+                            db_detection_data = detection_index.get(path.stem)
+                            if db_detection_data:
+                                item = _apply_detection_data(item, db_detection_data)
+                            batch_items.append(item)
+                        metadata_elapsed = time.perf_counter() - metadata_started
+
+                        preload_wait_started = time.perf_counter()
+                        preloaded_data = take_preloaded(batch_index)
+                        preload_wait_elapsed = time.perf_counter() - preload_wait_started
+                        fill_preload_queue(batch_index + 1)
+                        detect_started = time.perf_counter()
+                        detected_items = _detect_image_batch(
+                            detector,
+                            batch,
+                            batch_items,
+                            request,
+                            input_path,
+                            preloaded_data=preloaded_data,
+                        )
+                        detect_elapsed = time.perf_counter() - detect_started
+                        logger.info(
+                            (
+                                "Image batch timing: index=%d/%d size=%d "
+                                "metadata=%.3fs preload_wait=%.3fs detect_save=%.3fs total=%.3fs"
+                            ),
+                            batch_index + 1,
+                            len(image_batches),
+                            len(batch),
+                            metadata_elapsed,
+                            preload_wait_elapsed,
+                            detect_elapsed,
+                            time.perf_counter() - batch_started,
+                        )
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
+                        results.extend(detected_items)
+                        processed += len(detected_items)
+                        last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
+                        self._mutate_job(
+                            job_id,
+                            persist=False,
+                            processed=processed,
+                            results=results,
+                            message=(
+                                f"正在批处理照片 {processed}/{len(files)} "
+                                f"(batch={len(batch)}): {last_path.name}"
+                            ),
+                        )
+                finally:
+                    if preload_executor is not None:
+                        preload_executor.shutdown(wait=False, cancel_futures=True)
+
+                if request.options.video_mode == "fast":
+                    for batch in _chunked(video_files, batch_size):
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
+                        batch_items: list[DetectionItem] = []
+                        for path in batch:
+                            item = _build_metadata_item(path)
+                            db_detection_data = detection_index.get(path.stem)
+                            if db_detection_data:
+                                item = _apply_detection_data(item, db_detection_data)
+                            batch_items.append(item)
+
+                        detected_items = _detect_video_fast_batch(
+                            detector,
+                            batch,
+                            batch_items,
+                            request,
+                            input_path,
+                            cancelled=lambda: self._is_cancelled(job_id),
+                        )
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
+                        results.extend(detected_items)
+                        processed += len(detected_items)
+                        last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
+                        self._mutate_job(
+                            job_id,
+                            persist=False,
+                            processed=processed,
+                            results=results,
+                            message=(
+                                f"正在批量快速处理视频 {processed}/{len(files)} "
+                                f"(batch={len(batch)}): {last_path.name}"
+                            ),
+                        )
+                else:
+                    for path in video_files:
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
                         item = _build_metadata_item(path)
                         db_detection_data = detection_index.get(path.stem)
                         if db_detection_data:
                             item = _apply_detection_data(item, db_detection_data)
-                        batch_items.append(item)
 
-                    detected_items = _detect_image_batch(detector, batch, batch_items, request, input_path)
-                    if self._is_cancelled(job_id):
-                        self._mark_cancelled(job_id, results)
-                        return
-                    results.extend(detected_items)
-                    processed += len(detected_items)
-                    last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
-                    self._mutate_job(
-                        job_id,
-                        persist=False,
-                        processed=processed,
-                        results=results,
-                        message=(
-                            f"正在批处理照片 {processed}/{len(files)} "
-                            f"(batch={len(batch)}): {last_path.name}"
-                        ),
-                    )
-
-                for path in video_files:
-                    if self._is_cancelled(job_id):
-                        self._mark_cancelled(job_id, results)
-                        return
-                    item = _build_metadata_item(path)
-                    db_detection_data = detection_index.get(path.stem)
-                    if db_detection_data:
-                        item = _apply_detection_data(item, db_detection_data)
-
-                    item = _detect_video(
-                        detector,
-                        path,
-                        item,
-                        request,
-                        input_path,
-                        cancelled=lambda: self._is_cancelled(job_id),
-                    )
-                    if self._is_cancelled(job_id):
-                        self._mark_cancelled(job_id, results)
-                        return
-                    results.append(item)
-                    processed += 1
-                    self._mutate_job(
-                        job_id,
-                        processed=processed,
-                        results=results,
-                        message=f"正在处理视频 {processed}/{len(files)}: {path.name}",
-                    )
+                        item = _detect_video(
+                            detector,
+                            path,
+                            item,
+                            request,
+                            input_path,
+                            cancelled=lambda: self._is_cancelled(job_id),
+                        )
+                        if self._is_cancelled(job_id):
+                            self._mark_cancelled(job_id, results)
+                            return
+                        results.append(item)
+                        processed += 1
+                        self._mutate_job(
+                            job_id,
+                            processed=processed,
+                            results=results,
+                            message=f"正在处理视频 {processed}/{len(files)}: {path.name}",
+                        )
 
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, results)
@@ -644,6 +761,11 @@ class ProcessingJobManager:
             else:
                 self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message="处理失败")
         finally:
+            if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
+                try:
+                    detector.cleanup_runtime_cache(clear_cuda_cache=False)
+                except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
+                    logger.warning("Detector cleanup failed: %s", exc)
             with self._lock:
                 self._active_job_ids.discard(job_id)
                 self._save_state_unlocked()
@@ -717,10 +839,10 @@ def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:
         yield from _iter_supported_files(input_path)
 
 
-def _chunked(paths: list[Path], size: int) -> Iterable[list[Path]]:
+def _chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
     size = max(1, size)
-    for index in range(0, len(paths), size):
-        yield paths[index : index + size]
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
 
 
 def _unique_detection_items(items: Iterable[DetectionItem]) -> list[DetectionItem]:
@@ -1366,12 +1488,14 @@ def _detect_image_batch(
     items: list[DetectionItem],
     request: CreateJobRequest,
     input_path: Path,
+    preloaded_data: Any = None,
 ) -> list[DetectionItem]:
     try:
         selected_class_ids = _selected_species_class_ids(
             detector,
             request.options.selected_species_names,
         )
+        detect_started = time.perf_counter()
         detections = detector.detect_batch_species(
             [str(path) for path in paths],
             conf=request.options.confidence,
@@ -1380,9 +1504,12 @@ def _detect_image_batch(
             augment=request.options.use_augment,
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
+            preloaded_data=preloaded_data,
         )
+        detect_elapsed = time.perf_counter() - detect_started
         detected_items: list[DetectionItem] = []
         detection_payloads: list[tuple[Path, dict[str, Any]]] = []
+        serialize_started = time.perf_counter()
         for index, (path, item) in enumerate(zip(paths, items)):
             detection = detections[index] if index < len(detections) else {}
             if not isinstance(detection, dict):
@@ -1390,7 +1517,20 @@ def _detect_image_batch(
             detection_data = _serialize_detector_output(detector, detection)
             detection_payloads.append((path, detection_data))
             detected_items.append(_apply_detection_data(item, detection_data))
+        serialize_elapsed = time.perf_counter() - serialize_started
+        save_started = time.perf_counter()
         _save_detection_data_batch(detection_payloads, input_path)
+        save_elapsed = time.perf_counter() - save_started
+        logger.info(
+            (
+                "Image batch backend timing: size=%d detect=%.3fs "
+                "serialize=%.3fs save=%.3fs"
+            ),
+            len(paths),
+            detect_elapsed,
+            serialize_elapsed,
+            save_elapsed,
+        )
         return detected_items
     except Exception as exc:  # noqa: BLE001 - preserve per-file metadata on batch failure
         return [item.model_copy(update={"error": f"批量检测失败: {exc}"}) for item in items]
@@ -1500,27 +1640,182 @@ def _detect_video_fast(
     input_path: Path,
     cancelled=None,
 ) -> DetectionItem:
+    return _detect_video_fast_batch(
+        detector,
+        [path],
+        [item],
+        request,
+        input_path,
+        cancelled=cancelled,
+    )[0]
+
+
+def _detect_video_fast_batch(
+    detector,
+    paths: list[Path],
+    items: list[DetectionItem],
+    request: CreateJobRequest,
+    input_path: Path,
+    cancelled=None,
+) -> list[DetectionItem]:
     import shutil
     import tempfile
-    from collections import Counter
-
-    import cv2
 
     temp_dir = Path(tempfile.mkdtemp(prefix="neri_video_frames_"))
+    result_items: list[DetectionItem | None] = [None for _ in items]
+    video_infos: list[dict[str, Any] | None] = [None for _ in items]
+    frame_records: list[dict[str, Any]] = []
+
+    try:
+        batch_started = time.perf_counter()
+        sample_started = time.perf_counter()
+        sample_count = max(1, int(request.options.vid_stride or 1))
+        for video_index, (path, item) in enumerate(zip(paths, items)):
+            try:
+                _raise_if_cancelled(cancelled)
+                info = _sample_fast_video_frames(
+                    path,
+                    temp_dir / f"video_{video_index}",
+                    sample_count,
+                    cancelled=cancelled,
+                )
+                video_infos[video_index] = info
+                for frame_order, (frame_path, frame_index) in enumerate(
+                    zip(info["frame_paths"], info["frame_points"])
+                ):
+                    frame_records.append(
+                        {
+                            "video_index": video_index,
+                            "frame_order": frame_order,
+                            "frame_index": frame_index,
+                            "path": frame_path,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep the rest of the video batch alive
+                if cancelled is not None and cancelled():
+                    raise
+                result_items[video_index] = item.model_copy(
+                    update={"error": f"视频快速检测失败: {exc}"}
+                )
+
+        sample_elapsed = time.perf_counter() - sample_started
+        inference_elapsed = 0.0
+        if frame_records:
+            selected_class_ids = _selected_species_class_ids(
+                detector,
+                request.options.selected_species_names,
+            )
+            detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
+                [] for _ in items
+            ]
+            frame_batch_size = max(1, int(request.options.batch_size or 1))
+            inference_started = time.perf_counter()
+            for frame_batch in _chunked(frame_records, frame_batch_size):
+                _raise_if_cancelled(cancelled)
+                detections = detector.detect_batch_species(
+                    [str(record["path"]) for record in frame_batch],
+                    conf=request.options.confidence,
+                    iou=request.options.iou,
+                    use_fp16=request.options.use_fp16,
+                    augment=request.options.use_augment,
+                    agnostic_nms=request.options.use_agnostic_nms,
+                    classes=selected_class_ids,
+                )
+                _raise_if_cancelled(cancelled)
+                for index, record in enumerate(frame_batch):
+                    detection = detections[index] if index < len(detections) else {}
+                    if not isinstance(detection, dict):
+                        detection = {}
+                    detections_by_video[record["video_index"]].append(
+                        (record["frame_order"], record["frame_index"], detection)
+                    )
+            inference_elapsed = time.perf_counter() - inference_started
+        else:
+            detections_by_video = [[] for _ in items]
+
+        detection_payloads: list[tuple[Path, dict[str, Any]]] = []
+        for video_index, (path, item) in enumerate(zip(paths, items)):
+            if result_items[video_index] is not None:
+                continue
+            info = video_infos[video_index]
+            if info is None:
+                result_items[video_index] = item.model_copy(
+                    update={"error": "视频快速检测失败: 无法从视频中提取有效帧"}
+                )
+                continue
+            frame_detections = sorted(
+                detections_by_video[video_index],
+                key=lambda record: record[0],
+            )
+            detection_data = _build_fast_video_detection_data(
+                detector,
+                path,
+                info,
+                frame_detections,
+            )
+            detection_payloads.append((path, detection_data))
+            result_items[video_index] = _apply_detection_data(item, detection_data)
+        serialize_elapsed = time.perf_counter() - serialize_started
+
+        save_elapsed = 0.0
+        if detection_payloads:
+            save_started = time.perf_counter()
+            _save_detection_data_batch(detection_payloads, input_path)
+            save_elapsed = time.perf_counter() - save_started
+
+        logger.info(
+            (
+                "Fast video batch timing: videos=%d frames=%d sample=%.3fs "
+                "infer=%.3fs serialize=%.3fs save=%.3fs total=%.3fs"
+            ),
+            len(paths),
+            len(frame_records),
+            sample_elapsed,
+            inference_elapsed,
+            serialize_elapsed,
+            save_elapsed,
+            time.perf_counter() - batch_started,
+        )
+
+        return [
+            result_item if result_item is not None else item
+            for item, result_item in zip(items, result_items)
+        ]
+    except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
+        return [
+            item.model_copy(update={"error": f"视频批量快速检测失败: {exc}"})
+            for item in items
+        ]
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _raise_if_cancelled(cancelled) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("用户取消任务")
+
+
+def _sample_fast_video_frames(
+    path: Path,
+    temp_dir: Path,
+    sample_count: int,
+    cancelled=None,
+) -> dict[str, Any]:
+    import cv2
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
     frame_paths: list[Path] = []
     frame_points: list[int] = []
     cap = cv2.VideoCapture(str(path))
     try:
         if not cap.isOpened():
             raise RuntimeError("无法打开视频文件")
-        if cancelled is not None and cancelled():
-            raise RuntimeError("用户取消任务")
+        _raise_if_cancelled(cancelled)
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sample_count = max(1, int(request.options.vid_stride or 1))
         if total_frames > 0:
             points = [
                 min(total_frames - 1, max(0, round(total_frames * (index + 1) / (sample_count + 1))))
@@ -1530,103 +1825,97 @@ def _detect_video_fast(
             points = [0]
 
         for index, point in enumerate(points):
-            if cancelled is not None and cancelled():
-                raise RuntimeError("用户取消任务")
+            _raise_if_cancelled(cancelled)
             cap.set(cv2.CAP_PROP_POS_FRAMES, point)
             ok, frame = cap.read()
             if not ok:
                 continue
-            frame_path = temp_dir / f"{path.stem}_frame_{index}.jpg"
+            frame_path = temp_dir / f"frame_{index}.jpg"
             if cv2.imwrite(str(frame_path), frame):
                 frame_paths.append(frame_path)
                 frame_points.append(point)
 
         if not frame_paths:
             raise RuntimeError("无法从视频中提取有效帧")
-        if cancelled is not None and cancelled():
-            raise RuntimeError("用户取消任务")
 
-        selected_class_ids = _selected_species_class_ids(
-            detector,
-            request.options.selected_species_names,
-        )
-        detections = detector.detect_batch_species(
-            [str(frame_path) for frame_path in frame_paths],
-            conf=request.options.confidence,
-            iou=request.options.iou,
-            use_fp16=request.options.use_fp16,
-            augment=request.options.use_augment,
-            agnostic_nms=request.options.use_agnostic_nms,
-            classes=selected_class_ids,
-        )
-
-        species_votes: Counter[str] = Counter()
-        max_counts: dict[str, int] = {}
-        boxes: list[dict[str, Any]] = []
-        min_confidence: float | None = None
-        names_map: dict[Any, str] = {}
-        all_confidences: list[float] = []
-        all_classes: list[float] = []
-        for index, detection in enumerate(detections):
-            if cancelled is not None and cancelled():
-                raise RuntimeError("用户取消任务")
-            if not isinstance(detection, dict):
-                detection = {}
-            detection_data = _serialize_detector_output(detector, detection)
-            frame_species = _extract_species_list(detection_data)
-            for species in frame_species:
-                species_votes[species] += 1
-            raw_counts = str(detection_data.get("物种数量") or "")
-            count_values = [value.strip() for value in raw_counts.replace("，", ",").split(",")]
-            for species_index, species in enumerate(frame_species):
-                count = 1
-                if species_index < len(count_values):
-                    count = int(count_values[species_index]) if count_values[species_index].isdigit() else 1
-                max_counts[species] = max(max_counts.get(species, 0), count)
-
-            confidence = _coerce_float(detection_data.get("最低置信度"))
-            if confidence is not None:
-                min_confidence = confidence if min_confidence is None else min(min_confidence, confidence)
-            names_map.update(detection_data.get("names_map") or {})
-            all_confidences.extend(detection_data.get("all_confidences") or [])
-            all_classes.extend(detection_data.get("all_classes") or [])
-            frame_index = frame_points[index] if index < len(frame_points) else index
-            timestamp = frame_index / fps if fps else None
-            for box in detection_data.get("检测框") or []:
-                if not isinstance(box, dict):
-                    continue
-                box_data = dict(box)
-                box_data["frame_index"] = frame_index
-                box_data["timestamp"] = timestamp
-                boxes.append(box_data)
-
-        species_names = list(max_counts.keys())
-        detection_data = {
-            "video_source": str(path),
-            "video_mode": "fast",
-            "sampled_frames": frame_points,
+        return {
+            "frame_paths": frame_paths,
+            "frame_points": frame_points,
             "width": width,
             "height": height,
+            "fps": fps,
             "total_frames": total_frames,
-            "total_frames_processed": total_frames,
-            "vid_stride": 1,
-            "物种名称": ",".join(species_names) if species_names else "空",
-            "物种数量": ",".join(str(max_counts[name]) for name in species_names) if species_names else "空",
-            "最低置信度": f"{min_confidence:.3f}" if min_confidence is not None else None,
-            "检测时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "检测框": boxes,
-            "all_confidences": all_confidences,
-            "all_classes": all_classes,
-            "names_map": names_map,
-            "species_votes": dict(species_votes),
         }
-        _save_detection_data_for_path(path, detection_data, input_path)
-        return _apply_detection_data(item, detection_data)
-    except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
-        return item.model_copy(update={"error": f"视频快速检测失败: {exc}"})
     finally:
         cap.release()
-        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _build_fast_video_detection_data(
+    detector,
+    path: Path,
+    video_info: dict[str, Any],
+    frame_detections: list[tuple[int, int, dict[str, Any]]],
+) -> dict[str, Any]:
+    from collections import Counter
+
+    species_votes: Counter[str] = Counter()
+    max_counts: dict[str, int] = {}
+    boxes: list[dict[str, Any]] = []
+    min_confidence: float | None = None
+    names_map: dict[Any, str] = {}
+    all_confidences: list[float] = []
+    all_classes: list[float] = []
+    fps = video_info.get("fps") or 25
+
+    for _frame_order, frame_index, detection in frame_detections:
+        detection_data = _serialize_detector_output(detector, detection)
+        frame_species = _extract_species_list(detection_data)
+        for species in frame_species:
+            species_votes[species] += 1
+        raw_counts = str(detection_data.get("物种数量") or "")
+        count_values = [value.strip() for value in raw_counts.replace("，", ",").split(",")]
+        for species_index, species in enumerate(frame_species):
+            count = 1
+            if species_index < len(count_values):
+                count = int(count_values[species_index]) if count_values[species_index].isdigit() else 1
+            max_counts[species] = max(max_counts.get(species, 0), count)
+
+        confidence = _coerce_float(detection_data.get("最低置信度"))
+        if confidence is not None:
+            min_confidence = confidence if min_confidence is None else min(min_confidence, confidence)
+        names_map.update(detection_data.get("names_map") or {})
+        all_confidences.extend(detection_data.get("all_confidences") or [])
+        all_classes.extend(detection_data.get("all_classes") or [])
+        timestamp = frame_index / fps if fps else None
+        for box in detection_data.get("检测框") or []:
+            if not isinstance(box, dict):
+                continue
+            box_data = dict(box)
+            box_data["frame_index"] = frame_index
+            box_data["timestamp"] = timestamp
+            boxes.append(box_data)
+
+    species_names = list(max_counts.keys())
+    total_frames = int(video_info.get("total_frames") or 0)
+    return {
+        "video_source": str(path),
+        "video_mode": "fast",
+        "sampled_frames": video_info.get("frame_points") or [],
+        "width": int(video_info.get("width") or 0),
+        "height": int(video_info.get("height") or 0),
+        "total_frames": total_frames,
+        "total_frames_processed": total_frames,
+        "vid_stride": 1,
+        "物种名称": ",".join(species_names) if species_names else "空",
+        "物种数量": ",".join(str(max_counts[name]) for name in species_names) if species_names else "空",
+        "最低置信度": f"{min_confidence:.3f}" if min_confidence is not None else None,
+        "检测时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "检测框": boxes,
+        "all_confidences": all_confidences,
+        "all_classes": all_classes,
+        "names_map": names_map,
+        "species_votes": dict(species_votes),
+    }
 
 
 def _video_output_dir(input_path: Path, output_dir: str | None) -> Path:
