@@ -317,6 +317,26 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     await _refreshPreviewItems(force: true, finishGlobalLoading: true);
   }
 
+  Future<void> _restartBackendAndRefresh() async {
+    if (_closeFlowBlocksBackendStartup || _backendStarting) return;
+    _timer?.cancel();
+    _timer = null;
+    _previewRefreshTimer?.cancel();
+    _previewRefreshTimer = null;
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _backendReady = false;
+      });
+    }
+    await _forceShutdownBackend();
+    if (!mounted || _closeFlowBlocksBackendStartup) return;
+    await _startBackendAndInitialRefresh();
+    if (mounted && _backendReady) {
+      _showSnackBar('Python 后端已重启');
+    }
+  }
+
   void _stopGlobalLoading() {
     if (!mounted || !_loading) return;
     setState(() => _loading = false);
@@ -442,6 +462,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
       await _terminateBackendPortOwner();
     }
+  }
+
+  Future<void> _forceShutdownBackend() async {
+    _backendReady = false;
+    final process = _backendProcess;
+    if (process != null) {
+      await _terminateBackendProcess(process);
+      if (identical(_backendProcess, process)) {
+        _backendProcess = null;
+      }
+    }
+    await _terminateBackendPortOwner();
+    await _waitForBackendStopped(const Duration(milliseconds: 1500));
   }
 
   Future<bool> _waitForBackendStopped(Duration timeout) async {
@@ -1629,7 +1662,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String _compactVersionLabel(String? version) {
     final trimmed = version?.trim() ?? '';
     if (trimmed.isEmpty) return 'Neri';
-    return _versionNumberPattern.firstMatch(trimmed)?.group(0) ?? trimmed;
+    final versionNumber = _versionNumberPattern.firstMatch(trimmed)?.group(0);
+    return versionNumber == null ? trimmed : 'Neri $versionNumber';
   }
 
   int _safePreviewIndex(List<DetectionItem> items) {
@@ -1674,16 +1708,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                     ),
                   ),
                   IconButton(
-                    tooltip: '刷新',
+                    tooltip: '重启 Python 后端并刷新',
                     onPressed: _loading || _previewLoading
                         ? null
-                        : () async {
-                            if (!_backendReady) {
-                              await _startBackendAndInitialRefresh();
-                            } else {
-                              await _refreshInitialPageData();
-                            }
-                          },
+                        : _restartBackendAndRefresh,
                     icon: const Icon(Icons.refresh_rounded),
                   ),
                   const SizedBox(width: 8),
