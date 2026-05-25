@@ -59,6 +59,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     ),
   ];
 
+  static final _versionNumberPattern = RegExp(r'\d+(?:\.\d+)+');
+
   final _inputController = TextEditingController();
   final Map<String, DetectionItem> _previewMetadataCache =
       <String, DetectionItem>{};
@@ -605,9 +607,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _setValidationBusy(false);
     }
   }
-
-  bool get _jobTransitionBusy =>
-      _pendingStartJobBaselines.isNotEmpty || _pendingStopJobIds.isNotEmpty;
 
   bool get _jobProcessingBusy => _jobs.any((job) => job.isWorkerActive);
 
@@ -1458,23 +1457,27 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (items.isEmpty) return;
     setState(() => _submitting = true);
     try {
-      for (final item in items) {
-        await widget.apiClient.createJob(
-          inputDir: item.path,
-          modelPath: _selectedModelPath,
-          classificationModelPath: _selectedClassificationModelPath,
-          confidence: confidence,
-          iou: _iou,
-          useFp16: _effectiveUseFp16(),
-          useAugment: _useAugment(),
-          useAgnosticNms: _useAgnosticNms(),
-          batchSize: _processingBatchSize(singleFile: true),
-          vidStride: _videoStride(),
-          videoMode: _effectiveVideoMode(),
-          enableDetection: true,
-          selectedSpeciesNames: _selectedSpeciesNames(),
-        );
-      }
+      final inputPaths = items
+          .map((item) => item.path.trim())
+          .where((path) => path.isNotEmpty)
+          .toSet()
+          .toList();
+      if (inputPaths.isEmpty) return;
+      await widget.apiClient.createJob(
+        inputPaths: inputPaths,
+        modelPath: _selectedModelPath,
+        classificationModelPath: _selectedClassificationModelPath,
+        confidence: confidence,
+        iou: _iou,
+        useFp16: _effectiveUseFp16(),
+        useAugment: _useAugment(),
+        useAgnosticNms: _useAgnosticNms(),
+        batchSize: _processingBatchSize(singleFile: true),
+        vidStride: _videoStride(),
+        videoMode: _effectiveVideoMode(),
+        enableDetection: true,
+        selectedSpeciesNames: _selectedSpeciesNames(),
+      );
       await _refresh(silent: true);
       await _refreshPreviewItems(force: true);
     } catch (error) {
@@ -1623,6 +1626,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     ).where((name) => name.trim().isNotEmpty).toList();
   }
 
+  String _compactVersionLabel(String? version) {
+    final trimmed = version?.trim() ?? '';
+    if (trimmed.isEmpty) return 'Neri';
+    return _versionNumberPattern.firstMatch(trimmed)?.group(0) ?? trimmed;
+  }
+
   int _safePreviewIndex(List<DetectionItem> items) {
     if (items.isEmpty) return 0;
     if (_selectedPreviewIndex >= items.length) return items.length - 1;
@@ -1634,6 +1643,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final titleBarColor = colorScheme.surfaceContainerHigh;
+    final showGlobalProgress =
+        _loading || _previewDetecting || _submitting || _validationBusy;
 
     final content = Stack(
       fit: StackFit.expand,
@@ -1658,7 +1669,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                 actions: [
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Center(child: Text(_settings?.appTitle ?? 'Neri')),
+                    child: Center(
+                      child: Text(_compactVersionLabel(_settings?.appVersion)),
+                    ),
                   ),
                   IconButton(
                     tooltip: '刷新',
@@ -1738,12 +1751,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   // 标题栏下方的全局进度条
                   SizedBox(
                     height: 4, // 固定高度防止页面抖动
-                    child:
-                        (_loading ||
-                            _previewDetecting ||
-                            _submitting ||
-                            _jobTransitionBusy ||
-                            _validationBusy)
+                    child: showGlobalProgress
                         ? const ExcludeSemantics(
                             child: LinearProgressIndicator(),
                           )

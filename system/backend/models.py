@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class JobState(str, Enum):
@@ -169,13 +169,29 @@ class ProcessingOptions(BaseModel):
 class CreateJobRequest(BaseModel):
     """Request body for creating a processing job."""
 
-    input_dir: str = Field(
-        ...,
+    input_dir: str | None = Field(
+        default=None,
         min_length=1,
         description="Folder path or a single supported media file path.",
     )
+    input_paths: list[str] = Field(
+        default_factory=list,
+        description="Optional explicit list of supported media files or folders to process.",
+    )
     output_dir: str | None = None
     options: ProcessingOptions = Field(default_factory=ProcessingOptions)
+
+    @model_validator(mode="after")
+    def validate_inputs(self) -> "CreateJobRequest":
+        self.input_dir = self.input_dir.strip() if self.input_dir else None
+        self.input_paths = [
+            path.strip()
+            for path in self.input_paths
+            if path and path.strip()
+        ]
+        if not self.input_dir and not self.input_paths:
+            raise ValueError("input_dir 或 input_paths 至少需要提供一个。")
+        return self
 
 
 class DetectionItem(BaseModel):

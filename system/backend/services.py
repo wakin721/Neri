@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -279,7 +280,7 @@ class ProcessingJobManager:
         job = JobSummary(
             id=job_id,
             state=JobState.QUEUED,
-            input_dir=request.input_dir,
+            input_dir=_request_input_label(request),
             output_dir=request.output_dir,
             processed=initial_count,
             message=(
@@ -501,13 +502,7 @@ class ProcessingJobManager:
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, initial_results)
                 return
-            input_path = Path(request.input_dir).expanduser().resolve()
-            if not input_path.exists():
-                raise ValueError(f"输入路径不存在: {input_path}")
-
-            files = list(_resolve_supported_inputs(input_path))
-            if not files:
-                raise ValueError(f"输入路径中没有支持的媒体文件: {input_path}")
+            input_path, files = _resolve_job_inputs(request)
             file_keys = {_path_key(path) for path in files}
             results = [
                 item.model_copy(deep=True)
@@ -538,7 +533,7 @@ class ProcessingJobManager:
             )
 
             detection_db_roots = (
-                _detection_db_search_roots(input_path, request.output_dir)
+                _preview_detection_db_roots(input_path, request.output_dir, files)
                 if request.options.enable_detection
                 else []
             )
@@ -652,6 +647,63 @@ class ProcessingJobManager:
             with self._lock:
                 self._active_job_ids.discard(job_id)
                 self._save_state_unlocked()
+
+
+def _request_input_label(request: CreateJobRequest) -> str:
+    if request.input_paths:
+        if len(request.input_paths) == 1:
+            return request.input_paths[0]
+        return f"已选择 {len(request.input_paths)} 个输入路径"
+    return request.input_dir or ""
+
+
+def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
+    raw_inputs = request.input_paths or (
+        [request.input_dir] if request.input_dir else []
+    )
+    sources: list[Path] = []
+    for raw_input in raw_inputs:
+        if not raw_input:
+            continue
+        source = Path(raw_input).expanduser().resolve()
+        if not source.exists():
+            raise ValueError(f"输入路径不存在: {source}")
+        sources.append(source)
+
+    files: list[Path] = []
+    seen: set[str] = set()
+    for source in sources:
+        for path in _resolve_supported_inputs(source):
+            key = _path_key(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+
+    if not files:
+        raise ValueError(
+            f"输入路径中没有支持的媒体文件: {_request_input_label(request)}"
+        )
+
+    input_path = sources[0] if len(sources) == 1 else _common_input_root(files)
+    return input_path, files
+
+
+def _common_input_root(files: list[Path]) -> Path:
+    if not files:
+        return Path.cwd()
+    roots = [path.parent for path in files]
+    if len(roots) == 1:
+        return roots[0]
+    try:
+        common_path = Path(os.path.commonpath([str(root) for root in roots]))
+    except ValueError:
+        return roots[0]
+    return (
+        common_path
+        if common_path in roots and common_path.exists() and common_path.is_dir()
+        else roots[0]
+    )
 
 
 def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:

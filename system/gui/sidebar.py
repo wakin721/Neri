@@ -11,7 +11,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PIL import Image
 import os
 
-from system.config import APP_VERSION
+from system.config import APP_DISPLAY_VERSION
 from system.utils import resource_path
 from system.gui.ui_components import Win11Colors
 
@@ -671,7 +671,7 @@ class Sidebar(QWidget):
         layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # 版本信息
-        self.version_label = QLabel(f"V{APP_VERSION}")
+        self.version_label = QLabel(APP_DISPLAY_VERSION)
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.version_label.setFont(QFont("Segoe UI", 8, QFont.Weight.Normal))
         self._update_version_color(self.version_label)

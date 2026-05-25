@@ -161,7 +161,8 @@ class NeriApiClient {
   }
 
   Future<ProcessingJob> createJob({
-    required String inputDir,
+    String? inputDir,
+    List<String> inputPaths = const <String>[],
     String? outputDir,
     String? modelPath,
     String? classificationModelPath,
@@ -176,11 +177,23 @@ class NeriApiClient {
     required bool enableDetection,
     List<String> selectedSpeciesNames = const <String>[],
   }) async {
+    final cleanInputDir = inputDir?.trim();
+    final cleanInputPaths = inputPaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList();
+    if ((cleanInputDir == null || cleanInputDir.isEmpty) &&
+        cleanInputPaths.isEmpty) {
+      throw ArgumentError('inputDir 或 inputPaths 至少需要提供一个。');
+    }
+
     final response = await _httpClient.post(
       _uri('/api/jobs'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({
-        'input_dir': inputDir,
+        if (cleanInputDir != null && cleanInputDir.isNotEmpty)
+          'input_dir': cleanInputDir,
+        if (cleanInputPaths.isNotEmpty) 'input_paths': cleanInputPaths,
         'output_dir': (outputDir?.isEmpty ?? true) ? null : outputDir,
         'options': {
           'model_path': (modelPath?.isEmpty ?? true) ? null : modelPath,

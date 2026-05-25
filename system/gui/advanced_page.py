@@ -756,6 +756,7 @@ class AdvancedPage(QWidget):
         # 修改为纯环境选项，移除具体的 PyTorch 版本号
         versions = [
             "自动检测",
+            "CUDA 13.2",
             "CUDA 13.0",
             "CUDA 12.8",
             "CUDA 12.6",
@@ -1370,8 +1371,16 @@ class AdvancedPage(QWidget):
             elif "CUDA" in env_choice:
                 match = re.search(r"CUDA (\d+\.\d+)", env_choice)
                 if match:
-                    cuda_version = match.group(1).replace('.', '')
-                    index_url = f"--index-url https://download.pytorch.org/whl/cu{cuda_version}"
+                    major, minor = (int(value) for value in match.group(1).split('.'))
+                    if major > 13 or (major == 13 and minor >= 2):
+                        actual_env = "CUDA 13.2"
+                        index_url = "--index-url https://download.pytorch.org/whl/cu132"
+                    elif major == 13:
+                        actual_env = "CUDA 13.0"
+                        index_url = "--index-url https://download.pytorch.org/whl/cu130"
+                    else:
+                        cuda_version = f"{major}{minor}"
+                        index_url = f"--index-url https://download.pytorch.org/whl/cu{cuda_version}"
 
             elif "XPU" in env_choice:
                 # Intel XPU 的安装源
@@ -1380,8 +1389,8 @@ class AdvancedPage(QWidget):
             elif "CPU" in env_choice:
                 index_url = "--index-url https://download.pytorch.org/whl/cpu"
 
-            # 移除硬编码的版本号，直接安装最新对应版本的 torch, torchvision, torchaudio
-            install_cmd = f"{pip_command_prefix} install torch torchvision torchaudio {index_url}"
+            # 移除硬编码的版本号，直接安装最新对应版本的 torch 和 torchvision
+            install_cmd = f"{pip_command_prefix} install torch torchvision {index_url}"
 
             command = (
                 f"echo 正在卸载现有PyTorch... && "

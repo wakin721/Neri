@@ -24,6 +24,8 @@ ACTIVE_STATES = {"starting", "waiting_for_backend", "running", "restarting"}
 ULTRALYTICS_PACKAGE_SPEC = "ultralytics>=8.4.13"
 PYTORCH_CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 PYTORCH_XPU_INDEX_URL = "https://download.pytorch.org/whl/xpu"
+PYTORCH_CUDA_132_INDEX_URL = "https://download.pytorch.org/whl/cu132"
+PYTORCH_CUDA_130_INDEX_URL = "https://download.pytorch.org/whl/cu130"
 PIP_SOURCES = {
     "official": ("官方源", "https://pypi.org/simple"),
     "aliyun": ("阿里源", "https://mirrors.aliyun.com/pypi/simple"),
@@ -185,7 +187,7 @@ def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
 
 def _pip_source_args(package_source: str) -> list[str]:
     _, _, source_url = _resolve_package_source(package_source)
-    return ["--index-url", source_url]
+    return ["-i", source_url]
 
 
 def _run_cli(argv: Sequence[str] | None = None) -> int:
@@ -260,7 +262,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
 def _run_pytorch_install(env_choice: str, package_source: str = "official") -> None:
     python_exe = toolkit_python()
     actual_env, index_url = _resolve_pytorch_index(env_choice)
-    _, source_label, source_url = _resolve_package_source(package_source)
+    source_key, source_label, source_url = _resolve_package_source(package_source)
     install_command = [
         str(python_exe),
         "-m",
@@ -268,12 +270,11 @@ def _run_pytorch_install(env_choice: str, package_source: str = "official") -> N
         "install",
         "torch",
         "torchvision",
-        "torchaudio",
         "--index-url",
         index_url,
     ]
-    if source_url != PIP_SOURCES["official"][1]:
-        install_command.extend(["--extra-index-url", source_url])
+    if source_key != "official":
+        install_command.extend(["-i", source_url])
     commands = [
         [str(python_exe), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"],
         install_command,
@@ -372,7 +373,11 @@ def _resolve_pytorch_index(env_choice: str) -> tuple[str, str]:
 
     match = re.search(r"CUDA\s*(\d+)\.(\d+)", choice, flags=re.IGNORECASE)
     if match:
-        major, minor = match.groups()
+        major, minor = (int(value) for value in match.groups())
+        if major > 13 or (major == 13 and minor >= 2):
+            return "CUDA 13.2", PYTORCH_CUDA_132_INDEX_URL
+        if major == 13:
+            return "CUDA 13.0", PYTORCH_CUDA_130_INDEX_URL
         return f"CUDA {major}.{minor}", f"https://download.pytorch.org/whl/cu{major}{minor}"
 
     return "CPU Only", PYTORCH_CPU_INDEX_URL
@@ -411,8 +416,10 @@ def _detect_nvidia_cuda_pytorch_index() -> tuple[str, str] | None:
         return "CUDA 12.4 (自动检测默认)", "https://download.pytorch.org/whl/cu124"
 
     major, minor = (int(value) for value in match.groups())
-    if major >= 13:
-        return f"CUDA 13.0 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu130"
+    if major > 13 or (major == 13 and minor >= 2):
+        return f"CUDA 13.2 (检测到 CUDA {major}.{minor})", PYTORCH_CUDA_132_INDEX_URL
+    if major == 13:
+        return f"CUDA 13.0 (检测到 CUDA {major}.{minor})", PYTORCH_CUDA_130_INDEX_URL
     if major >= 12 and minor >= 8:
         return f"CUDA 12.8 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu128"
     if major >= 12 and minor >= 6:

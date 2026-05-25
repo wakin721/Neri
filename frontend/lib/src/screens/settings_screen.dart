@@ -50,7 +50,7 @@ const _releaseNotesUrl =
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
-const _frontendVersion = '3.0.3-beta+303';
+const _frontendVersion = '3.0.4-beta(0525)';
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
@@ -1266,6 +1266,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     value: _string('pytorch_version', '自动检测'),
                     options: const [
                       _SettingsOption<String>(value: '自动检测', label: '自动检测'),
+                      _SettingsOption<String>(
+                        value: 'CUDA 13.2',
+                        label: 'CUDA 13.2',
+                      ),
                       _SettingsOption<String>(
                         value: 'CUDA 13.0',
                         label: 'CUDA 13.0',
