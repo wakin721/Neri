@@ -262,13 +262,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<bool?> _resolveIntelDriverInstall(String envChoice) async {
+    try {
+      final plan = await widget.apiClient.fetchPytorchInstallPlan(envChoice);
+      if (!mounted) return null;
+      if (!plan.needsIntelDriver) return false;
+
+      final deviceText = plan.intelDeviceName.isEmpty
+          ? 'Intel GPU'
+          : plan.intelDeviceName;
+      final confirmed = await _confirmMaintenance(
+        title: '需要安装 Intel 显卡驱动',
+        message:
+            '将安装 Intel XPU 版本 PyTorch，但当前检测到 $deviceText 尚未安装可用的 Intel 官方显卡驱动。\n\n是否先从 Intel 官网下载并运行显卡驱动安装程序？安装过程中可能出现 Windows 权限确认，完成后可能需要重启。',
+        confirmLabel: '下载并安装驱动',
+      );
+      if (!mounted || confirmed != true) return null;
+      return true;
+    } catch (error) {
+      widget.onShowMessage('检测 Intel 显卡驱动失败：$error');
+      return null;
+    }
+  }
+
   Future<void> _installPytorch() async {
     final envChoice = _string('pytorch_version', '自动检测');
     final packageSource = _string('package_source', 'official');
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return;
+
+    final installStep = installIntelDriver
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。'
+        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。';
     final confirmed = await _confirmMaintenance(
       title: '安装 PyTorch',
-      message:
-          '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
+      message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
       confirmLabel: '开始安装',
     );
     if (confirmed != true) return;
@@ -282,6 +310,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = await widget.apiClient.installPytorch(
         envChoice,
         packageSource: packageSource,
+        installIntelDriver: installIntelDriver,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -308,13 +337,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     const envChoice = '自动检测';
     final packageSource = _string('package_source', 'official');
     final sourceLabel = _packageSourceLabel(packageSource);
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return;
+
+    final driverStep = installIntelDriver
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final missingText = _missingYoloDependenciesLabel.isEmpty
         ? 'YOLO 处理依赖'
         : _missingYoloDependenciesLabel;
     final confirmed = await _confirmMaintenance(
       title: '需要安装 YOLO 依赖',
       message:
-          '当前缺少：$missingText。\n\n安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+          '当前缺少：$missingText。\n\n$driverStep'
           '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
       confirmLabel: '安装依赖',
     );
@@ -329,6 +364,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
         packageSource: packageSource,
+        installIntelDriver: installIntelDriver,
       );
       if (!mounted) return;
       _startMaintenanceWatch(

@@ -21,6 +21,7 @@ from .models import (
     ModelClassInfo,
     MaintenanceStartResponse,
     MaintenanceStatusResponse,
+    PytorchInstallPlanResponse,
     JobSummary,
     ReinstallPackageRequest,
     SettingsResponse,
@@ -32,6 +33,7 @@ from .models import (
 )
 from .maintenance import (
     read_maintenance_status,
+    resolve_pytorch_install_plan,
     schedule_backend_shutdown,
     start_package_reinstall,
     start_pytorch_install,
@@ -258,12 +260,27 @@ def maintenance_status() -> MaintenanceStatusResponse:
     return MaintenanceStatusResponse(**read_maintenance_status())
 
 
+@app.get("/api/environment/pytorch-install-plan", response_model=PytorchInstallPlanResponse)
+def pytorch_install_plan(env_choice: str = Query("自动检测", min_length=1)) -> PytorchInstallPlanResponse:
+    """Resolve PyTorch target and Intel driver preflight data."""
+
+    try:
+        plan = resolve_pytorch_install_plan(env_choice)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PytorchInstallPlanResponse(**plan)
+
+
 @app.post("/api/environment/install-pytorch", response_model=MaintenanceStartResponse, status_code=202)
 def install_pytorch(request: InstallPytorchRequest, background_tasks: BackgroundTasks) -> MaintenanceStartResponse:
     """Start PyTorch installation, then restart the Python backend."""
 
     try:
-        status = start_pytorch_install(request.env_choice, request.package_source)
+        status = start_pytorch_install(
+            request.env_choice,
+            request.package_source,
+            install_intel_driver=request.install_intel_driver,
+        )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
@@ -281,6 +298,7 @@ def install_yolo_dependencies(
         status = start_yolo_dependencies_install(
             request.env_choice,
             request.package_source,
+            install_intel_driver=request.install_intel_driver,
         )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

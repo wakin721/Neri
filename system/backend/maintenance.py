@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -21,6 +24,16 @@ BACKEND_PORT = "721"
 BACKEND_APP = "system.backend.main:app"
 ACTIVE_STATES = {"starting", "waiting_for_backend", "running", "restarting"}
 ULTRALYTICS_PACKAGE_SPEC = "ultralytics>=8.4.13"
+INTEL_GRAPHICS_DRIVER_PAGE_URL = (
+    "https://www.intel.com/content/www/us/en/download/785597/intel-arc-graphics-windows.html"
+)
+INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL = (
+    "https://downloadmirror.intel.com/919751/gfx_win_101.8801.exe"
+)
+INTEL_GRAPHICS_DRIVER_SHA256 = (
+    "118F1C82871210A52FA2C2488A29E67423A1ED4E263DFCF94C3F64D05B3E0926"
+)
+INTEL_GRAPHICS_DRIVER_FILENAME = "gfx_win_101.8801.exe"
 PIP_SOURCES = {
     "official": ("官方源", "https://pypi.org/simple"),
     "aliyun": ("阿里源", "https://mirrors.aliyun.com/pypi/simple"),
@@ -67,13 +80,160 @@ def read_maintenance_status() -> dict[str, Any]:
     return {"state": "idle", "message": ""}
 
 
-def start_pytorch_install(env_choice: str, package_source: str = "official") -> dict[str, Any]:
+def intel_graphics_driver_status() -> dict[str, Any]:
+    """Return best-effort Intel display driver status for XPU installs."""
+
+    status = _empty_intel_driver_status()
+    if os.name != "nt":
+        status.update(
+            {
+                "checked": True,
+                "message": "Intel XPU 驱动自动检测仅支持 Windows。",
+            }
+        )
+        return status
+
+    try:
+        payload = _query_windows_display_devices()
+    except Exception as exc:  # noqa: BLE001 - best-effort hardware probing
+        status.update(
+            {
+                "checked": False,
+                "error": str(exc),
+                "message": f"检测 Intel 显卡驱动失败: {exc}",
+            }
+        )
+        return status
+
+    devices = _as_list(payload.get("devices"))
+    drivers = _as_list(payload.get("drivers"))
+    intel_devices = [device for device in devices if _is_intel_display_device(device)]
+    intel_drivers = [driver for driver in drivers if _is_intel_display_driver(driver)]
+    installed_driver = next(
+        (driver for driver in intel_drivers if _is_official_intel_display_driver(driver)),
+        None,
+    )
+    display_item = installed_driver or (intel_drivers[0] if intel_drivers else None)
+    status.update(
+        {
+            "checked": True,
+            "gpu_present": bool(intel_devices or intel_drivers),
+            "driver_installed": installed_driver is not None,
+            "driver_name": _first_text(display_item, "DeviceName", "Name"),
+            "driver_version": _first_text(display_item, "DriverVersion"),
+            "driver_provider": _first_text(display_item, "DriverProviderName", "Manufacturer"),
+            "device_name": _first_text(
+                intel_devices[0] if intel_devices else display_item,
+                "Name",
+                "DeviceName",
+            ),
+            "message": (
+                "已检测到 Intel 显卡驱动。"
+                if installed_driver is not None
+                else "未检测到可用的 Intel 官方显卡驱动。"
+            ),
+        }
+    )
+    return status
+
+
+def resolve_pytorch_install_plan(env_choice: str) -> dict[str, Any]:
+    """Resolve a PyTorch target and any Intel driver preflight requirement."""
+
+    requested = (env_choice or "自动检测").strip()
+    actual_env, index_url = _resolve_pytorch_index(requested)
+    is_xpu = index_url.rstrip("/").endswith("/xpu")
+    driver_status = intel_graphics_driver_status() if is_xpu else _empty_intel_driver_status()
+    return {
+        "env_choice": requested,
+        "actual_env": actual_env,
+        "index_url": index_url,
+        "is_xpu": is_xpu,
+        "intel_driver": driver_status,
+        "needs_intel_driver": bool(
+            is_xpu
+            and driver_status.get("gpu_present")
+            and not driver_status.get("driver_installed")
+        ),
+        "intel_driver_page_url": INTEL_GRAPHICS_DRIVER_PAGE_URL,
+        "intel_driver_download_url": INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL,
+    }
+
+
+def download_intel_graphics_driver() -> Path:
+    """Download Intel's official graphics driver installer and verify it."""
+
+    download_url = INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL
+    _validate_intel_download_url(download_url)
+    target_dir = project_root() / "temp" / "intel_driver"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    installer_path = target_dir / INTEL_GRAPHICS_DRIVER_FILENAME
+
+    expected_sha256 = INTEL_GRAPHICS_DRIVER_SHA256.lower()
+    if installer_path.exists() and _sha256_file(installer_path) == expected_sha256:
+        return installer_path
+    if installer_path.exists():
+        installer_path.unlink()
+
+    temp_path = installer_path.with_suffix(installer_path.suffix + ".download")
+    if temp_path.exists():
+        temp_path.unlink()
+
+    request = urllib.request.Request(
+        download_url,
+        headers={"User-Agent": "Neri Intel XPU dependency installer"},
+    )
+    with urllib.request.urlopen(request, timeout=90) as response:  # noqa: S310 - URL is validated above.
+        _validate_intel_download_url(response.geturl())
+        with temp_path.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+
+    actual_sha256 = _sha256_file(temp_path)
+    if actual_sha256 != expected_sha256:
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Intel 显卡驱动下载校验失败，已取消运行安装程序。"
+        )
+
+    temp_path.replace(installer_path)
+    return installer_path
+
+
+def install_intel_graphics_driver() -> Path:
+    """Download and run Intel's graphics driver installer."""
+
+    installer_path = download_intel_graphics_driver()
+    completed = subprocess.run(
+        [str(installer_path)],
+        cwd=str(installer_path.parent),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"Intel 显卡驱动安装程序退出码为 {completed.returncode}。")
+    return installer_path
+
+
+def start_pytorch_install(
+    env_choice: str,
+    package_source: str = "official",
+    install_intel_driver: bool = False,
+) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
     source_key, _, _ = _resolve_package_source(package_source)
-    message = "PyTorch 安装已开始，Python 后端会在安装完成后自动重启。"
+    message = (
+        "Intel 显卡驱动与 PyTorch 安装已开始，Python 后端会在安装完成后自动重启。"
+        if install_intel_driver
+        else "PyTorch 安装已开始，Python 后端会在安装完成后自动重启。"
+    )
+    extra_args = ["--env-choice", env_choice, "--package-source", source_key]
+    if install_intel_driver:
+        extra_args.append("--install-intel-driver")
     return _start_maintenance(
         operation="install_pytorch",
-        extra_args=["--env-choice", env_choice, "--package-source", source_key],
+        extra_args=extra_args,
         message=message,
     )
 
@@ -92,13 +252,21 @@ def start_package_reinstall(package_spec: str, package_source: str = "official")
 def start_yolo_dependencies_install(
     env_choice: str,
     package_source: str = "official",
+    install_intel_driver: bool = False,
 ) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
     source_key, _, _ = _resolve_package_source(package_source)
-    message = "YOLO 依赖安装已开始，将先安装 PyTorch，再安装 ultralytics，完成后自动重启 Python 后端。"
+    message = (
+        "YOLO 依赖安装已开始，将先安装 Intel 显卡驱动和 PyTorch，再安装 ultralytics，完成后自动重启 Python 后端。"
+        if install_intel_driver
+        else "YOLO 依赖安装已开始，将先安装 PyTorch，再安装 ultralytics，完成后自动重启 Python 后端。"
+    )
+    extra_args = ["--env-choice", env_choice, "--package-source", source_key]
+    if install_intel_driver:
+        extra_args.append("--install-intel-driver")
     return _start_maintenance(
         operation="install_yolo_dependencies",
-        extra_args=["--env-choice", env_choice, "--package-source", source_key],
+        extra_args=extra_args,
         message=message,
     )
 
@@ -196,6 +364,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--env-choice", default="自动检测")
     parser.add_argument("--package", default="")
     parser.add_argument("--package-source", default="official")
+    parser.add_argument("--install-intel-driver", action="store_true")
     args = parser.parse_args(argv)
 
     try:
@@ -210,9 +379,17 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
         _wait_for_port_release()
 
         if args.operation == "install_pytorch":
-            _run_pytorch_install(args.env_choice, args.package_source)
+            _run_pytorch_install(
+                args.env_choice,
+                args.package_source,
+                install_intel_driver=args.install_intel_driver,
+            )
         elif args.operation == "install_yolo_dependencies":
-            _run_yolo_dependencies_install(args.env_choice, args.package_source)
+            _run_yolo_dependencies_install(
+                args.env_choice,
+                args.package_source,
+                install_intel_driver=args.install_intel_driver,
+            )
         else:
             _run_package_reinstall(args.package, args.package_source)
 
@@ -254,10 +431,24 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-def _run_pytorch_install(env_choice: str, package_source: str = "official") -> None:
+def _run_pytorch_install(
+    env_choice: str,
+    package_source: str = "official",
+    *,
+    install_intel_driver: bool = False,
+) -> None:
     python_exe = toolkit_python()
-    actual_env, index_url = _resolve_pytorch_index(env_choice)
+    plan = resolve_pytorch_install_plan(env_choice)
+    actual_env = str(plan["actual_env"])
+    index_url = str(plan["index_url"])
     _, source_label, source_url = _resolve_package_source(package_source)
+    if plan.get("needs_intel_driver"):
+        if not install_intel_driver:
+            raise RuntimeError(
+                "安装 Intel XPU 版本 PyTorch 前需要先安装 Intel 显卡驱动。"
+            )
+        _install_intel_graphics_driver_for_xpu()
+
     install_command = [
         str(python_exe),
         "-m",
@@ -311,8 +502,17 @@ def _run_package_reinstall(package_spec: str, package_source: str = "official") 
     _run_commands(commands)
 
 
-def _run_yolo_dependencies_install(env_choice: str, package_source: str = "official") -> None:
-    _run_pytorch_install(env_choice, package_source)
+def _run_yolo_dependencies_install(
+    env_choice: str,
+    package_source: str = "official",
+    *,
+    install_intel_driver: bool = False,
+) -> None:
+    _run_pytorch_install(
+        env_choice,
+        package_source,
+        install_intel_driver=install_intel_driver,
+    )
     _run_ultralytics_install(package_source)
 
 
@@ -358,6 +558,260 @@ def _run_commands(commands: list[list[str]]) -> None:
         log.write(f"\n[{_utc_now()}] maintenance completed\n")
 
 
+def _empty_intel_driver_status() -> dict[str, Any]:
+    return {
+        "checked": False,
+        "gpu_present": False,
+        "driver_installed": False,
+        "driver_name": None,
+        "driver_version": None,
+        "driver_provider": None,
+        "device_name": None,
+        "message": "",
+        "error": None,
+    }
+
+
+def _query_windows_display_devices() -> dict[str, Any]:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$devices = Get-CimInstance Win32_PnPEntity |
+    Where-Object { $_.PNPClass -eq 'Display' -or $_.ClassGuid -eq '{4d36e968-e325-11ce-bfc1-08002be10318}' } |
+    Select-Object Name, Manufacturer, PNPDeviceID, Status
+$drivers = Get-CimInstance Win32_PnPSignedDriver |
+    Where-Object { $_.DeviceClass -eq 'DISPLAY' } |
+    Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DeviceID, InfName
+[pscustomobject]@{ devices = @($devices); drivers = @($drivers) } |
+    ConvertTo-Json -Depth 5 -Compress
+"""
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        try:
+            return _query_windows_display_devices_with_pnputil()
+        except Exception as fallback_exc:  # noqa: BLE001 - report both probes
+            message = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(
+                f"{message or 'PowerShell 显卡驱动检测失败'}; pnputil 兜底检测失败: {fallback_exc}"
+            ) from fallback_exc
+    output = completed.stdout.strip()
+    if not output:
+        return {"devices": [], "drivers": []}
+    data = json.loads(output)
+    if not isinstance(data, dict):
+        return {"devices": [], "drivers": []}
+    return data
+
+
+def _query_windows_display_devices_with_pnputil() -> dict[str, Any]:
+    completed = subprocess.run(
+        ["pnputil", "/enum-devices", "/class", "Display", "/drivers"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(message or "pnputil 显卡驱动检测失败")
+    return _parse_pnputil_display_output(completed.stdout)
+
+
+def _parse_pnputil_display_output(output: str) -> dict[str, Any]:
+    devices: list[dict[str, Any]] = []
+    drivers: list[dict[str, Any]] = []
+    blocks = re.split(r"(?m)^Instance ID:\s*", output)
+    for block in blocks[1:]:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        instance_id = lines[0].strip()
+        device = {
+            "Name": _search_pnputil_value(block, "Device Description"),
+            "Manufacturer": _search_pnputil_value(block, "Manufacturer Name"),
+            "PNPDeviceID": instance_id,
+            "Status": _search_pnputil_value(block, "Status"),
+        }
+        devices.append(device)
+        for driver_block in re.split(r"(?m)^\s+Driver Name:\s*", block)[1:]:
+            driver_lines = driver_block.splitlines()
+            if not driver_lines:
+                continue
+            drivers.append(
+                {
+                    "DeviceName": device["Name"],
+                    "Manufacturer": device["Manufacturer"],
+                    "DriverProviderName": _search_pnputil_value(driver_block, "Provider Name"),
+                    "DriverVersion": _search_pnputil_value(driver_block, "Driver Version"),
+                    "DeviceID": " ".join(
+                        part
+                        for part in [
+                            instance_id,
+                            _search_pnputil_value(driver_block, "Matching Device ID"),
+                            _search_pnputil_value(driver_block, "Driver Status"),
+                        ]
+                        if part
+                    ),
+                    "DriverStatus": _search_pnputil_value(driver_block, "Driver Status"),
+                    "InfName": driver_lines[0].strip(),
+                }
+            )
+    return {"devices": devices, "drivers": drivers}
+
+
+def _search_pnputil_value(block: str, label: str) -> str | None:
+    match = re.search(rf"(?im)^\s*{re.escape(label)}:\s*(.+?)\s*$", block)
+    return match.group(1).strip() if match else None
+
+
+def _as_list(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _is_intel_display_device(item: dict[str, Any]) -> bool:
+    text = _joined_item_text(
+        item,
+        "Name",
+        "Manufacturer",
+        "PNPDeviceID",
+        "DeviceName",
+        "DeviceID",
+    ).upper()
+    return "VEN_8086" in text or "INTEL" in text
+
+
+def _is_intel_display_driver(item: dict[str, Any]) -> bool:
+    text = _joined_item_text(
+        item,
+        "DeviceName",
+        "Manufacturer",
+        "DriverProviderName",
+        "DeviceID",
+        "InfName",
+    ).upper()
+    return "VEN_8086" in text or "INTEL" in text
+
+
+def _is_official_intel_display_driver(item: dict[str, Any]) -> bool:
+    provider = (_first_text(item, "DriverProviderName", "Manufacturer") or "").upper()
+    status = (_first_text(item, "DriverStatus") or "").upper()
+    driver_text = _joined_item_text(
+        item,
+        "DeviceName",
+        "Manufacturer",
+        "DriverProviderName",
+        "DeviceID",
+    ).upper()
+    if "MICROSOFT" in provider:
+        return False
+    if status and "INSTALLED" not in status:
+        return False
+    return bool(_first_text(item, "DriverVersion")) and (
+        "INTEL" in provider or "INTEL" in driver_text or "VEN_8086" in driver_text
+    )
+
+
+def _joined_item_text(item: dict[str, Any] | None, *keys: str) -> str:
+    if not item:
+        return ""
+    return " ".join(str(item.get(key) or "") for key in keys)
+
+
+def _first_text(item: dict[str, Any] | None, *keys: str) -> str | None:
+    if not item:
+        return None
+    for key in keys:
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def _validate_intel_download_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host != "downloadmirror.intel.com":
+        raise ValueError(f"不是受信任的 Intel 驱动下载地址: {url}")
+
+
+def _install_intel_graphics_driver_for_xpu() -> None:
+    log_path = maintenance_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_status(
+        {
+            "state": "running",
+            "message": "正在从 Intel 官网下载显卡驱动安装程序...",
+            "command": INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL,
+        }
+    )
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write(f"\n[{_utc_now()}] Intel graphics driver download start\n")
+        log.write(f"> {INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL}\n")
+        log.flush()
+        installer_path = download_intel_graphics_driver()
+        log.write(f"Downloaded Intel driver installer: {installer_path}\n")
+        log.flush()
+
+        _write_status(
+            {
+                "state": "running",
+                "message": "正在运行 Intel 显卡驱动安装程序，请按安装程序提示完成操作...",
+                "command": _format_command([str(installer_path)]),
+            }
+        )
+        log.write(f"> {_format_command([str(installer_path)])}\n")
+        log.flush()
+        completed = subprocess.run(
+            [str(installer_path)],
+            cwd=str(installer_path.parent),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"Intel 显卡驱动安装程序退出码为 {completed.returncode}。")
+        log.write(f"[{_utc_now()}] Intel graphics driver installer completed\n")
+
+    refreshed = intel_graphics_driver_status()
+    if refreshed.get("gpu_present") and not refreshed.get("driver_installed"):
+        _write_status(
+            {
+                "state": "running",
+                "message": "Intel 驱动安装程序已退出；如安装程序提示重启，请重启后再使用 XPU 加速。",
+            }
+        )
+
+
 def _resolve_pytorch_index(env_choice: str) -> tuple[str, str]:
     choice = (env_choice or "自动检测").strip()
     if choice == "自动检测":
@@ -386,10 +840,10 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
             timeout=10,
         )
     except Exception:
-        return "CPU Only (自动检测失败)", "https://download.pytorch.org/whl/cpu"
+        return _auto_detect_intel_or_cpu("CPU Only (自动检测失败)")
 
     if result.returncode != 0:
-        return "CPU Only (未检测到 NVIDIA GPU)", "https://download.pytorch.org/whl/cpu"
+        return _auto_detect_intel_or_cpu("CPU Only (未检测到 NVIDIA GPU)")
 
     match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", result.stdout)
     if not match:
@@ -409,6 +863,18 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
     if major >= 11 and minor >= 8:
         return f"CUDA 11.8 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu118"
     return f"CPU Only (CUDA {major}.{minor} 过旧)", "https://download.pytorch.org/whl/cpu"
+
+
+def _auto_detect_intel_or_cpu(cpu_reason: str) -> tuple[str, str]:
+    status = intel_graphics_driver_status()
+    if status.get("gpu_present"):
+        if status.get("driver_installed"):
+            return "Intel XPU (检测到 Intel GPU)", "https://download.pytorch.org/whl/xpu"
+        return (
+            "Intel XPU (检测到 Intel GPU，需安装 Intel 驱动)",
+            "https://download.pytorch.org/whl/xpu",
+        )
+    return cpu_reason, "https://download.pytorch.org/whl/cpu"
 
 
 def _start_backend() -> None:

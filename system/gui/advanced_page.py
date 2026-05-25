@@ -24,6 +24,10 @@ from system.gui.ui_components import (
 )
 from system.utils import resource_path
 from system.config import APP_VERSION, NORMAL_FONT
+from system.backend.maintenance import (
+    install_intel_graphics_driver,
+    resolve_pytorch_install_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1324,7 +1328,16 @@ class AdvancedPage(QWidget):
             QMessageBox.critical(self, "错误", "请选择安装环境")
             return
 
-        message = f"将为您安装适用于 {env_choice} 的最新版 PyTorch。\n\n此操作会强制卸载现有的 torch、torchvision、torchaudio 模块，是否继续？"
+        install_intel_driver = self._confirm_intel_driver_install_if_needed(env_choice)
+        if install_intel_driver is None:
+            return
+
+        driver_step = (
+            "将先从 Intel 官网下载并运行显卡驱动安装程序，然后"
+            if install_intel_driver
+            else ""
+        )
+        message = f"{driver_step}为您安装适用于 {env_choice} 的最新版 PyTorch。\n\n此操作会强制卸载现有的 torch、torchvision、torchaudio 模块，是否继续？"
 
         reply = QMessageBox.question(
             self, "确认安装", message,
@@ -1340,92 +1353,50 @@ class AdvancedPage(QWidget):
         # 启动安装线程
         threading.Thread(
             target=self._run_pytorch_install,
-            args=(env_choice,),
+            args=(env_choice, install_intel_driver),
             daemon=True
         ).start()
 
-    def _run_pytorch_install(self, env_choice):
+    def _confirm_intel_driver_install_if_needed(self, env_choice):
+        try:
+            plan = resolve_pytorch_install_plan(env_choice)
+        except Exception as e:
+            logger.warning(f"检测 Intel 显卡驱动失败: {e}")
+            QMessageBox.warning(self, "驱动检测失败", f"检测 Intel 显卡驱动失败：\n{e}")
+            return None
+
+        if not plan.get("needs_intel_driver"):
+            return False
+
+        driver_info = plan.get("intel_driver") or {}
+        device_name = driver_info.get("device_name") or driver_info.get("driver_name") or "Intel GPU"
+        reply = QMessageBox.question(
+            self,
+            "需要安装 Intel 显卡驱动",
+            f"将安装 Intel XPU 版本 PyTorch，但当前检测到 {device_name} 尚未安装可用的 Intel 官方显卡驱动。\n\n"
+            "是否先从 Intel 官网下载并运行显卡驱动安装程序？安装过程中可能出现 Windows 权限确认，完成后可能需要重启。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return None
+        return True
+
+    def _run_pytorch_install(self, env_choice, install_intel_driver=False):
         """运行PyTorch安装"""
         try:
             QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("正在启动安装..."))
 
             pip_command_prefix = self._get_python_command_prefix()
 
-            # 解析安装环境与源
-            index_url = ""
-            actual_env = env_choice
-
-            if env_choice == "自动检测":
-                try:
-                    # 运行 nvidia-smi 获取详细信息
-                    result = subprocess.run(
-                        ["nvidia-smi"],
-                        capture_output=True,
-                        text=True,
-                        encoding='gbk',
-                        errors='ignore',
-                        timeout=10,
-                        shell=True
-                    )
-
-                    if result.returncode == 0:
-                        # 从 nvidia-smi 输出中提取 CUDA 版本
-                        match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
-                        if match:
-                            major, minor = match.groups()
-                            cuda_major = int(major)
-                            cuda_minor = int(minor)
-
-                            # 根据 CUDA 版本选择对应的 PyTorch 版本
-                            if cuda_major >= 13:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu130"
-                                actual_env = f"CUDA 13.0 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 8:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu128"
-                                actual_env = f"CUDA 12.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 6:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu126"
-                                actual_env = f"CUDA 12.6 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 4:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu124"
-                                actual_env = f"CUDA 12.4 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 12 and cuda_minor >= 1:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu121"
-                                actual_env = f"CUDA 12.1 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            elif cuda_major >= 11 and cuda_minor >= 8:
-                                index_url = "--index-url https://download.pytorch.org/whl/cu118"
-                                actual_env = f"CUDA 11.8 (自动检测 CUDA {cuda_major}.{cuda_minor})"
-                            else:
-                                # 旧版本CUDA，使用CPU版本
-                                index_url = "--index-url https://download.pytorch.org/whl/cpu"
-                                actual_env = f"CPU Only (CUDA版本过旧: {cuda_major}.{cuda_minor})"
-                        else:
-                            # 有 nvidia-smi 但没匹配到具体版本，给一个兼容性最好的默认版本
-                            index_url = "--index-url https://download.pytorch.org/whl/cu124"
-                            actual_env = "CUDA 12.4 (自动检测 - 未识别具体版本)"
-                    else:
-                        # nvidia-smi 执行失败，说明可能没装驱动或没显卡，回退CPU
-                        index_url = "--index-url https://download.pytorch.org/whl/cpu"
-                        actual_env = "CPU Only (未检测到 NVIDIA GPU)"
-
-                except Exception as e:
-                    logger.warning(f"自动检测 CUDA 版本失败: {e}")
-                    # 发生异常，回退CPU
-                    index_url = "--index-url https://download.pytorch.org/whl/cpu"
-                    actual_env = "CPU Only (自动检测出错)"
-
-            elif "CUDA" in env_choice:
-                match = re.search(r"CUDA (\d+\.\d+)", env_choice)
-                if match:
-                    cuda_version = match.group(1).replace('.', '')
-                    index_url = f"--index-url https://download.pytorch.org/whl/cu{cuda_version}"
-
-            elif "XPU" in env_choice:
-                # Intel XPU 的安装源
-                index_url = "--index-url https://download.pytorch.org/whl/xpu"
-
-            elif "CPU" in env_choice:
-                index_url = "--index-url https://download.pytorch.org/whl/cpu"
+            plan = resolve_pytorch_install_plan(env_choice)
+            actual_env = plan["actual_env"]
+            index_url = f"--index-url {plan['index_url']}"
+            if plan.get("needs_intel_driver"):
+                if not install_intel_driver:
+                    raise RuntimeError("安装 Intel XPU 版本 PyTorch 前需要先安装 Intel 显卡驱动。")
+                QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("正在下载并运行 Intel 显卡驱动安装程序..."))
+                install_intel_graphics_driver()
+                QTimer.singleShot(0, lambda: self.pytorch_status_label.setText("Intel 驱动安装程序已退出，继续安装 PyTorch..."))
 
             # 移除硬编码的版本号，直接安装最新对应版本的 torch, torchvision, torchaudio
             install_cmd = f"{pip_command_prefix} install torch torchvision torchaudio {index_url}"
