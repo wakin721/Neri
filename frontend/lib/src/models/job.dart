@@ -146,6 +146,9 @@ class ProcessingJob {
     this.outputDir,
     this.total = 0,
     this.processed = 0,
+    this.elapsedSeconds = 0,
+    this.speed = 0,
+    this.remainingSeconds,
     this.message = '',
     this.results = const <DetectionItem>[],
     this.error,
@@ -160,6 +163,9 @@ class ProcessingJob {
       outputDir: json['output_dir'] as String?,
       total: json['total'] as int? ?? 0,
       processed: json['processed'] as int? ?? 0,
+      elapsedSeconds: _doubleFromJobJson(json['elapsed_seconds']) ?? 0,
+      speed: _doubleFromJobJson(json['speed']) ?? 0,
+      remainingSeconds: _doubleFromJobJson(json['remaining_seconds']),
       message: json['message'] as String? ?? '',
       results: (json['results'] as List<dynamic>? ?? const <dynamic>[])
           .whereType<Map<String, dynamic>>()
@@ -178,6 +184,9 @@ class ProcessingJob {
   final String? outputDir;
   final int total;
   final int processed;
+  final double elapsedSeconds;
+  final double speed;
+  final double? remainingSeconds;
   final String message;
   final List<DetectionItem> results;
   final String? error;
@@ -189,4 +198,9 @@ class ProcessingJob {
   bool get isActive => state == 'queued' || state == 'running';
   bool get isWorkerActive => isActive || active;
   bool get canResume => !active && (state == 'cancelled' || state == 'failed');
+}
+
+double? _doubleFromJobJson(Object? value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString() ?? '');
 }

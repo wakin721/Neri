@@ -9,6 +9,7 @@ and ML dependencies installed.
 from __future__ import annotations
 
 import csv
+import gc
 import importlib.util
 import json
 import logging
@@ -52,6 +53,20 @@ def utc_now() -> str:
     """Return an ISO-8601 UTC timestamp suitable for API responses."""
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _clear_torch_runtime_cache() -> None:
+    try:
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        xpu = getattr(torch, "xpu", None)
+        if xpu is not None and xpu.is_available() and hasattr(xpu, "empty_cache"):
+            xpu.empty_cache()
+    except Exception:
+        pass
 
 
 def model_directory() -> Path:
@@ -325,7 +340,9 @@ class ProcessingJobManager:
             )
             self._jobs[job_id] = JobSummary(**data)
             self._save_state_unlocked()
-            return self._snapshot_unlocked(job_id)
+            snapshot = self._snapshot_unlocked(job_id)
+        _clear_torch_runtime_cache()
+        return snapshot
 
     def resume_job(self, job_id: str) -> JobSummary:
         """Continue a cancelled or failed job in-place."""
@@ -517,22 +534,38 @@ class ProcessingJobManager:
             skipped_paths = {_path_key(item.path) for item in results}
             remaining_files = [path for path in files if _path_key(path) not in skipped_paths]
             processed = len(results)
+            job_started_at = time.monotonic()
+            start_processed = processed
+            total_files = len(files)
+
+            def progress_metrics(current_processed: int) -> dict[str, object]:
+                elapsed = max(0.0, time.monotonic() - job_started_at)
+                completed_this_run = max(0, current_processed - start_processed)
+                speed = completed_this_run / elapsed if elapsed > 0 else 0.0
+                remaining = max(0, total_files - current_processed)
+                remaining_seconds = remaining / speed if speed > 0 else None
+                return {
+                    "elapsed_seconds": elapsed,
+                    "speed": speed,
+                    "remaining_seconds": remaining_seconds,
+                }
 
             self._mutate_job(
                 job_id,
                 state=JobState.RUNNING,
-                total=len(files),
+                total=total_files,
                 processed=processed,
                 results=results,
+                **progress_metrics(processed),
                 message=(
-                    f"继续任务：已完成 {processed}/{len(files)}，剩余 {len(remaining_files)} 个文件"
+                    f"继续任务：已完成 {processed}/{total_files}，剩余 {len(remaining_files)} 个文件"
                     if processed > 0
-                    else f"预扫描发现 {len(files)} 个支持的媒体文件"
+                    else f"预扫描发现 {total_files} 个支持的媒体文件"
                     if not request.options.enable_detection
                     else (
-                        f"继续任务：已完成 {processed}/{len(files)}，剩余 {len(remaining_files)} 个文件"
+                        f"继续任务：已完成 {processed}/{total_files}，剩余 {len(remaining_files)} 个文件"
                         if processed > 0
-                        else f"发现 {len(files)} 个支持的媒体文件"
+                        else f"发现 {total_files} 个支持的媒体文件"
                     )
                 ),
             )
@@ -564,7 +597,8 @@ class ProcessingJobManager:
                         job_id,
                         processed=processed,
                         results=results,
-                        message=f"正在预扫描{media_label} {processed}/{len(files)}: {path.name}",
+                        **progress_metrics(processed),
+                        message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
                     )
             else:
                 image_files = [
@@ -671,8 +705,9 @@ class ProcessingJobManager:
                             persist=False,
                             processed=processed,
                             results=results,
+                            **progress_metrics(processed),
                             message=(
-                                f"正在批处理照片 {processed}/{len(files)} "
+                                f"正在批处理照片 {processed}/{total_files} "
                                 f"(batch={len(batch)}): {last_path.name}"
                             ),
                         )
@@ -712,8 +747,9 @@ class ProcessingJobManager:
                             persist=False,
                             processed=processed,
                             results=results,
+                            **progress_metrics(processed),
                             message=(
-                                f"正在批量快速处理视频 {processed}/{len(files)} "
+                                f"正在批量快速处理视频 {processed}/{total_files} "
                                 f"(batch={len(batch)}): {last_path.name}"
                             ),
                         )
@@ -744,7 +780,8 @@ class ProcessingJobManager:
                             job_id,
                             processed=processed,
                             results=results,
-                            message=f"正在处理视频 {processed}/{len(files)}: {path.name}",
+                            **progress_metrics(processed),
+                            message=f"正在处理视频 {processed}/{total_files}: {path.name}",
                         )
 
             if self._is_cancelled(job_id):
@@ -754,7 +791,14 @@ class ProcessingJobManager:
             message = "预扫描完成" if not request.options.enable_detection else "处理完成"
             if exported_path is not None:
                 message = f"处理完成，结果已导出到 {exported_path}"
-            self._mutate_job(job_id, state=JobState.COMPLETED, processed=len(files), results=results, message=message)
+            self._mutate_job(
+                job_id,
+                state=JobState.COMPLETED,
+                processed=total_files,
+                results=results,
+                **progress_metrics(total_files),
+                message=message,
+            )
         except Exception as exc:  # noqa: BLE001 - converted to an API-visible job failure
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id)
@@ -763,7 +807,7 @@ class ProcessingJobManager:
         finally:
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
-                    detector.cleanup_runtime_cache(clear_cuda_cache=False)
+                    detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
                 except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
                     logger.warning("Detector cleanup failed: %s", exc)
             with self._lock:
@@ -1504,6 +1548,7 @@ def _detect_image_batch(
             augment=request.options.use_augment,
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
+            imgsz=request.options.imgsz,
             preloaded_data=preloaded_data,
         )
         detect_elapsed = time.perf_counter() - detect_started
@@ -1550,6 +1595,7 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             augment=request.options.use_augment,
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
+            imgsz=request.options.imgsz,
         )
         detection = detections[0] if detections else {}
         detection_data = _serialize_detector_output(detector, detection)
@@ -1603,6 +1649,7 @@ def _detect_video_track(
             classes=selected_class_ids,
             status_callback=status_callback,
             vid_stride=request.options.vid_stride,
+            imgsz=request.options.imgsz,
             extra_db_dir=extra_db_dir,
         )
         if video_result.get("status") != "success":
@@ -1720,6 +1767,7 @@ def _detect_video_fast_batch(
                     augment=request.options.use_augment,
                     agnostic_nms=request.options.use_agnostic_nms,
                     classes=selected_class_ids,
+                    imgsz=request.options.imgsz,
                 )
                 _raise_if_cancelled(cancelled)
                 for index, record in enumerate(frame_batch):

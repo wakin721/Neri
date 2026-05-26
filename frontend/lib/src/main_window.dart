@@ -100,6 +100,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
   String _videoMode = 'all';
+  int _imageSize = 1920;
   int _vidStride = 1;
   String? _previewLoadedPath;
   int _selectedIndex = 0;
@@ -1077,6 +1078,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           if (firstLoad) {
             _confidence = _doubleSetting(settings, 'confidence', _confidence);
             _iou = _doubleSetting(settings, 'iou', _iou);
+            _imageSize = _intSetting(
+              settings,
+              'imgsz',
+              _imageSize,
+            ).clamp(320, 4096).toInt();
             _useFp16 =
                 settings.gpuAvailable &&
                 _boolSetting(settings, 'use_fp16', _useFp16);
@@ -1134,6 +1140,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             outputDir: summary.outputDir,
             total: summary.total,
             processed: summary.processed,
+            elapsedSeconds: summary.elapsedSeconds,
+            speed: summary.speed,
+            remainingSeconds: summary.remainingSeconds,
             message: summary.message,
             results: cachedById[summary.id]!.results,
             error: summary.error,
@@ -1156,6 +1165,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             _selectedClassificationModelPath;
         _confidence = _doubleSetting(saved, 'confidence', _confidence);
         _iou = _doubleSetting(saved, 'iou', _iou);
+        _imageSize = _intSetting(
+          saved,
+          'imgsz',
+          _imageSize,
+        ).clamp(320, 4096).toInt();
         _useFp16 =
             saved.gpuAvailable && _boolSetting(saved, 'use_fp16', _useFp16);
         _videoMode = _stringSetting(saved, 'video_mode', _videoMode) == 'fast'
@@ -1209,6 +1223,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return gpuAvailable ? savedBatchSize.clamp(1, 64).toInt() : 1;
   }
 
+  int _imageSizeSetting() {
+    return _intSetting(
+      _settingsOrEmpty(),
+      'imgsz',
+      _imageSize,
+    ).clamp(320, 4096).toInt();
+  }
+
   bool _effectiveUseFp16() {
     return _settings?.gpuAvailable == true && _useFp16;
   }
@@ -1222,7 +1244,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   bool _useAugment() {
-    return _boolSetting(_settingsOrEmpty(), 'use_augment', true);
+    return _boolSetting(_settingsOrEmpty(), 'use_augment', false);
   }
 
   bool _useAgnosticNms() {
@@ -1325,6 +1347,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(),
+        imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
         enableDetection: true,
@@ -1465,6 +1488,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(singleFile: true),
+        imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
         enableDetection: true,
@@ -1506,6 +1530,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
+        imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
         enableDetection: true,

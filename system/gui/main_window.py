@@ -869,6 +869,13 @@ class ProcessingThread(QThread):
             QTimer.singleShot(0, lambda: MaterialMessageBox.critical(None, "错误", f"处理过程中发生错误: {e}"))
             self.processing_complete.emit(False)
         finally:
+            image_processor = getattr(self.controller, 'image_processor', None)
+            if image_processor is not None and hasattr(image_processor, 'cleanup_runtime_cache'):
+                try:
+                    should_clear_cuda_cache = stopped_manually or self.stop_flag or self.force_stop_flag
+                    image_processor.cleanup_runtime_cache(clear_cuda_cache=should_clear_cuda_cache)
+                except Exception as cleanup_error:
+                    logger.warning(f"处理结束清理运行缓存失败: {cleanup_error}")
             gc.collect()
 
     def _save_processing_cache(self, excel_data, processed_files, total_files):

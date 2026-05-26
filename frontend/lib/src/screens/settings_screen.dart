@@ -50,7 +50,7 @@ const _releaseNotesUrl =
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
-const _frontendVersion = '3.0.4-beta(021b75)';
+const _frontendVersion = '3.0.4-beta(b986e9)';
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
@@ -145,6 +145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'package_source': _stringSetting(saved, 'package_source', 'official'),
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
+      'imgsz': _intSetting(saved, 'imgsz', 1920),
       'batch_size': !dependenciesReady
           ? _intSetting(saved, 'batch_size', 16)
           : settings?.gpuAvailable == true
@@ -154,7 +155,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
                 _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
-      'use_augment': _boolSetting(saved, 'use_augment', true),
+      'use_augment': _boolSetting(saved, 'use_augment', false),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
       'video_mode': _stringSetting(saved, 'video_mode', 'all'),
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
@@ -832,6 +833,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   divisions: 80,
                   enabled: detectionEnabled,
                   onChanged: (value) => _set('iou', value),
+                ),
+                _LabeledSlider(
+                  label: '输入尺寸',
+                  value: _int('imgsz', 1920).toDouble(),
+                  min: 640,
+                  max: 2560,
+                  divisions: 12,
+                  valueLabel: _int('imgsz', 1920).toString(),
+                  enabled: detectionEnabled,
+                  onChanged: (value) => _set('imgsz', value.round()),
                 ),
               ],
             ),

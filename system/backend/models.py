@@ -151,9 +151,10 @@ class ProcessingOptions(BaseModel):
     confidence: float = Field(default=0.25, ge=0.0, le=1.0)
     iou: float = Field(default=0.45, ge=0.0, le=1.0)
     use_fp16: bool = False
-    use_augment: bool = True
+    use_augment: bool = False
     use_agnostic_nms: bool = True
     batch_size: int = Field(default=16, ge=1, le=64)
+    imgsz: int = Field(default=1920, ge=320, le=4096)
     vid_stride: int = Field(default=1, ge=1, le=120)
     video_mode: Literal["all", "fast"] = "all"
     enable_detection: bool = Field(
@@ -265,6 +266,9 @@ class JobSummary(BaseModel):
     output_dir: str | None = None
     total: int = 0
     processed: int = 0
+    elapsed_seconds: float = 0.0
+    speed: float = 0.0
+    remaining_seconds: float | None = None
     message: str = ""
     results: list[DetectionItem] = Field(default_factory=list)
     error: str | None = None

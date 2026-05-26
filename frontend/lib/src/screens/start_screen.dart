@@ -612,6 +612,7 @@ class _JobsCard extends StatelessWidget {
   }
 
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
+    final runtimeText = _jobRuntimeText(job);
     return ExpansionTile(
       leading: Icon(_jobIcon(job.state)),
       title: Text(job.inputDir, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -623,6 +624,15 @@ class _JobsCard extends StatelessWidget {
             const SizedBox(height: 8),
           ],
           LinearProgressIndicator(value: _jobProgressValue(job)),
+          if (runtimeText.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              runtimeText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
         ],
       ),
       trailing: Row(
@@ -688,6 +698,35 @@ class _JobsCard extends StatelessWidget {
     }
     if (job.total == 0 && job.isActive) return null;
     return job.progress;
+  }
+
+  String _jobRuntimeText(ProcessingJob job) {
+    final parts = <String>[];
+    if (job.speed > 0) {
+      parts.add('${job.speed.toStringAsFixed(job.speed >= 10 ? 1 : 2)} 个/秒');
+    }
+    if (job.elapsedSeconds > 0) {
+      parts.add('已用 ${_formatDuration(job.elapsedSeconds)}');
+    }
+    final remaining = job.remainingSeconds;
+    if (job.isActive &&
+        remaining != null &&
+        remaining.isFinite &&
+        remaining >= 0) {
+      parts.add('剩余 ${_formatDuration(remaining)}');
+    }
+    return parts.join(' · ');
+  }
+
+  String _formatDuration(double seconds) {
+    final totalSeconds = seconds.round();
+    if (totalSeconds < 60) return '${totalSeconds}s';
+    final minutes = totalSeconds ~/ 60;
+    final restSeconds = totalSeconds % 60;
+    if (minutes < 60) return '${minutes}m${restSeconds}s';
+    final hours = minutes ~/ 60;
+    final restMinutes = minutes % 60;
+    return '${hours}h${restMinutes}m';
   }
 
   IconData _jobIcon(String state) {
