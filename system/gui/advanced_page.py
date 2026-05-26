@@ -78,7 +78,7 @@ class AdvancedPage(QWidget):
         self.gpu_available = getattr(controller, 'gpu_available', getattr(controller, 'cuda_available', False))
         self.use_fp16_var = self.gpu_available
         self.batch_size_var = 16
-        self.use_augment_var = True
+        self.use_augment_var = False
         self.use_agnostic_nms_var = True
         self.vid_stride_var = 1  # 默认值为1 (处理每一帧)
         self.min_frame_ratio_var = 0.0  # 默认 0%
@@ -1277,7 +1277,7 @@ class AdvancedPage(QWidget):
         self.use_fp16_var = getattr(self.controller, 'gpu_available', False)
         # 默认值根据 GPU 可用性动态变化
         self.batch_size_var = 4 if getattr(self.controller, 'gpu_available', False) else 1
-        self.use_augment_var = True
+        self.use_augment_var = False
         self.use_agnostic_nms_var = True
 
         self.iou_slider.setValue(int(self.iou_var * 100))

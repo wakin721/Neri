@@ -4,6 +4,7 @@ import os
 import logging
 import concurrent.futures
 import gc
+import time
 from typing import Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
 from ultralytics import YOLO
@@ -58,6 +59,47 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"加载分类模型失败: {e}")
             self.cls_model = None
+
+    @staticmethod
+    def _sync_device(device_name: str) -> None:
+        try:
+            if device_name == 'cuda' and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elif device_name == 'xpu' and hasattr(torch, 'xpu') and torch.xpu.is_available():
+                torch.xpu.synchronize()
+        except Exception:
+            pass
+
+    def cleanup_runtime_cache(self, clear_cuda_cache: bool = False) -> None:
+        try:
+            gc.collect()
+            if clear_cuda_cache and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            xpu = getattr(torch, 'xpu', None)
+            if (
+                clear_cuda_cache
+                and xpu is not None
+                and xpu.is_available()
+                and hasattr(xpu, 'empty_cache')
+            ):
+                xpu.empty_cache()
+        except Exception as e:
+            logger.warning(f"Runtime cache cleanup failed: {e}")
+
+    @staticmethod
+    def _cuda_cache_pressure_high(min_free_ratio: float = 0.15) -> bool:
+        if not torch.cuda.is_available():
+            return False
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            if total_bytes <= 0:
+                return False
+            reserved_bytes = torch.cuda.memory_reserved()
+            allocated_bytes = torch.cuda.memory_allocated()
+            has_releasable_cache = reserved_bytes > allocated_bytes
+            return (free_bytes / total_bytes) < min_free_ratio and has_releasable_cache
+        except Exception:
+            return False
 
     def _load_translation_file(self) -> Dict[str, str]:
         """加载翻译文件"""
@@ -278,10 +320,12 @@ class ImageProcessor:
         return None
 
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
-                             conf: float = 0.25, augment: bool = True,
+                             conf: float = 0.25, augment: bool = False,
                              agnostic_nms: bool = True, timeout: float = 60.0,
                              preloaded_data: Optional[Tuple] = None,
-                             classes: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+                             classes: Optional[List[int]] = None,
+                             imgsz: int = 1920,
+                             cleanup_cache: bool = False) -> List[Dict[str, Any]]:
         """
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
@@ -301,8 +345,16 @@ class ImageProcessor:
 
         def run_batch_process():
             nonlocal batch_results_info
+            batch_total_start = time.perf_counter()
+            preprocess_elapsed = 0.0
+            detect_elapsed = 0.0
+            crop_elapsed = 0.0
+            classify_elapsed = 0.0
+            merge_elapsed = 0.0
+            crop_count = 0
             try:
                 # 1. 优先使用预加载的数据，否则现场处理
+                preprocess_start = time.perf_counter()
                 if preloaded_data:
                     valid_indices, processed_imgs, original_imgs_rgb = preloaded_data
                 else:
@@ -325,6 +377,15 @@ class ImageProcessor:
                                 processed_imgs.append(proc_img)
                                 original_imgs_rgb.append(orig_rgb)
 
+                preprocess_elapsed = time.perf_counter() - preprocess_start
+                logger.info(
+                    "Batch preprocess: requested=%d valid=%d preloaded=%s elapsed=%.3fs",
+                    len(img_paths),
+                    len(processed_imgs),
+                    bool(preloaded_data),
+                    preprocess_elapsed,
+                )
+
                 if not processed_imgs:
                     return
 
@@ -334,7 +395,7 @@ class ImageProcessor:
                 print("\n" + "=" * 50)
                 print("🚀 [ImageProcessor] 开始执行模型推理，参数如下：")
                 print(f"  • 图像批次数量 : {len(processed_imgs) if isinstance(processed_imgs, list) else 1}")
-                print(f"  • 输入尺寸 (imgsz) : 1920")
+                print(f"  • 输入尺寸 (imgsz) : {imgsz}")
                 print(f"  • 推理设备 (device): {device_name}")
                 print(f"  • 半精度 (half)    : {use_fp16}")
                 print(f"  • 置信度 (conf)    : {conf}")
@@ -345,11 +406,13 @@ class ImageProcessor:
                 print("=" * 50 + "\n")
 
                 # 2. 批量运行检测模型
+                self._sync_device(device_name)
+                detect_start = time.perf_counter()
                 det_results = self.model(
                     processed_imgs,
                     augment=augment,
                     agnostic_nms=agnostic_nms,
-                    imgsz=1920,
+                    imgsz=imgsz,
                     half=use_fp16,
                     device=device_name,
                     iou=iou,
@@ -359,6 +422,8 @@ class ImageProcessor:
                     name="detect_log",
                     save=False
                 )
+                self._sync_device(device_name)
+                detect_elapsed = time.perf_counter() - detect_start
                 # 3. 准备分类裁剪 (Collection Phase)
                 all_crops = []
                 crop_map_info = []  # 映射: list index -> (result_index_in_batch, box_index)
@@ -376,6 +441,7 @@ class ImageProcessor:
 
                     # 并行执行裁剪和Padding
                     if crop_tasks:
+                        crop_start = time.perf_counter()
                         # 这里的 workers 数量不需要太多，主要是为了解耦内存操作
                         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                             results = executor.map(self._crop_single_box, crop_tasks)
@@ -385,9 +451,13 @@ class ImageProcessor:
                                     r_idx, b_idx, crop = res
                                     all_crops.append(crop)
                                     crop_map_info.append((r_idx, b_idx))
+                        crop_elapsed = time.perf_counter() - crop_start
+                        crop_count = len(all_crops)
 
                     # 4. 批量运行分类模型 (Batch Inference)
                     if all_crops:
+                        self._sync_device(device_name)
+                        classify_start = time.perf_counter()
                         cls_results_list = self.cls_model(
                             all_crops,
                             half=use_fp16,
@@ -397,6 +467,8 @@ class ImageProcessor:
                             name="cls_log",
                             exist_ok=True
                         )
+                        self._sync_device(device_name)
+                        classify_elapsed = time.perf_counter() - classify_start
 
                         # 5. 映射回原结果 (Map Back)
                         for i, cls_res in enumerate(cls_results_list):
@@ -436,6 +508,7 @@ class ImageProcessor:
                 det_iter = iter(det_results)
                 cand_map_iter = iter(batch_candidates_maps)
 
+                merge_start = time.perf_counter()
                 for idx in range(len(img_paths)):
                     if idx not in valid_indices:
                         # 读取失败的图片返回空
@@ -446,6 +519,11 @@ class ImageProcessor:
                         continue
 
                     r = next(det_iter)
+                    try:
+                        if hasattr(r, "cpu"):
+                            r = r.cpu()
+                    except Exception as e:
+                        logger.debug(f"Failed to move detection result to CPU: {e}")
                     candidates_map = next(cand_map_iter)
 
                     min_conf = None
@@ -485,6 +563,24 @@ class ImageProcessor:
                         '最低置信度': min_conf
                     })
 
+                merge_elapsed = time.perf_counter() - merge_start
+                logger.info(
+                    (
+                        "Batch timing: requested=%d valid=%d crops=%d "
+                        "preprocess=%.3fs detect=%.3fs crop=%.3fs classify=%.3fs "
+                        "merge=%.3fs total=%.3fs"
+                    ),
+                    len(img_paths),
+                    len(processed_imgs),
+                    crop_count,
+                    preprocess_elapsed,
+                    detect_elapsed,
+                    crop_elapsed,
+                    classify_elapsed,
+                    merge_elapsed,
+                    time.perf_counter() - batch_total_start,
+                )
+
                 return True
 
             except Exception as e:
@@ -496,17 +592,8 @@ class ImageProcessor:
 
         run_batch_process()
 
-        try:
-            # 1. 强制进行 Python 垃圾回收，断开未使用的 Tensor 引用
-            gc.collect()
-
-            # 2. 如果使用 GPU，强制清空 PyTorch 的显存缓存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                # 可选：整理碎片（PyTorch 某些版本支持）
-                # torch.cuda.ipc_collect()
-        except Exception as e:
-            logger.warning(f"显存清理过程中发生错误 (不影响结果): {e}")
+        should_clear_cuda_cache = cleanup_cache or self._cuda_cache_pressure_high()
+        self.cleanup_runtime_cache(clear_cuda_cache=should_clear_cuda_cache)
 
         return batch_results_info
 
@@ -587,6 +674,7 @@ class ImageProcessor:
                              vid_stride: int = 1,
                              temp_video_dir: Optional[str] = None,
                              classes: Optional[List[int]] = None,
+                             imgsz: int = 1920,
                              extra_db_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
@@ -642,7 +730,7 @@ class ImageProcessor:
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
-                imgsz=1920,
+                imgsz=imgsz,
                 half=use_fp16,
                 device=device_name,
                 iou=iou,
