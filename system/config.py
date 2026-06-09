@@ -3,10 +3,9 @@
 """
 import zlib  # Add this import for stable hashing
 
+from system.version import APP_DISPLAY_VERSION, APP_TITLE, APP_VERSION
+
 # 应用信息常量
-APP_TITLE = "Neri v3.0.4-beta(b986e9)"
-APP_VERSION = "3.0.4-beta(b986e9)"
-APP_DISPLAY_VERSION = "Neri 3.0.4"
 DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
 
 # 文件支持相关常量

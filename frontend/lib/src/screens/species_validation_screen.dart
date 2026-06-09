@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../api_client.dart';
 import '../models/job.dart';
+import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/selectable_list_card.dart';
@@ -58,6 +59,21 @@ const validationExportColumns = <String>[
   '备注',
 ];
 
+const validationQuantityButtons = <String>[
+  '1',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+  '10',
+  '25',
+  '50',
+];
+
 const double _validationButtonHeight = 40;
 
 class SpeciesValidationScreen extends StatefulWidget {
@@ -78,6 +94,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.quickMarkSpecies,
     required this.quickMarkRecentHistory,
     required this.quickMarkUsageCounts,
+    required this.quantityButtons,
     required this.exportColumns,
     required this.onRefresh,
     required this.onLoadMetadata,
@@ -85,6 +102,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onMarkItem,
     required this.onMarkItems,
     required this.onQuickMarkUsed,
+    required this.onQuickMarkReverted,
     required this.onRedetectItems,
     super.key,
   });
@@ -105,6 +123,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final List<String> quickMarkSpecies;
   final List<String> quickMarkRecentHistory;
   final Map<String, int> quickMarkUsageCounts;
+  final List<String> quantityButtons;
   final List<String> exportColumns;
   final Future<void> Function() onRefresh;
   final Future<void> Function(DetectionItem item) onLoadMetadata;
@@ -112,6 +131,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final MarkValidationItem onMarkItem;
   final MarkValidationItems onMarkItems;
   final Future<void> Function(String speciesName) onQuickMarkUsed;
+  final Future<void> Function(String speciesName) onQuickMarkReverted;
   final RedetectValidationItems onRedetectItems;
 
   @override
@@ -122,9 +142,16 @@ class SpeciesValidationScreen extends StatefulWidget {
 enum _ValidationListFocus { species, photos }
 
 class _MarkHistoryEntry {
-  _MarkHistoryEntry(Iterable<DetectionItem> items) : items = items.toList();
+  _MarkHistoryEntry(
+    Iterable<DetectionItem> items, {
+    Iterable<String>? quickMarkSpecies,
+  }) : items = items.toList(),
+       quickMarkSpecies = List<String>.from(
+         quickMarkSpecies ?? const <String>[],
+       );
 
   final List<DetectionItem> items;
+  final List<String> quickMarkSpecies;
 }
 
 class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
@@ -140,26 +167,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     '黑翅长脚鹬',
     '未知鸟',
   ];
-  static const _quantityOptions = <String>[
-    '1',
-    '2',
-    '3',
-    '4',
-    '5',
-    '6',
-    '7',
-    '8',
-    '9',
-    '10',
-    '25',
-    '50',
-  ];
-
   // 使用静态变量持久化保存跨界面的状态
   static String? _savedSelectedPath;
   static String? _savedSelectedBucketKey;
   static String _savedSelectedQuantity = '1';
-  static bool _savedShowQuantitySelection = false;
   static String _savedSelectedSpeciesFilter = _globalSpecies;
   static String _savedExportFormat = 'csv';
   static double _savedConfidence = 0.25;
@@ -174,9 +185,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   String get _selectedQuantity => _savedSelectedQuantity;
   set _selectedQuantity(String value) => _savedSelectedQuantity = value;
-
-  bool get _showQuantitySelection => _savedShowQuantitySelection;
-  set _showQuantitySelection(bool value) => _savedShowQuantitySelection = value;
 
   String get _selectedSpeciesFilter => _savedSelectedSpeciesFilter;
   set _selectedSpeciesFilter(String value) =>
@@ -198,8 +206,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool _marking = false;
   bool _exporting = false;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
-  String? _pendingSpeciesName;
-  String? _pendingQuantity;
+  final List<String> _pendingSpeciesNames = <String>[];
+  final List<String> _pendingQuantities = <String>[];
   String? _pendingItemPath;
   final List<String> _sessionQuickMarkHistory = <String>[];
   final Set<String> _selectedPaths = <String>{};
@@ -231,6 +239,21 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   bool get _useCollapsedGroups => widget.autoGroup && widget.collapseGroups;
   int get _undoHistoryLimit => widget.undoSteps.clamp(1, 50).toInt();
+  List<String> get _quantityOptions {
+    final source = widget.quantityButtons.isEmpty
+        ? validationQuantityButtons
+        : widget.quantityButtons;
+    final seen = <String>{};
+    final result = <String>[];
+    for (final value in source) {
+      final parsed = int.tryParse(value.trim());
+      if (parsed == null || parsed <= 0) continue;
+      final label = parsed.toString();
+      if (seen.add(label)) result.add(label);
+    }
+    return result.isEmpty ? validationQuantityButtons : result;
+  }
+
   String get _undoTooltip => '撤回上一步校验';
 
   @override
@@ -766,7 +789,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                                 label: species,
                                 selected:
                                     _pendingItemPath == item.path &&
-                                    _pendingSpeciesName == species,
+                                    _pendingSpeciesNames.contains(species),
                                 onPressed: _marking
                                     ? null
                                     : () => _markQuickSpecies(species),
@@ -803,8 +826,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                               return _QuantityButton(
                                 label: quantity,
                                 selected:
-                                    _showQuantitySelection &&
-                                    quantity == _selectedQuantity,
+                                    _pendingItemPath == item.path &&
+                                    _pendingQuantities.contains(quantity),
                                 onPressed: _marking
                                     ? null
                                     : () => _markQuantity(quantity),
@@ -2111,55 +2134,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         ? _quickSpecies
         : widget.quickMarkSpecies;
     final ordered = widget.autoSortQuickMarks
-        ? _autoSortedQuickMarkSpecies(configuredQuickSpecies)
+        ? autoSortedQuickMarks(
+            configuredMarks: configuredQuickSpecies,
+            usageCounts: widget.quickMarkUsageCounts,
+            recentHistory: widget.quickMarkRecentHistory,
+            sessionHistory: _sessionQuickMarkHistory,
+          )
         : configuredQuickSpecies;
-    return _uniqueSpecies(ordered).take(12).toList();
-  }
-
-  List<String> _autoSortedQuickMarkSpecies(List<String> fallbackSpecies) {
-    final history = <String>[
-      ...widget.quickMarkRecentHistory,
-      ..._sessionQuickMarkHistory,
-    ];
-    final latestIndex = <String, int>{};
-    final recentCounts = <String, int>{};
-    for (var index = 0; index < history.length; index++) {
-      final species = history[index].trim();
-      if (species.isEmpty || species == 'Unknown' || species == '空') continue;
-      latestIndex[species] = index;
-      recentCounts[species] = (recentCounts[species] ?? 0) + 1;
-    }
-
-    final candidates = <String>{
-      ...fallbackSpecies,
+    return _uniqueSpecies([
+      ...ordered,
+      ...configuredQuickSpecies,
+      ...widget.quickMarkRecentHistory.reversed,
       ...widget.quickMarkUsageCounts.keys,
-      ...recentCounts.keys,
-    }.where((species) => species.trim().isNotEmpty).toList();
-
-    candidates.sort((a, b) {
-      final recentCompare = (recentCounts[b] ?? 0).compareTo(
-        recentCounts[a] ?? 0,
-      );
-      if (recentCompare != 0) return recentCompare;
-      final usageCompare = (widget.quickMarkUsageCounts[b] ?? 0).compareTo(
-        widget.quickMarkUsageCounts[a] ?? 0,
-      );
-      if (usageCompare != 0) return usageCompare;
-      final latestCompare = (latestIndex[b] ?? -1).compareTo(
-        latestIndex[a] ?? -1,
-      );
-      if (latestCompare != 0) return latestCompare;
-      final aFallbackIndex = fallbackSpecies.indexOf(a);
-      final bFallbackIndex = fallbackSpecies.indexOf(b);
-      if (aFallbackIndex >= 0 && bFallbackIndex >= 0) {
-        return aFallbackIndex.compareTo(bFallbackIndex);
-      }
-      if (aFallbackIndex >= 0) return -1;
-      if (bFallbackIndex >= 0) return 1;
-      return a.compareTo(b);
-    });
-
-    return candidates;
+      ..._quickSpecies,
+    ]).take(configuredQuickSpecies.length).toList();
   }
 
   Map<String, int> _speciesUsageCounts() {
@@ -2172,6 +2160,35 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       counts[cleaned] = (counts[cleaned] ?? 0) + 1;
     }
     return counts;
+  }
+
+  void _notifyQuickMarkUsed(String speciesName) {
+    try {
+      unawaited(widget.onQuickMarkUsed(speciesName).catchError((_) {}));
+    } catch (_) {}
+  }
+
+  void _notifyQuickMarkReverted(Iterable<String> speciesNames) {
+    final names = speciesNames.toList();
+    if (names.isEmpty) return;
+    try {
+      unawaited(widget.onQuickMarkReverted(names.join(',')).catchError((_) {}));
+    } catch (_) {}
+  }
+
+  void _revertSessionQuickMarkHistory(Iterable<String> speciesNames) {
+    for (final species in speciesNames) {
+      for (
+        var index = _sessionQuickMarkHistory.length - 1;
+        index >= 0;
+        index--
+      ) {
+        if (_sessionQuickMarkHistory[index].trim() == species) {
+          _sessionQuickMarkHistory.removeAt(index);
+          break;
+        }
+      }
+    }
   }
 
   List<String> _uniqueSpecies(Iterable<String> values) {
@@ -2228,11 +2245,32 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       confidence = item.confidence?.toStringAsFixed(2) ?? 'N/A';
     }
 
-    return _DetectionSummary(
+    final summary = _DetectionSummary(
       species: species,
       count: count,
       type: _typeLabel(species, item),
       confidence: confidence,
+    );
+    return _pendingSummaryFor(item, summary) ?? summary;
+  }
+
+  _DetectionSummary? _pendingSummaryFor(
+    DetectionItem item,
+    _DetectionSummary baseSummary,
+  ) {
+    if (_pendingItemPath != item.path ||
+        (_pendingSpeciesNames.isEmpty && _pendingQuantities.isEmpty)) {
+      return null;
+    }
+
+    final typeSpecies = _pendingSpeciesNames.join(',');
+    return _DetectionSummary(
+      species: _pendingSpeciesNames.isEmpty
+          ? baseSummary.species
+          : _pendingSpeciesNames.join('，'),
+      count: _pendingQuantities.isEmpty ? '' : _pendingQuantities.join('，'),
+      type: typeSpecies.isEmpty ? baseSummary.type : _typeLabel(typeSpecies),
+      confidence: baseSummary.confidence,
     );
   }
 
@@ -2309,24 +2347,27 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   void _markQuickSpecies(String species) {
     setState(() {
-      if (_pendingItemPath != _selectedPath) {
-        _pendingQuantity = null;
+      _preparePendingMarkForSelectedPath();
+      if (_pendingSpeciesNames.contains(species)) {
+        _pendingSpeciesNames.remove(species);
+      } else {
+        _pendingSpeciesNames.add(species);
       }
-      _pendingItemPath = _selectedPath;
-      _pendingSpeciesName = species;
+      _clearPendingPathIfEmpty();
     });
     unawaited(_submitPendingMarkIfReady());
   }
 
   void _markQuantity(String quantity) {
     setState(() {
-      if (_pendingItemPath != _selectedPath) {
-        _pendingSpeciesName = null;
-      }
+      _preparePendingMarkForSelectedPath();
       _selectedQuantity = quantity;
-      _showQuantitySelection = true;
-      _pendingItemPath = _selectedPath;
-      _pendingQuantity = quantity;
+      if (_pendingQuantities.contains(quantity)) {
+        _pendingQuantities.remove(quantity);
+      } else {
+        _pendingQuantities.add(quantity);
+      }
+      _clearPendingPathIfEmpty();
     });
     unawaited(_submitPendingMarkIfReady());
   }
@@ -2335,22 +2376,37 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_marking ||
         _pendingItemPath == null ||
         _pendingItemPath != _selectedPath ||
-        _pendingSpeciesName == null ||
-        _pendingQuantity == null) {
+        _pendingSpeciesNames.isEmpty ||
+        _pendingQuantities.length != _pendingSpeciesNames.length) {
       return;
     }
+    final speciesName = _pendingSpeciesNames.join(',');
+    final speciesCount = _pendingQuantities.join(',');
     await _markSelected(
       'update',
-      speciesName: _pendingSpeciesName,
-      speciesCount: _pendingQuantity,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
     );
   }
 
   void _resetPendingMark() {
-    _pendingSpeciesName = null;
-    _pendingQuantity = null;
+    _pendingSpeciesNames.clear();
+    _pendingQuantities.clear();
     _pendingItemPath = null;
-    _showQuantitySelection = false;
+  }
+
+  void _preparePendingMarkForSelectedPath() {
+    if (_pendingItemPath == _selectedPath) return;
+    _pendingSpeciesNames.clear();
+    _pendingQuantities.clear();
+    _pendingItemPath = _selectedPath;
+  }
+
+  void _clearPendingPathIfEmpty() {
+    if (_pendingSpeciesNames.isNotEmpty || _pendingQuantities.isNotEmpty) {
+      return;
+    }
+    _pendingItemPath = null;
   }
 
   Future<void> _markOtherSpecies({List<DetectionItem>? itemsOverride}) async {
@@ -2452,7 +2508,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         if (action == 'unverified') {
           _discardMarkHistoryForPaths(items.map((item) => item.path).toSet());
         } else {
-          _recordMarkHistory(updatedItems);
+          _recordMarkHistory(
+            updatedItems,
+            quickMarkSpeciesName: usedQuickSpecies,
+          );
         }
         final nextSelection = nextPath ?? lastUpdated?.path;
         _selectedPaths.clear();
@@ -2476,7 +2535,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       });
       if (usedQuickSpecies != null) {
-        unawaited(widget.onQuickMarkUsed(usedQuickSpecies));
+        _notifyQuickMarkUsed(usedQuickSpecies);
       }
       _showSnackBar('已批量处理 ${items.length} 个文件');
     } catch (error) {
@@ -2487,7 +2546,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
-  void _recordMarkHistory(Iterable<DetectionItem> items) {
+  void _recordMarkHistory(
+    Iterable<DetectionItem> items, {
+    String? quickMarkSpeciesName,
+  }) {
     final itemsByPath = <String, DetectionItem>{};
     for (final item in items) {
       itemsByPath[item.path] = item;
@@ -2495,7 +2557,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (itemsByPath.isEmpty) return;
 
     _discardMarkHistoryForPaths(itemsByPath.keys.toSet());
-    _markHistory.add(_MarkHistoryEntry(itemsByPath.values));
+    _markHistory.add(
+      _MarkHistoryEntry(
+        itemsByPath.values,
+        quickMarkSpecies: quickMarkSpeciesName == null
+            ? const <String>[]
+            : _splitSpeciesNames(quickMarkSpeciesName),
+      ),
+    );
     if (_markHistory.length > _undoHistoryLimit) {
       _markHistory.removeRange(0, _markHistory.length - _undoHistoryLimit);
     }
@@ -2551,6 +2620,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_marking || _markHistory.isEmpty) return;
     final targets = _recentUndoTargets();
     if (targets.isEmpty) return;
+    final quickMarkSpeciesToUndo = List<String>.from(
+      _markHistory.last.quickMarkSpecies,
+    );
 
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, targets);
@@ -2575,7 +2647,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           _selectedGroupSignature = null;
         }
         _resetPendingMark();
+        _revertSessionQuickMarkHistory(quickMarkSpeciesToUndo);
       });
+      _notifyQuickMarkReverted(quickMarkSpeciesToUndo);
       final count = updatedItems.isEmpty ? targets.length : updatedItems.length;
       _showSnackBar(count == 1 ? '已撤回校验标记' : '已撤回 $count 个校验标记');
     } catch (error) {
@@ -2670,7 +2744,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         if (action == 'unverified') {
           _discardMarkHistoryForPaths({item.path});
         } else {
-          _recordMarkHistory(<DetectionItem>[updated]);
+          _recordMarkHistory(<DetectionItem>[
+            updated,
+          ], quickMarkSpeciesName: usedQuickSpecies);
         }
         final targetPath = targetItem.path;
         _selectedPath = targetPath;
@@ -2691,7 +2767,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       });
       if (usedQuickSpecies != null) {
-        unawaited(widget.onQuickMarkUsed(usedQuickSpecies));
+        _notifyQuickMarkUsed(usedQuickSpecies);
       }
       unawaited(widget.onLoadMetadata(targetItem));
       final message = action == 'unverified'

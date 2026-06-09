@@ -49,7 +49,7 @@ class SettingsManager:
         default_settings = {
             "list": default_species,
             "list_auto": default_species,
-            "auto": False
+            "auto": False,
         }
         for species in default_species:
             default_settings[species] = 0

@@ -81,6 +81,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _backendReady = false;
   bool _submitting = false;
   bool _previewLoading = false;
+  bool _settingsSaving = false;
   bool _validationBusy = false;
   int _validationBusyRequests = 0;
   final Map<String, int> _pendingStartJobBaselines = <String, int>{};
@@ -1154,6 +1155,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
+    if (mounted) setState(() => _settingsSaving = true);
     try {
       final saved = await widget.apiClient.saveSettings(settings);
       if (!mounted) return;
@@ -1183,8 +1185,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       });
       _showSnackBar('设置已保存');
     } catch (error) {
-      _showSnackBar('保存设置失败：$error');
+      if (mounted) _showSnackBar('保存设置失败：$error');
       rethrow;
+    } finally {
+      if (mounted) setState(() => _settingsSaving = false);
     }
   }
 
@@ -1292,38 +1296,85 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _recordQuickMarkUsage(String speciesName) async {
-    final current = _settings;
-    if (current == null) return;
-    final names = _splitSpeciesNames(speciesName);
-    if (names.isEmpty) return;
-
-    final nextSettings = Map<String, dynamic>.from(current.settings);
-    final counts = Map<String, int>.from(
-      _intMapSetting(current, 'quick_mark_usage_counts'),
-    );
-    final history = _stringListSetting(
-      current,
-      'quick_mark_recent_history',
-      const <String>[],
-    ).toList();
-
-    for (final name in names) {
-      counts[name] = (counts[name] ?? 0) + 1;
-      history.add(name);
-    }
-    if (history.length > 200) {
-      history.removeRange(0, history.length - 200);
-    }
-
-    nextSettings['quick_mark_usage_counts'] = counts;
-    nextSettings['quick_mark_recent_history'] = history;
-
     try {
+      final current = _settings;
+      if (current == null) return;
+      final names = _splitSpeciesNames(speciesName);
+      if (names.isEmpty) return;
+
+      final nextSettings = Map<String, dynamic>.from(current.settings);
+      final counts = Map<String, int>.from(
+        _intMapSetting(current, 'quick_mark_usage_counts'),
+      );
+      final history = _stringListSetting(
+        current,
+        'quick_mark_recent_history',
+        const <String>[],
+      ).toList();
+
+      for (final name in names) {
+        counts[name] = (counts[name] ?? 0) + 1;
+        history.add(name);
+      }
+      if (history.length > 200) {
+        history.removeRange(0, history.length - 200);
+      }
+
+      nextSettings['quick_mark_usage_counts'] = counts;
+      nextSettings['quick_mark_recent_history'] = history;
+
+      if (mounted) {
+        setState(() => _settings = current.copyWith(settings: nextSettings));
+      }
       final saved = await widget.apiClient.saveSettings(nextSettings);
       if (mounted) setState(() => _settings = saved);
     } catch (_) {
-      // Usage history is only used for sorting quick-mark buttons; marking
-      // itself should not fail if this lightweight preference save is blocked.
+      // Quick-mark preferences should never make the mark action fail.
+    }
+  }
+
+  Future<void> _revertQuickMarkUsage(String speciesName) async {
+    try {
+      final current = _settings;
+      if (current == null) return;
+      final names = _splitSpeciesNames(speciesName);
+      if (names.isEmpty) return;
+
+      final nextSettings = Map<String, dynamic>.from(current.settings);
+      final counts = Map<String, int>.from(
+        _intMapSetting(current, 'quick_mark_usage_counts'),
+      );
+      final history = _stringListSetting(
+        current,
+        'quick_mark_recent_history',
+        const <String>[],
+      ).toList();
+
+      for (final name in names) {
+        final count = counts[name] ?? 0;
+        if (count <= 1) {
+          counts.remove(name);
+        } else {
+          counts[name] = count - 1;
+        }
+        for (var index = history.length - 1; index >= 0; index--) {
+          if (history[index].trim() == name) {
+            history.removeAt(index);
+            break;
+          }
+        }
+      }
+
+      nextSettings['quick_mark_usage_counts'] = counts;
+      nextSettings['quick_mark_recent_history'] = history;
+
+      if (mounted) {
+        setState(() => _settings = current.copyWith(settings: nextSettings));
+      }
+      final saved = await widget.apiClient.saveSettings(nextSettings);
+      if (mounted) setState(() => _settings = saved);
+    } catch (_) {
+      // Undoing mark history must not make the undo action fail.
     }
   }
 
@@ -1703,7 +1754,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final colorScheme = Theme.of(context).colorScheme;
     final titleBarColor = colorScheme.surfaceContainerHigh;
     final showGlobalProgress =
-        _loading || _previewDetecting || _submitting || _validationBusy;
+        _loading ||
+        _previewDetecting ||
+        _submitting ||
+        _settingsSaving ||
+        _validationBusy;
 
     final content = Stack(
       fit: StackFit.expand,
@@ -1978,6 +2033,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final items = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
         : _previewItems;
+    final settings = _settingsOrEmpty();
+    final quickMarkSpecies = _stringListSetting(
+      settings,
+      'quick_mark_list',
+      const <String>[],
+    );
 
     return SpeciesValidationScreen(
       apiClient: widget.apiClient,
@@ -1986,49 +2047,31 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       loading: _previewLoading,
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
-      autoGroup: _boolSetting(_settingsOrEmpty(), 'auto_group', true),
-      collapseGroups: _boolSetting(
-        _settingsOrEmpty(),
-        'collapse_groups',
-        false,
-      ),
+      autoGroup: _boolSetting(settings, 'auto_group', true),
+      collapseGroups: _boolSetting(settings, 'collapse_groups', false),
       autoGroupDetectBurst: _boolSetting(
-        _settingsOrEmpty(),
+        settings,
         'auto_group_detect_burst',
         false,
       ),
-      autoGroupBurstSize: _intSetting(
-        _settingsOrEmpty(),
-        'auto_group_burst_size',
-        3,
-      ),
-      autoGroupGapSeconds: _intSetting(
-        _settingsOrEmpty(),
-        'auto_group_gap_seconds',
-        30,
-      ),
-      autoSortQuickMarks: _boolSetting(_settingsOrEmpty(), 'auto_sort', false),
-      undoSteps: _intSetting(
-        _settingsOrEmpty(),
-        'undo_steps',
-        1,
-      ).clamp(1, 50).toInt(),
-      quickMarkSpecies: _stringListSetting(
-        _settingsOrEmpty(),
-        'quick_mark_list',
-        const <String>[],
-      ),
+      autoGroupBurstSize: _intSetting(settings, 'auto_group_burst_size', 3),
+      autoGroupGapSeconds: _intSetting(settings, 'auto_group_gap_seconds', 30),
+      autoSortQuickMarks: _boolSetting(settings, 'auto_sort', false),
+      undoSteps: _intSetting(settings, 'undo_steps', 1).clamp(1, 50).toInt(),
+      quickMarkSpecies: quickMarkSpecies,
       quickMarkRecentHistory: _stringListSetting(
-        _settingsOrEmpty(),
+        settings,
         'quick_mark_recent_history',
         const <String>[],
       ),
-      quickMarkUsageCounts: _intMapSetting(
-        _settingsOrEmpty(),
-        'quick_mark_usage_counts',
+      quickMarkUsageCounts: _intMapSetting(settings, 'quick_mark_usage_counts'),
+      quantityButtons: _stringListSetting(
+        settings,
+        'quantity_buttons',
+        validationQuantityButtons,
       ),
       exportColumns: _stringListSetting(
-        _settingsOrEmpty(),
+        settings,
         'export_columns',
         validationExportColumns,
       ),
@@ -2038,6 +2081,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onMarkItem: _markValidationItem,
       onMarkItems: _markValidationItems,
       onQuickMarkUsed: _recordQuickMarkUsage,
+      onQuickMarkReverted: _revertQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
     );
   }

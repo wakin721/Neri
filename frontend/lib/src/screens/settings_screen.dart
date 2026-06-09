@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../api_client.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
+import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 import '../widgets/workspace_split_metrics.dart';
@@ -45,15 +46,34 @@ const _defaultQuickMarks = <String>[
   '未知鸟',
 ];
 
+const _defaultQuantityButtons = <String>[
+  '1',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+  '10',
+  '25',
+  '50',
+];
+
 const _releaseNotesUrl =
     'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
-const _frontendVersion = '3.0.4-beta(b986e9)';
+const _frontendVersion = String.fromEnvironment(
+  'NERI_FRONTEND_VERSION',
+  defaultValue: '3.0.4-beta(f47535)',
+);
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
+const _autoSaveDelay = Duration(milliseconds: 800);
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -79,7 +99,6 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _packageController = TextEditingController();
-  final _newQuickMarkController = TextEditingController();
   Map<String, dynamic> _draft = <String, dynamic>{};
   int _sectionIndex = 0;
   bool _saving = false;
@@ -89,6 +108,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
+  int _draftRevision = 0;
+  Timer? _autoSaveTimer;
   Timer? _maintenanceTimer;
   String? _maintenanceOperation;
   String? _maintenanceMessage;
@@ -108,18 +129,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.settings != widget.settings && !_dirty && !_saving) {
-      _resetDraft();
-      _loadModelClassesForSelection();
+    if (oldWidget.settings != widget.settings) {
+      if (!_dirty && !_saving) {
+        _resetDraft();
+        _loadModelClassesForSelection();
+      } else {
+        _syncQuickMarkDraftFromSettings();
+      }
     }
   }
 
   @override
   void dispose() {
+    _autoSaveTimer?.cancel();
     _maintenanceTimer?.cancel();
     _packageController.removeListener(_handlePackageChanged);
     _packageController.dispose();
-    _newQuickMarkController.dispose();
     super.dispose();
   }
 
@@ -127,6 +152,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = widget.settings;
     final saved = Map<String, dynamic>.from(
       settings?.settings ?? const <String, dynamic>{},
+    );
+    final savedQuickMarks = _stringListSetting(
+      saved,
+      'quick_mark_list',
+      _defaultQuickMarks,
     );
     final dependenciesReady =
         settings == null || settings.missingYoloDependencies.isEmpty;
@@ -175,10 +205,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       'undo_steps': _intSetting(saved, 'undo_steps', 1),
       'auto_sort': _boolSetting(saved, 'auto_sort', false),
-      'quick_mark_list': _stringListSetting(
+      'quick_mark_list': savedQuickMarks,
+      'quantity_buttons': _stringListSetting(
         saved,
-        'quick_mark_list',
-        _defaultQuickMarks,
+        'quantity_buttons',
+        _defaultQuantityButtons,
       ),
       'export_columns': _stringListSetting(
         saved,
@@ -198,12 +229,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _packageController.text = _stringSetting(saved, 'package', '');
     _resettingDraft = false;
     _dirty = false;
+    _autoSaveTimer?.cancel();
   }
 
   void _handlePackageChanged() {
     if (_resettingDraft) return;
     _draft['package'] = _packageController.text.trim();
     _markDirty();
+  }
+
+  void _syncQuickMarkDraftFromSettings() {
+    final settings = widget.settings;
+    if (settings == null) return;
+    final saved = settings.settings;
+    _draft['quick_mark_list'] = _stringListSetting(
+      saved,
+      'quick_mark_list',
+      _defaultQuickMarks,
+    );
+    _draft['quantity_buttons'] = _stringListSetting(
+      saved,
+      'quantity_buttons',
+      _defaultQuantityButtons,
+    );
+    _draft['quick_mark_recent_history'] = _stringListSetting(
+      saved,
+      'quick_mark_recent_history',
+      const <String>[],
+    );
+    _draft['quick_mark_usage_counts'] = _intMapSetting(
+      saved,
+      'quick_mark_usage_counts',
+    );
+    if (saved.containsKey('auto_sort')) {
+      _draft['auto_sort'] = _boolSetting(
+        saved,
+        'auto_sort',
+        _bool('auto_sort'),
+      );
+    }
   }
 
   List<String> get _missingYoloDependencies =>
@@ -218,8 +282,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _markDirty() {
-    if (_dirty || !mounted) return;
-    setState(() => _dirty = true);
+    if (!mounted) return;
+    setState(_markDraftChanged);
+    _scheduleAutoSave();
+  }
+
+  void _markDraftChanged() {
+    _dirty = true;
+    _draftRevision += 1;
+  }
+
+  void _scheduleAutoSave() {
+    _autoSaveTimer?.cancel();
+    if (!_dirty || !mounted) return;
+    _autoSaveTimer = Timer(
+      _autoSaveDelay,
+      () => unawaited(_save()),
+    );
   }
 
   Future<void> _loadModelClassesForSelection([String? modelPath]) async {
@@ -664,20 +743,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const VerticalDivider(width: 1),
             Expanded(
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                    child: _buildSaveStrip(),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      padding: const EdgeInsets.all(16),
-                      children: [_buildSelectedSection()],
-                    ),
-                  ),
-                ],
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(16),
+                children: [_buildSelectedSection()],
               ),
             ),
           ],
@@ -700,34 +769,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       4 => _buildUpdateSettingsSection(),
       _ => _buildProjectSettings(),
     };
-  }
-
-  Widget _buildSaveStrip() {
-    return Card.outlined(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            const Icon(Icons.tune_rounded),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                widget.settings == null
-                    ? '尚未读取到后端配置，部分选项会使用默认值。'
-                    : '高级设置会保存到 Python 后端的配置文件，并在后续处理任务中复用。',
-              ),
-            ),
-            const SizedBox(width: 12),
-            FilledButton.icon(
-              onPressed: _saving ? null : _save,
-              icon: const Icon(Icons.save_rounded),
-              label: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildDetectionSettings() {
@@ -1531,14 +1572,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _draft['auto_group_detect_burst'] = result['auto_group_detect_burst'];
       _draft['auto_group_burst_size'] = result['auto_group_burst_size'];
       _draft['auto_group_gap_seconds'] = result['auto_group_gap_seconds'];
-      _dirty = true;
+      _markDraftChanged();
     });
+    _scheduleAutoSave();
   }
 
   Widget _buildQuickMarkSettings() {
     return SectionCard(
       title: '快速标记设置',
-      subtitle: '自动排序或手动增减快速标记物种',
+      subtitle: '物种按钮、数量按钮和自动排序',
       icon: Icons.bookmark_add_rounded,
       child: _buildQuickMarkEditor(),
     );
@@ -1608,85 +1650,538 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildQuickMarkEditor() {
     final configuredMarks = _stringList('quick_mark_list');
-    final autoSort = _bool('auto_sort');
-    final marks = autoSort
-        ? _autoSortedQuickMarks(configuredMarks)
+    final displayedMarks = _bool('auto_sort')
+        ? _autoSortedConfiguredQuickMarks(configuredMarks)
         : configuredMarks;
+    final quantityButtons = _quantityButtons();
     return Column(
       children: [
         _SettingsPanel(
-          title: '自动排序',
-          subtitle: '根据最近常用物种调整快速标记列的显示顺序',
-          icon: Icons.sort_rounded,
-          showDivider: false,
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: Switch(
-              value: autoSort,
-              onChanged: (value) => _set('auto_sort', value),
-            ),
+          title: '物种按钮',
+          subtitle: '设置校验界面右侧快速标记列显示的物种按钮',
+          icon: Icons.bookmarks_rounded,
+          child: _SummaryDialogButton(
+            summary: _quickMarksSummary(displayedMarks),
+            onPressed: _showQuickMarkButtonsDialog,
           ),
         ),
-        ...List.generate(marks.length, (index) {
-          final configuredIndex = configuredMarks.indexOf(marks[index]);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                SizedBox(width: 36, child: Text('${index + 1}')),
-                Expanded(
-                  child: TextFormField(
-                    key: ValueKey('quick-${marks[index]}-$index'),
-                    initialValue: marks[index],
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                    onChanged: (value) {
-                      if (configuredIndex < 0) return;
-                      final next = _stringList('quick_mark_list');
-                      next[configuredIndex] = value.trim();
-                      _draft['quick_mark_list'] = next;
-                      _markDirty();
-                    },
-                  ),
-                ),
-                IconButton(
-                  tooltip: '删除',
-                  onPressed: () {
-                    if (configuredIndex < 0) return;
-                    final next = _stringList('quick_mark_list')
-                      ..removeAt(configuredIndex);
-                    _set('quick_mark_list', next);
-                  },
-                  icon: const Icon(Icons.delete_outline_rounded),
-                ),
-              ],
-            ),
-          );
-        }),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _newQuickMarkController,
-                decoration: const InputDecoration(
-                  labelText: '新增快速标记',
-                  border: OutlineInputBorder(),
-                ),
-                onSubmitted: (_) => _addQuickMark(),
-              ),
-            ),
-            const SizedBox(width: 10),
-            FilledButton.icon(
-              onPressed: _addQuickMark,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('新增'),
-            ),
-          ],
+        _SettingsPanel(
+          title: '数量按钮',
+          subtitle: '选择校验界面右侧数量列显示哪些数字快捷按钮',
+          icon: Icons.format_list_numbered_rounded,
+          showDivider: false,
+          child: _SummaryDialogButton(
+            summary: _quantityButtonsSummary(quantityButtons),
+            onPressed: _showQuantityButtonsDialog,
+          ),
         ),
       ],
     );
+  }
+
+  String _quickMarksSummary(List<String> values) {
+    final cleaned = values.where((value) => value.trim().isNotEmpty).toList();
+    if (cleaned.isEmpty) return '使用默认物种';
+    if (cleaned.length <= 3) return cleaned.join('、');
+    return '${cleaned.take(2).join('、')} 等 ${cleaned.length} 个';
+  }
+
+  List<String> _autoSortedConfiguredQuickMarks(Iterable<String> values) {
+    final configured = values
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toList();
+    if (configured.isEmpty) return configured;
+
+    final sorted = autoSortedQuickMarks(
+      configuredMarks: configured,
+      usageCounts: _intMapSetting(_draft, 'quick_mark_usage_counts'),
+      recentHistory: _stringList('quick_mark_recent_history'),
+    );
+    final remaining = configured.toList();
+    final result = <String>[];
+    for (final species in sorted) {
+      final index = remaining.indexOf(species);
+      if (index < 0) continue;
+      result.add(remaining.removeAt(index));
+    }
+    result.addAll(remaining);
+    return result;
+  }
+
+  Future<void> _showQuickMarkButtonsDialog() async {
+    final markControllers = _stringList(
+      'quick_mark_list',
+    ).map((value) => TextEditingController(text: value)).toList();
+    final removedMarkControllers = <TextEditingController>[];
+    final newMarkController = TextEditingController();
+    Map<String, dynamic>? result;
+
+    try {
+      result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) {
+          var autoSort = _bool('auto_sort');
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              List<TextEditingController> displayedControllers() {
+                if (!autoSort) return markControllers;
+                final sorted = autoSortedQuickMarks(
+                  configuredMarks: markControllers.map(
+                    (controller) => controller.text.trim(),
+                  ),
+                  usageCounts: _intMapSetting(
+                    _draft,
+                    'quick_mark_usage_counts',
+                  ),
+                  recentHistory: _stringList('quick_mark_recent_history'),
+                );
+                final remaining = markControllers.toList();
+                final result = <TextEditingController>[];
+                for (final species in sorted) {
+                  final index = remaining.indexWhere(
+                    (controller) => controller.text.trim() == species,
+                  );
+                  if (index < 0) continue;
+                  result.add(remaining.removeAt(index));
+                }
+                result.addAll(remaining);
+                return result;
+              }
+
+              void addQuickMark() {
+                final value = newMarkController.text.trim();
+                if (value.isEmpty) return;
+                setDialogState(() {
+                  markControllers.add(TextEditingController(text: value));
+                  newMarkController.clear();
+                });
+              }
+
+              return AlertDialog(
+                title: const Text('物种按钮'),
+                content: SizedBox(
+                  width: 460,
+                  height: 480,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const _MutedText('设置校验界面右侧快速标记列显示的物种按钮。拖拽可调整按钮顺序。'),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        value: autoSort,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('自动排序'),
+                        subtitle: const Text('开启后下方列表按校验页当前自动排序展示'),
+                        onChanged: (value) {
+                          setDialogState(() => autoSort = value);
+                        },
+                      ),
+                      const Divider(height: 20),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: newMarkController,
+                              decoration: const InputDecoration(
+                                labelText: '新增快速标记',
+                                isDense: true,
+                                border: OutlineInputBorder(),
+                              ),
+                              onSubmitted: (_) => addQuickMark(),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          FilledButton.icon(
+                            onPressed: addQuickMark,
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('新增'),
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 20),
+                      Expanded(
+                        child: markControllers.isEmpty
+                            ? const Center(child: Text('保存空列表时会使用默认物种按钮。'))
+                            : Builder(
+                                builder: (context) {
+                                  final displayItems = displayedControllers();
+                                  return ReorderableListView.builder(
+                                    buildDefaultDragHandles: false,
+                                    itemCount: displayItems.length,
+                                    onReorderItem: (oldIndex, newIndex) {
+                                      if (autoSort) return;
+                                      setDialogState(() {
+                                        final item = markControllers.removeAt(
+                                          oldIndex,
+                                        );
+                                        markControllers.insert(newIndex, item);
+                                      });
+                                    },
+                                    itemBuilder: (context, index) {
+                                      final controller = displayItems[index];
+                                      return Padding(
+                                        key: ObjectKey(controller),
+                                        padding: const EdgeInsets.only(
+                                          bottom: 8,
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            SizedBox(
+                                              width: 36,
+                                              child: Text('${index + 1}'),
+                                            ),
+                                            Expanded(
+                                              child: TextField(
+                                                controller: controller,
+                                                decoration:
+                                                    const InputDecoration(
+                                                      isDense: true,
+                                                      border:
+                                                          OutlineInputBorder(),
+                                                    ),
+                                                onChanged: (_) {
+                                                  if (autoSort) {
+                                                    setDialogState(() {});
+                                                  }
+                                                },
+                                              ),
+                                            ),
+                                            if (autoSort)
+                                              IconButton(
+                                                tooltip: '自动排序开启时由使用记录决定顺序',
+                                                onPressed: null,
+                                                icon: const Icon(
+                                                  Icons.drag_handle_rounded,
+                                                ),
+                                              )
+                                            else
+                                              ReorderableDragStartListener(
+                                                index: index,
+                                                child: IconButton(
+                                                  tooltip: '拖拽排序',
+                                                  onPressed: () {},
+                                                  icon: const Icon(
+                                                    Icons.drag_handle_rounded,
+                                                  ),
+                                                ),
+                                              ),
+                                            IconButton(
+                                              tooltip: '删除',
+                                              onPressed: () {
+                                                setDialogState(() {
+                                                  final removedIndex =
+                                                      markControllers.indexOf(
+                                                        controller,
+                                                      );
+                                                  if (removedIndex < 0) return;
+                                                  final removed =
+                                                      markControllers.removeAt(
+                                                        removedIndex,
+                                                      );
+                                                  removedMarkControllers.add(
+                                                    removed,
+                                                  );
+                                                });
+                                              },
+                                              icon: const Icon(
+                                                Icons.delete_outline_rounded,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton(
+                    onPressed: () {
+                      final next = markControllers
+                          .map((controller) => controller.text.trim())
+                          .where((value) => value.isNotEmpty)
+                          .toList(growable: false);
+                      Navigator.of(
+                        context,
+                      ).pop({'auto_sort': autoSort, 'quick_mark_list': next});
+                    },
+                    child: const Text('保存'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      newMarkController.dispose();
+      for (final controller in markControllers) {
+        controller.dispose();
+      }
+      for (final controller in removedMarkControllers) {
+        controller.dispose();
+      }
+    }
+
+    final savedResult = result;
+    if (savedResult != null) {
+      setState(() {
+        _draft['auto_sort'] = savedResult['auto_sort'];
+        _draft['quick_mark_list'] = savedResult['quick_mark_list'];
+        _markDraftChanged();
+      });
+      _scheduleAutoSave();
+    }
+  }
+
+  List<String> _quantityButtons() {
+    final values = _normalizeQuantityButtons(_stringList('quantity_buttons'));
+    return values.isEmpty ? List<String>.from(_defaultQuantityButtons) : values;
+  }
+
+  List<String> _quantityButtonCandidates() {
+    return _normalizeQuantityButtons([
+      ..._quantityButtons(),
+      ..._defaultQuantityButtons,
+    ]);
+  }
+
+  List<String> _normalizeQuantityButtons(Iterable<String> values) {
+    final result = <String>[];
+    final seen = <String>{};
+    for (final value in values) {
+      final parsed = int.tryParse(value.trim());
+      if (parsed == null || parsed <= 0) continue;
+      final label = parsed.toString();
+      if (seen.add(label)) result.add(label);
+    }
+    return result;
+  }
+
+  String _quantityButtonsSummary(List<String> values) {
+    if (values.isEmpty) return '使用默认数量';
+    if (values.length <= 5) return values.join('、');
+    return '${values.take(4).join('、')} 等 ${values.length} 个';
+  }
+
+  Future<void> _showQuantityButtonsDialog() async {
+    final initialSelection = _quantityButtons().toSet();
+    final ordered = _quantityButtonCandidates();
+    final quantityController = TextEditingController(
+      text: initialSelection.isEmpty ? '1' : initialSelection.first,
+    );
+    List<String>? result;
+    try {
+      result = await showDialog<List<String>>(
+        context: context,
+        builder: (context) {
+          final selected = initialSelection.toSet();
+          final items = ordered.toList();
+
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              void setControllerValue(int value) {
+                final text = math.max(1, value).toString();
+                quantityController.value = TextEditingValue(
+                  text: text,
+                  selection: TextSelection.collapsed(offset: text.length),
+                );
+              }
+
+              void adjustQuantity(int delta) {
+                final current =
+                    int.tryParse(quantityController.text.trim()) ?? 1;
+                setDialogState(() => setControllerValue(current + delta));
+              }
+
+              void setQuantityButton() {
+                final parsed = int.tryParse(quantityController.text.trim());
+                if (parsed == null || parsed <= 0) return;
+                final quantity = parsed.toString();
+                setDialogState(() {
+                  if (!items.contains(quantity)) {
+                    items.insert(0, quantity);
+                  }
+                  selected.add(quantity);
+                  setControllerValue(parsed);
+                });
+              }
+
+              Widget buildQuantityControls() {
+                final input = TextField(
+                  controller: quantityController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    labelText: '数量按钮',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  onSubmitted: (_) => setQuantityButton(),
+                );
+                final setButton = FilledButton.icon(
+                  onPressed: setQuantityButton,
+                  icon: const Icon(Icons.check_rounded),
+                  label: const Text('设置'),
+                );
+
+                return LayoutBuilder(
+                  builder: (context, constraints) {
+                    final compact = constraints.maxWidth < 400;
+                    final stepper = Row(
+                      children: [
+                        IconButton.outlined(
+                          tooltip: '减少',
+                          onPressed: () => adjustQuantity(-1),
+                          icon: const Icon(Icons.remove_rounded),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(child: input),
+                        const SizedBox(width: 8),
+                        IconButton.outlined(
+                          tooltip: '增加',
+                          onPressed: () => adjustQuantity(1),
+                          icon: const Icon(Icons.add_rounded),
+                        ),
+                      ],
+                    );
+
+                    if (compact) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          stepper,
+                          const SizedBox(height: 10),
+                          setButton,
+                        ],
+                      );
+                    }
+
+                    return Row(
+                      children: [
+                        Expanded(child: stepper),
+                        const SizedBox(width: 10),
+                        setButton,
+                      ],
+                    );
+                  },
+                );
+              }
+
+              return AlertDialog(
+                title: const Text('数量按钮'),
+                content: SizedBox(
+                  width: 460,
+                  height: 480,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const _MutedText('勾选校验界面右侧数量列要显示的数字按钮。拖拽可调整按钮顺序。'),
+                      const SizedBox(height: 8),
+                      buildQuantityControls(),
+                      const Divider(height: 20),
+                      Expanded(
+                        child: ReorderableListView.builder(
+                          buildDefaultDragHandles: false,
+                          itemCount: items.length,
+                          onReorderItem: (oldIndex, newIndex) {
+                            setDialogState(() {
+                              final item = items.removeAt(oldIndex);
+                              items.insert(newIndex, item);
+                            });
+                          },
+                          itemBuilder: (context, index) {
+                            final quantity = items[index];
+                            final checked = selected.contains(quantity);
+                            return CheckboxListTile(
+                              key: ValueKey('quantity-button-$quantity'),
+                              dense: true,
+                              value: checked,
+                              title: Text(quantity),
+                              contentPadding: EdgeInsets.zero,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              secondary: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ReorderableDragStartListener(
+                                    index: index,
+                                    child: IconButton(
+                                      tooltip: '拖拽排序',
+                                      onPressed: () {},
+                                      icon: const Icon(
+                                        Icons.drag_handle_rounded,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    tooltip: '删除',
+                                    onPressed: () {
+                                      setDialogState(() {
+                                        items.removeAt(index);
+                                        selected.remove(quantity);
+                                      });
+                                    },
+                                    icon: const Icon(
+                                      Icons.delete_outline_rounded,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              onChanged: (value) {
+                                setDialogState(() {
+                                  if (value == true) {
+                                    selected.add(quantity);
+                                  } else {
+                                    selected.remove(quantity);
+                                  }
+                                  quantityController.text = quantity;
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton(
+                    onPressed: selected.isEmpty
+                        ? null
+                        : () {
+                            final next = items
+                                .where(selected.contains)
+                                .toList(growable: false);
+                            Navigator.of(context).pop(next);
+                          },
+                    child: const Text('保存'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      quantityController.dispose();
+    }
+
+    if (result != null) {
+      _set('quantity_buttons', result);
+    }
   }
 
   Widget _buildExportColumns() {
@@ -1851,56 +2346,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  List<String> _autoSortedQuickMarks(List<String> configuredMarks) {
-    final usageCounts = _intMap('quick_mark_usage_counts');
-    final history = _stringList('quick_mark_recent_history');
-    final latestIndex = <String, int>{};
-    final recentCounts = <String, int>{};
-    for (var index = 0; index < history.length; index++) {
-      final species = history[index].trim();
-      if (species.isEmpty || species == 'Unknown' || species == '空') {
-        continue;
-      }
-      latestIndex[species] = index;
-      recentCounts[species] = (recentCounts[species] ?? 0) + 1;
-    }
-
-    final originalIndex = <String, int>{};
-    final sorted = <String>[];
-    for (var index = 0; index < configuredMarks.length; index++) {
-      final species = configuredMarks[index].trim();
-      if (species.isEmpty) continue;
-      originalIndex.putIfAbsent(species, () => index);
-      sorted.add(species);
-    }
-
-    sorted.sort((a, b) {
-      final recentCompare = (recentCounts[b] ?? 0).compareTo(
-        recentCounts[a] ?? 0,
-      );
-      if (recentCompare != 0) return recentCompare;
-      final usageCompare = (usageCounts[b] ?? 0).compareTo(usageCounts[a] ?? 0);
-      if (usageCompare != 0) return usageCompare;
-      final latestCompare = (latestIndex[b] ?? -1).compareTo(
-        latestIndex[a] ?? -1,
-      );
-      if (latestCompare != 0) return latestCompare;
-      return (originalIndex[a] ?? 0).compareTo(originalIndex[b] ?? 0);
-    });
-
-    return sorted;
-  }
-
-  void _addQuickMark() {
-    final value = _newQuickMarkController.text.trim();
-    if (value.isEmpty) return;
-    final next = _stringList('quick_mark_list')..add(value);
-    _newQuickMarkController.clear();
-    _set('quick_mark_list', next);
-  }
-
   Future<void> _save() async {
-    setState(() => _saving = true);
+    _autoSaveTimer?.cancel();
+    if (_saving || !_dirty) return;
+    final saveRevision = _draftRevision;
+    setState(() {
+      _saving = true;
+    });
     var saved = false;
     try {
       _draft['package'] = _packageController.text.trim();
@@ -1911,12 +2363,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       await widget.onSaveSettings(Map<String, dynamic>.from(_draft));
       saved = true;
+    } catch (_) {
+      saved = false;
     } finally {
       if (mounted) {
         setState(() {
           _saving = false;
-          if (saved) _dirty = false;
+          if (saved && _draftRevision == saveRevision) {
+            _dirty = false;
+          }
         });
+        if (_draftRevision != saveRevision) {
+          _scheduleAutoSave();
+        }
       }
     }
   }
@@ -1924,8 +2383,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _set(String key, dynamic value) {
     setState(() {
       _draft[key] = value;
-      _dirty = true;
+      _markDraftChanged();
     });
+    _scheduleAutoSave();
   }
 
   bool _bool(String key, [bool fallback = false]) {
@@ -1946,10 +2406,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   List<String> _stringList(String key) {
     return _stringListSetting(_draft, key, const <String>[]);
-  }
-
-  Map<String, int> _intMap(String key) {
-    return _intMapSetting(_draft, key);
   }
 
   String? _validModelValue(
