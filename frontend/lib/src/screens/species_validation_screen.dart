@@ -2362,11 +2362,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     setState(() {
       _preparePendingMarkForSelectedPath();
       _selectedQuantity = quantity;
-      if (_pendingQuantities.contains(quantity)) {
-        _pendingQuantities.remove(quantity);
-      } else {
-        _pendingQuantities.add(quantity);
-      }
+      _pendingQuantities.add(quantity);
       _clearPendingPathIfEmpty();
     });
     unawaited(_submitPendingMarkIfReady());
