@@ -127,6 +127,8 @@
 
 > 使用 Intel GPU 时，请确保已安装 Intel 显卡驱动：[Intel GPU 驱动安装页面](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-11.html)
 >
+> 如果安装 XPU 版本 PyTorch 前未检测到可用的 Intel 官方显卡驱动，程序会提示是否从 [Intel Arc Graphics Windows 驱动下载页面](https://www.intel.com/content/www/us/en/download/785597/intel-arc-graphics-windows.html)下载并运行驱动安装程序。驱动安装后可能需要重启系统。
+>
 > 参考：[Intel GPU PyTorch 官方入门指南](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
 
 **如何查看 CUDA 版本并安装对应 PyTorch：**

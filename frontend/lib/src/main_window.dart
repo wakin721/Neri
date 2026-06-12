@@ -1489,13 +1489,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       'tsinghua' => '清华源',
       _ => '官方源',
     };
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return true;
+
+    final driverStep = installIntelDriver
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('需要安装 YOLO 依赖'),
         content: Text(
           '当前缺少：$missingText。\n\n'
-          '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+          '$driverStep'
           '安装完成后 Python 后端会自动重启。',
         ),
         actions: [
@@ -1516,6 +1522,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
         packageSource: packageSource,
+        installIntelDriver: installIntelDriver,
       );
       if (!mounted) return true;
       _showSnackBar(response.message);
@@ -1524,6 +1531,43 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showSnackBar('启动 YOLO 依赖安装失败：$installError');
     }
     return true;
+  }
+
+  Future<bool?> _resolveIntelDriverInstall(String envChoice) async {
+    try {
+      final plan = await widget.apiClient.fetchPytorchInstallPlan(envChoice);
+      if (!mounted) return null;
+      if (!plan.needsIntelDriver) return false;
+
+      final deviceText = plan.intelDeviceName.isEmpty
+          ? 'Intel GPU'
+          : plan.intelDeviceName;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('需要安装 Intel 显卡驱动'),
+          content: Text(
+            '将安装 Intel XPU 版本 PyTorch，但当前检测到 $deviceText 尚未安装可用的 Intel 官方显卡驱动。\n\n'
+            '是否先从 Intel 官网下载并运行显卡驱动安装程序？安装过程中可能出现 Windows 权限确认，完成后可能需要重启。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('下载并安装驱动'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || confirmed != true) return null;
+      return true;
+    } catch (error) {
+      if (mounted) _showSnackBar('检测 Intel 显卡驱动失败：$error');
+      return null;
+    }
   }
 
   Future<void> _detectCurrentPreviewImage(DetectionItem item) async {

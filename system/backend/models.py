@@ -70,6 +70,7 @@ class InstallPytorchRequest(BaseModel):
 
     env_choice: str = Field(default="自动检测", min_length=1)
     package_source: str = Field(default="official", min_length=1)
+    install_intel_driver: bool = False
 
 
 class InstallYoloDependenciesRequest(BaseModel):
@@ -77,6 +78,7 @@ class InstallYoloDependenciesRequest(BaseModel):
 
     env_choice: str = Field(default="自动检测", min_length=1)
     package_source: str = Field(default="official", min_length=1)
+    install_intel_driver: bool = False
 
 
 class ReinstallPackageRequest(BaseModel):
@@ -92,6 +94,19 @@ class MaintenanceStartResponse(BaseModel):
     accepted: bool = True
     operation: str
     message: str
+
+
+class PytorchInstallPlanResponse(BaseModel):
+    """Resolved PyTorch installation target and Intel driver preflight info."""
+
+    env_choice: str
+    actual_env: str
+    index_url: str
+    is_xpu: bool = False
+    intel_driver: dict[str, Any] = Field(default_factory=dict)
+    needs_intel_driver: bool = False
+    intel_driver_page_url: str
+    intel_driver_download_url: str
 
 
 class MaintenanceStatusResponse(BaseModel):

@@ -62,6 +62,7 @@ class NeriApiClient {
   Future<MaintenanceStartResponse> installPytorch(
     String envChoice, {
     String packageSource = 'official',
+    bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/environment/install-pytorch'),
@@ -69,6 +70,7 @@ class NeriApiClient {
       body: jsonEncode({
         'env_choice': envChoice,
         'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
       }),
     );
     _ensureSuccess(response);
@@ -80,6 +82,7 @@ class NeriApiClient {
   Future<MaintenanceStartResponse> installYoloDependencies({
     required String envChoice,
     String packageSource = 'official',
+    bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/environment/install-yolo-dependencies'),
@@ -87,6 +90,7 @@ class NeriApiClient {
       body: jsonEncode({
         'env_choice': envChoice,
         'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
       }),
     );
     _ensureSuccess(response);
@@ -156,6 +160,17 @@ class NeriApiClient {
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
     return DebugLogContent.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PytorchInstallPlan> fetchPytorchInstallPlan(String envChoice) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/environment/pytorch-install-plan',
+    ).replace(queryParameters: {'env_choice': envChoice});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return PytorchInstallPlan.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
@@ -490,6 +505,49 @@ class MaintenanceStartResponse {
   final bool accepted;
   final String operation;
   final String message;
+}
+
+class PytorchInstallPlan {
+  const PytorchInstallPlan({
+    required this.envChoice,
+    required this.actualEnv,
+    required this.indexUrl,
+    required this.isXpu,
+    required this.needsIntelDriver,
+    required this.intelDriverPageUrl,
+    required this.intelDriverDownloadUrl,
+    required this.intelDriver,
+  });
+
+  factory PytorchInstallPlan.fromJson(Map<String, dynamic> json) {
+    return PytorchInstallPlan(
+      envChoice: json['env_choice'] as String? ?? '',
+      actualEnv: json['actual_env'] as String? ?? '',
+      indexUrl: json['index_url'] as String? ?? '',
+      isXpu: json['is_xpu'] as bool? ?? false,
+      needsIntelDriver: json['needs_intel_driver'] as bool? ?? false,
+      intelDriverPageUrl: json['intel_driver_page_url'] as String? ?? '',
+      intelDriverDownloadUrl:
+          json['intel_driver_download_url'] as String? ?? '',
+      intelDriver: Map<String, dynamic>.from(
+        json['intel_driver'] as Map<String, dynamic>? ?? const {},
+      ),
+    );
+  }
+
+  final String envChoice;
+  final String actualEnv;
+  final String indexUrl;
+  final bool isXpu;
+  final bool needsIntelDriver;
+  final String intelDriverPageUrl;
+  final String intelDriverDownloadUrl;
+  final Map<String, dynamic> intelDriver;
+
+  String get intelDeviceName =>
+      intelDriver['device_name']?.toString() ??
+      intelDriver['driver_name']?.toString() ??
+      '';
 }
 
 class MaintenanceStatus {
