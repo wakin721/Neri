@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -916,6 +917,8 @@ def _iter_supported_files(input_dir: Path) -> Iterable[Path]:
     image_files: list[Path] = []
     video_files: list[Path] = []
     for path in sorted(input_dir.rglob("*")):
+        if _is_generated_favorite_export_path(path):
+            continue
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
@@ -927,6 +930,10 @@ def _iter_supported_files(input_dir: Path) -> Iterable[Path]:
             video_files.append(path)
     yield from image_files
     yield from video_files
+
+
+def _is_generated_favorite_export_path(path: Path) -> bool:
+    return any(part.endswith("_收藏照片") for part in path.parts)
 
 
 def _file_size(path: Path) -> int | None:
@@ -1626,12 +1633,13 @@ def _detect_video_track(
     input_path: Path,
     cancelled=None,
 ) -> DetectionItem:
+    output_dir: Path | None = None
     try:
         selected_class_ids = _selected_species_class_ids(
             detector,
             request.options.selected_species_names,
         )
-        output_dir = _video_output_dir(input_path, request.output_dir)
+        output_dir = _video_processing_temp_dir()
         extra_db_dir = str(input_path if input_path.is_dir() else input_path.parent)
 
         def status_callback(*_args):
@@ -1677,6 +1685,9 @@ def _detect_video_track(
         return item
     except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
         return item.model_copy(update={"error": f"视频检测失败: {exc}"})
+    finally:
+        if output_dir is not None:
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def _detect_video_fast(
@@ -1966,14 +1977,10 @@ def _build_fast_video_detection_data(
     }
 
 
-def _video_output_dir(input_path: Path, output_dir: str | None) -> Path:
-    if output_dir:
-        target_dir = Path(output_dir).expanduser().resolve()
-    else:
-        target_dir = input_path if input_path.is_dir() else input_path.parent
-    output_path = target_dir / "video_results"
-    output_path.mkdir(parents=True, exist_ok=True)
-    return output_path
+def _video_processing_temp_dir() -> Path:
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="neri_video_track_"))
 
 
 DEFAULT_EXPORT_COLUMNS = [
@@ -2187,6 +2194,7 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
 
     for path in files:
         metadata = _build_export_metadata(path)
+        metadata["_source_path"] = str(path)
         detection_data = _load_detection_data_for_path(path, detection_roots)
         if detection_data:
             metadata.update(detection_data)
@@ -2222,10 +2230,22 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
     if not success:
         raise RuntimeError("导出文件失败，请查看后端日志获取详情。")
 
+    favorite_output_dir: Path | None = None
+    favorite_exported_count = 0
+    if request.export_favorite_photos:
+        favorite_output_dir, favorite_exported_count = _export_favorite_photos(
+            files,
+            request.favorite_photo_paths,
+            output_path,
+            _export_species_by_path(processed_data),
+        )
+
     return ValidationExportResponse(
         output_path=str(output_path),
         file_format=request.file_format,
         exported_count=len(processed_data),
+        favorite_output_dir=str(favorite_output_dir) if favorite_output_dir else None,
+        favorite_exported_count=favorite_exported_count,
     )
 
 
@@ -2337,6 +2357,90 @@ def _build_export_metadata(path: Path) -> dict[str, Any]:
                 image.close()
             except Exception:
                 pass
+
+
+def _export_favorite_photos(
+    files: Iterable[Path],
+    favorite_photo_paths: Iterable[str],
+    output_path: Path,
+    species_by_path: dict[str, str],
+) -> tuple[Path | None, int]:
+    favorite_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for path in favorite_photo_paths:
+        key = _path_key(path)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        favorite_keys.append(key)
+    if not favorite_keys:
+        return None, 0
+
+    available_images = {
+        _path_key(path): path
+        for path in files
+        if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+    }
+    selected_files = [
+        available_images[key]
+        for key in favorite_keys
+        if key in available_images and available_images[key].is_file()
+    ]
+    if not selected_files:
+        return None, 0
+
+    target_dir = output_path.parent / f"{output_path.stem}_收藏照片"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for source in selected_files:
+        species_folder = target_dir / _species_export_folder_name(
+            species_by_path.get(_path_key(source))
+        )
+        species_folder.mkdir(parents=True, exist_ok=True)
+        destination = _unique_favorite_export_path(species_folder, source.name)
+        shutil.copy2(source, destination)
+        copied += 1
+
+    return target_dir, copied
+
+
+def _export_species_by_path(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
+    species_by_path: dict[str, str] = {}
+    for row in rows:
+        key = _path_key(row.get("_source_path"))
+        if not key:
+            continue
+        species = str(row.get("物种名称") or "").strip()
+        if species:
+            species_by_path[key] = species
+    return species_by_path
+
+
+def _species_export_folder_name(species: str | None) -> str:
+    name = (species or "").strip() or "未知物种"
+    name = re.sub(r"\s*[,，]\s*", "、", name)
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name:
+        name = "未知物种"
+    return name[:80]
+
+
+def _unique_favorite_export_path(target_dir: Path, filename: str) -> Path:
+    source_name = Path(filename)
+    stem = source_name.stem or "photo"
+    suffix = source_name.suffix
+    candidate = target_dir / source_name.name
+    if not candidate.exists():
+        return candidate
+
+    index = 2
+    while True:
+        candidate = target_dir / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 def _resolve_validation_export_path(input_path: Path, request: ValidationExportRequest) -> Path:

@@ -144,6 +144,11 @@ class NeriApiClient {
     );
   }
 
+  Future<void> simulateBackendCrash() async {
+    final response = await _httpClient.post(_uri('/api/debug/simulate-crash'));
+    _ensureSuccess(response);
+  }
+
   Future<List<DebugLogInfo>> fetchDebugLogs() async {
     final response = await _httpClient.get(_uri('/api/debug/logs'));
     _ensureSuccess(response);
@@ -153,13 +158,34 @@ class NeriApiClient {
         .toList();
   }
 
-  Future<DebugLogContent> fetchDebugLogContent(String path) async {
-    final uri = Uri.parse(
-      '$baseUrl/api/debug/logs/content',
-    ).replace(queryParameters: {'path': path});
+  Future<DebugLogContent> fetchDebugLogContent(
+    String path, {
+    int maxBytes = 32000,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/debug/logs/content').replace(
+      queryParameters: {'path': path, 'max_bytes': maxBytes.toString()},
+    );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
     return DebugLogContent.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ClearCacheResult> clearCache({
+    required bool clearLogs,
+    required bool clearSoftwareCache,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/debug/clear-cache'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'clear_logs': clearLogs,
+        'clear_software_cache': clearSoftwareCache,
+      }),
+    );
+    _ensureSuccess(response);
+    return ClearCacheResult.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
@@ -359,6 +385,8 @@ class NeriApiClient {
     String? outputPath,
     List<String>? columnsToExport,
     Map<String, double>? confidenceSettings,
+    bool exportFavoritePhotos = false,
+    List<String>? favoritePhotoPaths,
     double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
@@ -370,6 +398,9 @@ class NeriApiClient {
         if (outputPath != null && outputPath.isNotEmpty)
           'output_path': outputPath,
         if (columnsToExport != null) 'columns_to_export': columnsToExport,
+        'export_favorite_photos': exportFavoritePhotos,
+        if (favoritePhotoPaths != null)
+          'favorite_photo_paths': favoritePhotoPaths,
         'confidence_settings': confidenceSettings ?? {'global': 0.25},
         'min_frame_ratio': minFrameRatio,
       }),
@@ -678,4 +709,30 @@ class DebugLogContent extends DebugLogInfo {
 
   final String content;
   final bool truncated;
+}
+
+class ClearCacheResult {
+  const ClearCacheResult({
+    required this.clearedFiles,
+    required this.clearedDirectories,
+    required this.reclaimedBytes,
+    required this.skipped,
+  });
+
+  factory ClearCacheResult.fromJson(Map<String, dynamic> json) {
+    return ClearCacheResult(
+      clearedFiles: json['cleared_files'] as int? ?? 0,
+      clearedDirectories: json['cleared_directories'] as int? ?? 0,
+      reclaimedBytes: json['reclaimed_bytes'] as int? ?? 0,
+      skipped: (json['skipped'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList(),
+    );
+  }
+
+  final int clearedFiles;
+  final int clearedDirectories;
+  final int reclaimedBytes;
+  final List<String> skipped;
 }

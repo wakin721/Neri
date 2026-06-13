@@ -158,6 +158,28 @@ class RuntimeDiagnostics(BaseModel):
     error: str | None = None
 
 
+class ClearCacheRequest(BaseModel):
+    """Request to clear selected local runtime files."""
+
+    clear_logs: bool = False
+    clear_software_cache: bool = False
+
+    @model_validator(mode="after")
+    def require_selection(self) -> "ClearCacheRequest":
+        if not self.clear_logs and not self.clear_software_cache:
+            raise ValueError("至少需要选择一项要清理的内容。")
+        return self
+
+
+class ClearCacheResponse(BaseModel):
+    """Summary of a local cache cleanup operation."""
+
+    cleared_files: int = 0
+    cleared_directories: int = 0
+    reclaimed_bytes: int = 0
+    skipped: list[str] = Field(default_factory=list)
+
+
 class ProcessingOptions(BaseModel):
     """Options that mirror the current desktop advanced processing controls."""
 
@@ -261,6 +283,8 @@ class ValidationExportRequest(BaseModel):
     file_format: Literal["excel", "csv"] = "csv"
     confidence_settings: dict[str, float] = Field(default_factory=lambda: {"global": 0.25})
     columns_to_export: list[str] | None = None
+    export_favorite_photos: bool = False
+    favorite_photo_paths: list[str] = Field(default_factory=list)
     min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -270,6 +294,8 @@ class ValidationExportResponse(BaseModel):
     output_path: str
     file_format: str
     exported_count: int
+    favorite_output_dir: str | None = None
+    favorite_exported_count: int = 0
 
 
 class JobSummary(BaseModel):

@@ -49,6 +49,7 @@ Thumbs.db
 toolkit/
 app/
 temp/
+logs/
 
 # 忽略 frontend 文件夹下的所有内容，但保留 lib 文件夹
 frontend/*

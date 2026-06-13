@@ -38,6 +38,10 @@ typedef RedetectValidationItems =
       required double confidence,
     });
 
+const favoritePhotoExportAsk = 'ask';
+const favoritePhotoExportAlways = 'export';
+const favoritePhotoExportNever = 'skip';
+
 const validationExportColumns = <String>[
   '文件名',
   '格式',
@@ -96,6 +100,8 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.quickMarkUsageCounts,
     required this.quantityButtons,
     required this.exportColumns,
+    required this.favoritePhotoPaths,
+    required this.favoritePhotoExportMode,
     required this.onRefresh,
     required this.onLoadMetadata,
     required this.onOpenExternal,
@@ -104,6 +110,8 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onQuickMarkUsed,
     required this.onQuickMarkReverted,
     required this.onRedetectItems,
+    required this.onFavoritePhotoPathsChanged,
+    required this.onFavoritePhotoExportModeChanged,
     super.key,
   });
 
@@ -125,6 +133,8 @@ class SpeciesValidationScreen extends StatefulWidget {
   final Map<String, int> quickMarkUsageCounts;
   final List<String> quantityButtons;
   final List<String> exportColumns;
+  final List<String> favoritePhotoPaths;
+  final String favoritePhotoExportMode;
   final Future<void> Function() onRefresh;
   final Future<void> Function(DetectionItem item) onLoadMetadata;
   final void Function(String path) onOpenExternal;
@@ -133,6 +143,8 @@ class SpeciesValidationScreen extends StatefulWidget {
   final Future<void> Function(String speciesName) onQuickMarkUsed;
   final Future<void> Function(String speciesName) onQuickMarkReverted;
   final RedetectValidationItems onRedetectItems;
+  final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
+  final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
 
   @override
   State<SpeciesValidationScreen> createState() =>
@@ -238,7 +250,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final Set<String> _expandedGroupSignatures = <String>{};
 
   bool get _useCollapsedGroups => widget.autoGroup && widget.collapseGroups;
-  int get _undoHistoryLimit => widget.undoSteps.clamp(1, 50).toInt();
+  int get _undoHistoryLimit => widget.undoSteps.clamp(10, 200).toInt();
   List<String> get _quantityOptions {
     final source = widget.quantityButtons.isEmpty
         ? validationQuantityButtons
@@ -252,6 +264,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (seen.add(label)) result.add(label);
     }
     return result.isEmpty ? validationQuantityButtons : result;
+  }
+
+  String get _favoritePhotoExportMode {
+    return switch (widget.favoritePhotoExportMode) {
+      favoritePhotoExportAlways => favoritePhotoExportAlways,
+      favoritePhotoExportNever => favoritePhotoExportNever,
+      _ => favoritePhotoExportAsk,
+    };
   }
 
   String get _undoTooltip => '撤回上一步校验';
@@ -745,6 +765,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         visibleBoxes: visibleBoxes,
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
+        isFavorite: _isFavoritePhoto(item),
+        onToggleFavorite: _isImage(item)
+            ? () => unawaited(_toggleFavoritePhoto(item))
+            : null,
       ),
     );
   }
@@ -1254,6 +1278,37 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool _isImage(DetectionItem item) {
     const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
     return imageTypes.contains(item.fileType.toLowerCase());
+  }
+
+  bool _isFavoritePhoto(DetectionItem item) {
+    return _isImage(item) &&
+        widget.favoritePhotoPaths.any((path) => path.trim() == item.path);
+  }
+
+  Future<void> _toggleFavoritePhoto(DetectionItem item) async {
+    if (!_isImage(item)) return;
+
+    final favorites = <String>[];
+    final seen = <String>{};
+    for (final path in widget.favoritePhotoPaths) {
+      final trimmed = path.trim();
+      if (trimmed.isEmpty || !seen.add(trimmed)) continue;
+      favorites.add(trimmed);
+    }
+
+    final isFavorite = favorites.remove(item.path);
+    if (!isFavorite) {
+      favorites.add(item.path);
+    }
+
+    try {
+      await widget.onFavoritePhotoPathsChanged(favorites);
+      if (!mounted) return;
+      _showSnackBar(isFavorite ? '已取消收藏照片' : '已收藏照片');
+    } catch (error) {
+      if (!mounted) return;
+      _showSnackBar('更新收藏失败：$error');
+    }
   }
 
   DetectionItem _selectedItem(List<DetectionItem> visibleItems) {
@@ -2828,12 +2883,119 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     Future.delayed(const Duration(seconds: 4), controller.close);
   }
 
+  List<DetectionItem> _favoriteImageItemsForExport() {
+    final favoritePaths = widget.favoritePhotoPaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toSet();
+    if (favoritePaths.isEmpty) return const <DetectionItem>[];
+
+    final seen = <String>{};
+    return [
+      for (final item in widget.items)
+        if (_isImage(item) &&
+            favoritePaths.contains(item.path) &&
+            seen.add(item.path))
+          item,
+    ];
+  }
+
+  Future<bool?> _resolveFavoritePhotoExport() async {
+    final favoriteItems = _favoriteImageItemsForExport();
+    if (favoriteItems.isEmpty) return false;
+
+    final mode = _favoritePhotoExportMode;
+    if (mode == favoritePhotoExportAlways) return true;
+    if (mode == favoritePhotoExportNever) return false;
+
+    final choice = await _showFavoritePhotoExportDialog(favoriteItems.length);
+    if (choice == null) return null;
+    if (choice.remember) {
+      final nextMode = choice.exportPhotos
+          ? favoritePhotoExportAlways
+          : favoritePhotoExportNever;
+      try {
+        await widget.onFavoritePhotoExportModeChanged(nextMode);
+      } catch (error) {
+        if (mounted) _showSnackBar('保存导出偏好失败：$error');
+      }
+    }
+    return choice.exportPhotos;
+  }
+
+  Future<_FavoritePhotoExportChoice?> _showFavoritePhotoExportDialog(
+    int favoriteCount,
+  ) {
+    var remember = false;
+    return showDialog<_FavoritePhotoExportChoice>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('导出收藏照片？'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('当前有 $favoriteCount 张收藏照片。是否在导出表格时同步复制到单独文件夹？'),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: remember,
+                      onChanged: (value) =>
+                          setDialogState(() => remember = value ?? false),
+                      title: const Text('不再询问'),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _FavoritePhotoExportChoice(
+                      exportPhotos: false,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('不导出'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _FavoritePhotoExportChoice(
+                      exportPhotos: true,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('导出'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _exportData() async {
+    final exportFavoritePhotos = await _resolveFavoritePhotoExport();
+    if (exportFavoritePhotos == null) return;
+
     setState(() => _exporting = true);
     try {
       final confidenceSettings = _selectedSpeciesFilter == _globalSpecies
           ? {'global': _confidence}
           : {'global': 0.25, _selectedSpeciesFilter: _confidence};
+      final favoritePhotoPaths = exportFavoritePhotos
+          ? _favoriteImageItemsForExport().map((item) => item.path).toList()
+          : const <String>[];
       final result = await widget.apiClient.exportValidationData(
         inputPath: widget.inputPath,
         fileFormat: _exportFormat,
@@ -2841,10 +3003,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             ? validationExportColumns
             : widget.exportColumns,
         confidenceSettings: confidenceSettings,
+        exportFavoritePhotos: exportFavoritePhotos,
+        favoritePhotoPaths: favoritePhotoPaths,
       );
       if (!mounted) return;
+      final favoriteMessage =
+          result.favoriteExportedCount > 0 &&
+              (result.favoriteOutputDir?.isNotEmpty ?? false)
+          ? '\n已同步导出 ${result.favoriteExportedCount} 张收藏照片到 ${result.favoriteOutputDir}'
+          : '';
       _showSnackBar(
-        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}',
+        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}$favoriteMessage',
         actionLabel: '打开',
         onAction: () => widget.onOpenExternal(result.outputPath),
       );
@@ -3323,6 +3492,16 @@ class _OtherSpeciesDraft {
   final String remark;
 }
 
+class _FavoritePhotoExportChoice {
+  const _FavoritePhotoExportChoice({
+    required this.exportPhotos,
+    required this.remember,
+  });
+
+  final bool exportPhotos;
+  final bool remember;
+}
+
 class _OtherSpeciesDialog extends StatefulWidget {
   const _OtherSpeciesDialog({
     required this.initialSpecies,
@@ -3517,8 +3696,10 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
         countController.text = newCountStr;
       }
     } else {
-      if (activeSpecies.contains('空') || activeSpecies.contains('未知鸟')) {
-        countController.text = activeSpecies.first;
+      if (activeSpecies.contains('空')) {
+        countController.text = '空';
+      } else if (activeSpecies.contains('未知鸟')) {
+        countController.text = '1';
       } else {
         countController.text = '';
       }

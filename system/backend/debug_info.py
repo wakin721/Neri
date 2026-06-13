@@ -13,6 +13,22 @@ from . import __version__
 from .maintenance import maintenance_log_path, maintenance_status_path, project_root
 
 LOG_EXTENSIONS = {".log", ".txt", ".json"}
+TEMP_LOG_EXTENSIONS = {".log", ".txt"}
+DEFAULT_LOG_TAIL_BYTES = 32_000
+CACHE_FILE_NAMES = {
+    "job_state.json",
+    "crash_startup_report.json",
+}
+CACHE_FILE_PREFIXES = (
+    "crash_watchdog_",
+    "crash_startup_report_",
+)
+CACHE_PRESERVED_TEMP_NAMES = {
+    "settings.json",
+    "quick_mark.json",
+    "backend_maintenance_status.json",
+    "backend_maintenance.log",
+}
 
 
 def installed_packages() -> list[dict[str, str]]:
@@ -89,11 +105,15 @@ def list_debug_logs() -> list[dict[str, Any]]:
 
     files: dict[Path, Path] = {}
     root = project_root()
-    for logs_root in (root / "temp", root / "logs"):
+    search_roots = (
+        (root / "temp", TEMP_LOG_EXTENSIONS),
+        (root / "logs", LOG_EXTENSIONS),
+    )
+    for logs_root, extensions in search_roots:
         if not logs_root.exists():
             continue
         for path in logs_root.rglob("*"):
-            if path.is_file() and path.suffix.lower() in LOG_EXTENSIONS:
+            if path.is_file() and path.suffix.lower() in extensions:
                 files[path.resolve()] = path
 
     for path in (maintenance_log_path(), maintenance_status_path()):
@@ -107,7 +127,10 @@ def list_debug_logs() -> list[dict[str, Any]]:
     )
 
 
-def read_debug_log(path_text: str, max_bytes: int = 200_000) -> dict[str, Any]:
+def read_debug_log(
+    path_text: str,
+    max_bytes: int = DEFAULT_LOG_TAIL_BYTES,
+) -> dict[str, Any]:
     """Read the tail of a whitelisted log file."""
 
     path = _resolve_allowed_log_path(path_text)
@@ -120,6 +143,79 @@ def read_debug_log(path_text: str, max_bytes: int = 200_000) -> dict[str, Any]:
     if truncated:
         content = f"... 仅显示最后 {max_bytes} 字节\n{content}"
     return {**_log_info(path), "content": content, "truncated": truncated}
+
+
+def clear_debug_storage(
+    *,
+    clear_logs: bool,
+    clear_software_cache: bool,
+) -> dict[str, Any]:
+    """Clear selected local runtime files under controlled project paths."""
+
+    cleared_files = 0
+    cleared_directories = 0
+    reclaimed_bytes = 0
+    skipped: list[str] = []
+
+    def delete_file(path: Path) -> None:
+        nonlocal cleared_files, reclaimed_bytes
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            cleared_files += 1
+            reclaimed_bytes += size
+        except Exception as exc:  # noqa: BLE001 - cleanup should be best effort
+            skipped.append(f"{_display_name(path)}：{exc}")
+
+    def delete_directory(path: Path) -> None:
+        nonlocal cleared_directories, reclaimed_bytes
+        try:
+            size = _directory_size(path)
+            for child in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                if child.is_file():
+                    child.unlink()
+                elif child.is_dir():
+                    child.rmdir()
+            path.rmdir()
+            cleared_directories += 1
+            reclaimed_bytes += size
+        except Exception as exc:  # noqa: BLE001 - cleanup should be best effort
+            skipped.append(f"{_display_name(path)}：{exc}")
+
+    root = project_root()
+    if clear_logs:
+        log_roots = (
+            (root / "logs", LOG_EXTENSIONS),
+            (root / "temp", TEMP_LOG_EXTENSIONS),
+        )
+        for log_root, extensions in log_roots:
+            if not log_root.exists():
+                continue
+            for path in sorted(log_root.rglob("*")):
+                if path.is_file() and path.suffix.lower() in extensions:
+                    delete_file(path)
+
+    if clear_software_cache:
+        temp_root = root / "temp"
+        if temp_root.exists():
+            for path in sorted(temp_root.iterdir()):
+                if path.name in CACHE_PRESERVED_TEMP_NAMES or path.suffix.lower() == ".db":
+                    continue
+                if path.is_file() and _is_cache_file(path):
+                    delete_file(path)
+                elif path.is_dir() and _is_cache_directory(path):
+                    delete_directory(path)
+
+        for pycache in sorted((root / "system").rglob("__pycache__")):
+            if pycache.is_dir():
+                delete_directory(pycache)
+
+    return {
+        "cleared_files": cleared_files,
+        "cleared_directories": cleared_directories,
+        "reclaimed_bytes": reclaimed_bytes,
+        "skipped": skipped,
+    }
 
 
 def _resolve_allowed_log_path(path_text: str) -> Path:
@@ -144,6 +240,33 @@ def _resolve_allowed_log_path(path_text: str) -> Path:
     if path in allowed_files:
         return path
     raise ValueError("日志路径不在允许的调试目录中。")
+
+
+def _is_cache_file(path: Path) -> bool:
+    name = path.name
+    return (
+        name in CACHE_FILE_NAMES
+        or any(name.startswith(prefix) for prefix in CACHE_FILE_PREFIXES)
+        or path.suffix.lower() in {".tmp", ".cache", ".bak"}
+    )
+
+
+def _is_cache_directory(path: Path) -> bool:
+    return path.name == "__pycache__" or path.name.lower().endswith("_cache")
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    try:
+        for child in path.rglob("*"):
+            if child.is_file():
+                try:
+                    total += child.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
 
 
 def _log_info(path: Path) -> dict[str, Any]:
