@@ -214,14 +214,13 @@ if (-not $reason) {
 }
 
 $message = @(
-    "The main program exited unexpectedly.",
+    "Neri 已异常退出。",
     "",
-    "Reason: $reason",
+    "原因：$reason",
     "",
-    "Frontend crash log: $FrontendLog",
-    "Backend runtime log: $BackendLog"
+    "崩溃日志：$FrontendLog"
 ) -join [Environment]::NewLine
-$caption = $Title + " crash report"
+$caption = $Title + " 崩溃提示"
 
 function Show-CrashMessage {
     param(

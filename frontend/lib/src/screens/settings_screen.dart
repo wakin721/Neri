@@ -70,7 +70,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.4-beta3(0702b2)',
+  defaultValue: '3.0.4-beta4(d52b8e)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -83,6 +83,7 @@ const _favoritePhotoExportNever = 'skip';
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     required this.settings,
+    required this.autoGroupInferredBurstSize,
     required this.apiClient,
     required this.themeNotifier,
     required this.onUpdateTheme,
@@ -92,6 +93,7 @@ class SettingsScreen extends StatefulWidget {
   });
 
   final NeriSettings? settings;
+  final int? autoGroupInferredBurstSize;
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
@@ -1496,7 +1498,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '自动分组规则',
-            subtitle: '综合拍摄时间和连拍张数判断事件边界；下一项是配套视频时会优先并入当前组。',
+            subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
             icon: Icons.timelapse_rounded,
             child: _SummaryDialogButton(
               summary: _autoGroupRuleSummary(),
@@ -1541,9 +1543,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final burst = _int('auto_group_burst_size').clamp(1, 20).toInt();
     final gap = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
     final burstText = _bool('auto_group_detect_burst')
-        ? '自动识别，当前 $burst 张'
+        ? '自动识别，当前 ${_autoGroupDisplayBurstSize(burst)} 张'
         : '$burst 张';
     return '$burstText · $gap 秒';
+  }
+
+  int _autoGroupDisplayBurstSize(int fallback) {
+    final inferred = widget.autoGroupInferredBurstSize;
+    if (inferred == null) return fallback;
+    return inferred.clamp(1, 20).toInt();
   }
 
   Future<void> _showAutoGroupRulesDialog() async {
@@ -1556,6 +1564,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
+            final currentBurstSize = _autoGroupDisplayBurstSize(burstSize);
             return AlertDialog(
               title: const Text('自动分组规则'),
               content: SizedBox(
@@ -1569,16 +1578,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       onChanged: (value) =>
                           setDialogState(() => detectBurst = value),
                       title: const Text('自动识别连拍张数'),
-                      subtitle: Text('开启后禁用手动连拍张数；当前分组连拍张数为 $burstSize 张'),
+                      subtitle: Text(
+                        '开启后禁用手动连拍张数；当前分组连拍张数为 $currentBurstSize 张',
+                      ),
                     ),
                     const SizedBox(height: 8),
                     _LabeledSlider(
                       label: '连拍张数',
-                      value: burstSize.toDouble(),
+                      value: (detectBurst ? currentBurstSize : burstSize)
+                          .toDouble(),
                       min: 1,
                       max: 20,
                       divisions: 19,
-                      valueLabel: '$burstSize 张',
+                      valueLabel:
+                          '${detectBurst ? currentBurstSize : burstSize} 张',
                       enabled: !detectBurst,
                       onChanged: (value) =>
                           setDialogState(() => burstSize = value.round()),

@@ -108,6 +108,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String _videoMode = 'all';
   int _imageSize = 1920;
   int _vidStride = 1;
+  int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
@@ -2195,6 +2196,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget _buildSettingsScreen() {
     return SettingsScreen(
       settings: _settings,
+      autoGroupInferredBurstSize: _autoGroupInferredBurstSize,
       apiClient: widget.apiClient,
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
@@ -2302,7 +2304,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onRedetectItems: _redetectValidationItems,
       onFavoritePhotoPathsChanged: _updateFavoritePhotoPaths,
       onFavoritePhotoExportModeChanged: _updateFavoritePhotoExportMode,
+      onAutoGroupInferredBurstSizeChanged:
+          _handleAutoGroupInferredBurstSizeChanged,
     );
+  }
+
+  void _handleAutoGroupInferredBurstSizeChanged(int? value) {
+    if (_autoGroupInferredBurstSize == value) return;
+    if (!mounted) return;
+    setState(() => _autoGroupInferredBurstSize = value);
   }
 
   NeriSettings _settingsOrEmpty() {

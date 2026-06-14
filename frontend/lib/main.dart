@@ -98,7 +98,7 @@ Future<void> _runCrashReportMode(ThemeSettings settings) async {
           CrashReporter.latestReport.value ??
           CrashReport(
             title: '程序崩溃提示',
-            message: 'Neri 上次运行异常退出。',
+            message: 'Neri 上次运行异常退出，崩溃日志已保存。',
             details: '',
             logPath: '',
             createdAt: DateTime.now(),
@@ -194,10 +194,33 @@ class _CrashReportOnlyScreenState extends State<_CrashReportOnlyScreen> {
                     ),
                     if (widget.report.details.isNotEmpty) ...[
                       const SizedBox(height: 16),
+                      Text(
+                        '详细原因',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: scheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
                       SelectableText(
                         widget.report.details,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: scheme.onSurface,
+                        ),
+                      ),
+                    ],
+                    if (widget.report.logPath.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        '崩溃日志',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: scheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      SelectableText(
+                        widget.report.logPath,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
                         ),
                       ),
                     ],

@@ -112,6 +112,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onRedetectItems,
     required this.onFavoritePhotoPathsChanged,
     required this.onFavoritePhotoExportModeChanged,
+    required this.onAutoGroupInferredBurstSizeChanged,
     super.key,
   });
 
@@ -145,6 +146,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final RedetectValidationItems onRedetectItems;
   final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
   final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
+  final ValueChanged<int?> onAutoGroupInferredBurstSizeChanged;
 
   @override
   State<SpeciesValidationScreen> createState() =>
@@ -248,6 +250,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final Map<String, String> _groupSpeciesLabelCache = <String, String>{};
   final Set<String> _deferredRegroupGroupSignatures = <String>{};
   final Set<String> _expandedGroupSignatures = <String>{};
+  int? _lastReportedAutoGroupInferredBurstSize;
 
   bool get _useCollapsedGroups => widget.autoGroup && widget.collapseGroups;
   int get _undoHistoryLimit => widget.undoSteps.clamp(10, 200).toInt();
@@ -291,6 +294,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _selectedGroupSignature = null;
     }
     if (widget.items.isEmpty) {
+      _notifyAutoGroupInferredBurstSize(null);
       _selectedPath = null;
       _selectedBucketKey = null;
       _selectedPaths.clear();
@@ -1511,12 +1515,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   List<_ValidationMediaGroup> _buildValidationGroups(
     List<DetectionItem> items,
   ) {
-    return widget.autoGroup
-        ? _buildAutoGroups(items)
-        : [
-            for (final item in _sortValidationItems(items))
-              _ValidationMediaGroup(<DetectionItem>[item]),
-          ];
+    if (widget.autoGroup) return _buildAutoGroups(items);
+    _notifyAutoGroupInferredBurstSize(null);
+    return [
+      for (final item in _sortValidationItems(items))
+        _ValidationMediaGroup(<DetectionItem>[item]),
+    ];
   }
 
   List<_SpeciesBucket> _buildBuckets(List<_ValidationMediaGroup> groups) {
@@ -1760,9 +1764,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final gapThreshold = Duration(
       seconds: widget.autoGroupGapSeconds.clamp(1, 3600).toInt(),
     );
+    final inferredBurstSize = _inferAutoGroupBurstSize(
+      orderedItems,
+      gapThreshold,
+    );
     final burstSize = widget.autoGroupDetectBurst
-        ? _inferAutoGroupBurstSize(orderedItems, gapThreshold)
+        ? inferredBurstSize
         : widget.autoGroupBurstSize.clamp(1, 20).toInt();
+    _notifyAutoGroupInferredBurstSize(inferredBurstSize);
 
     void flushCurrent() {
       if (current.isEmpty) return;
@@ -1789,6 +1798,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     flushCurrent();
 
     return groups;
+  }
+
+  void _notifyAutoGroupInferredBurstSize(int? value) {
+    final normalized = value?.clamp(1, 20).toInt();
+    if (_lastReportedAutoGroupInferredBurstSize == normalized) return;
+    _lastReportedAutoGroupInferredBurstSize = normalized;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.onAutoGroupInferredBurstSizeChanged(normalized);
+    });
   }
 
   int _inferAutoGroupBurstSize(

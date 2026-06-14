@@ -78,8 +78,7 @@ def main() -> int:
             "",
             f"原因：{reason}",
             "",
-            f"前端崩溃日志：{args.frontend_log}",
-            f"后端运行日志：{args.backend_log}",
+            f"崩溃日志：{args.frontend_log}",
         ]
     )
     _show_message_box(args.title + " 崩溃提示", message, args.diagnostic_log)
@@ -262,18 +261,10 @@ def _write_startup_report(
         _write_diagnostic(diagnostic_log, "No startup crash report path was supplied.")
         return
 
-    details = "\n".join(
-        [
-            f"原因：{reason}",
-            "",
-            f"前端崩溃日志：{frontend_log}",
-            f"后端运行日志：{backend_log}",
-        ]
-    )
     payload = {
         "title": "程序崩溃提示",
-        "message": "Neri 上次运行异常退出。",
-        "details": details,
+        "message": "Neri 上次运行异常退出，崩溃日志已保存。",
+        "details": f"原因：{reason}",
         "logPath": str(frontend_log),
         "createdAt": datetime.now().astimezone().isoformat(),
     }

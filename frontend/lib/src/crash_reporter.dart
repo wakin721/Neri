@@ -444,7 +444,7 @@ class _CrashReportDialog extends StatelessWidget {
               Text(report.message),
               const SizedBox(height: 16),
               Text(
-                '崩溃记录',
+                '崩溃日志',
                 style: textTheme.titleSmall?.copyWith(
                   color: colorScheme.onSurface,
                 ),
