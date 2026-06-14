@@ -70,7 +70,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.4-beta(593808)',
+  defaultValue: '3.0.4-beta3(0702b2)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
