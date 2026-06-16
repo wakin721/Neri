@@ -88,6 +88,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.loading,
     required this.refreshVersion,
     required this.speciesTypes,
+    required this.minFrameRatio,
     required this.autoGroup,
     required this.collapseGroups,
     required this.autoGroupDetectBurst,
@@ -122,6 +123,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final bool loading;
   final int refreshVersion;
   final Map<String, String> speciesTypes;
+  final double minFrameRatio;
   final bool autoGroup;
   final bool collapseGroups;
   final bool autoGroupDetectBurst;
@@ -232,6 +234,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
   double? _bucketCacheConfidence;
+  double? _bucketCacheMinFrameRatio;
   String? _bucketCachePathSignature;
   String? _bucketCacheGroupingSignature;
   int? _bucketCacheRefreshVersion;
@@ -306,6 +309,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheBurstSize = null;
       _bucketCacheGapSeconds = null;
       _bucketCacheConfidence = null;
+      _bucketCacheMinFrameRatio = null;
       _bucketCachePathSignature = null;
       _bucketCacheGroupingSignature = null;
       _bucketCacheRefreshVersion = null;
@@ -1563,6 +1567,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         _bucketCacheBurstSize == widget.autoGroupBurstSize &&
         _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
         _bucketCacheConfidence == _confidence &&
+        _bucketCacheMinFrameRatio == _minFrameRatio &&
         _bucketCacheRefreshVersion == widget.refreshVersion;
 
     if (hasSameGroupingSettings &&
@@ -1610,6 +1615,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
     _bucketCacheConfidence = _confidence;
+    _bucketCacheMinFrameRatio = _minFrameRatio;
     _bucketCachePathSignature = pathSignature;
     _bucketCacheGroupingSignature = groupingSignature;
     _bucketCacheRefreshVersion = widget.refreshVersion;
@@ -2090,27 +2096,72 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   List<DetectionBox> _filteredBoxes(DetectionItem item) {
+    final trackFrameCounts = _trackFrameCountsForFilter(item);
     return item.detectionBoxes.where((box) {
       final matchesSpecies =
           _selectedSpeciesFilter == _globalSpecies ||
           box.species == _selectedSpeciesFilter;
       final confidence = box.confidence;
       final matchesConfidence = _passesConfidenceFilter(confidence);
-      return matchesSpecies && matchesConfidence && box.bbox.length >= 4;
+      return matchesSpecies &&
+          matchesConfidence &&
+          _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
+          box.bbox.length >= 4;
     }).toList();
   }
 
   List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
+    final trackFrameCounts = _trackFrameCountsForFilter(item);
     return item.detectionBoxes
         .where(
           (box) =>
-              _passesConfidenceFilter(box.confidence) && box.bbox.length >= 4,
+              _passesConfidenceFilter(box.confidence) &&
+              _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
+              box.bbox.length >= 4,
         )
         .toList();
   }
 
   bool _passesConfidenceFilter(double? confidence) {
     return confidence == null || confidence >= _confidence;
+  }
+
+  double get _minFrameRatio => widget.minFrameRatio.clamp(0.0, 1.0).toDouble();
+
+  Map<String, int>? _trackFrameCountsForFilter(DetectionItem item) {
+    if (!_isVideo(item) || _minFrameRatio <= 0) return null;
+    final counts = <String, int>{};
+    for (final box in item.detectionBoxes) {
+      final trackId = box.trackId?.trim();
+      if (trackId == null || trackId.isEmpty) continue;
+      counts[trackId] = (counts[trackId] ?? 0) + 1;
+    }
+    return counts.isEmpty ? null : counts;
+  }
+
+  bool _passesMinFrameRatioFilter(
+    DetectionItem item,
+    DetectionBox box,
+    Map<String, int>? trackFrameCounts,
+  ) {
+    if (!_isVideo(item) || _isManualDetection(item) || _minFrameRatio <= 0) {
+      return true;
+    }
+    final trackId = box.trackId?.trim();
+    if (trackId == null || trackId.isEmpty || trackFrameCounts == null) {
+      return true;
+    }
+    final totalFrames = _totalFramesProcessed(item);
+    final threshold = totalFrames * _minFrameRatio;
+    return (trackFrameCounts[trackId] ?? 0) >= threshold;
+  }
+
+  double _totalFramesProcessed(DetectionItem item) {
+    final raw = item.detectionData['total_frames_processed'];
+    if (raw is num && raw > 0) return raw.toDouble();
+    final parsed = double.tryParse(raw?.toString() ?? '');
+    if (parsed != null && parsed > 0) return parsed;
+    return 1;
   }
 
   bool _isManualDetection(DetectionItem item) {
@@ -3022,6 +3073,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             ? validationExportColumns
             : widget.exportColumns,
         confidenceSettings: confidenceSettings,
+        minFrameRatio: _minFrameRatio,
         exportFavoritePhotos: exportFavoritePhotos,
         favoritePhotoPaths: favoritePhotoPaths,
       );

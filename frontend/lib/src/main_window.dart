@@ -2260,6 +2260,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       loading: _previewLoading,
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      minFrameRatio: _doubleSetting(
+        settings,
+        'min_frame_ratio',
+        0.0,
+      ).clamp(0.0, 1.0).toDouble(),
       autoGroup: _boolSetting(settings, 'auto_group', true),
       collapseGroups: _boolSetting(settings, 'collapse_groups', false),
       autoGroupDetectBurst: _boolSetting(
