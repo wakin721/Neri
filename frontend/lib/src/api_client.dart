@@ -62,6 +62,7 @@ class NeriApiClient {
   Future<MaintenanceStartResponse> installPytorch(
     String envChoice, {
     String packageSource = 'official',
+    bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/environment/install-pytorch'),
@@ -69,6 +70,7 @@ class NeriApiClient {
       body: jsonEncode({
         'env_choice': envChoice,
         'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
       }),
     );
     _ensureSuccess(response);
@@ -80,6 +82,7 @@ class NeriApiClient {
   Future<MaintenanceStartResponse> installYoloDependencies({
     required String envChoice,
     String packageSource = 'official',
+    bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/environment/install-yolo-dependencies'),
@@ -87,6 +90,7 @@ class NeriApiClient {
       body: jsonEncode({
         'env_choice': envChoice,
         'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
       }),
     );
     _ensureSuccess(response);
@@ -140,6 +144,11 @@ class NeriApiClient {
     );
   }
 
+  Future<void> simulateBackendCrash() async {
+    final response = await _httpClient.post(_uri('/api/debug/simulate-crash'));
+    _ensureSuccess(response);
+  }
+
   Future<List<DebugLogInfo>> fetchDebugLogs() async {
     final response = await _httpClient.get(_uri('/api/debug/logs'));
     _ensureSuccess(response);
@@ -149,13 +158,45 @@ class NeriApiClient {
         .toList();
   }
 
-  Future<DebugLogContent> fetchDebugLogContent(String path) async {
-    final uri = Uri.parse(
-      '$baseUrl/api/debug/logs/content',
-    ).replace(queryParameters: {'path': path});
+  Future<DebugLogContent> fetchDebugLogContent(
+    String path, {
+    int maxBytes = 32000,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/debug/logs/content').replace(
+      queryParameters: {'path': path, 'max_bytes': maxBytes.toString()},
+    );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
     return DebugLogContent.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ClearCacheResult> clearCache({
+    required bool clearLogs,
+    required bool clearSoftwareCache,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/debug/clear-cache'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'clear_logs': clearLogs,
+        'clear_software_cache': clearSoftwareCache,
+      }),
+    );
+    _ensureSuccess(response);
+    return ClearCacheResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PytorchInstallPlan> fetchPytorchInstallPlan(String envChoice) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/environment/pytorch-install-plan',
+    ).replace(queryParameters: {'env_choice': envChoice});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return PytorchInstallPlan.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
@@ -344,6 +385,8 @@ class NeriApiClient {
     String? outputPath,
     List<String>? columnsToExport,
     Map<String, double>? confidenceSettings,
+    bool exportFavoritePhotos = false,
+    List<String>? favoritePhotoPaths,
     double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
@@ -355,6 +398,9 @@ class NeriApiClient {
         if (outputPath != null && outputPath.isNotEmpty)
           'output_path': outputPath,
         if (columnsToExport != null) 'columns_to_export': columnsToExport,
+        'export_favorite_photos': exportFavoritePhotos,
+        if (favoritePhotoPaths != null)
+          'favorite_photo_paths': favoritePhotoPaths,
         'confidence_settings': confidenceSettings ?? {'global': 0.25},
         'min_frame_ratio': minFrameRatio,
       }),
@@ -492,6 +538,49 @@ class MaintenanceStartResponse {
   final String message;
 }
 
+class PytorchInstallPlan {
+  const PytorchInstallPlan({
+    required this.envChoice,
+    required this.actualEnv,
+    required this.indexUrl,
+    required this.isXpu,
+    required this.needsIntelDriver,
+    required this.intelDriverPageUrl,
+    required this.intelDriverDownloadUrl,
+    required this.intelDriver,
+  });
+
+  factory PytorchInstallPlan.fromJson(Map<String, dynamic> json) {
+    return PytorchInstallPlan(
+      envChoice: json['env_choice'] as String? ?? '',
+      actualEnv: json['actual_env'] as String? ?? '',
+      indexUrl: json['index_url'] as String? ?? '',
+      isXpu: json['is_xpu'] as bool? ?? false,
+      needsIntelDriver: json['needs_intel_driver'] as bool? ?? false,
+      intelDriverPageUrl: json['intel_driver_page_url'] as String? ?? '',
+      intelDriverDownloadUrl:
+          json['intel_driver_download_url'] as String? ?? '',
+      intelDriver: Map<String, dynamic>.from(
+        json['intel_driver'] as Map<String, dynamic>? ?? const {},
+      ),
+    );
+  }
+
+  final String envChoice;
+  final String actualEnv;
+  final String indexUrl;
+  final bool isXpu;
+  final bool needsIntelDriver;
+  final String intelDriverPageUrl;
+  final String intelDriverDownloadUrl;
+  final Map<String, dynamic> intelDriver;
+
+  String get intelDeviceName =>
+      intelDriver['device_name']?.toString() ??
+      intelDriver['driver_name']?.toString() ??
+      '';
+}
+
 class MaintenanceStatus {
   const MaintenanceStatus({
     required this.state,
@@ -620,4 +709,30 @@ class DebugLogContent extends DebugLogInfo {
 
   final String content;
   final bool truncated;
+}
+
+class ClearCacheResult {
+  const ClearCacheResult({
+    required this.clearedFiles,
+    required this.clearedDirectories,
+    required this.reclaimedBytes,
+    required this.skipped,
+  });
+
+  factory ClearCacheResult.fromJson(Map<String, dynamic> json) {
+    return ClearCacheResult(
+      clearedFiles: json['cleared_files'] as int? ?? 0,
+      clearedDirectories: json['cleared_directories'] as int? ?? 0,
+      reclaimedBytes: json['reclaimed_bytes'] as int? ?? 0,
+      skipped: (json['skipped'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList(),
+    );
+  }
+
+  final int clearedFiles;
+  final int clearedDirectories;
+  final int reclaimedBytes;
+  final List<String> skipped;
 }

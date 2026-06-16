@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
+import '../crash_reporter.dart';
+import '../crash_watchdog.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../utils/quick_mark_sort.dart';
@@ -68,16 +70,20 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.4-beta(f47535)',
+  defaultValue: '3.0.4-release(dfc280)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
 const _autoSaveDelay = Duration(milliseconds: 800);
+const _favoritePhotoExportAsk = 'ask';
+const _favoritePhotoExportAlways = 'export';
+const _favoritePhotoExportNever = 'skip';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     required this.settings,
+    required this.autoGroupInferredBurstSize,
     required this.apiClient,
     required this.themeNotifier,
     required this.onUpdateTheme,
@@ -87,6 +93,7 @@ class SettingsScreen extends StatefulWidget {
   });
 
   final NeriSettings? settings;
+  final int? autoGroupInferredBurstSize;
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
@@ -108,6 +115,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
+  bool _clearingCache = false;
   int _draftRevision = 0;
   Timer? _autoSaveTimer;
   Timer? _maintenanceTimer;
@@ -203,7 +211,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'auto_group_gap_seconds',
         30,
       ),
-      'undo_steps': _intSetting(saved, 'undo_steps', 1),
+      'undo_steps': _undoStepsSetting(saved),
       'auto_sort': _boolSetting(saved, 'auto_sort', false),
       'quick_mark_list': savedQuickMarks,
       'quantity_buttons': _stringListSetting(
@@ -216,6 +224,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'export_columns',
         _defaultExportColumns,
       ),
+      'favorite_photo_paths': _stringListSetting(
+        saved,
+        'favorite_photo_paths',
+        const <String>[],
+      ),
+      'favorite_photo_export_mode': _favoritePhotoExportModeSetting(saved),
       'selected_species_names': _stringListSetting(
         saved,
         'selected_species_names',
@@ -295,10 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _scheduleAutoSave() {
     _autoSaveTimer?.cancel();
     if (!_dirty || !mounted) return;
-    _autoSaveTimer = Timer(
-      _autoSaveDelay,
-      () => unawaited(_save()),
-    );
+    _autoSaveTimer = Timer(_autoSaveDelay, () => unawaited(_save()));
   }
 
   Future<void> _loadModelClassesForSelection([String? modelPath]) async {
@@ -351,14 +362,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<bool?> _resolveIntelDriverInstall(String envChoice) async {
+    try {
+      final plan = await widget.apiClient.fetchPytorchInstallPlan(envChoice);
+      if (!mounted) return null;
+      if (!plan.needsIntelDriver) return false;
+
+      final deviceText = plan.intelDeviceName.isEmpty
+          ? 'Intel GPU'
+          : plan.intelDeviceName;
+      final confirmed = await _confirmMaintenance(
+        title: '需要安装 Intel 显卡驱动',
+        message:
+            '将安装 Intel XPU 版本 PyTorch，但当前检测到 $deviceText 尚未安装可用的 Intel 官方显卡驱动。\n\n是否先从 Intel 官网下载并运行显卡驱动安装程序？安装过程中可能出现 Windows 权限确认，完成后可能需要重启。',
+        confirmLabel: '下载并安装驱动',
+      );
+      if (!mounted || confirmed != true) return null;
+      return true;
+    } catch (error) {
+      widget.onShowMessage('检测 Intel 显卡驱动失败：$error');
+      return null;
+    }
+  }
+
   Future<void> _installPytorch() async {
     final envChoice = _string('pytorch_version', '自动检测');
     final packageSource = _string('package_source', 'official');
     final sourceLabel = _packageSourceLabel(packageSource);
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return;
+
+    final installStep = installIntelDriver
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。'
+        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。';
     final confirmed = await _confirmMaintenance(
       title: '安装 PyTorch',
-      message:
-          '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
+      message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
       confirmLabel: '开始安装',
     );
     if (confirmed != true) return;
@@ -382,10 +421,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? await widget.apiClient.installYoloDependencies(
               envChoice: envChoice,
               packageSource: packageSource,
+              installIntelDriver: installIntelDriver,
             )
           : await widget.apiClient.installPytorch(
               envChoice,
               packageSource: packageSource,
+              installIntelDriver: installIntelDriver,
             );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -440,13 +481,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     const envChoice = '自动检测';
     final packageSource = _string('package_source', 'official');
     final sourceLabel = _packageSourceLabel(packageSource);
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return;
+
+    final driverStep = installIntelDriver
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final missingText = _missingYoloDependenciesLabel.isEmpty
         ? 'YOLO 处理依赖'
         : _missingYoloDependenciesLabel;
     final confirmed = await _confirmMaintenance(
       title: '需要安装 YOLO 依赖',
       message:
-          '当前缺少：$missingText。\n\n安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+          '当前缺少：$missingText。\n\n$driverStep'
           '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
       confirmLabel: '安装依赖',
     );
@@ -461,6 +508,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
         packageSource: packageSource,
+        installIntelDriver: installIntelDriver,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -1414,10 +1462,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildBasicSettings() {
-    final undoSteps = _int('undo_steps', 1).clamp(1, 50).toInt();
+    final undoSteps = _undoStepsSetting(_draft);
     return SectionCard(
       title: '基础设置',
-      subtitle: '校验辅助、快速标记和导出字段',
+      subtitle: '校验辅助、缓存清理、快速标记和导出字段',
       icon: Icons.fact_check_rounded,
       child: Column(
         children: [
@@ -1450,7 +1498,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '自动分组规则',
-            subtitle: '综合拍摄时间和连拍张数判断事件边界；下一项是配套视频时会优先并入当前组。',
+            subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
             icon: Icons.timelapse_rounded,
             child: _SummaryDialogButton(
               summary: _autoGroupRuleSummary(),
@@ -1464,13 +1512,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: _LabeledSlider(
               label: '记录步数',
               value: undoSteps.toDouble(),
-              min: 1,
-              max: 50,
-              divisions: 49,
+              min: 10,
+              max: 200,
+              divisions: 19,
               valueLabel: '$undoSteps 步',
-              onChanged: (value) => _set('undo_steps', value.round()),
+              onChanged: (value) =>
+                  _set('undo_steps', _normalizeUndoSteps(value.round())),
             ),
           ),
+          _buildClearCachePanel(),
           _buildQuickMarkEditor(),
           Builder(
             builder: (context) => Padding(
@@ -1481,7 +1531,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
-          _buildExportColumns(),
+          _buildExportColumns(showDivider: true),
+          _buildFavoritePhotoExportMode(),
         ],
       ),
     );
@@ -1492,9 +1543,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final burst = _int('auto_group_burst_size').clamp(1, 20).toInt();
     final gap = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
     final burstText = _bool('auto_group_detect_burst')
-        ? '自动识别，当前 $burst 张'
+        ? '自动识别，当前 ${_autoGroupDisplayBurstSize(burst)} 张'
         : '$burst 张';
     return '$burstText · $gap 秒';
+  }
+
+  int _autoGroupDisplayBurstSize(int fallback) {
+    final inferred = widget.autoGroupInferredBurstSize;
+    if (inferred == null) return fallback;
+    return inferred.clamp(1, 20).toInt();
   }
 
   Future<void> _showAutoGroupRulesDialog() async {
@@ -1507,6 +1564,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
+            final currentBurstSize = _autoGroupDisplayBurstSize(burstSize);
             return AlertDialog(
               title: const Text('自动分组规则'),
               content: SizedBox(
@@ -1520,16 +1578,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       onChanged: (value) =>
                           setDialogState(() => detectBurst = value),
                       title: const Text('自动识别连拍张数'),
-                      subtitle: Text('开启后禁用手动连拍张数；当前分组连拍张数为 $burstSize 张'),
+                      subtitle: Text(
+                        '开启后禁用手动连拍张数；当前分组连拍张数为 $currentBurstSize 张',
+                      ),
                     ),
                     const SizedBox(height: 8),
                     _LabeledSlider(
                       label: '连拍张数',
-                      value: burstSize.toDouble(),
+                      value: (detectBurst ? currentBurstSize : burstSize)
+                          .toDouble(),
                       min: 1,
                       max: 20,
                       divisions: 19,
-                      valueLabel: '$burstSize 张',
+                      valueLabel:
+                          '${detectBurst ? currentBurstSize : burstSize} 张',
                       enabled: !detectBurst,
                       onChanged: (value) =>
                           setDialogState(() => burstSize = value.round()),
@@ -1577,6 +1639,113 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _scheduleAutoSave();
   }
 
+  Widget _buildClearCachePanel() {
+    return _SettingsPanel(
+      title: '清理缓存',
+      subtitle: '可清除软件日志、运行状态和崩溃标记等可再生缓存，不会删除设置和物种数据库。',
+      icon: Icons.cleaning_services_rounded,
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: FilledButton.tonalIcon(
+          onPressed: _clearingCache ? null : _showClearCacheDialog,
+          icon: _clearingCache
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.delete_sweep_rounded),
+          label: Text(_clearingCache ? '清理中' : '选择清理'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showClearCacheDialog() async {
+    var clearLogs = true;
+    var clearSoftwareCache = true;
+    final selection = await showDialog<({bool logs, bool softwareCache})>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final canSubmit = clearLogs || clearSoftwareCache;
+            return AlertDialog(
+              title: const Text('清理缓存'),
+              content: SizedBox(
+                width: 440,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: clearLogs,
+                      onChanged: (value) =>
+                          setDialogState(() => clearLogs = value ?? false),
+                      title: const Text('清除日志'),
+                      subtitle: const Text('清除 logs 目录和临时目录中的软件日志。'),
+                    ),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: clearSoftwareCache,
+                      onChanged: (value) => setDialogState(
+                        () => clearSoftwareCache = value ?? false,
+                      ),
+                      title: const Text('清除软件缓存'),
+                      subtitle: const Text('清除运行状态、崩溃标记和 Python 缓存。'),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: canSubmit
+                      ? () => Navigator.of(context).pop((
+                          logs: clearLogs,
+                          softwareCache: clearSoftwareCache,
+                        ))
+                      : null,
+                  child: const Text('清理'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (selection == null || !mounted) return;
+
+    setState(() => _clearingCache = true);
+    try {
+      final result = await widget.apiClient.clearCache(
+        clearLogs: selection.logs,
+        clearSoftwareCache: selection.softwareCache,
+      );
+      if (!mounted) return;
+      widget.onShowMessage(_clearCacheMessage(result));
+    } catch (error) {
+      if (!mounted) return;
+      widget.onShowMessage('清理缓存失败：$error');
+    } finally {
+      if (mounted) setState(() => _clearingCache = false);
+    }
+  }
+
+  String _clearCacheMessage(ClearCacheResult result) {
+    final parts = <String>[
+      '已清理 ${result.clearedFiles} 个文件',
+      '${result.clearedDirectories} 个目录',
+      _formatBytes(result.reclaimedBytes),
+    ];
+    if (result.skipped.isNotEmpty) {
+      parts.add('${result.skipped.length} 项未能清理');
+    }
+    return parts.join(' · ');
+  }
+
   Widget _buildQuickMarkSettings() {
     return SectionCard(
       title: '快速标记设置',
@@ -1589,9 +1758,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildExportSettings() {
     return SectionCard(
       title: '导出设置',
-      subtitle: '自定义导出表格中的列',
+      subtitle: '自定义导出表格中的列和收藏照片同步策略',
       icon: Icons.table_chart_rounded,
-      child: _buildExportColumns(),
+      child: Column(
+        children: [
+          _buildExportColumns(showDivider: true),
+          _buildFavoritePhotoExportMode(),
+        ],
+      ),
     );
   }
 
@@ -2184,7 +2358,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Widget _buildExportColumns() {
+  Widget _buildExportColumns({bool showDivider = false}) {
     final selected = _stringList('export_columns');
     final summary = selected.isEmpty
         ? '使用默认列'
@@ -2196,10 +2370,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: '导出表格列',
       subtitle: '选择校验数据导出时包含的字段',
       icon: Icons.view_column_rounded,
-      showDivider: false,
+      showDivider: showDivider,
       child: _SummaryDialogButton(
         summary: summary,
         onPressed: _showExportColumnsDialog,
+      ),
+    );
+  }
+
+  Widget _buildFavoritePhotoExportMode() {
+    return _SettingsPanel(
+      title: '同步导出收藏照片',
+      subtitle: '导出校验表格时，选择是否把收藏照片复制到单独文件夹。',
+      icon: Icons.star_rounded,
+      showDivider: false,
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: SegmentedButton<String>(
+          segments: const [
+            ButtonSegment<String>(
+              value: _favoritePhotoExportAlways,
+              icon: Icon(Icons.ios_share_rounded),
+              label: Text('导出'),
+            ),
+            ButtonSegment<String>(
+              value: _favoritePhotoExportNever,
+              icon: Icon(Icons.block_rounded),
+              label: Text('不导出'),
+            ),
+            ButtonSegment<String>(
+              value: _favoritePhotoExportAsk,
+              icon: Icon(Icons.help_outline_rounded),
+              label: Text('每次询问'),
+            ),
+          ],
+          selected: {_favoritePhotoExportMode()},
+          onSelectionChanged: (selection) {
+            if (selection.isEmpty) return;
+            _set('favorite_photo_export_mode', selection.first);
+          },
+        ),
       ),
     );
   }
@@ -2400,12 +2610,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return _intSetting(_draft, key, fallback);
   }
 
+  int _undoStepsSetting(Map<String, dynamic> values) {
+    return _normalizeUndoSteps(_intSetting(values, 'undo_steps', 10));
+  }
+
+  int _normalizeUndoSteps(int value) {
+    final clamped = value.clamp(10, 200).toInt();
+    return ((clamped / 10).round() * 10).clamp(10, 200).toInt();
+  }
+
   String _string(String key, [String fallback = '']) {
     return _stringSetting(_draft, key, fallback);
   }
 
   List<String> _stringList(String key) {
     return _stringListSetting(_draft, key, const <String>[]);
+  }
+
+  String _favoritePhotoExportMode() {
+    return _favoritePhotoExportModeSetting(_draft);
+  }
+
+  String _favoritePhotoExportModeSetting(Map<String, dynamic> values) {
+    final value = _stringSetting(
+      values,
+      'favorite_photo_export_mode',
+      _favoritePhotoExportAsk,
+    );
+    return switch (value) {
+      _favoritePhotoExportAlways => _favoritePhotoExportAlways,
+      _favoritePhotoExportNever => _favoritePhotoExportNever,
+      _ => _favoritePhotoExportAsk,
+    };
   }
 
   String? _validModelValue(
@@ -2862,6 +3098,7 @@ class _DebugInfoPanel extends StatefulWidget {
 
 class _DebugInfoPanelState extends State<_DebugInfoPanel> {
   late Future<RuntimeDiagnostics> _runtimeFuture;
+  bool _simulatingBackendCrash = false;
 
   @override
   void initState() {
@@ -2911,6 +3148,83 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
         onShowMessage: widget.onShowMessage,
       ),
     );
+  }
+
+  Future<void> _simulateFrontendCrash() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('模拟前端崩溃'),
+        content: const Text('前端进程会以非零退出码结束，程序将记录日志并在重启后显示崩溃原因。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('模拟崩溃'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final watchdogStarted = await CrashWatchdog.ensureStarted();
+    if (!mounted) return;
+    if (!watchdogStarted) {
+      widget.onShowMessage('无法启动前端崩溃监听器，已取消模拟崩溃。请查看软件日志。');
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    if (!mounted) return;
+    CrashReporter.simulateFrontendCrash();
+  }
+
+  Future<void> _simulateBackendCrash() async {
+    if (_simulatingBackendCrash) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('模拟后端崩溃'),
+        content: const Text('Python 后端会以非零退出码结束，程序将记录日志并显示崩溃原因。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('模拟崩溃'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _simulatingBackendCrash = true);
+    final previousReport = CrashReporter.latestReport.value;
+    try {
+      await widget.apiClient.simulateBackendCrash();
+      if (!mounted) return;
+      widget.onShowMessage('已触发后端崩溃模拟');
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
+      if (!mounted) return;
+      if (identical(CrashReporter.latestReport.value, previousReport)) {
+        CrashReporter.recordBackendCrash(
+          exitCode: 86,
+          logPath: 'logs/${CrashReporter.crashLogFileName}',
+          outputTail: '调试模式模拟 Python 后端崩溃。',
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      widget.onShowMessage('触发后端崩溃模拟失败：$error');
+    } finally {
+      if (mounted) {
+        setState(() => _simulatingBackendCrash = false);
+      }
+    }
   }
 
   @override
@@ -2998,6 +3312,30 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
               onPressed: () => _showSoftwareLogs(context),
               icon: const Icon(Icons.receipt_long_outlined),
               label: const Text('软件日志'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Divider(height: 1, color: scheme.outlineVariant),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _simulateFrontendCrash,
+              icon: const Icon(Icons.warning_amber_rounded),
+              label: const Text('模拟前端崩溃'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _simulatingBackendCrash ? null : _simulateBackendCrash,
+              icon: _simulatingBackendCrash
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.dangerous_outlined),
+              label: const Text('模拟后端崩溃'),
             ),
           ],
         ),
@@ -3172,6 +3510,8 @@ class _SoftwareLogsDialog extends StatefulWidget {
 }
 
 class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
+  static const _logPreviewMaxBytes = 32000;
+
   late final Future<List<DebugLogInfo>> _logsFuture;
   DebugLogInfo? _selectedLog;
   Future<DebugLogContent>? _contentFuture;
@@ -3185,13 +3525,47 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   void _selectLog(DebugLogInfo log) {
     setState(() {
       _selectedLog = log;
-      _contentFuture = widget.apiClient.fetchDebugLogContent(log.path);
+      _contentFuture = widget.apiClient.fetchDebugLogContent(
+        log.path,
+        maxBytes: _logPreviewMaxBytes,
+      );
+    });
+  }
+
+  void _previewSelectedLog() {
+    final log = _selectedLog;
+    if (log == null) return;
+    setState(() {
+      _contentFuture = widget.apiClient.fetchDebugLogContent(
+        log.path,
+        maxBytes: _logPreviewMaxBytes,
+      );
     });
   }
 
   Future<void> _copyLog(DebugLogContent log) async {
     await Clipboard.setData(ClipboardData(text: log.content));
     widget.onShowMessage('日志内容已复制');
+  }
+
+  Future<void> _openLogExternally(DebugLogInfo log) async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('cmd', ['/c', 'start', '', log.path]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [log.path]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [log.path]);
+      } else {
+        await Clipboard.setData(ClipboardData(text: log.path));
+        widget.onShowMessage('日志路径已复制');
+        return;
+      }
+      widget.onShowMessage('已交给系统打开日志');
+    } catch (error) {
+      await Clipboard.setData(ClipboardData(text: log.path));
+      widget.onShowMessage('打开日志失败，已复制路径：$error');
+    }
   }
 
   @override
@@ -3220,6 +3594,13 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
                 icon: Icons.receipt_long_outlined,
                 message: '未找到软件日志。',
               );
+            }
+            if (_selectedLog == null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _selectedLog == null) {
+                  _selectLog(logs.first);
+                }
+              });
             }
 
             return Row(
@@ -3263,11 +3644,32 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   }
 
   Widget _buildSelectedLogContent() {
-    final future = _contentFuture;
-    if (future == null) {
+    final selectedLog = _selectedLog;
+    if (selectedLog == null) {
       return const _DebugDialogMessage(
         icon: Icons.receipt_long_outlined,
         message: '选择一个日志查看内容。',
+      );
+    }
+
+    final future = _contentFuture;
+    if (future == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _SelectedLogHeader(
+            log: selectedLog,
+            onPreview: _previewSelectedLog,
+            onOpenExternal: () => _openLogExternally(selectedLog),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: _DebugDialogMessage(
+              icon: Icons.article_outlined,
+              message: '正在准备日志预览，也可以用系统打开完整日志。',
+            ),
+          ),
+        ],
       );
     }
 
@@ -3295,29 +3697,11 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    log.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: () => _copyLog(log),
-                  icon: const Icon(Icons.copy_rounded),
-                  label: const Text('复制'),
-                ),
-              ],
-            ),
-            Text(
-              '${_formatBytes(log.sizeBytes)}'
-              '${log.modifiedAt == null ? '' : ' · ${_formatLogTime(log.modifiedAt)}'}',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+            _SelectedLogHeader(
+              log: log,
+              onPreview: _previewSelectedLog,
+              onOpenExternal: () => _openLogExternally(log),
+              onCopy: () => _copyLog(log),
             ),
             if (log.truncated)
               Padding(
@@ -3346,6 +3730,67 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
           ],
         );
       },
+    );
+  }
+}
+
+class _SelectedLogHeader extends StatelessWidget {
+  const _SelectedLogHeader({
+    required this.log,
+    required this.onPreview,
+    required this.onOpenExternal,
+    this.onCopy,
+  });
+
+  final DebugLogInfo log;
+  final VoidCallback onPreview;
+  final VoidCallback onOpenExternal;
+  final VoidCallback? onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final scheme = Theme.of(context).colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          log.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: textTheme.titleSmall,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '${_formatBytes(log.sizeBytes)}'
+          '${log.modifiedAt == null ? '' : ' · ${_formatLogTime(log.modifiedAt)}'}',
+          style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: onPreview,
+              icon: const Icon(Icons.segment_rounded),
+              label: const Text('预览尾部'),
+            ),
+            OutlinedButton.icon(
+              onPressed: onOpenExternal,
+              icon: const Icon(Icons.open_in_new_rounded),
+              label: const Text('用系统打开'),
+            ),
+            if (onCopy != null)
+              TextButton.icon(
+                onPressed: onCopy,
+                icon: const Icon(Icons.copy_rounded),
+                label: const Text('复制预览'),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }

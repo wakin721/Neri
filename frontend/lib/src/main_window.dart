@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'api_client.dart';
+import 'crash_reporter.dart';
+import 'crash_watchdog.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
@@ -60,11 +62,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   ];
 
   static final _versionNumberPattern = RegExp(r'\d+(?:\.\d+)+');
+  static const _backendOutputTailMaxCharacters = 12000;
 
   final _inputController = TextEditingController();
   final Map<String, DetectionItem> _previewMetadataCache =
       <String, DetectionItem>{};
   final Set<String> _previewMetadataLoading = <String>{};
+  final Set<int> _expectedBackendExitPids = <int>{};
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -100,9 +104,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String _previewSpeciesFilter = previewAllSpeciesLabel;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
+  String _backendOutputTail = '';
   String _videoMode = 'all';
   int _imageSize = 1920;
   int _vidStride = 1;
+  int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
@@ -207,6 +213,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (_) {}
     if (!mounted || flowId != _closeFlowId) return;
 
+    CrashWatchdog.markNormalExit();
     try {
       await windowManager.destroy().timeout(const Duration(milliseconds: 300));
     } catch (_) {}
@@ -358,35 +365,139 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       throw StateError('未找到 ${pythonExe.path}。');
     }
 
-    final process = await Process.start(
-      pythonExe.path,
-      const <String>[
-        '-m',
-        'uvicorn',
-        'system.backend.main:app',
-        '--app-dir',
-        '.',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        '721',
-      ],
-      workingDirectory: projectRoot.path,
-      environment: <String, String>{'NERI_PARENT_PID': pid.toString()},
-      includeParentEnvironment: true,
-      runInShell: false,
+    final backendLogFile = CrashReporter.createBackendLogFile();
+    _backendOutputTail = '';
+    backendLogFile.writeAsStringSync(
+      'Command: ${pythonExe.path} -m uvicorn system.backend.main:app --app-dir . --host 127.0.0.1 --port 721\n'
+      'Working directory: ${projectRoot.path}\n\n',
+      encoding: utf8,
+      mode: FileMode.append,
+      flush: true,
     );
+
+    late final Process process;
+    try {
+      process = await Process.start(
+        pythonExe.path,
+        const <String>[
+          '-m',
+          'uvicorn',
+          'system.backend.main:app',
+          '--app-dir',
+          '.',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          '721',
+        ],
+        workingDirectory: projectRoot.path,
+        environment: <String, String>{'NERI_PARENT_PID': pid.toString()},
+        includeParentEnvironment: true,
+        runInShell: false,
+      );
+    } catch (_) {
+      CrashReporter.deleteBackendLogFile(backendLogFile);
+      rethrow;
+    }
     _backendProcess = process;
-    process.stdout.transform(utf8.decoder).listen((_) {});
-    process.stderr.transform(utf8.decoder).listen((_) {});
+    _bindBackendProcessLogging(process, backendLogFile);
+  }
+
+  void _bindBackendProcessLogging(Process process, File logFile) {
+    void writeOutput(String streamName, String data) {
+      final formatted = _formatBackendOutput(streamName, data);
+      _appendBackendOutputTail(formatted);
+      try {
+        logFile.writeAsStringSync(
+          formatted,
+          encoding: utf8,
+          mode: FileMode.append,
+        );
+      } catch (_) {}
+    }
+
+    final stdoutDone = process.stdout
+        .transform(utf8.decoder)
+        .listen((data) => writeOutput('stdout', data))
+        .asFuture<void>()
+        .catchError((_) {});
+    final stderrDone = process.stderr
+        .transform(utf8.decoder)
+        .listen((data) => writeOutput('stderr', data))
+        .asFuture<void>()
+        .catchError((_) {});
+
     unawaited(
-      process.exitCode.then((_) {
-        if (identical(_backendProcess, process)) {
-          _backendProcess = null;
-          _backendReady = false;
-        }
-      }),
+      process.exitCode
+          .then((exitCode) async {
+            try {
+              await Future.wait([
+                stdoutDone,
+                stderrDone,
+              ]).timeout(const Duration(seconds: 2));
+            } catch (_) {}
+            final expectedExit = _expectedBackendExitPids.remove(process.pid);
+            final exitLine =
+                '\n[${DateTime.now().toIso8601String()}] Backend process exited with code $exitCode\n';
+            _appendBackendOutputTail(exitLine);
+            try {
+              logFile.writeAsStringSync(
+                exitLine,
+                encoding: utf8,
+                mode: FileMode.append,
+                flush: true,
+              );
+            } catch (_) {}
+
+            if (identical(_backendProcess, process)) {
+              _backendProcess = null;
+              _backendReady = false;
+            }
+            if (!expectedExit && exitCode != 0) {
+              if (mounted) {
+                setState(() => _loading = false);
+              }
+              CrashReporter.recordBackendCrash(
+                exitCode: exitCode,
+                logPath: logFile.path,
+                outputTail: _backendOutputTail,
+              );
+            }
+            CrashReporter.deleteBackendLogFile(logFile);
+          })
+          .catchError((_) {}),
     );
+  }
+
+  String _formatBackendOutput(String streamName, String data) {
+    if (data.isEmpty) return '';
+    final timestamp = DateTime.now().toIso8601String();
+    final normalized = data.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final buffer = StringBuffer();
+    final lines = normalized.split('\n');
+    for (var index = 0; index < lines.length; index++) {
+      final line = lines[index];
+      if (line.isEmpty && index == lines.length - 1) continue;
+      buffer.writeln('[$timestamp] [$streamName] $line');
+    }
+    return buffer.toString();
+  }
+
+  void _appendBackendOutputTail(String output) {
+    if (output.isEmpty) return;
+    final combined = '$_backendOutputTail$output';
+    if (combined.length <= _backendOutputTailMaxCharacters) {
+      _backendOutputTail = combined;
+      return;
+    }
+    _backendOutputTail = combined.substring(
+      combined.length - _backendOutputTailMaxCharacters,
+    );
+  }
+
+  void _markBackendExitExpected(Process? process) {
+    if (process == null) return;
+    _expectedBackendExitPids.add(process.pid);
   }
 
   Future<bool> _waitForBackendReady() async {
@@ -427,6 +538,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Future<void> _shutdownBackendNow() async {
     final process = _backendProcess;
+    _markBackendExitExpected(process);
     _backendReady = false;
     var shutdownRequested = false;
 
@@ -469,6 +581,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _forceShutdownBackend() async {
     _backendReady = false;
     final process = _backendProcess;
+    _markBackendExitExpected(process);
     if (process != null) {
       await _terminateBackendProcess(process);
       if (identical(_backendProcess, process)) {
@@ -1489,13 +1602,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       'tsinghua' => '清华源',
       _ => '官方源',
     };
+    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (installIntelDriver == null || !mounted) return true;
+
+    final driverStep = installIntelDriver
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('需要安装 YOLO 依赖'),
         content: Text(
           '当前缺少：$missingText。\n\n'
-          '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+          '$driverStep'
           '安装完成后 Python 后端会自动重启。',
         ),
         actions: [
@@ -1516,6 +1635,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
         packageSource: packageSource,
+        installIntelDriver: installIntelDriver,
       );
       if (!mounted) return true;
       _showSnackBar(response.message);
@@ -1524,6 +1644,43 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showSnackBar('启动 YOLO 依赖安装失败：$installError');
     }
     return true;
+  }
+
+  Future<bool?> _resolveIntelDriverInstall(String envChoice) async {
+    try {
+      final plan = await widget.apiClient.fetchPytorchInstallPlan(envChoice);
+      if (!mounted) return null;
+      if (!plan.needsIntelDriver) return false;
+
+      final deviceText = plan.intelDeviceName.isEmpty
+          ? 'Intel GPU'
+          : plan.intelDeviceName;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('需要安装 Intel 显卡驱动'),
+          content: Text(
+            '将安装 Intel XPU 版本 PyTorch，但当前检测到 $deviceText 尚未安装可用的 Intel 官方显卡驱动。\n\n'
+            '是否先从 Intel 官网下载并运行显卡驱动安装程序？安装过程中可能出现 Windows 权限确认，完成后可能需要重启。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('下载并安装驱动'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || confirmed != true) return null;
+      return true;
+    } catch (error) {
+      if (mounted) _showSnackBar('检测 Intel 显卡驱动失败：$error');
+      return null;
+    }
   }
 
   Future<void> _detectCurrentPreviewImage(DetectionItem item) async {
@@ -1711,6 +1868,61 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
         .toList();
+  }
+
+  List<String> _normalizeFavoritePhotoPaths(List<String> paths) {
+    final seen = <String>{};
+    final normalized = <String>[];
+    for (final path in paths) {
+      final trimmed = path.trim();
+      if (trimmed.isEmpty || !seen.add(trimmed)) continue;
+      normalized.add(trimmed);
+    }
+    return normalized;
+  }
+
+  String _favoritePhotoExportMode(NeriSettings settings) {
+    final value = _stringSetting(
+      settings,
+      'favorite_photo_export_mode',
+      favoritePhotoExportAsk,
+    );
+    return switch (value) {
+      favoritePhotoExportAlways => favoritePhotoExportAlways,
+      favoritePhotoExportNever => favoritePhotoExportNever,
+      _ => favoritePhotoExportAsk,
+    };
+  }
+
+  Future<void> _saveSilentSettingsPatch(Map<String, dynamic> patch) async {
+    final current = _settings;
+    if (current == null) {
+      throw StateError('设置尚未加载，请稍后重试');
+    }
+    final nextSettings = Map<String, dynamic>.from(current.settings)
+      ..addAll(patch);
+    if (mounted) {
+      setState(() => _settings = current.copyWith(settings: nextSettings));
+    }
+    final saved = await widget.apiClient.saveSettings(nextSettings);
+    if (mounted) setState(() => _settings = saved);
+  }
+
+  Future<void> _updateFavoritePhotoPaths(List<String> paths) {
+    return _saveSilentSettingsPatch({
+      'favorite_photo_paths': _normalizeFavoritePhotoPaths(paths),
+    });
+  }
+
+  Future<void> _updateFavoritePhotoExportMode(String mode) {
+    final normalizedMode = switch (mode) {
+      favoritePhotoExportAlways => favoritePhotoExportAlways,
+      favoritePhotoExportNever => favoritePhotoExportNever,
+      _ => favoritePhotoExportAsk,
+    };
+    return _saveSilentSettingsPatch({
+      'favorite_photo_export_mode': normalizedMode,
+    });
   }
 
   void _openFileWithSystem(String path) {
@@ -1984,6 +2196,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget _buildSettingsScreen() {
     return SettingsScreen(
       settings: _settings,
+      autoGroupInferredBurstSize: _autoGroupInferredBurstSize,
       apiClient: widget.apiClient,
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
@@ -2047,6 +2260,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       loading: _previewLoading,
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      minFrameRatio: _doubleSetting(
+        settings,
+        'min_frame_ratio',
+        0.0,
+      ).clamp(0.0, 1.0).toDouble(),
       autoGroup: _boolSetting(settings, 'auto_group', true),
       collapseGroups: _boolSetting(settings, 'collapse_groups', false),
       autoGroupDetectBurst: _boolSetting(
@@ -2057,7 +2275,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       autoGroupBurstSize: _intSetting(settings, 'auto_group_burst_size', 3),
       autoGroupGapSeconds: _intSetting(settings, 'auto_group_gap_seconds', 30),
       autoSortQuickMarks: _boolSetting(settings, 'auto_sort', false),
-      undoSteps: _intSetting(settings, 'undo_steps', 1).clamp(1, 50).toInt(),
+      undoSteps: _intSetting(settings, 'undo_steps', 10).clamp(10, 200).toInt(),
       quickMarkSpecies: quickMarkSpecies,
       quickMarkRecentHistory: _stringListSetting(
         settings,
@@ -2075,6 +2293,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         'export_columns',
         validationExportColumns,
       ),
+      favoritePhotoPaths: _stringListSetting(
+        settings,
+        'favorite_photo_paths',
+        const <String>[],
+      ),
+      favoritePhotoExportMode: _favoritePhotoExportMode(settings),
       onRefresh: () => _refreshPreviewItems(force: true),
       onLoadMetadata: _loadPreviewMetadata,
       onOpenExternal: _openFileWithSystem,
@@ -2083,7 +2307,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onQuickMarkUsed: _recordQuickMarkUsage,
       onQuickMarkReverted: _revertQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
+      onFavoritePhotoPathsChanged: _updateFavoritePhotoPaths,
+      onFavoritePhotoExportModeChanged: _updateFavoritePhotoExportMode,
+      onAutoGroupInferredBurstSizeChanged:
+          _handleAutoGroupInferredBurstSizeChanged,
     );
+  }
+
+  void _handleAutoGroupInferredBurstSizeChanged(int? value) {
+    if (_autoGroupInferredBurstSize == value) return;
+    if (!mounted) return;
+    setState(() => _autoGroupInferredBurstSize = value);
   }
 
   NeriSettings _settingsOrEmpty() {

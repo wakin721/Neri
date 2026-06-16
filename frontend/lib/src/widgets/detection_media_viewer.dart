@@ -14,6 +14,8 @@ class DetectionMediaViewer extends StatelessWidget {
     required this.visibleBoxes,
     required this.showDetections,
     required this.onOpenExternal,
+    this.isFavorite = false,
+    this.onToggleFavorite,
     super.key,
   });
 
@@ -21,9 +23,18 @@ class DetectionMediaViewer extends StatelessWidget {
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
   final VoidCallback onOpenExternal;
+  final bool isFavorite;
+  final VoidCallback? onToggleFavorite;
+
+  bool get _isImage {
+    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
+    return imageTypes.contains(item.fileType.toLowerCase());
+  }
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final showFavoriteButton = _isImage && onToggleFavorite != null;
     // 彻底移除 Semantics(container: true)，因为它会强行抓取内部高速变换的进度条和 YOLO 框，导致 AXTree 崩溃
     return ExcludeSemantics(
       child: ClipRRect(
@@ -42,10 +53,33 @@ class DetectionMediaViewer extends StatelessWidget {
               Positioned(
                 top: 12,
                 right: 12,
-                child: IconButton.filledTonal(
-                  tooltip: '使用系统应用打开',
-                  icon: const Icon(Icons.open_in_new_rounded),
-                  onPressed: onOpenExternal,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (showFavoriteButton) ...[
+                      IconButton.filledTonal(
+                        tooltip: isFavorite ? '取消收藏照片' : '收藏照片',
+                        icon: Icon(
+                          isFavorite
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
+                        ),
+                        style: isFavorite
+                            ? IconButton.styleFrom(
+                                backgroundColor: scheme.primaryContainer,
+                                foregroundColor: scheme.onPrimaryContainer,
+                              )
+                            : null,
+                        onPressed: onToggleFavorite,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    IconButton.filledTonal(
+                      tooltip: '使用系统应用打开',
+                      icon: const Icon(Icons.open_in_new_rounded),
+                      onPressed: onOpenExternal,
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -194,7 +228,9 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   Size? _videoSize;
 
   // 使用 Notifier 代替原先的 _position 进行局部刷新，彻底避免全局频繁 setState
-  final ValueNotifier<Duration> _positionNotifier = ValueNotifier(Duration.zero);
+  final ValueNotifier<Duration> _positionNotifier = ValueNotifier(
+    Duration.zero,
+  );
 
   @override
   void initState() {
@@ -243,7 +279,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
           });
           _positionTimer?.cancel();
           _positionTimer = null;
-          _player.pause(); 
+          _player.pause();
           _hideTimer?.cancel();
         }
       }),
@@ -284,7 +320,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     final state = _player.state;
     final position = state.position;
     final duration = state.duration;
-    
+
     if (position != _positionNotifier.value) {
       _positionNotifier.value = position;
     }
@@ -432,8 +468,10 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     }
     final totalFrames = _totalFrameHint();
     if (totalFrames == null || totalFrames <= 0) return null;
-    final progress = (position.inMilliseconds / _duration.inMilliseconds)
-        .clamp(0.0, 1.0);
+    final progress = (position.inMilliseconds / _duration.inMilliseconds).clamp(
+      0.0,
+      1.0,
+    );
     return (progress * totalFrames).round();
   }
 
@@ -551,13 +589,11 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
 
           // 3. 随时间进度局部刷新底部控制层
           Align(
-            alignment: Alignment.bottomCenter, 
+            alignment: Alignment.bottomCenter,
             child: ValueListenableBuilder<Duration>(
               valueListenable: _positionNotifier,
               builder: (context, position, child) {
-                return RepaintBoundary(
-                  child: _buildControls(position),
-                );
+                return RepaintBoundary(child: _buildControls(position));
               },
             ),
           ),

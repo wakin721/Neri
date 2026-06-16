@@ -1,19 +1,25 @@
 """FastAPI entrypoint for the Flutter-based Neri client."""
 
 import ctypes
+import logging
 import os
+import sys
 import threading
 import time
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.settings_manager import SettingsManager
 
 from . import __version__
-from .debug_info import installed_packages, list_debug_logs, read_debug_log, runtime_diagnostics
+from .crash_logging import configure_backend_crash_logging
+from .debug_info import clear_debug_storage, installed_packages, list_debug_logs, read_debug_log, runtime_diagnostics
 from .models import (
+    ClearCacheRequest,
+    ClearCacheResponse,
     CreateJobRequest,
     DebugLogContent,
     DebugLogInfo,
@@ -25,6 +31,7 @@ from .models import (
     ModelClassInfo,
     MaintenanceStartResponse,
     MaintenanceStatusResponse,
+    PytorchInstallPlanResponse,
     JobSummary,
     ReinstallPackageRequest,
     RuntimeDiagnostics,
@@ -37,6 +44,7 @@ from .models import (
 )
 from .maintenance import (
     read_maintenance_status,
+    resolve_pytorch_install_plan,
     schedule_backend_shutdown,
     start_package_reinstall,
     start_pytorch_install,
@@ -60,6 +68,9 @@ from .services import (
     preview_media_items,
 )
 
+configure_backend_crash_logging()
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="Neri API",
     version=__version__,
@@ -73,6 +84,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_api_exception(request: Request, exc: Exception) -> JSONResponse:
+    """Log uncaught API exceptions and return a readable local error."""
+
+    logger.exception("Unhandled API exception during %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"后端内部错误：{exc}"})
+
 
 job_manager = ProcessingJobManager()
 settings_manager = SettingsManager()
@@ -153,6 +173,22 @@ def shutdown(background_tasks: BackgroundTasks) -> dict[str, str]:
 
     background_tasks.add_task(schedule_backend_shutdown, 0.2)
     return {"status": "shutting_down"}
+
+
+@app.post("/api/debug/simulate-crash")
+def simulate_backend_crash(background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Schedule a non-zero backend exit for crash-report testing."""
+
+    background_tasks.add_task(_exit_with_simulated_crash, 0.2)
+    return {"status": "simulated_crash_scheduled"}
+
+
+def _exit_with_simulated_crash(delay: float) -> None:
+    time.sleep(delay)
+    message = "调试模式模拟 Python 后端崩溃。"
+    logger.error(message)
+    print(message, file=sys.stderr, flush=True)
+    os._exit(86)
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
@@ -287,7 +323,7 @@ def debug_logs() -> list[DebugLogInfo]:
 @app.get("/api/debug/logs/content", response_model=DebugLogContent)
 def debug_log_content(
     path: str = Query(..., min_length=1),
-    max_bytes: int = Query(200_000, ge=1024, le=1_000_000),
+    max_bytes: int = Query(32_000, ge=1024, le=200_000),
 ) -> DebugLogContent:
     """Return readable content for one whitelisted software log."""
 
@@ -299,12 +335,42 @@ def debug_log_content(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/debug/clear-cache", response_model=ClearCacheResponse)
+def clear_cache(request: ClearCacheRequest) -> ClearCacheResponse:
+    """Clear selected local logs and runtime cache files."""
+
+    try:
+        return ClearCacheResponse(
+            **clear_debug_storage(
+                clear_logs=request.clear_logs,
+                clear_software_cache=request.clear_software_cache,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/environment/pytorch-install-plan", response_model=PytorchInstallPlanResponse)
+def pytorch_install_plan(env_choice: str = Query("自动检测", min_length=1)) -> PytorchInstallPlanResponse:
+    """Resolve PyTorch target and Intel driver preflight data."""
+
+    try:
+        plan = resolve_pytorch_install_plan(env_choice)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PytorchInstallPlanResponse(**plan)
+
+
 @app.post("/api/environment/install-pytorch", response_model=MaintenanceStartResponse, status_code=202)
 def install_pytorch(request: InstallPytorchRequest, background_tasks: BackgroundTasks) -> MaintenanceStartResponse:
     """Start PyTorch installation, then restart the Python backend."""
 
     try:
-        status = start_pytorch_install(request.env_choice, request.package_source)
+        status = start_pytorch_install(
+            request.env_choice,
+            request.package_source,
+            install_intel_driver=request.install_intel_driver,
+        )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
@@ -322,6 +388,7 @@ def install_yolo_dependencies(
         status = start_yolo_dependencies_install(
             request.env_choice,
             request.package_source,
+            install_intel_driver=request.install_intel_driver,
         )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
