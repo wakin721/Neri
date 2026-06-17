@@ -3,8 +3,8 @@ import re
 import subprocess
 from pathlib import Path
 
-BASE_VERSION = "3.0.4-release"
-DEFAULT_BUILD_CODE = "dfc280"
+BASE_VERSION = "3.0.5-alpha1"
+DEFAULT_BUILD_CODE = "7dfa6c"
 
 _BUILD_CODE_PATTERN = re.compile(r"^[0-9a-fA-F]{6}$")
 _VERSION_NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)+")
