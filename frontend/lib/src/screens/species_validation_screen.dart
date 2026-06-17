@@ -79,6 +79,26 @@ const validationQuantityButtons = <String>[
 ];
 
 const double _validationButtonHeight = 40;
+const _validationImageTypes = {
+  'png',
+  'jpg',
+  'jpeg',
+  'bmp',
+  'gif',
+  'tiff',
+  'webp',
+};
+const _validationVideoTypes = {
+  'mp4',
+  'avi',
+  'mov',
+  'mkv',
+  'wmv',
+  'flv',
+  'webm',
+  'm4v',
+  'ts',
+};
 
 class SpeciesValidationScreen extends StatefulWidget {
   const SpeciesValidationScreen({
@@ -1284,8 +1304,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isImage(DetectionItem item) {
-    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
-    return imageTypes.contains(item.fileType.toLowerCase());
+    return _validationImageTypes.contains(item.fileType.toLowerCase());
   }
 
   bool _isFavoritePhoto(DetectionItem item) {
@@ -1796,9 +1815,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         flushCurrent();
       }
       current.add(item);
-      if (_isVideo(item)) {
-        flushCurrent();
-      }
     }
 
     flushCurrent();
@@ -1835,15 +1851,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final previousItem = previous;
       final startsNewRun =
           previousItem != null &&
-          (_isVideo(previousItem) ||
-              _isVideo(item) ||
-              ((_mediaGap(previousItem, item) ?? Duration.zero) >=
-                  gapThreshold));
+          ((_mediaGap(previousItem, item) ?? Duration.zero) >= gapThreshold);
       if (startsNewRun) finishRun();
       if (_isImage(item)) {
         runLength += 1;
-      } else {
-        finishRun();
       }
       previous = item;
     }
@@ -1866,19 +1877,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     required Duration gapThreshold,
   }) {
     if (current.isEmpty) return false;
-    if (_isVideo(current.last)) return true;
 
-    final nextIsVideo = _isVideo(next);
-    if (nextIsVideo) {
-      final gap = _mediaGap(current.last, next);
-      return gap != null && gap >= gapThreshold;
-    }
+    final photoCount = current.where(_isImage).length;
+    if (photoCount >= burstSize && _isImage(next)) return true;
 
     final gap = _mediaGap(current.last, next);
     if (gap != null) return gap >= gapThreshold;
 
-    final photoCount = current.where(_isImage).length;
-    return photoCount >= burstSize && _isImage(next);
+    return false;
   }
 
   Duration? _mediaGap(DetectionItem previous, DetectionItem next) {
@@ -2004,6 +2010,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_useCollapsedGroups && row.group.items.length > 1) {
       final state = row.groupExpanded ? '已展开' : '已折叠';
       final groupSize = row.group.items.length;
+      if (row.groupExpanded) {
+        return '${_groupOrdinalLabel(row)} · $state · $label';
+      }
       return '${_groupOrdinalLabel(row)} · $state $groupSize 个文件 · $label';
     }
     return '${_groupOrdinalLabel(row)} · $label';
@@ -2432,8 +2441,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isVideo(DetectionItem item) {
-    const videoTypes = {'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'};
-    return videoTypes.contains(item.fileType.toLowerCase());
+    return _validationVideoTypes.contains(item.fileType.toLowerCase());
   }
 
   Map<String, int> _boxCountsBySpecies(List<DetectionBox> boxes) {

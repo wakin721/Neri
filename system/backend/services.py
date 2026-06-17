@@ -20,7 +20,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -755,35 +755,132 @@ class ProcessingJobManager:
                             ),
                         )
                 else:
+                    video_items: list[DetectionItem] = []
                     for path in video_files:
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
                         item = _build_metadata_item(path)
                         db_detection_data = detection_index.get(path.stem)
                         if db_detection_data:
                             item = _apply_detection_data(item, db_detection_data)
+                        video_items.append(item)
 
-                        item = _detect_video(
-                            detector,
-                            path,
-                            item,
-                            request,
-                            input_path,
-                            cancelled=lambda: self._is_cancelled(job_id),
+                    video_worker_count = _tracked_video_worker_count(
+                        len(video_files),
+                        request.options.thread_count,
+                    )
+                    if video_worker_count <= 1:
+                        for path, item in zip(video_files, video_items):
+                            if self._is_cancelled(job_id):
+                                self._mark_cancelled(job_id, results)
+                                return
+
+                            item = _detect_video(
+                                detector,
+                                path,
+                                item,
+                                request,
+                                input_path,
+                                cancelled=lambda: self._is_cancelled(job_id),
+                            )
+                            if self._is_cancelled(job_id):
+                                self._mark_cancelled(job_id, results)
+                                return
+                            results.append(item)
+                            processed += 1
+                            self._mutate_job(
+                                job_id,
+                                processed=processed,
+                                results=results,
+                                **progress_metrics(processed),
+                                message=f"正在处理视频 {processed}/{total_files}: {path.name}",
+                            )
+                    else:
+                        logger.info(
+                            "Tracked video parallel workers: videos=%d workers=%d",
+                            len(video_files),
+                            video_worker_count,
                         )
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
-                        results.append(item)
-                        processed += 1
-                        self._mutate_job(
-                            job_id,
-                            processed=processed,
-                            results=results,
-                            **progress_metrics(processed),
-                            message=f"正在处理视频 {processed}/{total_files}: {path.name}",
-                        )
+                        base_results = list(results)
+                        detected_video_items: list[DetectionItem | None] = [
+                            None for _ in video_items
+                        ]
+                        worker_state = threading.local()
+                        primary_detector_lock = threading.Lock()
+                        primary_detector_available = True
+
+                        def detector_for_worker():
+                            nonlocal primary_detector_available
+                            worker_detector = getattr(worker_state, "detector", None)
+                            if worker_detector is not None:
+                                return worker_detector
+                            with primary_detector_lock:
+                                if primary_detector_available:
+                                    primary_detector_available = False
+                                    worker_state.detector = detector
+                                    return detector
+                            worker_detector = _load_detector(
+                                request.options.model_path,
+                                request.options.classification_model_path,
+                            )
+                            worker_state.detector = worker_detector
+                            return worker_detector
+
+                        def detect_one_video(video_index: int) -> tuple[int, DetectionItem]:
+                            _raise_if_cancelled(lambda: self._is_cancelled(job_id))
+                            path = video_files[video_index]
+                            item = video_items[video_index]
+                            detected_item = _detect_video(
+                                detector_for_worker(),
+                                path,
+                                item,
+                                request,
+                                input_path,
+                                cancelled=lambda: self._is_cancelled(job_id),
+                            )
+                            return video_index, detected_item
+
+                        with ThreadPoolExecutor(
+                            max_workers=video_worker_count,
+                            thread_name_prefix="neri-video",
+                        ) as video_executor:
+                            future_to_index = {
+                                video_executor.submit(detect_one_video, index): index
+                                for index in range(len(video_files))
+                            }
+                            for future in as_completed(future_to_index):
+                                if self._is_cancelled(job_id):
+                                    self._mark_cancelled(job_id, results)
+                                    return
+                                video_index = future_to_index[future]
+                                try:
+                                    completed_index, item = future.result()
+                                except Exception as exc:
+                                    if self._is_cancelled(job_id):
+                                        self._mark_cancelled(job_id, results)
+                                        return
+                                    completed_index = video_index
+                                    item = video_items[completed_index].model_copy(
+                                        update={"error": f"视频检测失败: {exc}"}
+                                    )
+                                detected_video_items[completed_index] = item
+                                processed += 1
+                                current_video_results = [
+                                    detected
+                                    for detected in detected_video_items
+                                    if detected is not None
+                                ]
+                                results = [*base_results, *current_video_results]
+                                self._mutate_job(
+                                    job_id,
+                                    processed=processed,
+                                    results=results,
+                                    **progress_metrics(processed),
+                                    message=(
+                                        f"正在并发处理视频 {processed}/{total_files} "
+                                        f"(workers={video_worker_count}): "
+                                        f"{video_files[completed_index].name}"
+                                    ),
+                                )
+                        _clear_torch_runtime_cache()
 
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, results)
@@ -888,6 +985,17 @@ def _chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
     size = max(1, size)
     for index in range(0, len(items), size):
         yield items[index : index + size]
+
+
+def _tracked_video_worker_count(item_count: int, thread_count: int) -> int:
+    if item_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    configured = max(1, min(int(thread_count or 1), 8))
+    cpu_budget = max(1, cpu_count // 2)
+    # Full video tracking loads model state and decodes frames per worker, so
+    # keep the cap conservative even when a larger value is requested.
+    return max(1, min(item_count, configured, cpu_budget))
 
 
 def _unique_detection_items(items: Iterable[DetectionItem]) -> list[DetectionItem]:
@@ -1520,7 +1628,8 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             upsert_detections_bulk,
             upsert_validation_bulk,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Detection DB bulk helpers unavailable: %s", exc)
         return
 
     for root, payloads in payloads_by_root.items():
@@ -1529,7 +1638,8 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             init_db(db_path)
             upsert_detections_bulk(db_path, payloads)
             upsert_validation_bulk(db_path, validations_by_root.get(root, []))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to save detection batch to SQLite at %s: %s", root, exc)
             continue
 
 

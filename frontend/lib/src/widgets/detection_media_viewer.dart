@@ -8,6 +8,19 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/job.dart';
 
+const _viewerImageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
+const _viewerVideoTypes = {
+  'mp4',
+  'avi',
+  'mov',
+  'mkv',
+  'wmv',
+  'flv',
+  'webm',
+  'm4v',
+  'ts',
+};
+
 class DetectionMediaViewer extends StatelessWidget {
   const DetectionMediaViewer({
     required this.item,
@@ -27,8 +40,7 @@ class DetectionMediaViewer extends StatelessWidget {
   final VoidCallback? onToggleFavorite;
 
   bool get _isImage {
-    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
-    return imageTypes.contains(item.fileType.toLowerCase());
+    return _viewerImageTypes.contains(item.fileType.toLowerCase());
   }
 
   @override
@@ -104,8 +116,7 @@ class _MediaContent extends StatelessWidget {
   final VoidCallback onOpenExternal;
 
   bool get isVideo {
-    const videoTypes = {'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'};
-    return videoTypes.contains(item.fileType.toLowerCase());
+    return _viewerVideoTypes.contains(item.fileType.toLowerCase());
   }
 
   @override

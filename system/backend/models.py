@@ -191,6 +191,7 @@ class ProcessingOptions(BaseModel):
     use_augment: bool = False
     use_agnostic_nms: bool = True
     batch_size: int = Field(default=16, ge=1, le=64)
+    thread_count: int = Field(default=4, ge=1, le=8)
     imgsz: int = Field(default=1920, ge=320, le=4096)
     vid_stride: int = Field(default=1, ge=1, le=120)
     video_mode: Literal["all", "fast"] = "all"

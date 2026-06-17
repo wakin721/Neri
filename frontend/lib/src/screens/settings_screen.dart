@@ -184,11 +184,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
-      'batch_size': !dependenciesReady
-          ? _intSetting(saved, 'batch_size', 16)
-          : settings?.gpuAvailable == true
-          ? _intSetting(saved, 'batch_size', 16)
-          : 1,
+      'batch_size': _intSetting(saved, 'batch_size', 16),
+      'thread_count': _intSetting(saved, 'thread_count', 4),
       'use_fp16': !dependenciesReady
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
@@ -938,19 +935,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '模型加速选项',
-            subtitle: 'CPU 模式会锁定 batch=1 并禁用 FP16',
+            subtitle: '批处理数控制单次推理规模，线程数控制完整视频文件并发',
             icon: Icons.bolt_rounded,
             child: Column(
               children: [
                 _LabeledSlider(
-                  label: '批处理大小',
+                  label: '批处理数',
                   value: _int('batch_size').toDouble(),
                   min: 1,
                   max: 32,
                   divisions: 31,
                   valueLabel: _int('batch_size').toString(),
-                  enabled: detectionEnabled && settings?.gpuAvailable == true,
+                  enabled: detectionEnabled,
                   onChanged: (value) => _set('batch_size', value.round()),
+                ),
+                _LabeledSlider(
+                  label: '线程数',
+                  value: _int('thread_count', 4).toDouble(),
+                  min: 1,
+                  max: 8,
+                  divisions: 7,
+                  valueLabel: _int('thread_count', 4).toString(),
+                  enabled: detectionEnabled,
+                  onChanged: (value) => _set('thread_count', value.round()),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -965,7 +972,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: Text(
                     settings?.gpuAvailable == true
                         ? '需要支持半精度推理的 GPU'
-                        : '当前为 CPU 模式，已禁用 FP16 并锁定 batch=1',
+                        : '当前为 CPU 模式，已禁用 FP16',
                   ),
                 ),
               ],
@@ -1543,7 +1550,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final burst = _int('auto_group_burst_size').clamp(1, 20).toInt();
     final gap = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
     final burstText = _bool('auto_group_detect_burst')
-        ? '自动识别，当前 ${_autoGroupDisplayBurstSize(burst)} 张'
+        ? '自动识别 · 当前 ${_autoGroupDisplayBurstSize(burst)} 张'
         : '$burst 张';
     return '$burstText · $gap 秒';
   }
@@ -2568,7 +2575,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _draft['package'] = _packageController.text.trim();
       if (_detectionDependenciesReady &&
           widget.settings?.gpuAvailable != true) {
-        _draft['batch_size'] = 1;
         _draft['use_fp16'] = false;
       }
       await widget.onSaveSettings(Map<String, dynamic>.from(_draft));

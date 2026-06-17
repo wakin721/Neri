@@ -1340,6 +1340,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return gpuAvailable ? savedBatchSize.clamp(1, 64).toInt() : 1;
   }
 
+  int _processingThreadCount({bool singleFile = false}) {
+    if (singleFile) return 1;
+    final settings = _settingsOrEmpty();
+    return _intSetting(settings, 'thread_count', 4).clamp(1, 8).toInt();
+  }
+
   int _imageSizeSetting() {
     return _intSetting(
       _settingsOrEmpty(),
@@ -1511,6 +1517,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(),
+        threadCount: _processingThreadCount(),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -1696,6 +1703,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(singleFile: true),
+        threadCount: _processingThreadCount(singleFile: true),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -1738,6 +1746,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
+        threadCount: _processingThreadCount(singleFile: inputPaths.length == 1),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
