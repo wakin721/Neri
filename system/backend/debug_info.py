@@ -13,7 +13,17 @@ from . import __version__
 from .maintenance import maintenance_log_path, maintenance_status_path, project_root
 
 LOG_EXTENSIONS = {".log", ".txt", ".json"}
-TEMP_LOG_EXTENSIONS = {".log", ".txt"}
+LEGACY_TEMP_LOG_EXTENSIONS = {".log", ".txt"}
+LEGACY_TEMP_LOG_NAMES = {
+    "backend_maintenance.log",
+    "backend_maintenance_status.json",
+    "crash_startup_report.json",
+    "crash_watchdog.tmp",
+}
+LEGACY_TEMP_LOG_PREFIXES = (
+    "crash_watchdog_",
+    "crash_startup_report_",
+)
 DEFAULT_LOG_TAIL_BYTES = 32_000
 CACHE_FILE_NAMES = {
     "job_state.json",
@@ -26,8 +36,6 @@ CACHE_FILE_PREFIXES = (
 CACHE_PRESERVED_TEMP_NAMES = {
     "settings.json",
     "quick_mark.json",
-    "backend_maintenance_status.json",
-    "backend_maintenance.log",
 }
 
 
@@ -106,7 +114,6 @@ def list_debug_logs() -> list[dict[str, Any]]:
     files: dict[Path, Path] = {}
     root = project_root()
     search_roots = (
-        (root / "temp", TEMP_LOG_EXTENSIONS),
         (root / "logs", LOG_EXTENSIONS),
     )
     for logs_root, extensions in search_roots:
@@ -186,13 +193,17 @@ def clear_debug_storage(
     if clear_logs:
         log_roots = (
             (root / "logs", LOG_EXTENSIONS),
-            (root / "temp", TEMP_LOG_EXTENSIONS),
         )
         for log_root, extensions in log_roots:
             if not log_root.exists():
                 continue
             for path in sorted(log_root.rglob("*")):
                 if path.is_file() and path.suffix.lower() in extensions:
+                    delete_file(path)
+        legacy_temp_root = root / "temp"
+        if legacy_temp_root.exists():
+            for path in sorted(legacy_temp_root.rglob("*")):
+                if path.is_file() and _is_legacy_temp_log_file(path):
                     delete_file(path)
 
     if clear_software_cache:
@@ -228,7 +239,6 @@ def _resolve_allowed_log_path(path_text: str) -> Path:
     if path.suffix.lower() not in LOG_EXTENSIONS:
         raise ValueError("不支持查看该类型的日志文件。")
     allowed_roots = [
-        (project_root() / "temp").resolve(),
         (project_root() / "logs").resolve(),
     ]
     if any(_is_relative_to(path, root) for root in allowed_roots):
@@ -248,6 +258,15 @@ def _is_cache_file(path: Path) -> bool:
         name in CACHE_FILE_NAMES
         or any(name.startswith(prefix) for prefix in CACHE_FILE_PREFIXES)
         or path.suffix.lower() in {".tmp", ".cache", ".bak"}
+    )
+
+
+def _is_legacy_temp_log_file(path: Path) -> bool:
+    name = path.name
+    return (
+        name in LEGACY_TEMP_LOG_NAMES
+        or any(name.startswith(prefix) for prefix in LEGACY_TEMP_LOG_PREFIXES)
+        or path.suffix.lower() in LEGACY_TEMP_LOG_EXTENSIONS
     )
 
 

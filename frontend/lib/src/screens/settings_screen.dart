@@ -70,7 +70,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-alpha',
+  defaultValue: '3.0.5-alpha2',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -1689,7 +1689,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       onChanged: (value) =>
                           setDialogState(() => clearLogs = value ?? false),
                       title: const Text('清除日志'),
-                      subtitle: const Text('清除 logs 目录和临时目录中的软件日志。'),
+                      subtitle: const Text('清除 logs 目录中的软件日志。'),
                     ),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,

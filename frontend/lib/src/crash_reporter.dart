@@ -172,12 +172,25 @@ class CrashReporter {
   static void _loadPendingStartupReport() {
     final projectRoot = _resolveProjectRoot();
     if (projectRoot == null) return;
-    final file = File(
-      [
-        projectRoot.path,
-        'temp',
-        'crash_startup_report.json',
-      ].join(Platform.pathSeparator),
+    final candidates = <File>[
+      File(
+        [
+          projectRoot.path,
+          'logs',
+          'crash_startup_report.json',
+        ].join(Platform.pathSeparator),
+      ),
+      File(
+        [
+          projectRoot.path,
+          'temp',
+          'crash_startup_report.json',
+        ].join(Platform.pathSeparator),
+      ),
+    ];
+    final file = candidates.firstWhere(
+      (candidate) => candidate.existsSync(),
+      orElse: () => candidates.first,
     );
     if (!file.existsSync()) return;
 

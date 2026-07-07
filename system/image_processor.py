@@ -17,6 +17,13 @@ import cv2
 logger = logging.getLogger(__name__)
 
 
+def _runtime_logs_dir(*parts: str) -> str:
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    path = os.path.join(root, "logs", *parts)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 class ImageProcessor:
     """处理图像、检测物种及视频追踪的核心类"""
 
@@ -389,8 +396,7 @@ class ImageProcessor:
                 if not processed_imgs:
                     return
 
-                import tempfile
-                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs")
+                temp_run_project = _runtime_logs_dir("yolo")
 
                 print("\n" + "=" * 50)
                 print("🚀 [ImageProcessor] 开始执行模型推理，参数如下：")
@@ -702,8 +708,7 @@ class ImageProcessor:
         temp_enhanced_video_path = os.path.join(work_temp_dir, f"{video_name}_enhanced_temp.mp4")
 
         # YOLO 日志路径
-        import tempfile
-        temp_run_project = os.path.join(tempfile.gettempdir(), "neri_yolo_logs")
+        temp_run_project = _runtime_logs_dir("yolo")
 
         # 追踪器配置
         tracker_config = resource_path(os.path.join("res", "model_cls", "tracker.yaml"))

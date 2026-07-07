@@ -64,12 +64,18 @@ def toolkit_python() -> Path:
     return project_root() / "toolkit" / "python.exe"
 
 
+def logs_dir() -> Path:
+    """Return the project software log directory."""
+
+    return project_root() / "logs"
+
+
 def maintenance_status_path() -> Path:
-    return project_root() / "temp" / "backend_maintenance_status.json"
+    return logs_dir() / "backend_maintenance_status.json"
 
 
 def maintenance_log_path() -> Path:
-    return project_root() / "temp" / "backend_maintenance.log"
+    return logs_dir() / "backend_maintenance.log"
 
 
 def read_maintenance_status() -> dict[str, Any]:
