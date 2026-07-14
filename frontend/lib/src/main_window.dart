@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -37,6 +38,7 @@ class MainWindow extends StatefulWidget {
 }
 
 class _MainWindowState extends State<MainWindow> with WindowListener {
+  static const _windowsShellChannel = MethodChannel('neri/windows_shell');
   static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置'];
   static const _navigationItems = <_NavigationRailEntry>[
     _NavigationRailEntry(
@@ -112,6 +114,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String? _previewLoadedPath;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
+  String? _lastWindowsShellStatusSignature;
 
   @override
   void initState() {
@@ -119,14 +122,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     windowManager.addListener(this);
     unawaited(windowManager.setPreventClose(true));
     _initWindowState();
+    if (Platform.isWindows) {
+      _windowsShellChannel.setMethodCallHandler(_handleWindowsShellCall);
+    }
 
     try {
       MediaKit.ensureInitialized();
     } catch (_) {}
 
-    _inputController.addListener(_schedulePreviewRefresh);
+    _inputController.addListener(() {
+      _schedulePreviewRefresh();
+      unawaited(_updateWindowsShellStatus());
+    });
     _loadLastInputPath();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_updateWindowsShellStatus());
       unawaited(_startBackendAndInitialRefresh());
     });
   }
@@ -134,6 +144,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   void dispose() {
     windowManager.removeListener(this);
+    if (Platform.isWindows) {
+      _windowsShellChannel.setMethodCallHandler(null);
+    }
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
     if (_closing) {
@@ -148,6 +161,113 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _inputController.dispose();
     super.dispose();
   }
+
+  ProcessingJob? get _windowsShellJob {
+    for (final job in _jobs) {
+      if (job.isWorkerActive) return job;
+    }
+    for (final job in _jobs) {
+      if (job.canResume) return job;
+    }
+    return null;
+  }
+
+  Future<dynamic> _handleWindowsShellCall(MethodCall call) async {
+    if (call.method != 'trayAction') return null;
+    switch (call.arguments) {
+      case 'toggleProcessing':
+        final job = _windowsShellJob;
+        if (job == null) {
+          if (_canCreateJobFromTray) await _createJob();
+        } else if (job.isWorkerActive) {
+          if (!_pendingStopJobIds.contains(job.id)) {
+            await _cancelJob(job);
+          }
+        } else if (job.canResume &&
+            !_pendingStartJobBaselines.containsKey(job.id)) {
+          await _resumeJob(job);
+        }
+      case 'openSettings':
+        if (mounted) setState(() => _selectedIndex = 3);
+        await _showAndFocusWindow();
+      case 'exit':
+        await _showAndFocusWindow();
+        if (mounted) _requestCloseWindow();
+    }
+    return null;
+  }
+
+  Future<void> _showAndFocusWindow() async {
+    try {
+      await windowManager.show();
+      if (await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.focus();
+    } catch (_) {}
+  }
+
+  Future<void> _updateWindowsShellStatus() async {
+    if (!Platform.isWindows || !mounted) return;
+    final job = _windowsShellJob;
+    final isRunning = job?.isWorkerActive ?? false;
+    final isFailed = job?.state == 'failed';
+    final hasProgress = job != null && job.total > 0;
+    final progress = hasProgress
+        ? job.progress.clamp(0.0, 1.0).toDouble()
+        : 0.0;
+    final percent = (progress * 100).round();
+
+    String tooltip = 'Neri';
+    if (job != null) {
+      final counts = hasProgress
+          ? ' ($percent% · ${job.processed}/${job.total})'
+          : '';
+      if (isRunning) {
+        tooltip = hasProgress ? 'Neri - 任务进度$counts' : 'Neri - 任务准备中';
+      } else if (isFailed) {
+        tooltip = 'Neri - 任务失败$counts';
+      } else {
+        tooltip = 'Neri - 任务已暂停$counts';
+      }
+    }
+
+    final taskActionEnabled = job == null
+        ? _canCreateJobFromTray
+        : isRunning
+        ? !_pendingStopJobIds.contains(job.id)
+        : job.canResume && !_pendingStartJobBaselines.containsKey(job.id);
+    final progressState = job == null
+        ? 'none'
+        : isRunning
+        ? (hasProgress ? 'normal' : 'indeterminate')
+        : isFailed
+        ? 'error'
+        : 'paused';
+    final status = <String, Object>{
+      'tooltip': tooltip,
+      'taskActionEnabled': taskActionEnabled,
+      'taskIsRunning': isRunning,
+      'progressState': progressState,
+      'progress': progress,
+    };
+    final signature = jsonEncode(status);
+    if (_lastWindowsShellStatusSignature == signature) return;
+    try {
+      await _windowsShellChannel.invokeMethod<void>('updateStatus', status);
+      _lastWindowsShellStatusSignature = signature;
+    } on MissingPluginException {
+      // Non-Windows test runners do not register the native shell channel.
+    } on PlatformException {
+      // A transient native-shell failure should not interrupt processing.
+    }
+  }
+
+  bool get _canCreateJobFromTray =>
+      _backendReady &&
+      _settings != null &&
+      !_submitting &&
+      _inputController.text.trim().isNotEmpty;
 
   @override
   void onWindowClose() {
@@ -1223,6 +1343,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           }
         });
       }
+      if (settingsChanged || jobsChanged) {
+        unawaited(_updateWindowsShellStatus());
+      }
 
       // 清理加载状态
       if (!silent && finishLoading && _loading) {
@@ -1505,6 +1628,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
 
     setState(() => _submitting = true);
+    unawaited(_updateWindowsShellStatus());
     try {
       await _saveLastInputPath(inputPath);
       final createdJob = await widget.apiClient.createJob(
@@ -1537,13 +1661,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (await _handleYoloDependencyError(error)) return;
       _showSnackBar('创建任务失败：$error');
     } finally {
-      if (mounted) setState(() => _submitting = false);
+      if (mounted) {
+        setState(() => _submitting = false);
+        unawaited(_updateWindowsShellStatus());
+      }
     }
   }
 
   Future<void> _cancelJob(ProcessingJob job) async {
     if (mounted && job.id.isNotEmpty) {
       setState(() => _pendingStopJobIds.add(job.id));
+      unawaited(_updateWindowsShellStatus());
     }
     try {
       await widget.apiClient.cancelJob(job.id);
@@ -1552,6 +1680,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted) return;
       setState(() => _pendingStopJobIds.remove(job.id));
+      unawaited(_updateWindowsShellStatus());
       _showSnackBar('停止任务失败：$error');
     }
   }
@@ -1561,6 +1690,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() {
         _pendingStartJobBaselines[job.id] = job.processed;
       });
+      unawaited(_updateWindowsShellStatus());
     }
     try {
       await widget.apiClient.resumeJob(job.id);
@@ -1569,6 +1699,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted) return;
       setState(() => _pendingStartJobBaselines.remove(job.id));
+      unawaited(_updateWindowsShellStatus());
       _showSnackBar('继续任务失败：$error');
     }
   }
