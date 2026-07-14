@@ -374,7 +374,7 @@ def install_pytorch(request: InstallPytorchRequest, background_tasks: Background
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/environment/install-yolo-dependencies", response_model=MaintenanceStartResponse, status_code=202)
@@ -393,7 +393,7 @@ def install_yolo_dependencies(
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/environment/reinstall-package", response_model=MaintenanceStartResponse, status_code=202)
@@ -408,7 +408,7 @@ def reinstall_package(
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/jobs", response_model=JobSummary, status_code=202)

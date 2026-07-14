@@ -94,6 +94,9 @@ class MaintenanceStartResponse(BaseModel):
     accepted: bool = True
     operation: str
     message: str
+    progress: int = Field(default=0, ge=0, le=100)
+    status_path: str | None = None
+    maintenance_pid: int | None = None
 
 
 class PytorchInstallPlanResponse(BaseModel):
@@ -115,10 +118,13 @@ class MaintenanceStatusResponse(BaseModel):
     operation: str | None = None
     state: str = "idle"
     message: str = ""
+    progress: int = Field(default=0, ge=0, le=100)
     started_at: str | None = None
     updated_at: str | None = None
     return_code: int | None = None
     log_path: str | None = None
+    status_path: str | None = None
+    maintenance_pid: int | None = None
     error: str | None = None
 
 

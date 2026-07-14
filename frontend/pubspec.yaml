@@ -1,5 +1,5 @@
 name: neri_flutter
-version: 3.0.5-alpha2
+version: 3.0.5-alpha2+b5f6a6
 publish_to: none
 description: Material 3 Flutter frontend for the Neri infrared-camera processing backend.
 

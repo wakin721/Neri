@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 import 'api_client.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
+import 'local_maintenance_status.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
@@ -71,6 +72,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       <String, DetectionItem>{};
   final Set<String> _previewMetadataLoading = <String>{};
   final Set<int> _expectedBackendExitPids = <int>{};
+  final _maintenanceStatusStore = LocalMaintenanceStatusStore();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -106,6 +108,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String _previewSpeciesFilter = previewAllSpeciesLabel;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
+  MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
   String _videoMode = 'all';
   int _imageSize = 1920;
@@ -403,6 +406,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _backendStarting = true;
     if (mounted) setState(() => _loading = true);
     try {
+      await _waitForActiveEnvironmentMaintenance();
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
       await _ensureBackendStarted();
       if (_closeFlowBlocksBackendStartup) {
         if (mounted) setState(() => _loading = false);
@@ -432,6 +437,34 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } finally {
       _backendStarting = false;
     }
+  }
+
+  Future<void> _waitForActiveEnvironmentMaintenance() async {
+    var status = await _maintenanceStatusStore.tryRead();
+    if (status == null || !_maintenanceStatusStore.isActive(status)) return;
+
+    var missingWorkerChecks = 0;
+    while (mounted && !_closeFlowBlocksBackendStartup) {
+      if (!_maintenanceStatusStore.isActive(status!)) break;
+      setState(() => _startupMaintenanceStatus = status);
+
+      if (await _maintenanceStatusStore.isWorkerRunning(status)) {
+        missingWorkerChecks = 0;
+      } else {
+        missingWorkerChecks++;
+        if (missingWorkerChecks >= 3) {
+          await _maintenanceStatusStore.markInterrupted(status);
+          break;
+        }
+      }
+
+      await Future<void>.delayed(const Duration(seconds: 1));
+      status =
+          await _maintenanceStatusStore.tryRead(path: status.statusPath) ??
+          status;
+    }
+
+    if (mounted) setState(() => _startupMaintenanceStatus = null);
   }
 
   Future<void> _refreshInitialPageData() async {
@@ -2251,6 +2284,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             ],
           ),
         ),
+        if (_startupMaintenanceStatus case final status?)
+          _StartupMaintenanceOverlay(status: status),
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,
@@ -2489,6 +2524,72 @@ class _NavigationRailEntry {
   final String label;
   final IconData icon;
   final IconData selectedIcon;
+}
+
+class _StartupMaintenanceOverlay extends StatelessWidget {
+  const _StartupMaintenanceOverlay({required this.status});
+
+  final MaintenanceStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: kToolbarHeight + 4,
+      bottom: 0,
+      child: ColoredBox(
+        color: scheme.scrim.withValues(alpha: 0.36),
+        child: Center(
+          child: Card(
+            elevation: 6,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox.square(
+                      dimension: 24,
+                      child: CircularProgressIndicator(
+                        value: status.progress / 100,
+                        strokeWidth: 2.8,
+                        color: scheme.primary,
+                        backgroundColor: scheme.surfaceContainerHighest,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '环境维护中',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            status.message.isEmpty
+                                ? '正在继续之前的依赖安装，请稍候。'
+                                : status.message,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: scheme.onSurfaceVariant),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _ClosingOverlay extends StatelessWidget {

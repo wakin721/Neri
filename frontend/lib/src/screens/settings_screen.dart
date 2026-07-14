@@ -8,6 +8,8 @@ import 'package:flutter/services.dart';
 import '../api_client.dart';
 import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
+import '../local_debug_logs.dart';
+import '../local_maintenance_status.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../utils/quick_mark_sort.dart';
@@ -70,7 +72,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-alpha2',
+  defaultValue: '3.0.5-alpha2(b5f6a6)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -106,6 +108,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _packageController = TextEditingController();
+  final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   Map<String, dynamic> _draft = <String, dynamic>{};
   int _sectionIndex = 0;
   bool _saving = false;
@@ -121,6 +124,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Timer? _maintenanceTimer;
   String? _maintenanceOperation;
   String? _maintenanceMessage;
+  double? _maintenanceProgress;
+  String? _maintenanceStatusPath;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -130,7 +135,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _packageController.addListener(_handlePackageChanged);
     _resetDraft();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _loadModelClassesForSelection();
+      if (!mounted) return;
+      _loadModelClassesForSelection();
+      unawaited(_resumeMaintenanceWatchIfActive());
     });
   }
 
@@ -383,6 +390,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installPytorch() async {
+    if (_maintenanceInProgress ||
+        await _resumeMaintenanceWatchIfActive(announce: true)) {
+      return;
+    }
     final envChoice = _string('pytorch_version', '自动检测');
     final packageSource = _string('package_source', 'official');
     final sourceLabel = _packageSourceLabel(packageSource);
@@ -433,17 +444,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : 'install_pytorch')
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _installingPytorch = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 PyTorch 安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 PyTorch 安装失败');
     }
   }
 
@@ -474,7 +480,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installYoloDependencies() async {
-    if (_maintenanceInProgress) return;
+    if (_maintenanceInProgress ||
+        await _resumeMaintenanceWatchIfActive(announce: true)) {
+      return;
+    }
     const envChoice = '自动检测';
     final packageSource = _string('package_source', 'official');
     final sourceLabel = _packageSourceLabel(packageSource);
@@ -513,17 +522,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? 'install_yolo_dependencies'
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _installingPytorch = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 YOLO 依赖安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 YOLO 依赖安装失败');
     }
   }
 
@@ -536,6 +540,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _reinstallPythonPackage() async {
+    if (_maintenanceInProgress ||
+        await _resumeMaintenanceWatchIfActive(announce: true)) {
+      return;
+    }
     final packageSpec = _packageController.text.trim();
     final packageSource = _string('package_source', 'official');
     if (packageSpec.isEmpty) {
@@ -567,28 +575,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? 'reinstall_package'
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _reinstallingPackage = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 Python 包重新安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 Python 包重新安装失败');
     }
+  }
+
+  Future<void> _handleMaintenanceStartFailure(
+    Object error,
+    String prefix,
+  ) async {
+    if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+    if (!mounted) return;
+    setState(() {
+      _installingPytorch = false;
+      _reinstallingPackage = false;
+      _maintenanceOperation = null;
+      _maintenanceMessage = null;
+      _maintenanceProgress = null;
+      _maintenanceStatusPath = null;
+    });
+    widget.onShowMessage('$prefix：$error');
+  }
+
+  Future<bool> _resumeMaintenanceWatchIfActive({bool announce = false}) async {
+    MaintenanceStatus? status;
+    try {
+      status = await widget.apiClient.fetchMaintenanceStatus().timeout(
+        const Duration(seconds: 1),
+      );
+    } catch (_) {
+      status = await _maintenanceStatusStore.tryRead(
+        path: _maintenanceStatusPath,
+      );
+    }
+    if (!mounted ||
+        status == null ||
+        !_maintenanceStatusStore.isActive(status)) {
+      return false;
+    }
+
+    final operation = status.operation ?? '';
+    if (!const {
+      'install_pytorch',
+      'install_yolo_dependencies',
+      'reinstall_package',
+    }.contains(operation)) {
+      return false;
+    }
+    _startMaintenanceWatch(
+      operation: operation,
+      message: status.message,
+      progress: status.progress,
+      statusPath: status.statusPath ?? _maintenanceStatusStore.statusFile.path,
+    );
+    if (announce) widget.onShowMessage('已恢复正在执行的环境维护任务。');
+    return true;
   }
 
   void _startMaintenanceWatch({
     required String operation,
     required String message,
+    required int progress,
+    String? statusPath,
   }) {
     _maintenanceTimer?.cancel();
     setState(() {
       _maintenanceOperation = operation;
       _maintenanceMessage = message.isEmpty ? '正在安装...' : message;
+      _maintenanceProgress = progress.clamp(0, 100) / 100;
+      _maintenanceStatusPath = statusPath;
       _installingPytorch =
           operation == 'install_pytorch' ||
           operation == 'install_yolo_dependencies';
@@ -604,16 +663,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _pollMaintenanceStatus() async {
     if (!_maintenanceInProgress) return;
     try {
-      final status = await widget.apiClient.fetchMaintenanceStatus();
+      late final MaintenanceStatus status;
+      try {
+        status = await widget.apiClient.fetchMaintenanceStatus();
+      } catch (_) {
+        status = await _readLocalMaintenanceStatus();
+      }
       if (!mounted || !_maintenanceInProgress) return;
       final operation = status.operation ?? _maintenanceOperation;
       final message = status.message.isEmpty
           ? (_maintenanceMessage ?? '正在安装...')
           : status.message;
-      if (_isMaintenanceActive(status.state)) {
+      if (_maintenanceStatusStore.isActive(status)) {
         setState(() {
           _maintenanceOperation = operation;
           _maintenanceMessage = message;
+          _maintenanceProgress = status.progress / 100;
+          _maintenanceStatusPath = status.statusPath ?? _maintenanceStatusPath;
           _installingPytorch =
               operation == 'install_pytorch' ||
               operation == 'install_yolo_dependencies';
@@ -626,18 +692,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {
       if (!mounted || !_maintenanceInProgress) return;
       setState(() {
-        _maintenanceMessage = '正在安装，Python 后端暂时离线，完成后会自动重启...';
+        _maintenanceMessage = '正在安装，暂时无法读取最新进度；Python 后端完成后会自动重启...';
       });
     }
   }
 
-  bool _isMaintenanceActive(String state) {
-    return const {
-      'starting',
-      'waiting_for_backend',
-      'running',
-      'restarting',
-    }.contains(state);
+  Future<MaintenanceStatus> _readLocalMaintenanceStatus() async {
+    return _maintenanceStatusStore.read(path: _maintenanceStatusPath);
   }
 
   bool get _maintenanceInProgress => _installingPytorch || _reinstallingPackage;
@@ -650,6 +711,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _reinstallingPackage = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
+      _maintenanceProgress = null;
+      _maintenanceStatusPath = null;
     });
     if (message.isNotEmpty) widget.onShowMessage(message);
   }
@@ -1321,8 +1384,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             width: 22,
             height: 22,
             child: CircularProgressIndicator(
+              value: _maintenanceProgress,
               strokeWidth: 2.6,
               color: scheme.primary,
+              backgroundColor: scheme.surfaceContainerHighest,
             ),
           ),
           const SizedBox(width: 12),
@@ -3149,10 +3214,7 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
   void _showSoftwareLogs(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (_) => _SoftwareLogsDialog(
-        apiClient: widget.apiClient,
-        onShowMessage: widget.onShowMessage,
-      ),
+      builder: (_) => _SoftwareLogsDialog(onShowMessage: widget.onShowMessage),
     );
   }
 
@@ -3503,12 +3565,8 @@ class _InstalledPackagesDialogState extends State<_InstalledPackagesDialog> {
 }
 
 class _SoftwareLogsDialog extends StatefulWidget {
-  const _SoftwareLogsDialog({
-    required this.apiClient,
-    required this.onShowMessage,
-  });
+  const _SoftwareLogsDialog({required this.onShowMessage});
 
-  final NeriApiClient apiClient;
   final ValueChanged<String> onShowMessage;
 
   @override
@@ -3518,6 +3576,7 @@ class _SoftwareLogsDialog extends StatefulWidget {
 class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   static const _logPreviewMaxBytes = 32000;
 
+  final _logReader = LocalDebugLogReader();
   late final Future<List<DebugLogInfo>> _logsFuture;
   DebugLogInfo? _selectedLog;
   Future<DebugLogContent>? _contentFuture;
@@ -3525,16 +3584,13 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   @override
   void initState() {
     super.initState();
-    _logsFuture = widget.apiClient.fetchDebugLogs();
+    _logsFuture = _logReader.listLogs();
   }
 
   void _selectLog(DebugLogInfo log) {
     setState(() {
       _selectedLog = log;
-      _contentFuture = widget.apiClient.fetchDebugLogContent(
-        log.path,
-        maxBytes: _logPreviewMaxBytes,
-      );
+      _contentFuture = _logReader.readLog(log, maxBytes: _logPreviewMaxBytes);
     });
   }
 
@@ -3542,10 +3598,7 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
     final log = _selectedLog;
     if (log == null) return;
     setState(() {
-      _contentFuture = widget.apiClient.fetchDebugLogContent(
-        log.path,
-        maxBytes: _logPreviewMaxBytes,
-      );
+      _contentFuture = _logReader.readLog(log, maxBytes: _logPreviewMaxBytes);
     });
   }
 

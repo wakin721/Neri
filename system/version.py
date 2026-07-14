@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 BASE_VERSION = "3.0.5-alpha2"
-DEFAULT_BUILD_CODE = "7dfa6c"
+DEFAULT_BUILD_CODE = "b5f6a6"
 
 _BUILD_CODE_PATTERN = re.compile(r"^[0-9a-fA-F]{6}$")
 _VERSION_NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)+")

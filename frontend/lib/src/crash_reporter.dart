@@ -34,6 +34,11 @@ class CrashReporter {
   static Directory? _logsDirectory;
   static bool _initialized = false;
 
+  static Directory get logsDirectory {
+    initialize();
+    return _logsDirectory ?? Directory.current.absolute;
+  }
+
   static void initialize() {
     if (_initialized) return;
     _logsDirectory = _resolveLogsDirectory();
@@ -317,6 +322,7 @@ class CrashReporter {
       for (final entity in directory.listSync()) {
         if (entity is! File) continue;
         final name = entity.path.split(Platform.pathSeparator).last;
+        if (name == 'backend_maintenance.log') continue;
         if (name.startsWith('backend_') && name.endsWith('.log')) {
           _deleteFile(entity);
         }

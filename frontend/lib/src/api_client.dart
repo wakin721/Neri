@@ -525,6 +525,9 @@ class MaintenanceStartResponse {
     required this.accepted,
     required this.operation,
     required this.message,
+    required this.progress,
+    this.statusPath,
+    this.maintenancePid,
   });
 
   factory MaintenanceStartResponse.fromJson(Map<String, dynamic> json) {
@@ -532,12 +535,20 @@ class MaintenanceStartResponse {
       accepted: json['accepted'] as bool? ?? false,
       operation: json['operation'] as String? ?? '',
       message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
     );
   }
 
   final bool accepted;
   final String operation;
   final String message;
+  final int progress;
+  final String? statusPath;
+  final int? maintenancePid;
 }
 
 class PytorchInstallPlan {
@@ -587,8 +598,11 @@ class MaintenanceStatus {
   const MaintenanceStatus({
     required this.state,
     required this.message,
+    required this.progress,
     this.operation,
     this.logPath,
+    this.statusPath,
+    this.maintenancePid,
     this.error,
   });
 
@@ -597,7 +611,12 @@ class MaintenanceStatus {
       operation: json['operation'] as String?,
       state: json['state'] as String? ?? 'idle',
       message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
       logPath: json['log_path'] as String?,
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
       error: json['error'] as String?,
     );
   }
@@ -605,7 +624,10 @@ class MaintenanceStatus {
   final String? operation;
   final String state;
   final String message;
+  final int progress;
   final String? logPath;
+  final String? statusPath;
+  final int? maintenancePid;
   final String? error;
 }
 
