@@ -280,16 +280,28 @@ class AppUpdater {
     await updateRoot.create(recursive: true);
     final safeTag = _safeFileName(release.tag);
     final updateDirectory = Directory(
-      _joinPath(
-        updateRoot.path,
-        '${safeTag}_${DateTime.now().millisecondsSinceEpoch}_$pid',
-      ),
+      _joinPath(updateRoot.path, _stableDownloadDirectoryName(release)),
     );
     await updateDirectory.create(recursive: true);
     final archive = File(
       _joinPath(updateDirectory.path, _safeFileName(release.asset.name)),
     );
     final partialArchive = File('${archive.path}.part');
+    await _adoptReusableDownload(
+      updateRoot: updateRoot,
+      updateDirectory: updateDirectory,
+      safeTag: safeTag,
+      asset: release.asset,
+      archive: archive,
+      partialArchive: partialArchive,
+    );
+    if (await _isCompleteDownload(archive, release.asset)) {
+      return DownloadedAppUpdate(
+        release: release,
+        archive: archive,
+        updateDirectory: updateDirectory,
+      );
+    }
     final sources = _downloadSources(
       release.asset.downloadUri,
       mirror,
@@ -297,41 +309,39 @@ class AppUpdater {
     );
     final errors = <String>[];
 
-    try {
-      for (final source in sources) {
-        try {
-          if (await partialArchive.exists()) await partialArchive.delete();
-          if (await archive.exists()) await archive.delete();
-          await _downloadFromSource(
-            source,
-            release.asset,
-            partialArchive,
-            onProgress,
-          );
-          await partialArchive.rename(archive.path);
-          await _verifyDigestIfAvailable(archive, release.asset.sha256);
-          return DownloadedAppUpdate(
-            release: release,
-            archive: archive,
-            updateDirectory: updateDirectory,
-          );
-        } catch (error) {
-          errors.add('${source.label}：$error');
+    for (final source in sources) {
+      try {
+        await _downloadFromSource(
+          source,
+          release.asset,
+          partialArchive,
+          onProgress,
+        );
+        if (await archive.exists()) await archive.delete();
+        await partialArchive.rename(archive.path);
+        await _verifyDigestIfAvailable(archive, release.asset.sha256);
+        return DownloadedAppUpdate(
+          release: release,
+          archive: archive,
+          updateDirectory: updateDirectory,
+        );
+      } catch (error) {
+        errors.add('${source.label}：$error');
+        if (await archive.exists()) {
+          try {
+            await archive.delete();
+          } catch (_) {}
         }
       }
-      throw HttpException('所有下载源均失败：${errors.join('；')}');
-    } catch (_) {
-      if (await updateDirectory.exists()) {
-        await updateDirectory.delete(recursive: true);
-      }
-      rethrow;
     }
+    throw HttpException('所有下载源均失败：${errors.join('；')}。已保留下载进度，下次可继续下载。');
   }
 
   Future<void> launchInstaller({
     required DownloadedAppUpdate update,
     required Directory installDirectory,
     required File restartExecutable,
+    int? parentProcessId,
   }) async {
     if (!isSupported) {
       throw UnsupportedError('自动安装更新目前仅支持 Windows');
@@ -345,39 +355,88 @@ class AppUpdater {
         'Neri-Updater-${DateTime.now().millisecondsSinceEpoch}-$pid.ps1',
       ),
     );
-    await script.writeAsString(_windowsUpdaterScript, flush: true);
+    final readyFile = File('${script.path}.ready');
+    await script.writeAsBytes(<int>[
+      0xef,
+      0xbb,
+      0xbf,
+      ...utf8.encode(_windowsUpdaterScript),
+    ], flush: true);
 
     try {
-      await Process.start(
+      final arguments = <String>[
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        script.path,
+        '-ParentProcessId',
+        (parentProcessId ?? pid).toString(),
+        '-ArchivePath',
+        update.archive.path,
+        '-InstallDirectory',
+        installDirectory.absolute.path,
+        '-RestartExecutable',
+        restartExecutable.absolute.path,
+        '-UpdateDirectory',
+        update.updateDirectory.absolute.path,
+      ];
+      final expectedSha256 = update.release.asset.sha256?.trim() ?? '';
+      if (expectedSha256.isNotEmpty) {
+        arguments.addAll(<String>['-ExpectedSha256', expectedSha256]);
+      }
+      arguments.addAll(<String>['-ReadyPath', readyFile.path]);
+
+      final process = await Process.start(
         'powershell.exe',
-        <String>[
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-WindowStyle',
-          'Hidden',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-File',
-          script.path,
-          '-ParentProcessId',
-          pid.toString(),
-          '-ArchivePath',
-          update.archive.path,
-          '-InstallDirectory',
-          installDirectory.absolute.path,
-          '-RestartExecutable',
-          restartExecutable.absolute.path,
-          '-UpdateDirectory',
-          update.updateDirectory.absolute.path,
-          '-ExpectedSha256',
-          update.release.asset.sha256 ?? '',
-        ],
+        arguments,
         workingDirectory: installDirectory.path,
-        mode: ProcessStartMode.detached,
+        mode: ProcessStartMode.normal,
       );
+      final stdoutFuture = process.stdout
+          .transform(systemEncoding.decoder)
+          .join();
+      final stderrFuture = process.stderr
+          .transform(systemEncoding.decoder)
+          .join();
+      final outcome = await Future.any<({bool ready, int? exitCode})>(<
+        Future<({bool ready, int? exitCode})>
+      >[
+        _waitForFile(
+          readyFile,
+          const Duration(seconds: 8),
+        ).then((ready) => (ready: ready, exitCode: null)),
+        process.exitCode.then((exitCode) => (ready: false, exitCode: exitCode)),
+      ]);
+      if (!outcome.ready) {
+        if (outcome.exitCode == null) {
+          process.kill();
+        }
+        final output = <String>[
+          await stderrFuture.timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => '',
+          ),
+          await stdoutFuture.timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => '',
+          ),
+        ].join('\n').trim();
+        final reason = outcome.exitCode == null
+            ? '更新脚本启动超时'
+            : '更新脚本启动失败（退出码 ${outcome.exitCode}）';
+        throw StateError(
+          '$reason，程序将保持运行'
+          '${output.isEmpty ? '' : '：${_shorten(output, 800)}'}',
+        );
+      }
     } catch (_) {
       if (await script.exists()) await script.delete();
+      if (await readyFile.exists()) await readyFile.delete();
       rethrow;
     }
   }
@@ -406,42 +465,83 @@ class AppUpdater {
     File destination,
     UpdateDownloadProgressCallback? onProgress,
   ) async {
-    final request = await _httpClient
-        .getUrl(source.uri)
-        .timeout(_requestTimeout);
-    request.followRedirects = true;
-    request.maxRedirects = 8;
-    request.headers
-      ..set(HttpHeaders.userAgentHeader, _userAgent)
-      ..set(HttpHeaders.acceptHeader, 'application/octet-stream');
-    if (source.referer != null) {
-      request.headers.set(HttpHeaders.refererHeader, source.referer!);
+    var existingBytes = await destination.exists()
+        ? await destination.length()
+        : 0;
+    if (asset.sizeBytes > 0 && existingBytes > asset.sizeBytes) {
+      await destination.writeAsBytes(const <int>[]);
+      existingBytes = 0;
     }
-    final response = await request.close().timeout(_requestTimeout);
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain<void>();
-      throw HttpException('下载服务返回 ${response.statusCode}', uri: source.uri);
-    }
-
-    final responseLength = response.contentLength;
-    final totalBytes = responseLength > 0
-        ? responseLength
-        : asset.sizeBytes > 0
-        ? asset.sizeBytes
-        : null;
-    var receivedBytes = 0;
-    final sink = destination.openWrite();
-    try {
+    if (asset.sizeBytes > 0 && existingBytes == asset.sizeBytes) {
       onProgress?.call(
         UpdateDownloadProgress(
           sourceLabel: source.label,
-          receivedBytes: 0,
-          totalBytes: totalBytes,
+          receivedBytes: existingBytes,
+          totalBytes: asset.sizeBytes,
         ),
       );
-      await for (final chunk in response.timeout(_streamIdleTimeout)) {
-        sink.add(chunk);
-        receivedBytes += chunk.length;
+      return;
+    }
+
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final request = await _httpClient
+          .getUrl(source.uri)
+          .timeout(_requestTimeout);
+      request.followRedirects = true;
+      request.maxRedirects = 8;
+      request.headers
+        ..set(HttpHeaders.userAgentHeader, _userAgent)
+        ..set(HttpHeaders.acceptHeader, 'application/octet-stream');
+      if (existingBytes > 0) {
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$existingBytes-');
+      }
+      if (source.referer != null) {
+        request.headers.set(HttpHeaders.refererHeader, source.referer!);
+      }
+      final response = await request.close().timeout(_requestTimeout);
+
+      if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
+          existingBytes > 0) {
+        await response.drain<void>();
+        if (asset.sizeBytes > 0 && existingBytes == asset.sizeBytes) return;
+        await destination.writeAsBytes(const <int>[]);
+        existingBytes = 0;
+        continue;
+      }
+      if (response.statusCode != HttpStatus.ok &&
+          response.statusCode != HttpStatus.partialContent) {
+        await response.drain<void>();
+        throw HttpException('下载服务返回 ${response.statusCode}', uri: source.uri);
+      }
+
+      var append = response.statusCode == HttpStatus.partialContent;
+      if (append) {
+        final contentRange = response.headers.value(
+          HttpHeaders.contentRangeHeader,
+        );
+        final rangeStart = _contentRangeStart(contentRange);
+        if (rangeStart != existingBytes) {
+          await response.drain<void>();
+          await destination.writeAsBytes(const <int>[]);
+          existingBytes = 0;
+          continue;
+        }
+      } else {
+        // The server ignored Range. Restart cleanly with its full response.
+        existingBytes = 0;
+      }
+
+      final responseLength = response.contentLength;
+      final totalBytes = asset.sizeBytes > 0
+          ? asset.sizeBytes
+          : responseLength > 0
+          ? existingBytes + responseLength
+          : null;
+      var receivedBytes = existingBytes;
+      final sink = destination.openWrite(
+        mode: append ? FileMode.append : FileMode.write,
+      );
+      try {
         onProgress?.call(
           UpdateDownloadProgress(
             sourceLabel: source.label,
@@ -449,18 +549,106 @@ class AppUpdater {
             totalBytes: totalBytes,
           ),
         );
+        await for (final chunk in response.timeout(_streamIdleTimeout)) {
+          sink.add(chunk);
+          receivedBytes += chunk.length;
+          onProgress?.call(
+            UpdateDownloadProgress(
+              sourceLabel: source.label,
+              receivedBytes: receivedBytes,
+              totalBytes: totalBytes,
+            ),
+          );
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
       }
-      await sink.flush();
-    } finally {
-      await sink.close();
+      if (receivedBytes <= 0) {
+        throw const HttpException('下载内容为空');
+      }
+      if (asset.sizeBytes > 0 && receivedBytes != asset.sizeBytes) {
+        throw HttpException(
+          '文件大小校验失败（应为 ${asset.sizeBytes} 字节，实际 $receivedBytes 字节）',
+        );
+      }
+      return;
     }
-    if (receivedBytes <= 0) {
-      throw const HttpException('下载内容为空');
+    throw const HttpException('下载服务器返回了无效的断点续传响应');
+  }
+
+  Future<bool> _isCompleteDownload(File archive, AppUpdateAsset asset) async {
+    if (!await archive.exists()) return false;
+    if (asset.sizeBytes > 0 && await archive.length() != asset.sizeBytes) {
+      final length = await archive.length();
+      if (length > 0 && length < asset.sizeBytes) {
+        final partial = File('${archive.path}.part');
+        if (!await partial.exists() || await partial.length() < length) {
+          if (await partial.exists()) await partial.delete();
+          await archive.rename(partial.path);
+        } else {
+          await archive.delete();
+        }
+      } else {
+        await archive.delete();
+      }
+      return false;
     }
-    if (asset.sizeBytes > 0 && receivedBytes != asset.sizeBytes) {
-      throw HttpException(
-        '文件大小校验失败（应为 ${asset.sizeBytes} 字节，实际 $receivedBytes 字节）',
-      );
+    try {
+      await _verifyDigestIfAvailable(archive, asset.sha256);
+      return true;
+    } catch (_) {
+      await archive.delete();
+      return false;
+    }
+  }
+
+  Future<void> _adoptReusableDownload({
+    required Directory updateRoot,
+    required Directory updateDirectory,
+    required String safeTag,
+    required AppUpdateAsset asset,
+    required File archive,
+    required File partialArchive,
+  }) async {
+    final candidates = <File>[];
+    await for (final entity in updateRoot.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final name = _pathBaseName(entity.path);
+      if (entity.path != updateDirectory.path &&
+          !name.startsWith('${safeTag}_')) {
+        continue;
+      }
+      for (final candidateName in <String>[
+        _safeFileName(asset.name),
+        '${_safeFileName(asset.name)}.part',
+      ]) {
+        final candidate = File(_joinPath(entity.path, candidateName));
+        if (await candidate.exists()) candidates.add(candidate);
+      }
+    }
+    if (candidates.isEmpty) return;
+    candidates.sort((left, right) {
+      final leftLength = left.lengthSync();
+      final rightLength = right.lengthSync();
+      return rightLength.compareTo(leftLength);
+    });
+    final candidate = candidates.first;
+    final candidateLength = await candidate.length();
+    if (asset.sizeBytes > 0 && candidateLength > asset.sizeBytes) return;
+    final isComplete =
+        asset.sizeBytes > 0 && candidateLength == asset.sizeBytes;
+    final destination = isComplete ? archive : partialArchive;
+    if (candidate.path == destination.path) return;
+    if (await destination.exists() &&
+        await destination.length() >= candidateLength) {
+      return;
+    }
+    if (await destination.exists()) await destination.delete();
+    try {
+      await candidate.rename(destination.path);
+    } on FileSystemException {
+      await candidate.copy(destination.path);
     }
   }
 
@@ -667,6 +855,43 @@ String _safeFileName(String value) {
   return normalized.isEmpty ? 'update.zip' : normalized;
 }
 
+String _stableDownloadDirectoryName(AppUpdateRelease release) {
+  final safeTag = _safeFileName(release.tag);
+  final displayTag = safeTag.length > 60 ? safeTag.substring(0, 60) : safeTag;
+  final identity =
+      '${release.tag}\n${release.asset.name}\n${release.asset.downloadUri}';
+  var hash = 0x811c9dc5;
+  for (final codeUnit in identity.codeUnits) {
+    hash ^= codeUnit;
+    hash = (hash * 0x01000193) & 0xffffffff;
+  }
+  return '${displayTag}_${hash.toRadixString(16).padLeft(8, '0')}';
+}
+
+int? _contentRangeStart(String? value) {
+  if (value == null) return null;
+  final match = RegExp(
+    r'^bytes\s+(\d+)-\d+/(?:\d+|\*)$',
+    caseSensitive: false,
+  ).firstMatch(value.trim());
+  return match == null ? null : int.tryParse(match.group(1)!);
+}
+
+String _pathBaseName(String path) {
+  final normalized = path.replaceAll(RegExp(r'[\\/]+$'), '');
+  final separator = normalized.lastIndexOf(RegExp(r'[\\/]'));
+  return separator < 0 ? normalized : normalized.substring(separator + 1);
+}
+
+Future<bool> _waitForFile(File file, Duration timeout) async {
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    if (await file.exists()) return true;
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+  }
+  return file.exists();
+}
+
 String _joinPath(String first, String second) =>
     '$first${Platform.pathSeparator}$second';
 
@@ -676,7 +901,8 @@ const _windowsUpdaterScript = r'''param(
     [Parameter(Mandatory = $true)][string]$InstallDirectory,
     [Parameter(Mandatory = $true)][string]$RestartExecutable,
     [Parameter(Mandatory = $true)][string]$UpdateDirectory,
-    [string]$ExpectedSha256 = ''
+    [string]$ExpectedSha256 = '',
+    [Parameter(Mandatory = $true)][string]$ReadyPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -690,6 +916,14 @@ function Write-UpdateLog([string]$Message) {
     try {
         Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $Message)
     } catch {}
+}
+
+try {
+    Set-Content -LiteralPath $ReadyPath -Encoding ASCII -Force -Value $PID
+    Write-UpdateLog "更新脚本已启动（PID $PID）"
+} catch {
+    Write-UpdateLog "无法创建更新脚本启动标记：$($_.Exception.Message)"
+    throw
 }
 
 function Expand-UpdateArchive([string]$Source, [string]$Destination) {
@@ -795,6 +1029,9 @@ try {
         ) | Out-Null
     } catch {}
 } finally {
+    try {
+        Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
+    } catch {}
     try {
         if (Test-Path -LiteralPath $UpdateDirectory) {
             Remove-Item -LiteralPath $UpdateDirectory -Recurse -Force

@@ -105,8 +105,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _closeBackendStopped = false;
   bool _checkingForAppUpdate = false;
   bool _startupUpdateCheckScheduled = false;
+  bool _installingDownloadedAppUpdate = false;
+  bool _softwareUpdateCardDismissed = false;
   _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
   _SoftwareUpdateProgress? _softwareUpdateProgress;
+  _AvailableSoftwareUpdate? _availableSoftwareUpdate;
+  DownloadedAppUpdate? _downloadedAppUpdate;
+  Directory? _downloadedAppUpdateInstallDirectory;
   DateTime? _lastSoftwareUpdateProgressPaint;
   double _confidence = 0.25;
   double _iou = 0.45;
@@ -512,6 +517,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (manual) _showSnackBar('正在检查或安装更新，请稍候。');
       return;
     }
+    if (_downloadedAppUpdate != null) {
+      if (manual && mounted) {
+        setState(() => _softwareUpdateCardDismissed = false);
+        _showSnackBar('更新已下载，可从右下角选择重启更新。');
+      }
+      return;
+    }
+    if (_availableSoftwareUpdate != null) {
+      if (manual && mounted) {
+        setState(() => _softwareUpdateCardDismissed = false);
+        _showSnackBar('已发现新版本，请在右下角选择是否下载更新。');
+      }
+      return;
+    }
     final settings = _settings;
     if (settings == null) {
       if (manual) _showSnackBar('版本信息尚未加载，请稍后重试。');
@@ -526,6 +545,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _checkingForAppUpdate = true;
     if (manual && mounted) {
       setState(() {
+        _softwareUpdateCardDismissed = false;
         _softwareUpdateProgress = const _SoftwareUpdateProgress(
           message: '正在从 GitHub 检查最新版本…',
           detail: '这通常只需要几秒钟。',
@@ -550,79 +570,60 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (manual) _showSnackBar('当前已是所选通道的最新版本。');
         return;
       }
-
-      final install = await _showUpdateAvailableDialog(release);
-      if (!mounted || install != true || _closing) return;
-      await _downloadAndInstallUpdate(
-        release,
-        mirror: selectedMirror,
-        mirrorTemplates: selectedMirrorTemplates,
-        installDirectory: installDirectory,
-      );
+      setState(() {
+        _softwareUpdateCardDismissed = false;
+        _availableSoftwareUpdate = _AvailableSoftwareUpdate(
+          release: release,
+          mirror: selectedMirror,
+          mirrorTemplates: selectedMirrorTemplates,
+          installDirectory: installDirectory,
+        );
+      });
     } catch (error) {
       if (!mounted || _closing) return;
-      setState(() => _softwareUpdateProgress = null);
+      setState(() {
+        _softwareUpdateProgress = null;
+      });
       if (manual) {
-        _showSnackBar('检查或安装更新失败：$error');
+        _showSnackBar('检查更新失败：$error');
       }
     } finally {
       _checkingForAppUpdate = false;
     }
   }
 
-  Future<bool?> _showUpdateAvailableDialog(AppUpdateRelease release) {
-    final notes = release.notes.trim();
-    final visibleNotes = notes.length > 5000
-        ? '${notes.substring(0, 5000)}\n\n…更新说明已截断'
-        : notes;
-    return showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return AlertDialog(
-          icon: const Icon(Icons.system_update_alt_rounded),
-          title: Text('发现新版本 ${release.tag}'),
-          content: SizedBox(
-            width: 560,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(release.prerelease ? '这是预览版更新。是否下载并安装？' : '是否下载并安装此更新？'),
-                if (visibleNotes.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  Text(
-                    '更新说明',
-                    style: Theme.of(dialogContext).textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: SingleChildScrollView(
-                      child: SelectableText(visibleNotes),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('稍后'),
-            ),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              icon: const Icon(Icons.download_rounded),
-              label: const Text('下载并更新'),
-            ),
-          ],
-        );
-      },
+  void _dismissAvailableSoftwareUpdate() {
+    if (!mounted) return;
+    setState(() => _availableSoftwareUpdate = null);
+  }
+
+  void _startAvailableSoftwareUpdateDownload() {
+    final available = _availableSoftwareUpdate;
+    if (available == null || _checkingForAppUpdate || _closing) return;
+    _checkingForAppUpdate = true;
+    setState(() {
+      _availableSoftwareUpdate = null;
+      _softwareUpdateCardDismissed = false;
+    });
+    _showSnackBar('更新下载已开始，完成后会显示“重启并更新”。');
+    unawaited(
+      _downloadAppUpdate(
+            available.release,
+            mirror: available.mirror,
+            mirrorTemplates: available.mirrorTemplates,
+            installDirectory: available.installDirectory,
+          )
+          .catchError((Object error, StackTrace stackTrace) {
+            if (mounted && !_closing) {
+              setState(() => _softwareUpdateProgress = null);
+              _showSnackBar('下载更新失败：$error');
+            }
+          })
+          .whenComplete(() => _checkingForAppUpdate = false),
     );
   }
 
-  Future<void> _downloadAndInstallUpdate(
+  Future<void> _downloadAppUpdate(
     AppUpdateRelease release, {
     required String mirror,
     required List<String> mirrorTemplates,
@@ -634,32 +635,65 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _softwareUpdateProgress = const _SoftwareUpdateProgress(
           message: '正在准备下载更新…',
           detail: '更新包将保存到系统临时文件夹。',
+          isDownloading: true,
         );
       });
     }
 
-    DownloadedAppUpdate? downloaded;
     try {
-      downloaded = await _appUpdater.downloadUpdate(
+      final downloaded = await _appUpdater.downloadUpdate(
         release,
         mirror: mirror,
         mirrorTemplates: mirrorTemplates,
         onProgress: _handleSoftwareUpdateDownloadProgress,
       );
       if (!mounted || _closing) {
-        if (await downloaded.updateDirectory.exists()) {
-          await downloaded.updateDirectory.delete(recursive: true);
-        }
         return;
       }
       setState(() {
+        _downloadedAppUpdate = downloaded;
+        _downloadedAppUpdateInstallDirectory = installDirectory;
+        _softwareUpdateProgress = null;
+        _softwareUpdateCardDismissed = false;
+      });
+      _showSnackBar('更新下载完成，可从右下角选择“重启并更新”。');
+    } catch (error) {
+      // Keep completed and partial files so a later attempt can reuse them.
+      if (mounted && !_closing) {
+        setState(() {
+          _softwareUpdateProgress = null;
+        });
+        _showSnackBar('下载更新失败：$error');
+      }
+    }
+  }
+
+  void _dismissSoftwareUpdateCard() {
+    if (!mounted) return;
+    setState(() => _softwareUpdateCardDismissed = true);
+  }
+
+  Future<void> _installDownloadedAppUpdate() async {
+    final downloaded = _downloadedAppUpdate;
+    final installDirectory = _downloadedAppUpdateInstallDirectory;
+    if (downloaded == null ||
+        installDirectory == null ||
+        _installingDownloadedAppUpdate ||
+        _closing) {
+      return;
+    }
+    _installingDownloadedAppUpdate = true;
+    if (mounted) {
+      setState(() {
+        _softwareUpdateCardDismissed = false;
         _softwareUpdateProgress = const _SoftwareUpdateProgress(
-          message: '下载完成，正在启动更新脚本…',
-          detail: '程序将自动关闭、覆盖更新并重新启动。',
+          message: '正在启动更新脚本…',
+          detail: '确认安装程序已启动后，Neri 将自动关闭。',
           fraction: 1,
         );
       });
-
+    }
+    try {
       await _appUpdater.launchInstaller(
         update: downloaded,
         installDirectory: installDirectory,
@@ -674,13 +708,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         );
       });
       await _exitForSoftwareUpdate();
-    } catch (_) {
-      if (downloaded != null && await downloaded.updateDirectory.exists()) {
-        try {
-          await downloaded.updateDirectory.delete(recursive: true);
-        } catch (_) {}
+    } catch (error) {
+      if (mounted && !_closing) {
+        setState(() => _softwareUpdateProgress = null);
+        _showSnackBar('启动更新安装失败：$error');
       }
-      rethrow;
+    } finally {
+      _installingDownloadedAppUpdate = false;
     }
   }
 
@@ -705,6 +739,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         message: '正在从${progress.sourceLabel}下载更新…',
         detail: detail,
         fraction: progress.fraction,
+        isDownloading: true,
       );
     });
   }
@@ -2587,7 +2622,27 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (_startupMaintenanceStatus case final status?)
           _StartupMaintenanceOverlay(status: status),
         if (_softwareUpdateProgress case final progress?)
-          _SoftwareUpdateOverlay(progress: progress),
+          if (!_softwareUpdateCardDismissed)
+            _SoftwareUpdateProgressCard(
+              progress: progress,
+              onClose: _dismissSoftwareUpdateCard,
+            ),
+        if (_availableSoftwareUpdate case final availableUpdate?)
+          if (!_softwareUpdateCardDismissed &&
+              _softwareUpdateProgress == null &&
+              _downloadedAppUpdate == null)
+            _AvailableSoftwareUpdateCard(
+              release: availableUpdate.release,
+              onLater: _dismissAvailableSoftwareUpdate,
+              onDownload: _startAvailableSoftwareUpdateDownload,
+            ),
+        if (_downloadedAppUpdate case final downloadedUpdate?)
+          if (!_softwareUpdateCardDismissed && _softwareUpdateProgress == null)
+            _DownloadedSoftwareUpdateCard(
+              release: downloadedUpdate.release,
+              onClose: _dismissSoftwareUpdateCard,
+              onInstall: () => unawaited(_installDownloadedAppUpdate()),
+            ),
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,
@@ -2905,73 +2960,280 @@ class _StartupMaintenanceOverlay extends StatelessWidget {
   }
 }
 
+class _AvailableSoftwareUpdate {
+  const _AvailableSoftwareUpdate({
+    required this.release,
+    required this.mirror,
+    required this.mirrorTemplates,
+    required this.installDirectory,
+  });
+
+  final AppUpdateRelease release;
+  final String mirror;
+  final List<String> mirrorTemplates;
+  final Directory installDirectory;
+}
+
 class _SoftwareUpdateProgress {
   const _SoftwareUpdateProgress({
     required this.message,
     required this.detail,
     this.fraction,
+    this.isDownloading = false,
   });
 
   final String message;
   final String detail;
   final double? fraction;
+  final bool isDownloading;
 }
 
-class _SoftwareUpdateOverlay extends StatelessWidget {
-  const _SoftwareUpdateOverlay({required this.progress});
+class _SoftwareUpdateProgressCard extends StatelessWidget {
+  const _SoftwareUpdateProgressCard({
+    required this.progress,
+    required this.onClose,
+  });
 
   final _SoftwareUpdateProgress progress;
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Positioned.fill(
-      child: Stack(
-        children: [
-          ModalBarrier(
-            dismissible: false,
-            color: scheme.scrim.withValues(alpha: 0.42),
-          ),
-          Center(
-            child: Card(
-              elevation: 7,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 460),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.system_update_alt_rounded,
-                            color: scheme.primary,
-                          ),
-                          const SizedBox(width: 12),
-                          Text('软件更新', style: theme.textTheme.titleMedium),
-                        ],
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 6,
+        child: SizedBox(
+          width: 360,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 14, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.download_rounded, color: scheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        progress.isDownloading ? '下载更新' : '软件更新',
+                        style: theme.textTheme.titleSmall,
                       ),
-                      const SizedBox(height: 16),
-                      LinearProgressIndicator(value: progress.fraction),
-                      const SizedBox(height: 14),
-                      Text(progress.message, style: theme.textTheme.bodyLarge),
-                      const SizedBox(height: 6),
-                      Text(
-                        progress.detail,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+                    ),
+                    IconButton(
+                      onPressed: onClose,
+                      tooltip: '关闭进度卡',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(value: progress.fraction),
+                const SizedBox(height: 10),
+                Text(
+                  progress.message,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  progress.detail,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
                   ),
                 ),
-              ),
+              ],
             ),
           ),
-        ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AvailableSoftwareUpdateCard extends StatelessWidget {
+  const _AvailableSoftwareUpdateCard({
+    required this.release,
+    required this.onLater,
+    required this.onDownload,
+  });
+
+  final AppUpdateRelease release;
+  final VoidCallback onLater;
+  final VoidCallback onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final notes = release.notes.trim();
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 7,
+        child: SizedBox(
+          width: 400,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.system_update_alt_rounded,
+                      color: scheme.primary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '发现新版本 ${release.tag}',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            release.prerelease ? '预览版更新' : '稳定版更新',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onLater,
+                      tooltip: '关闭',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                if (notes.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    notes,
+                    maxLines: 5,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(onPressed: onLater, child: const Text('稍后')),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: onDownload,
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('下载更新'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DownloadedSoftwareUpdateCard extends StatelessWidget {
+  const _DownloadedSoftwareUpdateCard({
+    required this.release,
+    required this.onClose,
+    required this.onInstall,
+  });
+
+  final AppUpdateRelease release;
+  final VoidCallback onClose;
+  final VoidCallback onInstall;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 7,
+        child: SizedBox(
+          width: 400,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.download_done_rounded, color: scheme.primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '更新已下载 ${release.tag}',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            release.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onClose,
+                      tooltip: '关闭',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '更新包已下载完成，可以稍后安装或立即重启 Neri 完成更新。',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(onPressed: onClose, child: const Text('稍后')),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: onInstall,
+                      icon: const Icon(Icons.restart_alt_rounded),
+                      label: const Text('重启并更新'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

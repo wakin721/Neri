@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:neri_flutter/src/app_updater.dart';
 
@@ -93,4 +95,176 @@ void main() {
       );
     });
   });
+
+  group('resumable update downloads', () {
+    test(
+      'keeps a partial file and resumes it with an HTTP range request',
+      () async {
+        final payload = List<int>.generate(32 * 1024, (index) => index % 251);
+        final cutoff = 7000;
+        final ranges = <String?>[];
+        var requestCount = 0;
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final subscription = server.listen((request) async {
+          requestCount++;
+          ranges.add(request.headers.value(HttpHeaders.rangeHeader));
+          final response = request.response;
+          if (requestCount == 1) {
+            response.contentLength = payload.length;
+            final socket = await response.detachSocket();
+            socket.add(payload.sublist(0, cutoff));
+            await socket.flush();
+            await socket.close();
+            return;
+          }
+
+          final range = request.headers.value(HttpHeaders.rangeHeader);
+          final start = int.parse(
+            RegExp(r'^bytes=(\d+)-$').firstMatch(range!)!.group(1)!,
+          );
+          response.statusCode = HttpStatus.partialContent;
+          response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes $start-${payload.length - 1}/${payload.length}',
+          );
+          response.contentLength = payload.length - start;
+          response.add(payload.sublist(start));
+          await response.close();
+        });
+        final updater = AppUpdater();
+        final uniqueTag =
+            'v99.0.0-resume-${DateTime.now().microsecondsSinceEpoch}';
+        final release = AppUpdateRelease(
+          tag: uniqueTag,
+          name: uniqueTag,
+          notes: '',
+          pageUri: Uri.parse('https://example.test/$uniqueTag'),
+          prerelease: true,
+          asset: AppUpdateAsset(
+            name: 'Neri-test.zip',
+            downloadUri: Uri.parse(
+              'http://${server.address.address}:${server.port}/Neri-test.zip',
+            ),
+            sizeBytes: payload.length,
+          ),
+        );
+        DownloadedAppUpdate? downloaded;
+
+        try {
+          await expectLater(
+            updater.downloadUpdate(release, mirror: 'Official'),
+            throwsA(isA<HttpException>()),
+          );
+
+          final progress = <UpdateDownloadProgress>[];
+          downloaded = await updater.downloadUpdate(
+            release,
+            mirror: 'Official',
+            onProgress: progress.add,
+          );
+
+          expect(await downloaded.archive.readAsBytes(), payload);
+          expect(requestCount, 2);
+          expect(ranges, <String?>[null, 'bytes=$cutoff-']);
+          expect(progress.any((item) => item.receivedBytes == cutoff), isTrue);
+
+          final reused = await updater.downloadUpdate(
+            release,
+            mirror: 'Official',
+          );
+          expect(reused.archive.path, downloaded.archive.path);
+          expect(requestCount, 2, reason: '完整更新包应直接复用，不应重新请求');
+        } finally {
+          updater.close();
+          await subscription.cancel();
+          await server.close(force: true);
+          final updateDirectory = downloaded?.updateDirectory;
+          if (updateDirectory != null && await updateDirectory.exists()) {
+            await updateDirectory.delete(recursive: true);
+          }
+        }
+      },
+    );
+  });
+
+  test(
+    'starts and completes the Windows updater when SHA-256 is absent',
+    () async {
+      if (!Platform.isWindows) return;
+
+      final root = await Directory.systemTemp.createTemp('neri-updater-test-');
+      final payloadDirectory = Directory('${root.path}\\payload');
+      final updateDirectory = Directory('${root.path}\\update');
+      final installDirectory = Directory('${root.path}\\install');
+      final marker = File('${payloadDirectory.path}\\updated.txt');
+      final archive = File('${updateDirectory.path}\\Neri-test.zip');
+      final updater = AppUpdater();
+      Process? blocker;
+
+      try {
+        await payloadDirectory.create(recursive: true);
+        await updateDirectory.create(recursive: true);
+        await installDirectory.create(recursive: true);
+        await marker.writeAsString('updated');
+        final zipResult = await Process.run('powershell.exe', <String>[
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          r'''& { param([string]$Source, [string]$Destination) Compress-Archive -Path (Join-Path $Source '*') -DestinationPath $Destination -Force }''',
+          payloadDirectory.path,
+          archive.path,
+        ]);
+        expect(zipResult.exitCode, 0, reason: zipResult.stderr.toString());
+
+        blocker = await Process.start('powershell.exe', const <String>[
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Start-Sleep -Seconds 30',
+        ]);
+        final asset = AppUpdateAsset(
+          name: archive.uri.pathSegments.last,
+          downloadUri: Uri.parse('https://example.test/Neri-test.zip'),
+          sizeBytes: await archive.length(),
+        );
+        final release = AppUpdateRelease(
+          tag: 'v99.0.0-installer-test',
+          name: 'installer test',
+          notes: '',
+          pageUri: Uri.parse('https://example.test/release'),
+          prerelease: true,
+          asset: asset,
+        );
+
+        await updater.launchInstaller(
+          update: DownloadedAppUpdate(
+            release: release,
+            archive: archive,
+            updateDirectory: updateDirectory,
+          ),
+          installDirectory: installDirectory,
+          restartExecutable: File('${root.path}\\missing.exe'),
+          parentProcessId: blocker.pid,
+        );
+        blocker.kill();
+
+        final installedMarker = File('${installDirectory.path}\\updated.txt');
+        final deadline = DateTime.now().add(const Duration(seconds: 10));
+        while (!await installedMarker.exists() &&
+            DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        expect(await installedMarker.readAsString(), 'updated');
+      } finally {
+        blocker?.kill();
+        updater.close();
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        if (await root.exists()) {
+          await root.delete(recursive: true);
+        }
+      }
+    },
+  );
 }
