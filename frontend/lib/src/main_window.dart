@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'api_client.dart';
+import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
 import 'local_maintenance_status.dart';
@@ -73,6 +74,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final Set<String> _previewMetadataLoading = <String>{};
   final Set<int> _expectedBackendExitPids = <int>{};
   final _maintenanceStatusStore = LocalMaintenanceStatusStore();
+  final _appUpdater = AppUpdater();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -101,7 +103,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _closing = false;
   bool _showClosingOverlay = false;
   bool _closeBackendStopped = false;
+  bool _checkingForAppUpdate = false;
+  bool _startupUpdateCheckScheduled = false;
   _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
+  _SoftwareUpdateProgress? _softwareUpdateProgress;
+  DateTime? _lastSoftwareUpdateProgressPaint;
   double _confidence = 0.25;
   double _iou = 0.45;
   double _previewConfidenceThreshold = 0.25;
@@ -152,6 +158,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
+    _appUpdater.close();
     if (_closing) {
       widget.apiClient.close();
     } else {
@@ -470,6 +477,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _refreshInitialPageData() async {
     await _refresh(includeJobResults: true, finishLoading: false);
     if (!mounted || _closeFlowBlocksBackendStartup) return;
+    _scheduleStartupUpdateCheck();
     if (_inputController.text.trim().isEmpty) {
       _stopGlobalLoading();
       return;
@@ -477,6 +485,263 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshTimer?.cancel();
     _previewRefreshTimer = null;
     await _refreshPreviewItems(force: true, finishGlobalLoading: true);
+  }
+
+  void _scheduleStartupUpdateCheck() {
+    if (_startupUpdateCheckScheduled ||
+        !_appUpdater.isSupported ||
+        _settings == null) {
+      return;
+    }
+    _startupUpdateCheckScheduled = true;
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 700), () async {
+        if (!mounted || _closing) return;
+        await _checkForSoftwareUpdate(manual: false);
+      }),
+    );
+  }
+
+  Future<void> _checkForSoftwareUpdate({
+    required bool manual,
+    String? channel,
+    String? mirror,
+  }) async {
+    if (_checkingForAppUpdate || _closing) {
+      if (manual) _showSnackBar('正在检查或安装更新，请稍候。');
+      return;
+    }
+    final settings = _settings;
+    if (settings == null) {
+      if (manual) _showSnackBar('版本信息尚未加载，请稍后重试。');
+      return;
+    }
+    final installDirectory = _resolveProjectRoot();
+    if (installDirectory == null) {
+      if (manual) _showSnackBar('未找到程序目录，无法执行自动更新。');
+      return;
+    }
+
+    _checkingForAppUpdate = true;
+    if (manual && mounted) {
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在从 GitHub 检查最新版本…',
+          detail: '这通常只需要几秒钟。',
+        );
+      });
+    }
+
+    try {
+      final selectedChannel =
+          channel ?? _stringSetting(settings, 'update_channel', 'Preview');
+      final selectedMirror =
+          mirror ?? _stringSetting(settings, 'update_mirror', 'KKGitHub');
+      final release = await _appUpdater.checkForUpdate(
+        currentVersion: settings.appVersion,
+        channel: selectedChannel,
+      );
+      if (!mounted || _closing) return;
+      setState(() => _softwareUpdateProgress = null);
+      if (release == null) {
+        if (manual) _showSnackBar('当前已是所选通道的最新版本。');
+        return;
+      }
+
+      final install = await _showUpdateAvailableDialog(release);
+      if (!mounted || install != true || _closing) return;
+      await _downloadAndInstallUpdate(
+        release,
+        mirror: selectedMirror,
+        installDirectory: installDirectory,
+      );
+    } catch (error) {
+      if (!mounted || _closing) return;
+      setState(() => _softwareUpdateProgress = null);
+      if (manual) {
+        _showSnackBar('检查或安装更新失败：$error');
+      }
+    } finally {
+      _checkingForAppUpdate = false;
+    }
+  }
+
+  Future<bool?> _showUpdateAvailableDialog(AppUpdateRelease release) {
+    final notes = release.notes.trim();
+    final visibleNotes = notes.length > 5000
+        ? '${notes.substring(0, 5000)}\n\n…更新说明已截断'
+        : notes;
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          icon: const Icon(Icons.system_update_alt_rounded),
+          title: Text('发现新版本 ${release.tag}'),
+          content: SizedBox(
+            width: 560,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(release.prerelease ? '这是预览版更新。是否下载并安装？' : '是否下载并安装此更新？'),
+                if (visibleNotes.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    '更新说明',
+                    style: Theme.of(dialogContext).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: SingleChildScrollView(
+                      child: SelectableText(visibleNotes),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('稍后'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              icon: const Icon(Icons.download_rounded),
+              label: const Text('下载并更新'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _downloadAndInstallUpdate(
+    AppUpdateRelease release, {
+    required String mirror,
+    required Directory installDirectory,
+  }) async {
+    _lastSoftwareUpdateProgressPaint = null;
+    if (mounted) {
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在准备下载更新…',
+          detail: '更新包将保存到系统临时文件夹。',
+        );
+      });
+    }
+
+    DownloadedAppUpdate? downloaded;
+    try {
+      downloaded = await _appUpdater.downloadUpdate(
+        release,
+        mirror: mirror,
+        onProgress: _handleSoftwareUpdateDownloadProgress,
+      );
+      if (!mounted || _closing) {
+        if (await downloaded.updateDirectory.exists()) {
+          await downloaded.updateDirectory.delete(recursive: true);
+        }
+        return;
+      }
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '下载完成，正在启动更新脚本…',
+          detail: '程序将自动关闭、覆盖更新并重新启动。',
+          fraction: 1,
+        );
+      });
+
+      await _appUpdater.launchInstaller(
+        update: downloaded,
+        installDirectory: installDirectory,
+        restartExecutable: _restartExecutable(installDirectory),
+      );
+      if (!mounted) return;
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在关闭程序并安装更新…',
+          detail: '请勿手动关闭更新脚本。安装完成后 Neri 会自动重新启动。',
+          fraction: 1,
+        );
+      });
+      await _exitForSoftwareUpdate();
+    } catch (_) {
+      if (downloaded != null && await downloaded.updateDirectory.exists()) {
+        try {
+          await downloaded.updateDirectory.delete(recursive: true);
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  void _handleSoftwareUpdateDownloadProgress(UpdateDownloadProgress progress) {
+    if (!mounted || _closing) return;
+    final now = DateTime.now();
+    final isComplete =
+        progress.totalBytes != null &&
+        progress.receivedBytes >= progress.totalBytes!;
+    if (!isComplete &&
+        _lastSoftwareUpdateProgressPaint != null &&
+        now.difference(_lastSoftwareUpdateProgressPaint!).inMilliseconds < 80) {
+      return;
+    }
+    _lastSoftwareUpdateProgressPaint = now;
+    final total = progress.totalBytes;
+    final detail = total == null
+        ? '已下载 ${_formatByteCount(progress.receivedBytes)}'
+        : '${_formatByteCount(progress.receivedBytes)} / ${_formatByteCount(total)}';
+    setState(() {
+      _softwareUpdateProgress = _SoftwareUpdateProgress(
+        message: '正在从${progress.sourceLabel}下载更新…',
+        detail: detail,
+        fraction: progress.fraction,
+      );
+    });
+  }
+
+  File _restartExecutable(Directory installDirectory) {
+    final launcher = _fileUnder(installDirectory, ['Neri.exe']);
+    return launcher.existsSync()
+        ? launcher
+        : File(Platform.resolvedExecutable).absolute;
+  }
+
+  Future<void> _exitForSoftwareUpdate() async {
+    _closing = true;
+    _timer?.cancel();
+    _timer = null;
+    _previewRefreshTimer?.cancel();
+    _previewRefreshTimer = null;
+    _backendReady = false;
+    try {
+      await _shutdownBackend().timeout(const Duration(seconds: 10));
+    } catch (_) {}
+    try {
+      await windowManager
+          .setPreventClose(false)
+          .timeout(const Duration(milliseconds: 300));
+    } catch (_) {}
+    CrashWatchdog.markNormalExit();
+    try {
+      await windowManager.destroy().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    exit(0);
+  }
+
+  String _formatByteCount(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    const units = <String>['KB', 'MB', 'GB', 'TB'];
+    var value = bytes / 1024;
+    var unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    return '${value.toStringAsFixed(value >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
 
   Future<void> _restartBackendAndRefresh() async {
@@ -2286,6 +2551,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ),
         if (_startupMaintenanceStatus case final status?)
           _StartupMaintenanceOverlay(status: status),
+        if (_softwareUpdateProgress case final progress?)
+          _SoftwareUpdateOverlay(progress: progress),
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,
@@ -2376,6 +2643,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
       onSaveSettings: _saveAdvancedSettings,
+      onCheckForUpdates: ({required String channel, required String mirror}) =>
+          _checkForSoftwareUpdate(
+            manual: true,
+            channel: channel,
+            mirror: mirror,
+          ),
       onShowMessage: _showSnackBar,
     );
   }
@@ -2587,6 +2860,78 @@ class _StartupMaintenanceOverlay extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _SoftwareUpdateProgress {
+  const _SoftwareUpdateProgress({
+    required this.message,
+    required this.detail,
+    this.fraction,
+  });
+
+  final String message;
+  final String detail;
+  final double? fraction;
+}
+
+class _SoftwareUpdateOverlay extends StatelessWidget {
+  const _SoftwareUpdateOverlay({required this.progress});
+
+  final _SoftwareUpdateProgress progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          ModalBarrier(
+            dismissible: false,
+            color: scheme.scrim.withValues(alpha: 0.42),
+          ),
+          Center(
+            child: Card(
+              elevation: 7,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.system_update_alt_rounded,
+                            color: scheme.primary,
+                          ),
+                          const SizedBox(width: 12),
+                          Text('软件更新', style: theme.textTheme.titleMedium),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      LinearProgressIndicator(value: progress.fraction),
+                      const SizedBox(height: 14),
+                      Text(progress.message, style: theme.textTheme.bodyLarge),
+                      const SizedBox(height: 6),
+                      Text(
+                        progress.detail,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

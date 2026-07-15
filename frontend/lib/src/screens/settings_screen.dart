@@ -72,7 +72,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-alpha2(b5f6a6)',
+  defaultValue: '3.0.5-alpha2(400b56)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -82,6 +82,9 @@ const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
 
+typedef SoftwareUpdateCheckCallback =
+    Future<void> Function({required String channel, required String mirror});
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     required this.settings,
@@ -90,6 +93,7 @@ class SettingsScreen extends StatefulWidget {
     required this.themeNotifier,
     required this.onUpdateTheme,
     required this.onSaveSettings,
+    required this.onCheckForUpdates,
     required this.onShowMessage,
     super.key,
   });
@@ -100,6 +104,7 @@ class SettingsScreen extends StatefulWidget {
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
+  final SoftwareUpdateCheckCallback onCheckForUpdates;
   final ValueChanged<String> onShowMessage;
 
   @override
@@ -119,6 +124,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
   bool _clearingCache = false;
+  bool _checkingForUpdates = false;
   int _draftRevision = 0;
   Timer? _autoSaveTimer;
   Timer? _maintenanceTimer;
@@ -2600,7 +2606,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         _SettingsPanel(
           title: '镜像源',
-          subtitle: '选择检查更新时使用的下载源',
+          subtitle: '国内源下载失败时会自动回退 GitHub 官方源',
           icon: Icons.public_rounded,
           child: _SettingsMenuButton<String>(
             value: _string('update_mirror', 'KKGitHub'),
@@ -2613,19 +2619,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         _SettingsPanel(
           title: '检查更新',
-          subtitle: '保留软件更新检查入口',
+          subtitle: '立即扫描所选通道的最新 Windows 版本',
           icon: Icons.system_update_alt_rounded,
           showDivider: false,
           child: Align(
             alignment: Alignment.centerRight,
             child: FilledButton(
-              onPressed: () => widget.onShowMessage('软件更新检查入口已保留，后续可接入更新服务。'),
-              child: const Text('检查更新'),
+              onPressed: _checkingForUpdates ? null : _checkForUpdates,
+              child: _checkingForUpdates
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('检查更新'),
             ),
           ),
         ),
       ],
     );
+  }
+
+  Future<void> _checkForUpdates() async {
+    if (_checkingForUpdates) return;
+    setState(() => _checkingForUpdates = true);
+    try {
+      await _save();
+      if (!mounted) return;
+      await widget.onCheckForUpdates(
+        channel: _string('update_channel', 'Preview'),
+        mirror: _string('update_mirror', 'KKGitHub'),
+      );
+    } finally {
+      if (mounted) setState(() => _checkingForUpdates = false);
+    }
   }
 
   Future<void> _save() async {
