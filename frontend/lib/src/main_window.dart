@@ -506,6 +506,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     required bool manual,
     String? channel,
     String? mirror,
+    List<String>? mirrorTemplates,
   }) async {
     if (_checkingForAppUpdate || _closing) {
       if (manual) _showSnackBar('正在检查或安装更新，请稍候。');
@@ -537,6 +538,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           channel ?? _stringSetting(settings, 'update_channel', 'Preview');
       final selectedMirror =
           mirror ?? _stringSetting(settings, 'update_mirror', 'KKGitHub');
+      final selectedMirrorTemplates =
+          mirrorTemplates ?? _updateMirrorTemplatesSetting(settings);
       final release = await _appUpdater.checkForUpdate(
         currentVersion: settings.appVersion,
         channel: selectedChannel,
@@ -553,6 +556,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       await _downloadAndInstallUpdate(
         release,
         mirror: selectedMirror,
+        mirrorTemplates: selectedMirrorTemplates,
         installDirectory: installDirectory,
       );
     } catch (error) {
@@ -621,6 +625,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _downloadAndInstallUpdate(
     AppUpdateRelease release, {
     required String mirror,
+    required List<String> mirrorTemplates,
     required Directory installDirectory,
   }) async {
     _lastSoftwareUpdateProgressPaint = null;
@@ -638,6 +643,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       downloaded = await _appUpdater.downloadUpdate(
         release,
         mirror: mirror,
+        mirrorTemplates: mirrorTemplates,
         onProgress: _handleSoftwareUpdateDownloadProgress,
       );
       if (!mounted || _closing) {
@@ -1815,6 +1821,34 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return fallback;
   }
 
+  List<String> _updateMirrorTemplatesSetting(NeriSettings settings) {
+    final values = settings.settings.containsKey('update_mirrors')
+        ? _stringListSetting(settings, 'update_mirrors', const <String>[])
+        : <String>[
+            _stringSetting(
+              settings,
+              'update_mirror_url',
+              defaultGithubMirrorTemplate,
+            ),
+            defaultGithubMirrorTemplate,
+            ..._stringListSetting(
+              settings,
+              'update_custom_mirrors',
+              const <String>[],
+            ),
+          ];
+    final mirrors = <String>[];
+    for (final value in values) {
+      try {
+        final normalized = normalizeGithubMirrorTemplate(value);
+        if (!mirrors.contains(normalized)) mirrors.add(normalized);
+      } on FormatException {
+        // Ignore malformed entries saved by older or manually edited settings.
+      }
+    }
+    return mirrors;
+  }
+
   Map<String, int> _intMapSetting(NeriSettings settings, String key) {
     final value = settings.settings[key];
     if (value is! Map) return const <String, int>{};
@@ -2036,14 +2070,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final sourceLabel = switch (packageSource) {
       'aliyun' => '阿里源',
       'tsinghua' => '清华源',
+      'nju' => '南京大学源',
       _ => '官方源',
     };
     final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return true;
 
     final driverStep = installIntelDriver
-        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
-        : '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel及对应硬件版本的 PyTorch wheel 源安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会使用$sourceLabel及对应硬件版本的 PyTorch wheel 源安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2643,11 +2678,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
       onSaveSettings: _saveAdvancedSettings,
-      onCheckForUpdates: ({required String channel, required String mirror}) =>
-          _checkForSoftwareUpdate(
+      onCheckForUpdates:
+          ({
+            required String channel,
+            required String mirror,
+            required List<String> mirrorTemplates,
+          }) => _checkForSoftwareUpdate(
             manual: true,
             channel: channel,
             mirror: mirror,
+            mirrorTemplates: mirrorTemplates,
           ),
       onShowMessage: _showSnackBar,
     );

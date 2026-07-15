@@ -5,6 +5,102 @@ import 'dart:io';
 typedef UpdateDownloadProgressCallback =
     void Function(UpdateDownloadProgress progress);
 
+const defaultGithubMirrorTemplate = 'https://kkgithub.com';
+
+String normalizeGithubMirrorTemplate(String value) {
+  var template = value.trim();
+  if (template.isEmpty) {
+    throw const FormatException('镜像地址不能为空');
+  }
+  if (template.length > 500) {
+    throw const FormatException('镜像地址不能超过 500 个字符');
+  }
+  final unknownPlaceholder = RegExp(
+    r'\{(?!url\}|path\})[^}]+\}',
+  ).firstMatch(template);
+  if (unknownPlaceholder != null) {
+    throw FormatException('不支持的占位符：${unknownPlaceholder.group(0)}');
+  }
+  if (!template.contains('{url}') && !template.contains('{path}')) {
+    final base = Uri.tryParse(template);
+    if (base == null ||
+        (base.scheme != 'http' && base.scheme != 'https') ||
+        base.host.isEmpty ||
+        base.userInfo.isNotEmpty) {
+      throw const FormatException('请输入有效且不包含账号密码的 HTTP 或 HTTPS 镜像地址');
+    }
+  }
+  final probe = resolveGithubMirrorUri(
+    Uri.parse(
+      'https://github.com/wakin721/Neri/releases/download/v1.0.0/Neri.zip',
+    ),
+    template,
+    normalize: false,
+  );
+  if (probe.scheme != 'http' && probe.scheme != 'https') {
+    throw const FormatException('镜像地址仅支持 HTTP 或 HTTPS');
+  }
+  if (probe.host.isEmpty || probe.userInfo.isNotEmpty) {
+    throw const FormatException('请输入有效且不包含账号密码的镜像地址');
+  }
+  if (!template.contains('{url}') && !template.contains('{path}')) {
+    template = template.replaceFirst(RegExp(r'/+$'), '');
+  }
+  return template;
+}
+
+Uri resolveGithubMirrorUri(
+  Uri officialUri,
+  String template, {
+  bool normalize = true,
+}) {
+  final normalized = normalize
+      ? normalizeGithubMirrorTemplate(template)
+      : template;
+  final officialPath = officialUri.hasQuery
+      ? '${officialUri.path}?${officialUri.query}'
+      : officialUri.path;
+  if (normalized.contains('{url}')) {
+    return Uri.parse(normalized.replaceAll('{url}', officialUri.toString()));
+  }
+  if (normalized.contains('{path}')) {
+    return Uri.parse(normalized.replaceAll('{path}', officialPath));
+  }
+
+  final base = Uri.parse(normalized);
+  if (base.path.isEmpty || base.path == '/') {
+    return officialUri.replace(
+      scheme: base.scheme,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
+    );
+  }
+  final prefix = normalized.endsWith('/') ? normalized : '$normalized/';
+  return Uri.parse('$prefix${officialUri.toString()}');
+}
+
+List<Uri> buildGithubDownloadUris({
+  required Uri officialUri,
+  required bool useMirrors,
+  required Iterable<String> mirrorTemplates,
+}) {
+  if (!useMirrors || officialUri.host.toLowerCase() != 'github.com') {
+    return <Uri>[officialUri];
+  }
+  final uris = <Uri>[];
+  final seen = <String>{officialUri.toString()};
+  for (final template in mirrorTemplates) {
+    try {
+      final mirrorUri = resolveGithubMirrorUri(officialUri, template);
+      if (seen.add(mirrorUri.toString())) uris.add(mirrorUri);
+    } on FormatException {
+      // Ignore malformed entries that may come from manually edited settings.
+    }
+  }
+  uris.add(officialUri);
+  return uris;
+}
+
 class AppUpdateAsset {
   const AppUpdateAsset({
     required this.name,
@@ -177,6 +273,7 @@ class AppUpdater {
   Future<DownloadedAppUpdate> downloadUpdate(
     AppUpdateRelease release, {
     required String mirror,
+    List<String> mirrorTemplates = const <String>[defaultGithubMirrorTemplate],
     UpdateDownloadProgressCallback? onProgress,
   }) async {
     final updateRoot = _updatesRoot();
@@ -193,7 +290,11 @@ class AppUpdater {
       _joinPath(updateDirectory.path, _safeFileName(release.asset.name)),
     );
     final partialArchive = File('${archive.path}.part');
-    final sources = _downloadSources(release.asset.downloadUri, mirror);
+    final sources = _downloadSources(
+      release.asset.downloadUri,
+      mirror,
+      mirrorTemplates,
+    );
     final errors = <String>[];
 
     try {
@@ -424,20 +525,27 @@ class AppUpdater {
     return assets.first.asset;
   }
 
-  List<_DownloadSource> _downloadSources(Uri officialUri, String mirror) {
+  List<_DownloadSource> _downloadSources(
+    Uri officialUri,
+    String mirror,
+    List<String> mirrorTemplates,
+  ) {
     final useOfficial = mirror.trim().toLowerCase() == 'official';
-    if (useOfficial || officialUri.host.toLowerCase() != 'github.com') {
-      return <_DownloadSource>[
-        _DownloadSource(label: 'GitHub 官方源', uri: officialUri),
-      ];
-    }
+    final uris = buildGithubDownloadUris(
+      officialUri: officialUri,
+      useMirrors: !useOfficial,
+      mirrorTemplates: mirrorTemplates,
+    );
     return <_DownloadSource>[
-      _DownloadSource(
-        label: '国内源',
-        uri: officialUri.replace(scheme: 'https', host: 'kkgithub.com'),
-        referer: 'https://kkgithub.com/',
-      ),
-      _DownloadSource(label: 'GitHub 官方源', uri: officialUri),
+      for (var index = 0; index < uris.length; index++)
+        if (uris[index] == officialUri)
+          _DownloadSource(label: 'GitHub 官方源', uri: officialUri)
+        else
+          _DownloadSource(
+            label: '国内镜像 ${index + 1}（${uris[index].host}）',
+            uri: uris[index],
+            referer: '${uris[index].scheme}://${uris[index].authority}/',
+          ),
     ];
   }
 

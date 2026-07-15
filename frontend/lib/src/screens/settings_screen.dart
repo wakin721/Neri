@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
+import '../app_updater.dart';
 import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
 import '../local_debug_logs.dart';
@@ -72,7 +73,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-alpha2(400b56)',
+  defaultValue: '3.0.5-beta1(52111e)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -81,9 +82,16 @@ const _autoSaveDelay = Duration(milliseconds: 800);
 const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
+const _updateMirrorsKey = 'update_mirrors';
+const _legacyUpdateMirrorUrlKey = 'update_mirror_url';
+const _legacyUpdateCustomMirrorsKey = 'update_custom_mirrors';
 
 typedef SoftwareUpdateCheckCallback =
-    Future<void> Function({required String channel, required String mirror});
+    Future<void> Function({
+      required String channel,
+      required String mirror,
+      required List<String> mirrorTemplates,
+    });
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -181,6 +189,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     final dependenciesReady =
         settings == null || settings.missingYoloDependencies.isEmpty;
+    final updateMirrors = saved.containsKey(_updateMirrorsKey)
+        ? _normalizedUpdateMirrors(
+            _stringListSetting(saved, _updateMirrorsKey, const <String>[]),
+          )
+        : _normalizedUpdateMirrors(<String>[
+            _normalizedUpdateMirror(
+              _stringSetting(
+                saved,
+                _legacyUpdateMirrorUrlKey,
+                defaultGithubMirrorTemplate,
+              ),
+            ),
+            defaultGithubMirrorTemplate,
+            ..._stringListSetting(
+              saved,
+              _legacyUpdateCustomMirrorsKey,
+              const <String>[],
+            ),
+          ]);
     _draft = <String, dynamic>{
       ...saved,
       'selected_model': _stringSetting(
@@ -247,6 +274,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       'update_channel': _stringSetting(saved, 'update_channel', 'Preview'),
       'update_mirror': _stringSetting(saved, 'update_mirror', 'KKGitHub'),
+      _updateMirrorsKey: updateMirrors,
       _debugModeKey: _boolSetting(saved, _debugModeKey, false),
     };
     _resettingDraft = true;
@@ -407,8 +435,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (installIntelDriver == null || !mounted) return;
 
     final installStep = installIntelDriver
-        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。'
-        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。';
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe、$sourceLabel及对应硬件版本的 PyTorch wheel 源重新安装适用于 $envChoice 的 PyTorch。'
+        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe、$sourceLabel及对应硬件版本的 PyTorch wheel 源重新安装适用于 $envChoice 的 PyTorch。';
     final confirmed = await _confirmMaintenance(
       title: '安装 PyTorch',
       message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
@@ -497,8 +525,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (installIntelDriver == null || !mounted) return;
 
     final driverStep = installIntelDriver
-        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
-        : '安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会使用$sourceLabel及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final missingText = _missingYoloDependenciesLabel.isEmpty
         ? 'YOLO 处理依赖'
         : _missingYoloDependenciesLabel;
@@ -541,6 +569,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return switch (packageSource) {
       'aliyun' => '阿里源',
       'tsinghua' => '清华源',
+      'nju' => '南京大学源',
       _ => '官方源',
     };
   }
@@ -1421,7 +1450,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_maintenanceInProgress) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: 'Python 包安装源',
-            subtitle: '用于 ultralytics 和单个 Python 包安装',
+            subtitle: '用于 PyTorch 依赖、ultralytics 和单个 Python 包安装',
             icon: Icons.travel_explore_rounded,
             child: _SettingsMenuButton<String>(
               value: _string('package_source', 'official'),
@@ -1429,6 +1458,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SettingsOption<String>(value: 'official', label: '官方源'),
                 _SettingsOption<String>(value: 'aliyun', label: '阿里源'),
                 _SettingsOption<String>(value: 'tsinghua', label: '清华源'),
+                _SettingsOption<String>(value: 'nju', label: '南京大学源'),
               ],
               onChanged: (value) => _set('package_source', value),
             ),
@@ -1559,30 +1589,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
-          _SettingsPanel(
-            title: '折叠分组',
-            subtitle:
-                '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
-            icon: Icons.folder_copy_rounded,
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: Switch(
-                value: _bool('auto_group') && _bool('collapse_groups'),
-                onChanged: _bool('auto_group')
-                    ? (value) => _set('collapse_groups', value)
-                    : null,
+          if (_bool('auto_group')) ...[
+            _SettingsPanel(
+              title: '折叠分组',
+              subtitle:
+                  '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
+              icon: Icons.folder_copy_rounded,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Switch(
+                  value: _bool('collapse_groups'),
+                  onChanged: (value) => _set('collapse_groups', value),
+                ),
               ),
             ),
-          ),
-          _SettingsPanel(
-            title: '自动分组规则',
-            subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
-            icon: Icons.timelapse_rounded,
-            child: _SummaryDialogButton(
-              summary: _autoGroupRuleSummary(),
-              onPressed: _bool('auto_group') ? _showAutoGroupRulesDialog : null,
+            _SettingsPanel(
+              title: '自动分组规则',
+              subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
+              icon: Icons.timelapse_rounded,
+              child: _SummaryDialogButton(
+                summary: _autoGroupRuleSummary(),
+                onPressed: _showAutoGroupRulesDialog,
+              ),
             ),
-          ),
+          ],
           _SettingsPanel(
             title: '可撤回记录步数',
             subtitle: '最多保留多少次校验操作可供逐步撤回；批量标记会作为一次操作整体记录。',
@@ -2583,6 +2613,281 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  String _normalizedUpdateMirror(String value) {
+    try {
+      return normalizeGithubMirrorTemplate(value);
+    } on FormatException {
+      return defaultGithubMirrorTemplate;
+    }
+  }
+
+  List<String> _normalizedUpdateMirrors(Iterable<String> values) {
+    final mirrors = <String>[];
+    for (final value in values) {
+      try {
+        final normalized = normalizeGithubMirrorTemplate(value);
+        if (!mirrors.contains(normalized)) {
+          mirrors.add(normalized);
+        }
+      } on FormatException {
+        // Ignore malformed entries saved by older or manually edited settings.
+      }
+    }
+    return mirrors;
+  }
+
+  List<String> _updateMirrors() {
+    return _normalizedUpdateMirrors(_stringList(_updateMirrorsKey));
+  }
+
+  String _updateSourceSummary() {
+    if (_string('update_mirror', 'KKGitHub') == 'Official') {
+      return 'GitHub 官方源';
+    }
+    final mirrorCount = _updateMirrors().length;
+    return mirrorCount == 0 ? '国内源 · 仅使用官方回退' : '国内源 · $mirrorCount 个镜像';
+  }
+
+  Future<String?> _promptForUpdateMirror(BuildContext ownerContext) async {
+    final controller = TextEditingController();
+    String? validationMessage;
+    final result = await showDialog<String>(
+      context: ownerContext,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void submit() {
+              try {
+                final normalized = normalizeGithubMirrorTemplate(
+                  controller.text,
+                );
+                final officialProbe = Uri.parse(
+                  'https://github.com/wakin721/Neri/releases/download/v1/Neri.zip',
+                );
+                final resolved = resolveGithubMirrorUri(
+                  officialProbe,
+                  normalized,
+                );
+                if (resolved == officialProbe) {
+                  throw const FormatException('该地址仍指向 GitHub 官方源');
+                }
+                Navigator.of(dialogContext).pop(normalized);
+              } on FormatException catch (error) {
+                setDialogState(() => validationMessage = error.message);
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('添加 GitHub 镜像站'),
+              content: SizedBox(
+                width: 520,
+                child: TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLength: 500,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => submit(),
+                  decoration: InputDecoration(
+                    labelText: '镜像地址或模板',
+                    hintText: 'https://mirror.example.com',
+                    helperText:
+                        '站点根地址会替换 github.com；代理前缀可写成 https://example.com/{url}，也支持 {path}。',
+                    helperMaxLines: 3,
+                    errorText: validationMessage,
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(onPressed: submit, child: const Text('添加')),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
+    return result;
+  }
+
+  Future<void> _showUpdateSourcesDialog() async {
+    var source = _string('update_mirror', 'KKGitHub') == 'Official'
+        ? 'Official'
+        : 'KKGitHub';
+    final mirrors = _updateMirrors().toList(growable: true);
+    final result = await showDialog<({String source, List<String> mirrors})>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> addMirror() async {
+              final mirror = await _promptForUpdateMirror(dialogContext);
+              if (mirror == null || mirrors.contains(mirror)) return;
+              setDialogState(() => mirrors.add(mirror));
+            }
+
+            Widget sourceButton({
+              required String value,
+              required IconData icon,
+              required String label,
+            }) {
+              final selected = source == value;
+              return TextButton.icon(
+                onPressed: () => setDialogState(() => source = value),
+                icon: Icon(selected ? Icons.check_circle_rounded : icon),
+                label: Text(label),
+              );
+            }
+
+            return AlertDialog(
+              title: const Text('选择更新镜像源'),
+              content: SizedBox(
+                width: 460,
+                height: 480,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        sourceButton(
+                          value: 'Official',
+                          icon: Icons.public_rounded,
+                          label: 'GitHub 官方源',
+                        ),
+                        sourceButton(
+                          value: 'KKGitHub',
+                          icon: Icons.dns_rounded,
+                          label: '国内镜像源',
+                        ),
+                        if (source == 'KKGitHub')
+                          TextButton.icon(
+                            onPressed: addMirror,
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('添加'),
+                          ),
+                        if (source == 'KKGitHub')
+                          TextButton.icon(
+                            onPressed: mirrors.isEmpty
+                                ? null
+                                : () => setDialogState(mirrors.clear),
+                            icon: const Icon(Icons.deselect_rounded),
+                            label: const Text('清空'),
+                          ),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    if (source == 'Official')
+                      const Expanded(
+                        child: Center(
+                          child: _MutedText('更新文件将直接从 GitHub 官方地址下载。'),
+                        ),
+                      )
+                    else ...[
+                      const _MutedText('按从上到下的顺序逐个尝试；全部失败后使用 GitHub 官方源。'),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: mirrors.isEmpty
+                            ? const Center(
+                                child: _MutedText('当前没有国内镜像，将直接使用 GitHub 官方源。'),
+                              )
+                            : ReorderableListView.builder(
+                                buildDefaultDragHandles: false,
+                                itemCount: mirrors.length,
+                                onReorderItem: (oldIndex, newIndex) {
+                                  setDialogState(() {
+                                    final mirror = mirrors.removeAt(oldIndex);
+                                    mirrors.insert(newIndex, mirror);
+                                  });
+                                },
+                                itemBuilder: (context, index) {
+                                  final mirror = mirrors[index];
+                                  return ListTile(
+                                    key: ValueKey('update-mirror-$mirror'),
+                                    dense: true,
+                                    leading: SizedBox(
+                                      width: 28,
+                                      child: Text(
+                                        '${index + 1}',
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ),
+                                    title: Text(
+                                      mirror == defaultGithubMirrorTemplate
+                                          ? 'KKGitHub'
+                                          : mirror,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle:
+                                        mirror == defaultGithubMirrorTemplate
+                                        ? Text(mirror)
+                                        : null,
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          tooltip: '删除镜像',
+                                          onPressed: () {
+                                            setDialogState(
+                                              () => mirrors.removeAt(index),
+                                            );
+                                          },
+                                          icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                          ),
+                                        ),
+                                        ReorderableDragStartListener(
+                                          index: index,
+                                          child: const Padding(
+                                            padding: EdgeInsets.all(12),
+                                            child: Icon(
+                                              Icons.drag_handle_rounded,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(
+                    dialogContext,
+                  ).pop((source: source, mirrors: List<String>.from(mirrors))),
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (!mounted || result == null) return;
+
+    setState(() {
+      _draft['update_mirror'] = result.source;
+      _draft[_updateMirrorsKey] = result.mirrors;
+      _markDraftChanged();
+    });
+    _scheduleAutoSave();
+  }
+
   Widget _buildUpdateSettings() {
     return Column(
       children: [
@@ -2606,15 +2911,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         _SettingsPanel(
           title: '镜像源',
-          subtitle: '国内源下载失败时会自动回退 GitHub 官方源',
+          subtitle: '管理国内镜像的增删与下载顺序',
           icon: Icons.public_rounded,
-          child: _SettingsMenuButton<String>(
-            value: _string('update_mirror', 'KKGitHub'),
-            options: const [
-              _SettingsOption<String>(value: 'Official', label: '官方源'),
-              _SettingsOption<String>(value: 'KKGitHub', label: '国内源'),
-            ],
-            onChanged: (value) => _set('update_mirror', value),
+          child: _SummaryDialogButton(
+            summary: _updateSourceSummary(),
+            onPressed: _showUpdateSourcesDialog,
           ),
         ),
         _SettingsPanel(
@@ -2648,6 +2949,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await widget.onCheckForUpdates(
         channel: _string('update_channel', 'Preview'),
         mirror: _string('update_mirror', 'KKGitHub'),
+        mirrorTemplates: _updateMirrors(),
       );
     } finally {
       if (mounted) setState(() => _checkingForUpdates = false);

@@ -44,6 +44,7 @@ PIP_SOURCES = {
     "official": ("官方源", "https://pypi.org/simple"),
     "aliyun": ("阿里源", "https://mirrors.aliyun.com/pypi/simple"),
     "tsinghua": ("清华源", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    "nju": ("南京大学源", "https://mirror.nju.edu.cn/pypi/web/simple"),
 }
 
 _PACKAGE_SPEC_PATTERN = re.compile(
@@ -364,6 +365,10 @@ def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
         "清华源": "tsinghua",
         "tsinghua": "tsinghua",
         "tuna": "tsinghua",
+        "nju": "nju",
+        "nanjing": "nju",
+        "南京大学源": "nju",
+        "南大源": "nju",
     }
     key = alias_map.get(cleaned, "official")
     label, url = PIP_SOURCES[key]
@@ -481,7 +486,7 @@ def _run_pytorch_install(
     plan = resolve_pytorch_install_plan(env_choice)
     actual_env = str(plan["actual_env"])
     index_url = str(plan["index_url"])
-    source_key, source_label, source_url = _resolve_package_source(package_source)
+    _, source_label, source_url = _resolve_package_source(package_source)
     command_progress_start = progress_start
     if plan.get("needs_intel_driver"):
         if not install_intel_driver:
@@ -511,9 +516,9 @@ def _run_pytorch_install(
         "torchvision",
         "--index-url",
         index_url,
+        "--extra-index-url",
+        source_url,
     ]
-    if source_key != "official":
-        install_command.extend(["-i", source_url])
     commands = [
         [str(python_exe), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"],
         install_command,
