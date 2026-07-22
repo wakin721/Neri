@@ -63,6 +63,7 @@ jobs:
 
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name neri_flutter .
+          Remove-Item "test\widget_test.dart" -Force -ErrorAction SilentlyContinue
 
           foreach ($file in $customFiles) {
             Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force
