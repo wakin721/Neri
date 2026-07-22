@@ -1,0 +1,130 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - Neri-for-md3-project
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Flutter 3.44.6
+        shell: pwsh
+        run: |
+          git clone `
+            --branch 3.44.6 `
+            --depth 1 `
+            https://github.com/flutter/flutter.git `
+            C:\flutter
+
+          "C:\flutter\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate Windows project files
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          $backup = Join-Path $env:RUNNER_TEMP "neri-windows-runner"
+          New-Item -ItemType Directory -Path $backup -Force | Out-Null
+
+          $customFiles = @(
+            "flutter_window.cpp",
+            "flutter_window.h",
+            "win32_window.cpp",
+            "win32_window.h"
+          )
+
+          foreach ($file in $customFiles) {
+            Copy-Item "windows\runner\$file" $backup -Force
+          }
+
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name neri_flutter .
+
+          foreach ($file in $customFiles) {
+            Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force
+          }
+
+          Copy-Item "..\res\ico.ico" "windows\runner\resources\app_icon.ico" -Force
+
+      - name: Get Flutter dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run Flutter tests
+        shell: pwsh
+        working-directory: frontend
+        run: flutter test
+
+      - name: Build Flutter Windows release
+        shell: pwsh
+        working-directory: frontend
+        run: flutter build windows --release
+
+      - name: Install Python backend dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt "ultralytics>=8.4.13"
+
+      - name: Assemble portable application
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:GITHUB_WORKSPACE "package\Neri"
+          $release = Join-Path $env:GITHUB_WORKSPACE "frontend\build\windows\x64\runner\Release"
+          $pythonRoot = Split-Path -Parent (Get-Command python).Source
+
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          Copy-Item "$release\*" $package -Recurse -Force
+          Copy-Item "system" $package -Recurse -Force
+          Copy-Item "res" $package -Recurse -Force
+          Copy-Item "requirements.txt" $package -Force
+
+          $toolkit = Join-Path $package "toolkit"
+          New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
+          Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
+
+          $generatedExe = Join-Path $package "neri_flutter.exe"
+          $productExe = Join-Path $package "Neri.exe"
+          if (Test-Path $generatedExe) {
+            Move-Item $generatedExe $productExe -Force
+          }
+          if (-not (Test-Path $productExe)) {
+            throw "Neri.exe was not produced by the Flutter build."
+          }
+
+          & "$toolkit\python.exe" -c "import fastapi, uvicorn, torch, ultralytics"
+
+      - name: Upload Windows x64 application
+        uses: actions/upload-artifact@v4
+        with:
+          name: Neri-windows-x64-${{ github.sha }}
+          path: package/Neri/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
