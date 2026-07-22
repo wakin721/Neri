@@ -90,34 +90,6 @@ jobs:
         shell: pwsh
         run: python -m pip install -r requirements.txt
 
-      - name: Assemble portable application
-        shell: pwsh
-        run: |
-          $package = Join-Path $env:GITHUB_WORKSPACE "package\Neri"
-          $release = Join-Path $env:GITHUB_WORKSPACE "frontend\build\windows\x64\runner\Release"
-          $pythonRoot = Split-Path -Parent (Get-Command python).Source
-
-          New-Item -ItemType Directory -Path $package -Force | Out-Null
-          Copy-Item "$release\*" $package -Recurse -Force
-          Copy-Item "system" $package -Recurse -Force
-          Copy-Item "res" $package -Recurse -Force
-          Copy-Item "requirements.txt" $package -Force
-
-          $toolkit = Join-Path $package "toolkit"
-          New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
-          Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
-
-          $generatedExe = Join-Path $package "neri_flutter.exe"
-          $productExe = Join-Path $package "Neri.exe"
-          if (Test-Path $generatedExe) {
-            Move-Item $generatedExe $productExe -Force
-          }
-          if (-not (Test-Path $productExe)) {
-            throw "Neri.exe was not produced by the Flutter build."
-          }
-
-          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, uvicorn"
-
       - name: Determine artifact name
         id: artifact
         shell: pwsh
@@ -153,11 +125,42 @@ jobs:
           "Artifact: $artifactName.zip" |
             Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
+      - name: Assemble portable application
+        shell: pwsh
+        env:
+          NERI_ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+        run: |
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE "package\$env:NERI_ARTIFACT_NAME"
+          $package = Join-Path $packageRoot "Neri"
+          $release = Join-Path $env:GITHUB_WORKSPACE "frontend\build\windows\x64\runner\Release"
+          $pythonRoot = Split-Path -Parent (Get-Command python).Source
+
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          Copy-Item "$release\*" $package -Recurse -Force
+          Copy-Item "system" $package -Recurse -Force
+          Copy-Item "res" $package -Recurse -Force
+          Copy-Item "requirements.txt" $package -Force
+
+          $toolkit = Join-Path $package "toolkit"
+          New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
+          Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
+
+          $generatedExe = Join-Path $package "neri_flutter.exe"
+          $productExe = Join-Path $package "Neri.exe"
+          if (Test-Path $generatedExe) {
+            Move-Item $generatedExe $productExe -Force
+          }
+          if (-not (Test-Path $productExe)) {
+            throw "Neri.exe was not produced by the Flutter build."
+          }
+
+          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, uvicorn"
+
       - name: Upload Windows x64 application
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
-          path: package/Neri/
+          path: package/${{ steps.artifact.outputs.artifact_name }}/
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
