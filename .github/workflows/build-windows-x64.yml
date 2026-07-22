@@ -24,10 +24,10 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: requirements.txt
 
@@ -88,10 +88,7 @@ jobs:
 
       - name: Install Python backend dependencies
         shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -r requirements.txt "ultralytics>=8.4.13"
+        run: python -m pip install -r requirements.txt
 
       - name: Assemble portable application
         shell: pwsh
@@ -119,12 +116,47 @@ jobs:
             throw "Neri.exe was not produced by the Flutter build."
           }
 
-          & "$toolkit\python.exe" -c "import fastapi, uvicorn, torch, ultralytics"
+          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, uvicorn"
+
+      - name: Determine artifact name
+        id: artifact
+        shell: pwsh
+        run: |
+          $versionMatch = Select-String `
+            -Path "frontend\pubspec.yaml" `
+            -Pattern '^version:\s*(\S+)' |
+            Select-Object -First 1
+          if ($null -eq $versionMatch) {
+            throw "Unable to read the application version from frontend/pubspec.yaml."
+          }
+
+          $pubspecVersion = $versionMatch.Matches[0].Groups[1].Value.Trim()
+          $baseVersion = ($pubspecVersion -split '\+', 2)[0]
+          $versionParts = $baseVersion -split '-', 2
+          $versionNumber = $versionParts[0]
+          $releaseLabel = if ($versionParts.Count -eq 2) {
+            $versionParts[1]
+          } else {
+            "release"
+          }
+
+          if ($versionNumber -notmatch '^\d+(?:\.\d+)+$') {
+            throw "Invalid application version: $versionNumber"
+          }
+          if ($releaseLabel -notmatch '^[A-Za-z0-9.-]+$') {
+            throw "Invalid release label: $releaseLabel"
+          }
+
+          $artifactName = "Neri_v${versionNumber}_${releaseLabel}_x64_lite"
+          "artifact_name=$artifactName" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "Artifact: $artifactName.zip" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Upload Windows x64 application
         uses: actions/upload-artifact@v4
         with:
-          name: Neri-windows-x64-${{ github.sha }}
+          name: ${{ steps.artifact.outputs.artifact_name }}
           path: package/Neri/
           if-no-files-found: error
           retention-days: 14
