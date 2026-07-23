@@ -27,9 +27,10 @@ def _runtime_logs_dir(*parts: str) -> str:
 class ImageProcessor:
     """处理图像、检测物种及视频追踪的核心类"""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: Optional[str]):
         """初始化图像处理器"""
-        self.model = self._load_model(model_path)
+        self.model_path = model_path or None
+        self.model = self._load_model(model_path) if model_path else None
         self.translation_dict = self._load_translation_file()
         self.cls_model = None
 
@@ -326,6 +327,111 @@ class ImageProcessor:
             pass
         return None
 
+    def _classify_batch_species(
+        self,
+        img_paths: List[str],
+        *,
+        use_fp16: bool,
+        conf: float,
+        preloaded_data: Optional[Tuple],
+        classes: Optional[List[int]],
+    ) -> List[Dict[str, Any]]:
+        """在未选择探测模型时，对整张图片直接运行分类模型。"""
+        empty_result = {
+            '物种名称': "",
+            '物种数量': "",
+            'detect_results': None,
+            '最低置信度': None,
+            '分类候选项': [],
+        }
+        batch_results_info = [dict(empty_result) for _ in img_paths]
+        if not self.cls_model:
+            return batch_results_info
+
+        loaded_data = preloaded_data or self.preload_batch_data(img_paths)
+        if not loaded_data:
+            return batch_results_info
+
+        valid_indices, processed_imgs, _original_imgs_rgb = loaded_data
+        if not processed_imgs:
+            return batch_results_info
+
+        device_name, use_fp16 = self._determine_device(use_fp16)
+        temp_run_project = _runtime_logs_dir("yolo")
+        self._sync_device(device_name)
+        classify_start = time.perf_counter()
+        cls_results = self.cls_model(
+            processed_imgs,
+            half=use_fp16,
+            device=device_name,
+            save=False,
+            project=temp_run_project,
+            name="cls_full_image_log",
+            exist_ok=True,
+        )
+        self._sync_device(device_name)
+
+        allowed_class_ids = set(classes) if classes is not None else None
+        for source_index, cls_result in zip(valid_indices, cls_results):
+            probs = getattr(cls_result, "probs", None)
+            probs_data = getattr(probs, "data", None)
+            if probs_data is None:
+                continue
+            try:
+                scores = probs_data.detach().float().cpu().tolist()
+            except Exception:
+                scores = list(probs_data)
+
+            ranked = sorted(
+                (
+                    (class_id, float(score))
+                    for class_id, score in enumerate(scores)
+                    if allowed_class_ids is None or class_id in allowed_class_ids
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            if not ranked:
+                continue
+
+            candidates = []
+            names = getattr(cls_result, "names", {}) or {}
+            for class_id, score in ranked[:3]:
+                raw_name = str(
+                    names.get(class_id, class_id)
+                    if isinstance(names, dict)
+                    else names[class_id]
+                )
+                translated_name = self.translation_dict.get(raw_name, raw_name)
+                candidates.append(
+                    {
+                        "name": translated_name,
+                        "conf": score,
+                        "raw_cls_conf": score,
+                        "class_id": class_id,
+                    }
+                )
+
+            top_candidate = candidates[0]
+            accepted = float(top_candidate["conf"]) >= conf
+            batch_results_info[source_index] = {
+                '物种名称': top_candidate["name"] if accepted else "空",
+                '物种数量': "1" if accepted else "空",
+                'detect_results': None,
+                '最低置信度': (
+                    f"{float(top_candidate['conf']):.3f}" if accepted else None
+                ),
+                '分类候选项': candidates,
+            }
+
+        logger.info(
+            "Full-image classification: requested=%d valid=%d elapsed=%.3fs",
+            len(img_paths),
+            len(processed_imgs),
+            time.perf_counter() - classify_start,
+        )
+        return batch_results_info
+
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
                              conf: float = 0.25, augment: bool = False,
                              agnostic_nms: bool = True, timeout: float = 60.0,
@@ -343,6 +449,21 @@ class ImageProcessor:
         batch_results_info = []
 
         if not self.model:
+            if self.cls_model:
+                classification_results = self._classify_batch_species(
+                    img_paths,
+                    use_fp16=use_fp16,
+                    conf=conf,
+                    preloaded_data=preloaded_data,
+                    classes=classes,
+                )
+                should_clear_cuda_cache = (
+                    cleanup_cache or self._cuda_cache_pressure_high()
+                )
+                self.cleanup_runtime_cache(
+                    clear_cuda_cache=should_clear_cuda_cache
+                )
+                return classification_results
             for _ in img_paths:
                 batch_results_info.append({
                     '物种名称': "", '物种数量': "",

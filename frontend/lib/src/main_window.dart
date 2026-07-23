@@ -1629,12 +1629,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               .map((model) => model.path)
               .toSet();
           if (_selectedModelPath == null ||
-              !modelPaths.contains(_selectedModelPath)) {
-            _selectedModelPath =
-                settings.selectedModel ??
-                (settings.availableModels.isEmpty
-                    ? null
-                    : settings.availableModels.first.path);
+              (_selectedModelPath!.isNotEmpty &&
+                  !modelPaths.contains(_selectedModelPath))) {
+            _selectedModelPath = _savedModelSelection(
+              settings,
+              'selected_model',
+              settings.selectedModel ?? '',
+              modelPaths,
+            );
           }
           final classificationModelPaths = settings
               .availableClassificationModels
@@ -1645,8 +1647,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   !classificationModelPaths.contains(
                     _selectedClassificationModelPath,
                   ))) {
-            _selectedClassificationModelPath =
-                settings.selectedClassificationModel ?? '';
+            _selectedClassificationModelPath = _savedModelSelection(
+              settings,
+              'selected_classification_model',
+              settings.selectedClassificationModel ?? '',
+              classificationModelPaths,
+            );
           }
           if (firstLoad) {
             _confidence = _doubleSetting(settings, 'confidence', _confidence);
@@ -1736,10 +1742,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted) return;
       setState(() {
         _settings = saved;
-        _selectedModelPath = saved.selectedModel ?? _selectedModelPath;
-        _selectedClassificationModelPath =
-            saved.selectedClassificationModel ??
-            _selectedClassificationModelPath;
+        _selectedModelPath = _savedModelSelection(
+          saved,
+          'selected_model',
+          saved.selectedModel ?? '',
+          saved.availableModels.map((model) => model.path).toSet(),
+        );
+        _selectedClassificationModelPath = _savedModelSelection(
+          saved,
+          'selected_classification_model',
+          saved.selectedClassificationModel ?? '',
+          saved.availableClassificationModels
+              .map((model) => model.path)
+              .toSet(),
+        );
         _confidence = _doubleSetting(saved, 'confidence', _confidence);
         _iou = _doubleSetting(saved, 'iou', _iou);
         _imageSize = _intSetting(
@@ -1792,6 +1808,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final value = settings.settings[key];
     if (value is String && value.trim().isNotEmpty) return value;
     return fallback;
+  }
+
+  String _savedModelSelection(
+    NeriSettings settings,
+    String key,
+    String fallback,
+    Set<String> availablePaths,
+  ) {
+    final value = settings.settings[key];
+    if (value is String) {
+      final cleaned = value.trim();
+      if (cleaned.isEmpty || availablePaths.contains(cleaned)) return cleaned;
+    }
+    return availablePaths.contains(fallback) ? fallback : '';
   }
 
   int _processingBatchSize({bool singleFile = false}) {
@@ -1987,12 +2017,36 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
+  Future<bool> _ensureDetectionModelSelected() async {
+    final hasDetectionModel = _selectedModelPath?.trim().isNotEmpty == true;
+    final hasClassificationModel =
+        _selectedClassificationModelPath?.trim().isNotEmpty == true;
+    if (hasDetectionModel || hasClassificationModel) return true;
+    if (!mounted) return false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('请选择检测模型'),
+        content: const Text('探测模型和分类模型不能同时设为“不使用”。请至少选择一个模型后再开始检测。'),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+    return false;
+  }
+
   Future<void> _createJob() async {
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
       _showSnackBar('请输入红外相机媒体文件夹路径');
       return;
     }
+    if (!await _ensureDetectionModelSelected()) return;
 
     setState(() => _submitting = true);
     unawaited(_updateWindowsShellStatus());
@@ -2190,6 +2244,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _detectCurrentPreviewImage(DetectionItem item) async {
+    if (!await _ensureDetectionModelSelected()) return;
     setState(() => _previewDetecting = true);
     try {
       await widget.apiClient.createJob(
@@ -2227,6 +2282,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     required double confidence,
   }) async {
     if (items.isEmpty) return;
+    if (!await _ensureDetectionModelSelected()) return;
     setState(() => _submitting = true);
     try {
       final inputPaths = items

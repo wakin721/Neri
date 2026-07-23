@@ -350,7 +350,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _autoSaveTimer = Timer(_autoSaveDelay, () => unawaited(_save()));
   }
 
-  Future<void> _loadModelClassesForSelection([String? modelPath]) async {
+  Future<void> _loadModelClassesForSelection() async {
     if (!_detectionDependenciesReady) {
       if (!mounted) return;
       setState(() {
@@ -361,12 +361,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    final path =
-        modelPath ??
-        _validModelValue(
-          _string('selected_model'),
-          widget.settings?.availableModels ?? const <ModelInfo>[],
-        );
+    final path = _modelClassesSelectionPath();
     if (path == null || path.isEmpty) {
       if (!mounted) return;
       setState(() {
@@ -385,13 +380,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     try {
       final classes = await widget.apiClient.fetchModelClasses(path);
-      if (!mounted || _string('selected_model') != path) return;
+      if (!mounted || _modelClassesSelectionPath() != path) return;
       setState(() {
         _modelClassOptions = classes;
         _loadingModelClasses = false;
       });
     } catch (error) {
-      if (!mounted || _string('selected_model') != path) return;
+      if (!mounted || _modelClassesSelectionPath() != path) return;
       setState(() {
         _modelClassOptions = const <ModelClassInfo>[];
         _loadingModelClasses = false;
@@ -919,6 +914,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final selectedModel = _validModelValue(
       _string('selected_model'),
       settings?.availableModels ?? const <ModelInfo>[],
+      allowEmpty: true,
     );
     final selectedClassificationModel = _validModelValue(
       _string('selected_classification_model'),
@@ -939,30 +935,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_maintenanceInProgress) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
-            subtitle: '选择用于照片和视频目标检测的模型',
+            subtitle: '选择目标探测模型，或设为不使用',
             icon: Icons.build_rounded,
             child: _SettingsMenuButton<String>(
               value: selectedModel,
               placeholder: '未发现探测模型',
               enabled: detectionEnabled,
-              options: (settings?.availableModels ?? const <ModelInfo>[])
-                  .map(
-                    (model) => _SettingsOption<String>(
-                      value: model.path,
-                      label: model.name,
-                    ),
-                  )
-                  .toList(),
+              options: [
+                const _SettingsOption<String>(value: '', label: '不使用'),
+                ...(settings?.availableModels ?? const <ModelInfo>[]).map(
+                  (model) => _SettingsOption<String>(
+                    value: model.path,
+                    label: model.name,
+                  ),
+                ),
+              ],
               onChanged: (value) {
                 _set('selected_model', value);
                 _set('selected_species_names', <String>[]);
-                _loadModelClassesForSelection(value);
+                _loadModelClassesForSelection();
               },
             ),
           ),
           _SettingsPanel(
             title: '分类模型',
-            subtitle: '选择二次分类模型，或设为不使用',
+            subtitle: '用于整图识别或探测后的二次分类，也可设为不使用',
             icon: Icons.account_tree_rounded,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -981,8 +978,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                   ],
-                  onChanged: (value) =>
-                      _set('selected_classification_model', value),
+                  onChanged: (value) {
+                    _set('selected_classification_model', value);
+                    if (selectedModel?.isEmpty ?? true) {
+                      _set('selected_species_names', <String>[]);
+                      _loadModelClassesForSelection();
+                    }
+                  },
                 ),
                 const SizedBox(height: 8),
               ],
@@ -3052,6 +3054,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (models.any((model) => model.path == value)) return value;
     if (allowEmpty) return '';
     return models.isEmpty ? null : models.first.path;
+  }
+
+  String? _modelClassesSelectionPath() {
+    final detectionModel = _validModelValue(
+      _string('selected_model'),
+      widget.settings?.availableModels ?? const <ModelInfo>[],
+      allowEmpty: true,
+    );
+    if (detectionModel != null && detectionModel.isNotEmpty) {
+      return detectionModel;
+    }
+    final classificationModel = _validModelValue(
+      _string('selected_classification_model'),
+      widget.settings?.availableClassificationModels ?? const <ModelInfo>[],
+      allowEmpty: true,
+    );
+    return classificationModel == null || classificationModel.isEmpty
+        ? null
+        : classificationModel;
   }
 }
 

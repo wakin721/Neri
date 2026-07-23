@@ -389,34 +389,27 @@ class _ModelSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final models = settings?.availableModels ?? const <ModelInfo>[];
-    final selectedValue = models.any((model) => model.path == selectedModelPath)
-        ? selectedModelPath
-        : (models.isEmpty ? null : models.first.path);
-
-    if (models.isEmpty) {
-      return InputDecorator(
-        decoration: InputDecoration(
-          labelText: '模型文件',
-          helperText: enabled
-              ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
-              : '检测依赖未安装，安装完成后可选择模型',
-          prefixIcon: const Icon(Icons.folder_off_rounded),
-          border: const OutlineInputBorder(),
-          enabled: enabled,
-        ),
-        child: const Text('暂无可用模型'),
-      );
-    }
+    final selectedValue =
+        selectedModelPath == null || selectedModelPath!.isEmpty
+        ? ''
+        : (models.any((model) => model.path == selectedModelPath)
+              ? selectedModelPath
+              : '');
 
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
-      label: const Text('模型文件'),
-      helperText: '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
+      label: const Text('探测模型'),
+      helperText: !enabled
+          ? '检测依赖未安装，安装完成后可选择模型'
+          : models.isEmpty
+          ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
+          : '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
       leadingIcon: const Icon(Icons.memory_rounded),
       dropdownMenuEntries: [
+        const DropdownMenuEntry<String>(value: '', label: '不使用'),
         for (final model in models)
           DropdownMenuEntry<String>(value: model.path, label: model.name),
       ],

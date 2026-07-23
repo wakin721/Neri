@@ -58,6 +58,7 @@ frontend/*
 !frontend/test/
 frontend/test/*
 !frontend/test/app_updater_test.dart
+!frontend/test/model_selection_test.dart
 !frontend/pubspec.yaml
 # Keep Neri's customized Windows shell integration under version control.
 !frontend/windows/

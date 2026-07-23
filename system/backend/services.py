@@ -1113,16 +1113,27 @@ def _build_metadata_item(path: Path) -> DetectionItem:
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
     from system.image_processor import ImageProcessor
 
-    resolved_model_path = _resolve_model_path(model_path)
-    detector = ImageProcessor(str(resolved_model_path))
+    resolved_model_path = _resolve_model_path(model_path) if model_path else None
     resolved_classification_path = _resolve_classification_model_path(classification_model_path)
+    if classification_model_path and resolved_classification_path is None:
+        raise FileNotFoundError(f"分类模型文件不存在: {classification_model_path}")
+    if resolved_model_path is None and resolved_classification_path is None:
+        raise ValueError("探测模型和分类模型至少需要选择一个。")
+
+    detector = ImageProcessor(
+        str(resolved_model_path) if resolved_model_path is not None else None
+    )
     if resolved_classification_path is not None:
         detector.load_cls_model(str(resolved_classification_path))
+    if detector.model is None and detector.cls_model is None:
+        raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
 
 
 def _detector_model_names(detector) -> dict[int, str]:
     model = getattr(detector, "model", None)
+    if model is None:
+        model = getattr(detector, "cls_model", None)
     names = getattr(model, "names", None)
     if isinstance(names, dict):
         normalized: dict[int, str] = {}
@@ -1586,6 +1597,7 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
         "最低置信度": confidence_raw,
         "检测时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "检测框": boxes,
+        "分类候选项": detection.get("分类候选项", []),
         "all_confidences": all_confidences,
         "all_classes": all_classes,
         "names_map": names_map,
@@ -1730,7 +1742,11 @@ def _detect_video(
     input_path: Path,
     cancelled=None,
 ) -> DetectionItem:
-    if request.options.video_mode == "fast":
+    classification_only = (
+        getattr(detector, "model", None) is None
+        and getattr(detector, "cls_model", None) is not None
+    )
+    if request.options.video_mode == "fast" or classification_only:
         return _detect_video_fast(detector, path, item, request, input_path, cancelled=cancelled)
     return _detect_video_track(detector, path, item, request, input_path, cancelled=cancelled)
 
@@ -1838,6 +1854,15 @@ def _detect_video_fast_batch(
         batch_started = time.perf_counter()
         sample_started = time.perf_counter()
         sample_count = max(1, int(request.options.vid_stride or 1))
+        classification_only = (
+            getattr(detector, "model", None) is None
+            and getattr(detector, "cls_model", None) is not None
+        )
+        frame_stride = (
+            max(1, int(request.options.vid_stride or 1))
+            if classification_only and request.options.video_mode == "all"
+            else None
+        )
         for video_index, (path, item) in enumerate(zip(paths, items)):
             try:
                 _raise_if_cancelled(cancelled)
@@ -1845,6 +1870,7 @@ def _detect_video_fast_batch(
                     path,
                     temp_dir / f"video_{video_index}",
                     sample_count,
+                    frame_stride=frame_stride,
                     cancelled=cancelled,
                 )
                 video_infos[video_index] = info
@@ -1921,6 +1947,7 @@ def _detect_video_fast_batch(
                 path,
                 info,
                 frame_detections,
+                video_mode=request.options.video_mode,
             )
             detection_payloads.append((path, detection_data))
             result_items[video_index] = _apply_detection_data(item, detection_data)
@@ -1968,6 +1995,7 @@ def _sample_fast_video_frames(
     path: Path,
     temp_dir: Path,
     sample_count: int,
+    frame_stride: int | None = None,
     cancelled=None,
 ) -> dict[str, Any]:
     import cv2
@@ -1985,7 +2013,9 @@ def _sample_fast_video_frames(
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames > 0:
+        if total_frames > 0 and frame_stride is not None:
+            points = list(range(0, total_frames, max(1, frame_stride)))
+        elif total_frames > 0:
             points = [
                 min(total_frames - 1, max(0, round(total_frames * (index + 1) / (sample_count + 1))))
                 for index in range(sample_count)
@@ -2024,6 +2054,7 @@ def _build_fast_video_detection_data(
     path: Path,
     video_info: dict[str, Any],
     frame_detections: list[tuple[int, int, dict[str, Any]]],
+    video_mode: str = "fast",
 ) -> dict[str, Any]:
     from collections import Counter
 
@@ -2068,7 +2099,7 @@ def _build_fast_video_detection_data(
     total_frames = int(video_info.get("total_frames") or 0)
     return {
         "video_source": str(path),
-        "video_mode": "fast",
+        "video_mode": video_mode,
         "sampled_frames": video_info.get("frame_points") or [],
         "width": int(video_info.get("width") or 0),
         "height": int(video_info.get("height") or 0),

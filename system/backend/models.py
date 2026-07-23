@@ -189,8 +189,14 @@ class ClearCacheResponse(BaseModel):
 class ProcessingOptions(BaseModel):
     """Options that mirror the current desktop advanced processing controls."""
 
-    model_path: str | None = Field(default=None, description="YOLO .pt model path. Uses the project default when empty.")
-    classification_model_path: str | None = Field(default=None, description="Optional second-stage classification model path.")
+    model_path: str | None = Field(
+        default=None,
+        description="Optional YOLO detection model path.",
+    )
+    classification_model_path: str | None = Field(
+        default=None,
+        description="Optional classification model path; it can also run on full images without a detection model.",
+    )
     confidence: float = Field(default=0.25, ge=0.0, le=1.0)
     iou: float = Field(default=0.45, ge=0.0, le=1.0)
     use_fp16: bool = False
@@ -209,6 +215,22 @@ class ProcessingOptions(BaseModel):
         default_factory=list,
         description="Optional translated or raw class names to limit YOLO inference.",
     )
+
+    @model_validator(mode="after")
+    def validate_detection_models(self) -> "ProcessingOptions":
+        self.model_path = self.model_path.strip() if self.model_path else None
+        self.classification_model_path = (
+            self.classification_model_path.strip()
+            if self.classification_model_path
+            else None
+        )
+        if (
+            self.enable_detection
+            and not self.model_path
+            and not self.classification_model_path
+        ):
+            raise ValueError("启用检测时，探测模型和分类模型至少需要选择一个。")
+        return self
 
 
 class CreateJobRequest(BaseModel):

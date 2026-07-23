@@ -215,15 +215,22 @@ def settings() -> SettingsResponse:
         stored_settings["quick_mark_usage_counts"] = quick_mark_counts
     available_models = list_available_models()
     available_classification_models = list_available_classification_models()
+    has_saved_model = "selected_model" in stored_settings
     saved_model = stored_settings.get("selected_model")
-    saved_classification_model = stored_settings.get("selected_classification_model") or stored_settings.get("selected_cls_model")
+    if "selected_classification_model" in stored_settings:
+        saved_classification_model = stored_settings.get(
+            "selected_classification_model"
+        )
+    else:
+        saved_classification_model = stored_settings.get("selected_cls_model")
     selected_model = None
-    if isinstance(saved_model, str):
+    if isinstance(saved_model, str) and saved_model:
         selected_model = next(
             (model.path for model in available_models if model.name == saved_model or model.path == saved_model),
             None,
         )
-    selected_model = selected_model or (available_models[0].path if available_models else None)
+    if not has_saved_model:
+        selected_model = available_models[0].path if available_models else None
 
     selected_classification_model = None
     if isinstance(saved_classification_model, str) and saved_classification_model:
