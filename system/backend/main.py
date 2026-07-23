@@ -31,8 +31,9 @@ from .models import (
     ModelClassInfo,
     MaintenanceStartResponse,
     MaintenanceStatusResponse,
-    PytorchInstallPlanResponse,
     JobSummary,
+    PackageSourceResponse,
+    PytorchInstallPlanResponse,
     ReinstallPackageRequest,
     RuntimeDiagnostics,
     SettingsResponse,
@@ -44,6 +45,7 @@ from .models import (
 )
 from .maintenance import (
     read_maintenance_status,
+    resolve_package_source,
     resolve_pytorch_install_plan,
     schedule_backend_shutdown,
     start_package_reinstall,
@@ -196,6 +198,10 @@ def settings() -> SettingsResponse:
     """Return Neri runtime settings and supported media formats."""
 
     stored_settings = settings_manager.load_settings() or {}
+    stored_settings.setdefault("package_source", "auto")
+    stored_settings.setdefault("auto_group", True)
+    stored_settings.setdefault("auto_group_detect_burst", True)
+    stored_settings.setdefault("undo_steps", 200)
     quick_mark_settings = settings_manager.load_quick_mark_species() or {}
     if "quick_mark_list" not in stored_settings and isinstance(quick_mark_settings.get("list"), list):
         stored_settings["quick_mark_list"] = quick_mark_settings["list"]
@@ -304,6 +310,16 @@ def maintenance_status() -> MaintenanceStatusResponse:
     """Return the last environment-maintenance status."""
 
     return MaintenanceStatusResponse(**read_maintenance_status())
+
+
+@app.get("/api/environment/package-source", response_model=PackageSourceResponse)
+def package_source(
+    source: str = Query("auto", min_length=1, max_length=32),
+) -> PackageSourceResponse:
+    """Resolve the configured Python package source for the current public IP."""
+
+    source_key, source_label, _ = resolve_package_source(source)
+    return PackageSourceResponse(source=source_key, label=source_label)
 
 
 @app.get("/api/debug/packages", response_model=list[InstalledPackageInfo])

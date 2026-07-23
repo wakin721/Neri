@@ -65,11 +65,18 @@ class SettingsUpdateRequest(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+class PackageSourceResponse(BaseModel):
+    """Resolved Python package source used by environment maintenance."""
+
+    source: str
+    label: str
+
+
 class InstallPytorchRequest(BaseModel):
     """Request to reinstall PyTorch for a selected runtime target."""
 
     env_choice: str = Field(default="自动检测", min_length=1)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
     install_intel_driver: bool = False
 
 
@@ -77,7 +84,7 @@ class InstallYoloDependenciesRequest(BaseModel):
     """Request to install runtime dependencies required by YOLO processing."""
 
     env_choice: str = Field(default="自动检测", min_length=1)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
     install_intel_driver: bool = False
 
 
@@ -85,7 +92,7 @@ class ReinstallPackageRequest(BaseModel):
     """Request to force-reinstall one Python package."""
 
     package: str = Field(..., min_length=1, max_length=160)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
 
 
 class MaintenanceStartResponse(BaseModel):

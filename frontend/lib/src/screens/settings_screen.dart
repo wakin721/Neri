@@ -220,7 +220,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'selected_classification_model',
         settings?.selectedClassificationModel ?? '',
       ),
-      'package_source': _stringSetting(saved, 'package_source', 'official'),
+      'package_source': _stringSetting(saved, 'package_source', 'auto'),
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
@@ -240,7 +240,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'auto_group_detect_burst': _boolSetting(
         saved,
         'auto_group_detect_burst',
-        false,
+        true,
       ),
       'auto_group_burst_size': _intSetting(saved, 'auto_group_burst_size', 3),
       'auto_group_gap_seconds': _intSetting(
@@ -424,14 +424,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     final envChoice = _string('pytorch_version', '自动检测');
-    final packageSource = _string('package_source', 'official');
+    final packageSource = await _resolvePackageSource();
+    if (packageSource == null || !mounted) return;
     final sourceLabel = _packageSourceLabel(packageSource);
     final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return;
 
     final installStep = installIntelDriver
-        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe、$sourceLabel及对应硬件版本的 PyTorch wheel 源重新安装适用于 $envChoice 的 PyTorch。'
-        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe、$sourceLabel及对应硬件版本的 PyTorch wheel 源重新安装适用于 $envChoice 的 PyTorch。';
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel重新安装适用于$envChoice的PyTorch。'
+        : '将使用$sourceLabel重新安装适用于$envChoice的PyTorch。';
     final confirmed = await _confirmMaintenance(
       title: '安装 PyTorch',
       message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
@@ -514,7 +515,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     const envChoice = '自动检测';
-    final packageSource = _string('package_source', 'official');
+    final packageSource = await _resolvePackageSource();
+    if (packageSource == null || !mounted) return;
     final sourceLabel = _packageSourceLabel(packageSource);
     final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return;
@@ -565,8 +567,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'aliyun' => '阿里源',
       'tsinghua' => '清华源',
       'nju' => '南京大学源',
-      _ => '官方源',
+      'official' => '官方源',
+      _ => '自动选择源',
     };
+  }
+
+  Future<String?> _resolvePackageSource() async {
+    try {
+      return await widget.apiClient.resolvePackageSource(
+        _string('package_source', 'auto'),
+      );
+    } catch (error) {
+      widget.onShowMessage('检测 Python 包安装源失败：$error');
+      return null;
+    }
   }
 
   Future<void> _reinstallPythonPackage() async {
@@ -575,7 +589,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     final packageSpec = _packageController.text.trim();
-    final packageSource = _string('package_source', 'official');
+    final packageSource = _string('package_source', 'auto');
     if (packageSpec.isEmpty) {
       widget.onShowMessage('请输入要重新安装的 Python 包名。');
       return;
@@ -1455,8 +1469,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: '用于 PyTorch 依赖、ultralytics 和单个 Python 包安装',
             icon: Icons.travel_explore_rounded,
             child: _SettingsMenuButton<String>(
-              value: _string('package_source', 'official'),
+              value: _string('package_source', 'auto'),
               options: const [
+                _SettingsOption<String>(value: 'auto', label: '自动选择源'),
                 _SettingsOption<String>(value: 'official', label: '官方源'),
                 _SettingsOption<String>(value: 'aliyun', label: '阿里源'),
                 _SettingsOption<String>(value: 'tsinghua', label: '清华源'),
@@ -3012,7 +3027,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   int _undoStepsSetting(Map<String, dynamic> values) {
-    return _normalizeUndoSteps(_intSetting(values, 'undo_steps', 10));
+    return _normalizeUndoSteps(_intSetting(values, 'undo_steps', 200));
   }
 
   int _normalizeUndoSteps(int value) {

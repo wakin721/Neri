@@ -1867,7 +1867,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   String _packageSource() {
-    return _stringSetting(_settingsOrEmpty(), 'package_source', 'official');
+    return _stringSetting(_settingsOrEmpty(), 'package_source', 'auto');
   }
 
   String _pytorchVersion() {
@@ -2869,12 +2869,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       autoGroupDetectBurst: _boolSetting(
         settings,
         'auto_group_detect_burst',
-        false,
+        true,
       ),
       autoGroupBurstSize: _intSetting(settings, 'auto_group_burst_size', 3),
       autoGroupGapSeconds: _intSetting(settings, 'auto_group_gap_seconds', 30),
       autoSortQuickMarks: _boolSetting(settings, 'auto_sort', false),
-      undoSteps: _intSetting(settings, 'undo_steps', 10).clamp(10, 200).toInt(),
+      undoSteps: _intSetting(
+        settings,
+        'undo_steps',
+        200,
+      ).clamp(10, 200).toInt(),
       quickMarkSpecies: quickMarkSpecies,
       quickMarkRecentHistory: _stringListSetting(
         settings,

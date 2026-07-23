@@ -47,6 +47,16 @@ class NeriApiClient {
     );
   }
 
+  Future<String> resolvePackageSource([String source = 'auto']) async {
+    final uri = _uri(
+      '/api/environment/package-source',
+    ).replace(queryParameters: {'source': source});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    return payload['source'] as String? ?? 'official';
+  }
+
   Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
     final uri = Uri.parse(
       '$baseUrl/api/models/classes',
@@ -61,7 +71,7 @@ class NeriApiClient {
 
   Future<MaintenanceStartResponse> installPytorch(
     String envChoice, {
-    String packageSource = 'official',
+    String packageSource = 'auto',
     bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
@@ -81,7 +91,7 @@ class NeriApiClient {
 
   Future<MaintenanceStartResponse> installYoloDependencies({
     required String envChoice,
-    String packageSource = 'official',
+    String packageSource = 'auto',
     bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(

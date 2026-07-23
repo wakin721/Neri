@@ -46,6 +46,8 @@ PIP_SOURCES = {
     "tsinghua": ("清华源", "https://pypi.tuna.tsinghua.edu.cn/simple"),
     "nju": ("南京大学源", "https://mirror.nju.edu.cn/pypi/web/simple"),
 }
+PUBLIC_IP_COUNTRY_URL = "https://api.country.is/"
+PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS = 3.0
 
 _PACKAGE_SPEC_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -237,11 +239,11 @@ def install_intel_graphics_driver() -> Path:
 
 def start_pytorch_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     install_intel_driver: bool = False,
 ) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = (
         "Intel 显卡驱动与 PyTorch 安装已开始，Python 后端会在安装完成后自动重启。"
         if install_intel_driver
@@ -257,9 +259,9 @@ def start_pytorch_install(
     )
 
 
-def start_package_reinstall(package_spec: str, package_source: str = "official") -> dict[str, Any]:
+def start_package_reinstall(package_spec: str, package_source: str = "auto") -> dict[str, Any]:
     package_spec = _validate_package_spec(package_spec)
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = f"{package_spec} 重新安装已开始，Python 后端会在安装完成后自动重启。"
     return _start_maintenance(
         operation="reinstall_package",
@@ -270,11 +272,11 @@ def start_package_reinstall(package_spec: str, package_source: str = "official")
 
 def start_yolo_dependencies_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     install_intel_driver: bool = False,
 ) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = (
         "YOLO 依赖安装已开始，将先安装 Intel 显卡驱动和 PyTorch，再安装 ultralytics，完成后自动重启 Python 后端。"
         if install_intel_driver
@@ -353,9 +355,46 @@ def _validate_package_spec(package_spec: str) -> str:
     return cleaned
 
 
-def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
-    cleaned = (package_source or "official").strip().lower()
+def _public_ip_country_code() -> str | None:
+    """Return the public-IP country code, or None when detection is unavailable."""
+
+    request = urllib.request.Request(
+        PUBLIC_IP_COUNTRY_URL,
+        headers={"User-Agent": "Neri package source selector"},
+    )
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - fixed HTTPS endpoint.
+            request,
+            timeout=PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS,
+        ) as response:
+            payload = json.loads(response.read(4096).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    country = payload.get("country")
+    if not isinstance(country, str):
+        return None
+    normalized = country.strip().upper()
+    return normalized if len(normalized) == 2 else None
+
+
+def _automatic_package_source() -> str:
+    """Use Aliyun in mainland China and official PyPI everywhere else."""
+
+    return "aliyun" if _public_ip_country_code() == "CN" else "official"
+
+
+def resolve_package_source(package_source: str = "auto") -> tuple[str, str, str]:
+    """Resolve an automatic or explicitly selected Python package source."""
+
+    cleaned = (package_source or "auto").strip().lower()
     alias_map = {
+        "auto": "auto",
+        "automatic": "auto",
+        "自动": "auto",
+        "自动检测": "auto",
         "official": "official",
         "pypi": "official",
         "官方源": "official",
@@ -371,12 +410,14 @@ def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
         "南大源": "nju",
     }
     key = alias_map.get(cleaned, "official")
+    if key == "auto":
+        key = _automatic_package_source()
     label, url = PIP_SOURCES[key]
     return key, label, url
 
 
 def _pip_source_args(package_source: str) -> list[str]:
-    _, _, source_url = _resolve_package_source(package_source)
+    _, _, source_url = resolve_package_source(package_source)
     return ["-i", source_url]
 
 
@@ -390,7 +431,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--backend-pid", type=int, required=True)
     parser.add_argument("--env-choice", default="自动检测")
     parser.add_argument("--package", default="")
-    parser.add_argument("--package-source", default="official")
+    parser.add_argument("--package-source", default="auto")
     parser.add_argument("--install-intel-driver", action="store_true")
     args = parser.parse_args(argv)
 
@@ -476,7 +517,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
 
 def _run_pytorch_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     *,
     install_intel_driver: bool = False,
     progress_start: int = 10,
@@ -486,7 +527,7 @@ def _run_pytorch_install(
     plan = resolve_pytorch_install_plan(env_choice)
     actual_env = str(plan["actual_env"])
     index_url = str(plan["index_url"])
-    _, source_label, source_url = _resolve_package_source(package_source)
+    _, source_label, source_url = resolve_package_source(package_source)
     command_progress_start = progress_start
     if plan.get("needs_intel_driver"):
         if not install_intel_driver:
@@ -544,10 +585,10 @@ def _run_pytorch_install(
     )
 
 
-def _run_package_reinstall(package_spec: str, package_source: str = "official") -> None:
+def _run_package_reinstall(package_spec: str, package_source: str = "auto") -> None:
     package_spec = _validate_package_spec(package_spec)
     python_exe = toolkit_python()
-    _, source_label, _ = _resolve_package_source(package_source)
+    _, source_label, _ = resolve_package_source(package_source)
     commands = [
         [
             str(python_exe),
@@ -582,7 +623,7 @@ def _run_package_reinstall(package_spec: str, package_source: str = "official") 
 
 def _run_yolo_dependencies_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     *,
     install_intel_driver: bool = False,
 ) -> None:
@@ -597,13 +638,13 @@ def _run_yolo_dependencies_install(
 
 
 def _run_ultralytics_install(
-    package_source: str = "official",
+    package_source: str = "auto",
     *,
     progress_start: int = 70,
     progress_end: int = 90,
 ) -> None:
     python_exe = toolkit_python()
-    _, source_label, _ = _resolve_package_source(package_source)
+    _, source_label, _ = resolve_package_source(package_source)
     command = [
         str(python_exe),
         "-m",
