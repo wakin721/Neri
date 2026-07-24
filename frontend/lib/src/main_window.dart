@@ -13,6 +13,7 @@ import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
 import 'local_maintenance_status.dart';
+import 'models/close_behavior.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
@@ -24,7 +25,9 @@ import 'utils/job_result_refresh.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
-enum _CloseDialogPhase { confirming, closing, restoring }
+enum _CloseDialogPhase { choosing, shuttingDown, restoring }
+
+enum _CloseAction { hideToTray, exit }
 
 class MainWindow extends StatefulWidget {
   const MainWindow({
@@ -87,6 +90,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
   int _closeFlowId = 0;
+  int _closeBehaviorRevision = 0;
   bool _loading = true;
   bool _backendStarting = false;
   bool _backendReady = false;
@@ -103,12 +107,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _isMaximized = false;
   bool _closing = false;
   bool _showClosingOverlay = false;
-  bool _closeBackendStopped = false;
+  bool _closeSelectionSaving = false;
+  bool _closeDontAskAgain = false;
   bool _checkingForAppUpdate = false;
   bool _startupUpdateCheckScheduled = false;
   bool _installingDownloadedAppUpdate = false;
   bool _softwareUpdateCardDismissed = false;
-  _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
+  _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.choosing;
+  _CloseAction _selectedCloseAction = _CloseAction.hideToTray;
+  String _closeBehavior = closeBehaviorAsk;
   _SoftwareUpdateProgress? _softwareUpdateProgress;
   _AvailableSoftwareUpdate? _availableSoftwareUpdate;
   DownloadedAppUpdate? _downloadedAppUpdate;
@@ -150,6 +157,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       unawaited(_updateWindowsShellStatus());
     });
     _loadLastInputPath();
+    _loadCloseBehavior();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_updateWindowsShellStatus());
       unawaited(_startBackendAndInitialRefresh());
@@ -208,7 +216,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         await _showAndFocusWindow();
       case 'exit':
         await _showAndFocusWindow();
-        if (mounted) _requestCloseWindow();
+        if (mounted) _requestCloseWindow(forceExit: true);
     }
     return null;
   }
@@ -293,7 +301,76 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool get _closeFlowBlocksBackendStartup =>
       _closing && _closeDialogPhase != _CloseDialogPhase.restoring;
 
-  void _requestCloseWindow() {
+  String get _configuredCloseBehavior => normalizeCloseBehavior(_closeBehavior);
+
+  void _requestCloseWindow({bool forceExit = false}) {
+    if (_closing || _showClosingOverlay) return;
+    final behavior = forceExit ? closeBehaviorExit : _configuredCloseBehavior;
+    if (behavior == closeBehaviorHideToTray) {
+      unawaited(_hideWindowToTray());
+      return;
+    }
+    if (behavior == closeBehaviorExit) {
+      _beginBackendShutdown();
+      return;
+    }
+
+    ++_closeFlowId;
+    if (!mounted) return;
+    setState(() {
+      _closeDialogPhase = _CloseDialogPhase.choosing;
+      _selectedCloseAction = _CloseAction.hideToTray;
+      _closeDontAskAgain = false;
+      _closeSelectionSaving = false;
+      _showClosingOverlay = true;
+    });
+  }
+
+  Future<void> _hideWindowToTray() async {
+    try {
+      await windowManager.hide();
+    } catch (error) {
+      if (mounted) _showSnackBar('隐藏到任务托盘失败：$error');
+    }
+  }
+
+  Future<void> _confirmCloseWindow() async {
+    if (_closeDialogPhase != _CloseDialogPhase.choosing ||
+        _closeSelectionSaving) {
+      return;
+    }
+    final flowId = _closeFlowId;
+    final selectedAction = _selectedCloseAction;
+    if (_closeDontAskAgain) {
+      setState(() => _closeSelectionSaving = true);
+      final behavior = selectedAction == _CloseAction.hideToTray
+          ? closeBehaviorHideToTray
+          : closeBehaviorExit;
+      try {
+        await _updateCloseBehavior(behavior);
+      } catch (_) {
+        // A preference persistence failure must not block the selected action.
+      }
+      if (!mounted ||
+          flowId != _closeFlowId ||
+          _closeDialogPhase != _CloseDialogPhase.choosing) {
+        return;
+      }
+    }
+
+    if (selectedAction == _CloseAction.hideToTray) {
+      setState(() {
+        _showClosingOverlay = false;
+        _closeSelectionSaving = false;
+        _closeDontAskAgain = false;
+      });
+      await _hideWindowToTray();
+      return;
+    }
+    _beginBackendShutdown();
+  }
+
+  void _beginBackendShutdown() {
     if (_closing) return;
     final flowId = ++_closeFlowId;
     _closing = true;
@@ -304,34 +381,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshRequestId++;
     if (mounted) {
       setState(() {
-        _closeBackendStopped = false;
-        _closeDialogPhase = _CloseDialogPhase.confirming;
+        _closeDialogPhase = _CloseDialogPhase.shuttingDown;
+        _closeSelectionSaving = false;
         _showClosingOverlay = true;
       });
     }
     final shutdownTask = _shutdownBackend();
     _closeBackendShutdownTask = shutdownTask;
     unawaited(
-      shutdownTask.catchError((_) {}).whenComplete(() {
-        if (!mounted || !_showClosingOverlay || flowId != _closeFlowId) return;
-        if (_closeDialogPhase == _CloseDialogPhase.confirming) {
-          setState(() => _closeBackendStopped = true);
-        }
-      }),
+      shutdownTask
+          .catchError((_) {})
+          .whenComplete(() => _finishCloseWindow(flowId)),
     );
   }
 
-  void _confirmCloseWindow() {
-    if (!_closing || _closeDialogPhase == _CloseDialogPhase.closing) return;
-    final flowId = _closeFlowId;
-    if (mounted) {
-      setState(() => _closeDialogPhase = _CloseDialogPhase.closing);
-    }
-    unawaited(_finishCloseWindow(flowId));
-  }
-
   void _cancelCloseWindow() {
-    if (!_closing || _closeDialogPhase != _CloseDialogPhase.confirming) return;
+    if (!_closing || _closeDialogPhase != _CloseDialogPhase.shuttingDown) {
+      return;
+    }
     final shutdownTask = _closeBackendShutdownTask;
     final flowId = ++_closeFlowId;
     if (mounted) {
@@ -380,9 +447,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         setState(() {
           _closing = false;
           _showClosingOverlay = false;
-          _closeBackendStopped = false;
+          _closeSelectionSaving = false;
+          _closeDontAskAgain = false;
           _closeBackendShutdownTask = null;
-          _closeDialogPhase = _CloseDialogPhase.confirming;
+          _closeDialogPhase = _CloseDialogPhase.choosing;
         });
       }
     }
@@ -411,6 +479,42 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted || lastPath == null || lastPath.isEmpty) return;
     setState(() => _inputController.text = lastPath);
     _schedulePreviewRefresh();
+  }
+
+  Future<void> _loadCloseBehavior() async {
+    final revision = _closeBehaviorRevision;
+    final preferences = await SharedPreferences.getInstance();
+    final behavior = normalizeCloseBehavior(
+      preferences.getString(closeBehaviorSettingKey),
+    );
+    if (!mounted || revision != _closeBehaviorRevision) return;
+    setState(() => _closeBehavior = behavior);
+  }
+
+  Future<void> _updateCloseBehavior(String behavior) async {
+    final normalized = normalizeCloseBehavior(behavior);
+    final previous = _closeBehavior;
+    final revision = ++_closeBehaviorRevision;
+    if (mounted && _closeBehavior != normalized) {
+      setState(() => _closeBehavior = normalized);
+    }
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(closeBehaviorSettingKey, normalized);
+    } catch (_) {
+      if (mounted && revision == _closeBehaviorRevision) {
+        setState(() => _closeBehavior = previous);
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _updateCloseBehaviorFromSettings(String behavior) async {
+    try {
+      await _updateCloseBehavior(behavior);
+    } catch (error) {
+      if (mounted) _showSnackBar('保存关闭方式失败：$error');
+    }
   }
 
   Future<void> _startBackendAndInitialRefresh() async {
@@ -2724,9 +2828,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,
-            backendStopped: _closeBackendStopped,
+            selectedAction: _selectedCloseAction,
+            dontAskAgain: _closeDontAskAgain,
+            selectionSaving: _closeSelectionSaving,
+            onActionChanged: (action) =>
+                setState(() => _selectedCloseAction = action),
+            onDontAskAgainChanged: (value) =>
+                setState(() => _closeDontAskAgain = value),
             onCancel: _cancelCloseWindow,
-            onConfirm: _confirmCloseWindow,
+            onConfirm: () => unawaited(_confirmCloseWindow()),
           ),
       ],
     );
@@ -2810,6 +2920,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       apiClient: widget.apiClient,
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
+      closeBehavior: _closeBehavior,
+      onCloseBehaviorChanged: (behavior) =>
+          unawaited(_updateCloseBehaviorFromSettings(behavior)),
       onSaveSettings: _saveAdvancedSettings,
       onCheckForUpdates:
           ({
@@ -3324,33 +3437,35 @@ class _DownloadedSoftwareUpdateCard extends StatelessWidget {
 class _ClosingOverlay extends StatelessWidget {
   const _ClosingOverlay({
     required this.phase,
-    required this.backendStopped,
+    required this.selectedAction,
+    required this.dontAskAgain,
+    required this.selectionSaving,
+    required this.onActionChanged,
+    required this.onDontAskAgainChanged,
     required this.onCancel,
     required this.onConfirm,
   });
 
   final _CloseDialogPhase phase;
-  final bool backendStopped;
+  final _CloseAction selectedAction;
+  final bool dontAskAgain;
+  final bool selectionSaving;
+  final ValueChanged<_CloseAction> onActionChanged;
+  final ValueChanged<bool> onDontAskAgainChanged;
   final VoidCallback onCancel;
   final VoidCallback onConfirm;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final showActions = phase == _CloseDialogPhase.confirming;
-    final showProgress =
-        phase != _CloseDialogPhase.confirming || !backendStopped;
     final title = switch (phase) {
-      _CloseDialogPhase.confirming => '关闭程序？',
-      _CloseDialogPhase.closing => '正在关闭',
+      _CloseDialogPhase.choosing => '关闭主窗口？',
+      _CloseDialogPhase.shuttingDown => '正在退出主程序',
       _CloseDialogPhase.restoring => '正在恢复',
     };
     final message = switch (phase) {
-      _CloseDialogPhase.confirming =>
-        backendStopped
-            ? 'Python 后端已关闭。确认后将退出程序，取消会重新启动后端。'
-            : '正在先关闭 Python 后端。确认后将立即退出程序，取消会重新启动后端。',
-      _CloseDialogPhase.closing => '正在退出程序。若后端仍在收尾，会随主程序退出自动结束。',
+      _CloseDialogPhase.choosing => '请选择关闭主窗口后的操作。',
+      _CloseDialogPhase.shuttingDown => '正在关闭 Python 后端，关闭完成后将自动退出主程序。',
       _CloseDialogPhase.restoring => '正在重新启动 Python 后端，请稍候。',
     };
 
@@ -3375,7 +3490,7 @@ class _ClosingOverlay extends StatelessWidget {
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (showProgress) ...[
+                          if (phase != _CloseDialogPhase.choosing) ...[
                             SizedBox(
                               width: 22,
                               height: 22,
@@ -3401,7 +3516,63 @@ class _ClosingOverlay extends StatelessWidget {
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
-                      if (showActions) ...[
+                      if (phase == _CloseDialogPhase.choosing) ...[
+                        const SizedBox(height: 12),
+                        RadioGroup<_CloseAction>(
+                          groupValue: selectedAction,
+                          onChanged: (value) {
+                            if (!selectionSaving && value != null) {
+                              onActionChanged(value);
+                            }
+                          },
+                          child: Column(
+                            children: [
+                              RadioListTile<_CloseAction>(
+                                contentPadding: EdgeInsets.zero,
+                                value: _CloseAction.hideToTray,
+                                enabled: !selectionSaving,
+                                title: const Text('隐藏到任务托盘'),
+                                subtitle: const Text('主程序和 Python 后端继续在后台运行'),
+                              ),
+                              RadioListTile<_CloseAction>(
+                                contentPadding: EdgeInsets.zero,
+                                value: _CloseAction.exit,
+                                enabled: !selectionSaving,
+                                title: const Text('退出主程序'),
+                                subtitle: const Text('关闭 Python 后端并退出 Neri'),
+                              ),
+                            ],
+                          ),
+                        ),
+                        CheckboxListTile(
+                          contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          value: dontAskAgain,
+                          onChanged: selectionSaving
+                              ? null
+                              : (value) =>
+                                    onDontAskAgainChanged(value ?? false),
+                          title: const Text('不再提醒'),
+                          subtitle: const Text('以后自动执行本次选择，可在基础设置中修改'),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            FilledButton(
+                              onPressed: selectionSaving ? null : onConfirm,
+                              child: selectionSaving
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('确认'),
+                            ),
+                          ],
+                        ),
+                      ] else if (phase == _CloseDialogPhase.shuttingDown) ...[
                         const SizedBox(height: 18),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
@@ -3409,11 +3580,6 @@ class _ClosingOverlay extends StatelessWidget {
                             TextButton(
                               onPressed: onCancel,
                               child: const Text('取消'),
-                            ),
-                            const SizedBox(width: 8),
-                            FilledButton(
-                              onPressed: onConfirm,
-                              child: const Text('关闭'),
                             ),
                           ],
                         ),

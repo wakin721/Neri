@@ -11,6 +11,7 @@ import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
 import '../local_debug_logs.dart';
 import '../local_maintenance_status.dart';
+import '../models/close_behavior.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../utils/quick_mark_sort.dart';
@@ -101,6 +102,8 @@ class SettingsScreen extends StatefulWidget {
     required this.apiClient,
     required this.themeNotifier,
     required this.onUpdateTheme,
+    required this.closeBehavior,
+    required this.onCloseBehaviorChanged,
     required this.onSaveSettings,
     required this.onCheckForUpdates,
     required this.onShowMessage,
@@ -112,6 +115,8 @@ class SettingsScreen extends StatefulWidget {
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
+  final String closeBehavior;
+  final ValueChanged<String> onCloseBehaviorChanged;
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
   final SoftwareUpdateCheckCallback onCheckForUpdates;
   final ValueChanged<String> onShowMessage;
@@ -129,7 +134,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _dirty = false;
   bool _resettingDraft = false;
   bool _loadingModelClasses = false;
-  bool _preparingPytorchInstall = false;
+  String? _maintenancePreparationOperation;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
@@ -425,42 +430,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _installPytorch() async {
     if (_maintenanceBusy) return;
-    _startPytorchPreparation('正在检查环境维护状态...');
+    _startMaintenancePreparation(
+      operation: 'install_pytorch',
+      message: '正在检查环境维护状态...',
+    );
 
     final envChoice = _normalizedPytorchVersion(
       _string('pytorch_version', '自动检测'),
     );
-    late final String? packageSource;
+    late final PackageSourceResolution? packageSource;
     late final bool? installIntelDriver;
     try {
       if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
-      _updatePytorchPreparation('正在检测 Python 包安装源和运行环境...');
+      _updateMaintenancePreparation('正在检测 Python 包安装源和运行环境...');
       final checks = await Future.wait<Object?>([
         _resolvePackageSource(),
         _resolveIntelDriverInstall(envChoice),
       ]);
-      packageSource = checks[0] as String?;
+      packageSource = checks[0] as PackageSourceResolution?;
       installIntelDriver = checks[1] as bool?;
     } finally {
-      _finishPytorchPreparation();
+      _finishMaintenancePreparation();
     }
 
     if (packageSource == null || !mounted) return;
-    final sourceLabel = _packageSourceLabel(packageSource);
     if (installIntelDriver == null || !mounted) return;
 
     final installStep = installIntelDriver
-        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel重新安装适用于$envChoice的PyTorch。'
-        : '将使用$sourceLabel重新安装适用于$envChoice的PyTorch。';
-    final confirmed = await _confirmMaintenance(
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再使用${packageSource.label}重新安装适用于$envChoice的 PyTorch。'
+        : '将使用${packageSource.label}重新安装适用于$envChoice的 PyTorch。';
+    final confirmed = await _confirmPythonInstallation(
       title: '安装 PyTorch',
-      message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '开始安装',
+      message: installStep,
     );
     if (confirmed != true) return;
 
     final installUltralytics = _missingYoloDependencies.contains('ultralytics')
-        ? await _confirmInstallUltralyticsWithPytorch(sourceLabel)
+        ? await _confirmInstallUltralyticsWithPytorch(packageSource.label)
         : false;
     if (installUltralytics == null || !mounted) return;
 
@@ -477,12 +483,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = installUltralytics
           ? await widget.apiClient.installYoloDependencies(
               envChoice: envChoice,
-              packageSource: packageSource,
+              packageSource: packageSource.source,
               installIntelDriver: installIntelDriver,
             )
           : await widget.apiClient.installPytorch(
               envChoice,
-              packageSource: packageSource,
+              packageSource: packageSource.source,
               installIntelDriver: installIntelDriver,
             );
       if (!mounted) return;
@@ -530,40 +536,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _installYoloDependencies() async {
     if (_maintenanceBusy) return;
-    _startPytorchPreparation('正在检查环境维护状态...');
+    _startMaintenancePreparation(
+      operation: 'install_yolo_dependencies',
+      message: '正在检查环境维护状态...',
+    );
 
     const envChoice = '自动检测';
-    late final String? packageSource;
+    late final PackageSourceResolution? packageSource;
     late final bool? installIntelDriver;
     try {
       if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
-      _updatePytorchPreparation('正在检测 Python 包安装源和运行环境...');
+      _updateMaintenancePreparation('正在检测 Python 包安装源和运行环境...');
       final checks = await Future.wait<Object?>([
         _resolvePackageSource(),
         _resolveIntelDriverInstall(envChoice),
       ]);
-      packageSource = checks[0] as String?;
+      packageSource = checks[0] as PackageSourceResolution?;
       installIntelDriver = checks[1] as bool?;
     } finally {
-      _finishPytorchPreparation();
+      _finishMaintenancePreparation();
     }
 
     if (packageSource == null || !mounted) return;
-    final sourceLabel = _packageSourceLabel(packageSource);
     if (installIntelDriver == null || !mounted) return;
 
     final driverStep = installIntelDriver
-        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
-        : '安装时会使用$sourceLabel及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用${packageSource.label}及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从${packageSource.label}安装 ultralytics。'
+        : '安装时会使用${packageSource.label}及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从${packageSource.label}安装 ultralytics。';
     final missingText = _missingYoloDependenciesLabel.isEmpty
         ? 'YOLO 处理依赖'
         : _missingYoloDependenciesLabel;
-    final confirmed = await _confirmMaintenance(
-      title: '需要安装 YOLO 依赖',
-      message:
-          '当前缺少：$missingText。\n\n$driverStep'
-          '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '安装依赖',
+    final confirmed = await _confirmPythonInstallation(
+      title: '安装 YOLO 检测库',
+      message: '当前缺少：$missingText。\n\n$driverStep',
     );
     if (confirmed != true || !mounted) return;
 
@@ -575,7 +580,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
-        packageSource: packageSource,
+        packageSource: packageSource.source,
         installIntelDriver: installIntelDriver,
       );
       if (!mounted) return;
@@ -593,17 +598,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  String _packageSourceLabel(String packageSource) {
-    return switch (packageSource) {
-      'aliyun' => '阿里源',
-      'tsinghua' => '清华源',
-      'nju' => '南京大学源',
-      'official' => '官方源',
-      _ => '自动选择源',
-    };
-  }
-
-  Future<String?> _resolvePackageSource() async {
+  Future<PackageSourceResolution?> _resolvePackageSource() async {
     try {
       return await widget.apiClient.resolvePackageSource(
         _string('package_source', 'auto'),
@@ -621,23 +616,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return value;
   }
 
-  void _startPytorchPreparation(String message) {
+  void _startMaintenancePreparation({
+    required String operation,
+    required String message,
+  }) {
     setState(() {
-      _preparingPytorchInstall = true;
+      _maintenancePreparationOperation = operation;
       _maintenanceMessage = message;
       _maintenanceProgress = null;
     });
   }
 
-  void _updatePytorchPreparation(String message) {
-    if (!mounted || !_preparingPytorchInstall) return;
+  void _updateMaintenancePreparation(String message) {
+    if (!mounted || _maintenancePreparationOperation == null) return;
     setState(() => _maintenanceMessage = message);
   }
 
-  void _finishPytorchPreparation() {
-    if (!mounted || !_preparingPytorchInstall) return;
+  void _finishMaintenancePreparation() {
+    if (!mounted || _maintenancePreparationOperation == null) return;
     setState(() {
-      _preparingPytorchInstall = false;
+      _maintenancePreparationOperation = null;
       if (!_maintenanceInProgress) {
         _maintenanceMessage = null;
         _maintenanceProgress = null;
@@ -646,22 +644,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _reinstallPythonPackage() async {
-    if (_maintenanceInProgress ||
-        await _resumeMaintenanceWatchIfActive(announce: true)) {
-      return;
-    }
+    if (_maintenanceBusy) return;
     final packageSpec = _packageController.text.trim();
-    final packageSource = _string('package_source', 'auto');
     if (packageSpec.isEmpty) {
       widget.onShowMessage('请输入要重新安装的 Python 包名。');
       return;
     }
 
-    final confirmed = await _confirmMaintenance(
-      title: '重新安装 Python 包',
+    _startMaintenancePreparation(
+      operation: 'reinstall_package',
+      message: '正在检查环境维护状态...',
+    );
+    PackageSourceResolution? packageSource;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updateMaintenancePreparation('正在检测 Python 包安装源...');
+      packageSource = await _resolvePackageSource();
+    } finally {
+      _finishMaintenancePreparation();
+    }
+
+    if (packageSource == null || !mounted) return;
+    final confirmed = await _confirmPythonInstallation(
+      title: '安装 Python 库',
       message:
-          '将使用 toolkit\\python.exe 对 $packageSpec 执行强制重新安装。\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '开始安装',
+          '将使用${packageSource.label}通过 toolkit\\python.exe 强制重新安装 $packageSpec。',
     );
     if (confirmed != true) return;
 
@@ -673,7 +680,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final response = await widget.apiClient.reinstallPythonPackage(
         packageSpec,
-        packageSource,
+        packageSource.source,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -809,7 +816,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool get _maintenanceInProgress => _installingPytorch || _reinstallingPackage;
   bool get _maintenanceBusy =>
-      _preparingPytorchInstall || _maintenanceInProgress;
+      _maintenancePreparationOperation != null || _maintenanceInProgress;
 
   void _finishMaintenanceWatch(String message) {
     _maintenanceTimer?.cancel();
@@ -846,6 +853,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Future<bool?> _confirmPythonInstallation({
+    required String title,
+    required String message,
+  }) {
+    return _confirmMaintenance(
+      title: title,
+      message:
+          '$message\n\n'
+          '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
+      confirmLabel: '开始安装',
     );
   }
 
@@ -1221,7 +1241,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(width: 12),
           FilledButton(
             onPressed: _maintenanceBusy ? null : _installYoloDependencies,
-            child: _preparingPytorchInstall || _installingPytorch
+            child:
+                _maintenancePreparationOperation ==
+                        'install_yolo_dependencies' ||
+                    _installingPytorch
                 ? const SizedBox(
                     width: 18,
                     height: 18,
@@ -1601,7 +1624,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const SizedBox(width: 10),
                 FilledButton(
                   onPressed: _maintenanceBusy ? null : _installPytorch,
-                  child: _preparingPytorchInstall || _installingPytorch
+                  child:
+                      _maintenancePreparationOperation == 'install_pytorch' ||
+                          _installingPytorch
                       ? const SizedBox(
                           width: 18,
                           height: 18,
@@ -1633,7 +1658,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const SizedBox(width: 10),
                 FilledButton(
                   onPressed: _maintenanceBusy ? null : _reinstallPythonPackage,
-                  child: _reinstallingPackage
+                  child:
+                      _maintenancePreparationOperation == 'reinstall_package' ||
+                          _reinstallingPackage
                       ? const SizedBox(
                           width: 18,
                           height: 18,
@@ -1653,10 +1680,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final undoSteps = _undoStepsSetting(_draft);
     return SectionCard(
       title: '基础设置',
-      subtitle: '校验辅助、缓存清理、快速标记和导出字段',
+      subtitle: '窗口关闭、校验辅助、缓存清理、快速标记和导出字段',
       icon: Icons.fact_check_rounded,
       child: Column(
         children: [
+          _SettingsPanel(
+            title: '关闭主窗口时',
+            subtitle: '选择每次询问、隐藏到任务托盘或直接退出主程序',
+            icon: Icons.close_rounded,
+            child: _SettingsMenuButton<String>(
+              value: normalizeCloseBehavior(widget.closeBehavior),
+              options: const [
+                _SettingsOption<String>(value: closeBehaviorAsk, label: '每次询问'),
+                _SettingsOption<String>(
+                  value: closeBehaviorHideToTray,
+                  label: '隐藏到任务托盘',
+                ),
+                _SettingsOption<String>(
+                  value: closeBehaviorExit,
+                  label: '退出主程序',
+                ),
+              ],
+              onChanged: widget.onCloseBehaviorChanged,
+            ),
+          ),
           _SettingsPanel(
             title: '物种校验界面自动分组',
             subtitle: '开启后，将根据视频文件自动对连续拍摄的照片和视频进行分组，并在文件列表中按所在组校验最多的物种统一归类显示。',

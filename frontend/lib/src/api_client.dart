@@ -47,14 +47,17 @@ class NeriApiClient {
     );
   }
 
-  Future<String> resolvePackageSource([String source = 'auto']) async {
+  Future<PackageSourceResolution> resolvePackageSource([
+    String source = 'auto',
+  ]) async {
     final uri = _uri(
       '/api/environment/package-source',
     ).replace(queryParameters: {'source': source});
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
-    final payload = jsonDecode(response.body) as Map<String, dynamic>;
-    return payload['source'] as String? ?? 'official';
+    return PackageSourceResolution.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
@@ -559,6 +562,31 @@ class MaintenanceStartResponse {
   final int progress;
   final String? statusPath;
   final int? maintenancePid;
+}
+
+class PackageSourceResolution {
+  const PackageSourceResolution({required this.source, required this.label});
+
+  factory PackageSourceResolution.fromJson(Map<String, dynamic> json) {
+    final source = json['source'] as String? ?? 'official';
+    final label = json['label'] as String?;
+    return PackageSourceResolution(
+      source: source,
+      label: label == null || label.isEmpty ? _fallbackLabel(source) : label,
+    );
+  }
+
+  final String source;
+  final String label;
+
+  static String _fallbackLabel(String source) {
+    return switch (source) {
+      'aliyun' => '阿里源',
+      'tsinghua' => '清华源',
+      'nju' => '南京大学源',
+      _ => '官方源',
+    };
+  }
 }
 
 class PytorchInstallPlan {
