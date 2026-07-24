@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from system.config import XPU_ENABLED
+
 from . import __version__
 from .maintenance import maintenance_log_path, maintenance_status_path, project_root
 
@@ -85,7 +87,7 @@ def runtime_diagnostics() -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - diagnostic best effort
             diagnostics["error"] = str(exc)
 
-        xpu = getattr(torch, "xpu", None)
+        xpu = getattr(torch, "xpu", None) if XPU_ENABLED else None
         try:
             if xpu is not None and xpu.is_available():
                 for index in range(xpu.device_count()):

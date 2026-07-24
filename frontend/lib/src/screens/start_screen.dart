@@ -258,8 +258,8 @@ class _CreateJobCard extends StatelessWidget {
             title: const Text('使用 FP16 加速'),
             subtitle: Text(
               fp16Enabled
-                  ? '需要支持半精度推理的 GPU 或 Intel XPU'
-                  : '未检测到 GPU / Intel XPU，已禁用 FP16',
+                  ? '需要支持半精度推理的 NVIDIA GPU'
+                  : '未检测到可用的 NVIDIA GPU，已禁用 FP16',
             ),
           ),
           _ProcessingSlider(

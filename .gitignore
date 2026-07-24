@@ -17,6 +17,7 @@ htmlcov/
 venv/
 env/
 ENV/
+/tests/
 
 # Build outputs
 build/
@@ -58,6 +59,7 @@ frontend/*
 !frontend/test/
 frontend/test/*
 !frontend/test/app_updater_test.dart
+!frontend/test/job_result_refresh_test.dart
 !frontend/test/model_selection_test.dart
 !frontend/pubspec.yaml
 # Keep Neri's customized Windows shell integration under version control.

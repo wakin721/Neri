@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from system.config import XPU_ENABLED
+
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = "721"
 BACKEND_APP = "system.backend.main:app"
@@ -47,7 +49,16 @@ PIP_SOURCES = {
     "nju": ("南京大学源", "https://mirror.nju.edu.cn/pypi/web/simple"),
 }
 PUBLIC_IP_COUNTRY_URL = "https://api.country.is/"
-PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS = 3.0
+PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS = 1.5
+PACKAGE_SOURCE_CACHE_SECONDS = 30 * 60
+HARDWARE_PROBE_TIMEOUT_SECONDS = 8
+NVIDIA_SMI_TIMEOUT_SECONDS = 3
+HARDWARE_STATUS_CACHE_SECONDS = 60
+
+_package_source_cache: tuple[float, str] | None = None
+_package_source_cache_lock = threading.Lock()
+_intel_driver_status_cache: tuple[float, dict[str, Any]] | None = None
+_intel_driver_status_cache_lock = threading.Lock()
 
 _PACKAGE_SPEC_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -104,6 +115,28 @@ def read_maintenance_status() -> dict[str, Any]:
 def intel_graphics_driver_status() -> dict[str, Any]:
     """Return best-effort Intel display driver status for XPU installs."""
 
+    global _intel_driver_status_cache
+
+    now = time.monotonic()
+    with _intel_driver_status_cache_lock:
+        if (
+            _intel_driver_status_cache is not None
+            and now - _intel_driver_status_cache[0] < HARDWARE_STATUS_CACHE_SECONDS
+        ):
+            return dict(_intel_driver_status_cache[1])
+
+        status = _probe_intel_graphics_driver_status()
+        _intel_driver_status_cache = (time.monotonic(), dict(status))
+        return status
+
+
+def _reset_intel_driver_status_cache() -> None:
+    global _intel_driver_status_cache
+    with _intel_driver_status_cache_lock:
+        _intel_driver_status_cache = None
+
+
+def _probe_intel_graphics_driver_status() -> dict[str, Any]:
     status = _empty_intel_driver_status()
     if os.name != "nt":
         status.update(
@@ -128,6 +161,14 @@ def intel_graphics_driver_status() -> dict[str, Any]:
 
     devices = _as_list(payload.get("devices"))
     drivers = _as_list(payload.get("drivers"))
+    raw_processor_names = payload.get("processors")
+    if not isinstance(raw_processor_names, list):
+        raw_processor_names = [raw_processor_names] if raw_processor_names else []
+    processor_names = [
+        str(value).strip()
+        for value in raw_processor_names
+        if str(value).strip()
+    ]
     intel_devices = [device for device in devices if _is_intel_display_device(device)]
     intel_drivers = [driver for driver in drivers if _is_intel_display_driver(driver)]
     installed_driver = next(
@@ -148,6 +189,7 @@ def intel_graphics_driver_status() -> dict[str, Any]:
                 "Name",
                 "DeviceName",
             ),
+            "processor_names": processor_names,
             "message": (
                 "已检测到 Intel 显卡驱动。"
                 if installed_driver is not None
@@ -383,7 +425,51 @@ def _public_ip_country_code() -> str | None:
 def _automatic_package_source() -> str:
     """Use Aliyun in mainland China and official PyPI everywhere else."""
 
-    return "aliyun" if _public_ip_country_code() == "CN" else "official"
+    global _package_source_cache
+
+    now = time.monotonic()
+    with _package_source_cache_lock:
+        if (
+            _package_source_cache is not None
+            and now - _package_source_cache[0] < PACKAGE_SOURCE_CACHE_SECONDS
+        ):
+            return _package_source_cache[1]
+
+        # A mainland-China timezone is a reliable, zero-network-cost hint for
+        # the common case. The public-IP lookup remains the authority elsewhere.
+        source = (
+            "aliyun"
+            if _local_timezone_indicates_mainland_china()
+            or _public_ip_country_code() == "CN"
+            else "official"
+        )
+        _package_source_cache = (now, source)
+        return source
+
+
+def _local_timezone_indicates_mainland_china() -> bool:
+    timezone_names = {
+        str(value).strip().lower().replace("\\", "/")
+        for value in (*time.tzname, os.environ.get("TZ", ""))
+        if value
+    }
+    return bool(
+        timezone_names
+        & {
+            "asia/shanghai",
+            "china standard time",
+            "中国标准时间",
+            "prc",
+        }
+    )
+
+
+def _reset_package_source_cache() -> None:
+    """Clear automatic source state for tests and explicit runtime refreshes."""
+
+    global _package_source_cache
+    with _package_source_cache_lock:
+        _package_source_cache = None
 
 
 def resolve_package_source(package_source: str = "auto") -> tuple[str, str, str]:
@@ -894,6 +980,7 @@ def _empty_intel_driver_status() -> dict[str, Any]:
         "driver_version": None,
         "driver_provider": None,
         "device_name": None,
+        "processor_names": [],
         "message": "",
         "error": None,
     }
@@ -904,13 +991,21 @@ def _query_windows_display_devices() -> dict[str, Any]:
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
-$devices = Get-CimInstance Win32_PnPEntity |
-    Where-Object { $_.PNPClass -eq 'Display' -or $_.ClassGuid -eq '{4d36e968-e325-11ce-bfc1-08002be10318}' } |
-    Select-Object Name, Manufacturer, PNPDeviceID, Status
-$drivers = Get-CimInstance Win32_PnPSignedDriver |
-    Where-Object { $_.DeviceClass -eq 'DISPLAY' } |
-    Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DeviceID, InfName
-[pscustomobject]@{ devices = @($devices); drivers = @($drivers) } |
+$devices = Get-CimInstance Win32_VideoController |
+    Select-Object Name, @{Name='Manufacturer'; Expression={$_.AdapterCompatibility}}, PNPDeviceID, Status
+$hasIntelDisplay = @(
+    $devices | Where-Object {
+        "$($_.Name) $($_.Manufacturer) $($_.PNPDeviceID)" -match '(?i)Intel|VEN_8086'
+    }
+).Count -gt 0
+$drivers = @()
+$processors = @()
+if ($hasIntelDisplay) {
+    $drivers = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass = 'DISPLAY'" |
+        Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DeviceID, InfName
+    $processors = Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name
+}
+[pscustomobject]@{ devices = @($devices); drivers = @($drivers); processors = @($processors) } |
     ConvertTo-Json -Depth 5 -Compress
 """
     completed = subprocess.run(
@@ -926,7 +1021,7 @@ $drivers = Get-CimInstance Win32_PnPSignedDriver |
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         try:
@@ -952,7 +1047,7 @@ def _query_windows_display_devices_with_pnputil() -> dict[str, Any]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout).strip()
@@ -1137,6 +1232,7 @@ def _install_intel_graphics_driver_for_xpu(
         log.write(f"[{_utc_now()}] Intel graphics driver installer completed\n")
         _write_status({"progress": progress_end})
 
+    _reset_intel_driver_status_cache()
     refreshed = intel_graphics_driver_status()
     if refreshed.get("gpu_present") and not refreshed.get("driver_installed"):
         _write_status(
@@ -1152,6 +1248,8 @@ def _resolve_pytorch_index(env_choice: str) -> tuple[str, str]:
     if choice == "自动检测":
         return _auto_detect_pytorch_index()
     if "XPU" in choice.upper():
+        if not XPU_ENABLED:
+            raise RuntimeError("Intel XPU 安装当前已暂时关闭，请选择 CUDA 或 CPU Only。")
         return "Intel XPU", PYTORCH_XPU_INDEX_URL
     if "CPU" in choice.upper():
         return "CPU Only", PYTORCH_CPU_INDEX_URL
@@ -1173,9 +1271,10 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
     if cuda_choice is not None:
         return cuda_choice
 
-    intel_choice = _detect_intel_xpu_pytorch_index()
-    if intel_choice is not None:
-        return intel_choice
+    if XPU_ENABLED:
+        intel_choice = _detect_intel_xpu_pytorch_index()
+        if intel_choice is not None:
+            return intel_choice
 
     return "CPU Only (未检测到支持的 GPU)", PYTORCH_CPU_INDEX_URL
 
@@ -1188,17 +1287,13 @@ def _detect_nvidia_cuda_pytorch_index() -> tuple[str, str] | None:
             text=True,
             encoding="gbk",
             errors="ignore",
-            timeout=10,
+            timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
         )
     except Exception:
-        return _detect_intel_xpu_pytorch_index() or _auto_detect_intel_or_cpu(
-            "CPU Only (自动检测失败)"
-        )
+        return None
 
     if result.returncode != 0:
-        return _detect_intel_xpu_pytorch_index() or _auto_detect_intel_or_cpu(
-            "CPU Only (未检测到 NVIDIA GPU)"
-        )
+        return None
 
     cuda_version = _parse_nvidia_cuda_version(result.stdout)
     if cuda_version is None:
@@ -1238,19 +1333,20 @@ def _parse_nvidia_cuda_version(output: str) -> tuple[int, int] | None:
 
 
 def _detect_intel_xpu_pytorch_index() -> tuple[str, str] | None:
-    gpu_names = _windows_video_controller_names()
-    intel_gpu_names = [
-        name for name in gpu_names if "intel" in _normalize_hardware_name(name)
-    ]
-    if not intel_gpu_names:
+    status = intel_graphics_driver_status()
+    if not status.get("gpu_present"):
         return None
 
-    cpu_names = _windows_processor_names()
-    for gpu_name in intel_gpu_names:
-        if _is_supported_intel_xpu_gpu(gpu_name, cpu_names):
-            return f"Intel XPU (检测到 {gpu_name})", PYTORCH_XPU_INDEX_URL
+    gpu_name = str(status.get("device_name") or status.get("driver_name") or "Intel GPU")
+    cpu_names = [
+        str(value)
+        for value in status.get("processor_names", [])
+        if str(value).strip()
+    ]
+    if _is_supported_intel_xpu_gpu(gpu_name, cpu_names):
+        return f"Intel XPU (检测到 {gpu_name})", PYTORCH_XPU_INDEX_URL
 
-    return f"CPU Only (Intel GPU 暂不支持 XPU: {intel_gpu_names[0]})", PYTORCH_CPU_INDEX_URL
+    return f"CPU Only (Intel GPU 暂不支持 XPU: {gpu_name})", PYTORCH_CPU_INDEX_URL
 
 
 def _is_supported_intel_xpu_gpu(gpu_name: str, cpu_names: Sequence[str]) -> bool:
@@ -1315,7 +1411,7 @@ def _powershell_cim_property_values(cim_class: str, property_name: str) -> list[
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=10,
+            timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
         )
     except Exception:
         return []
@@ -1334,7 +1430,7 @@ def _wmic_property_values(command: Sequence[str]) -> list[str]:
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=10,
+            timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
         )
     except Exception:
         return []
@@ -1352,18 +1448,6 @@ def _normalize_hardware_name(value: str) -> str:
     text = text.encode("ascii", "ignore").decode("ascii").lower()
     text = re.sub(r"[\(\)\[\],._+\-/]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _auto_detect_intel_or_cpu(cpu_reason: str) -> tuple[str, str]:
-    status = intel_graphics_driver_status()
-    if status.get("gpu_present"):
-        if status.get("driver_installed"):
-            return "Intel XPU (检测到 Intel GPU)", "https://download.pytorch.org/whl/xpu"
-        return (
-            "Intel XPU (检测到 Intel GPU，需安装 Intel 驱动)",
-            "https://download.pytorch.org/whl/xpu",
-        )
-    return cpu_reason, "https://download.pytorch.org/whl/cpu"
 
 
 def _start_backend() -> None:

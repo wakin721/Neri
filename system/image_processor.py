@@ -11,6 +11,7 @@ from ultralytics import YOLO
 import json
 import torch
 import numpy as np
+from system.config import XPU_ENABLED
 from system.utils import resource_path
 import cv2
 
@@ -73,7 +74,12 @@ class ImageProcessor:
         try:
             if device_name == 'cuda' and torch.cuda.is_available():
                 torch.cuda.synchronize()
-            elif device_name == 'xpu' and hasattr(torch, 'xpu') and torch.xpu.is_available():
+            elif (
+                XPU_ENABLED
+                and device_name == 'xpu'
+                and hasattr(torch, 'xpu')
+                and torch.xpu.is_available()
+            ):
                 torch.xpu.synchronize()
         except Exception:
             pass
@@ -83,7 +89,7 @@ class ImageProcessor:
             gc.collect()
             if clear_cuda_cache and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            xpu = getattr(torch, 'xpu', None)
+            xpu = getattr(torch, 'xpu', None) if XPU_ENABLED else None
             if (
                 clear_cuda_cache
                 and xpu is not None
@@ -134,8 +140,8 @@ class ImageProcessor:
                 device = 'cuda'
                 fp16_enabled = use_fp16
             else:
-                # 2. 检查 Intel XPU
-                if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                # XPU 暂时关闭，保留逻辑以便功能重新开放。
+                if XPU_ENABLED and hasattr(torch, 'xpu') and torch.xpu.is_available():
                     device = 'xpu'
                     fp16_enabled = use_fp16
         except Exception as e:

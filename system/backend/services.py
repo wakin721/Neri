@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
+from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS, XPU_ENABLED
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 
@@ -63,7 +63,7 @@ def _clear_torch_runtime_cache() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        xpu = getattr(torch, "xpu", None)
+        xpu = getattr(torch, "xpu", None) if XPU_ENABLED else None
         if xpu is not None and xpu.is_available() and hasattr(xpu, "empty_cache"):
             xpu.empty_cache()
     except Exception:
@@ -184,7 +184,7 @@ def detect_gpu_available() -> bool:
         import torch
 
         cuda_available = bool(torch.cuda.is_available())
-        xpu = getattr(torch, "xpu", None)
+        xpu = getattr(torch, "xpu", None) if XPU_ENABLED else None
         xpu_available = bool(xpu is not None and xpu.is_available())
         return cuda_available or xpu_available
     except Exception:

@@ -73,12 +73,13 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-beta3(bdd63a)',
+  defaultValue: '3.0.5-beta4(e15519)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
 const _autoSaveDelay = Duration(milliseconds: 800);
+const _xpuEnabled = false;
 const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
@@ -128,6 +129,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _dirty = false;
   bool _resettingDraft = false;
   bool _loadingModelClasses = false;
+  bool _preparingPytorchInstall = false;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
@@ -221,6 +223,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         settings?.selectedClassificationModel ?? '',
       ),
       'package_source': _stringSetting(saved, 'package_source', 'auto'),
+      'pytorch_version': _normalizedPytorchVersion(
+        _stringSetting(saved, 'pytorch_version', '自动检测'),
+      ),
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
@@ -419,15 +424,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installPytorch() async {
-    if (_maintenanceInProgress ||
-        await _resumeMaintenanceWatchIfActive(announce: true)) {
-      return;
+    if (_maintenanceBusy) return;
+    _startPytorchPreparation('正在检查环境维护状态...');
+
+    final envChoice = _normalizedPytorchVersion(
+      _string('pytorch_version', '自动检测'),
+    );
+    late final String? packageSource;
+    late final bool? installIntelDriver;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updatePytorchPreparation('正在检测 Python 包安装源和运行环境...');
+      final checks = await Future.wait<Object?>([
+        _resolvePackageSource(),
+        _resolveIntelDriverInstall(envChoice),
+      ]);
+      packageSource = checks[0] as String?;
+      installIntelDriver = checks[1] as bool?;
+    } finally {
+      _finishPytorchPreparation();
     }
-    final envChoice = _string('pytorch_version', '自动检测');
-    final packageSource = await _resolvePackageSource();
+
     if (packageSource == null || !mounted) return;
     final sourceLabel = _packageSourceLabel(packageSource);
-    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return;
 
     final installStep = installIntelDriver
@@ -510,15 +529,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installYoloDependencies() async {
-    if (_maintenanceInProgress ||
-        await _resumeMaintenanceWatchIfActive(announce: true)) {
-      return;
-    }
+    if (_maintenanceBusy) return;
+    _startPytorchPreparation('正在检查环境维护状态...');
+
     const envChoice = '自动检测';
-    final packageSource = await _resolvePackageSource();
+    late final String? packageSource;
+    late final bool? installIntelDriver;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updatePytorchPreparation('正在检测 Python 包安装源和运行环境...');
+      final checks = await Future.wait<Object?>([
+        _resolvePackageSource(),
+        _resolveIntelDriverInstall(envChoice),
+      ]);
+      packageSource = checks[0] as String?;
+      installIntelDriver = checks[1] as bool?;
+    } finally {
+      _finishPytorchPreparation();
+    }
+
     if (packageSource == null || !mounted) return;
     final sourceLabel = _packageSourceLabel(packageSource);
-    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return;
 
     final driverStep = installIntelDriver
@@ -581,6 +612,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.onShowMessage('检测 Python 包安装源失败：$error');
       return null;
     }
+  }
+
+  String _normalizedPytorchVersion(String value) {
+    if (!_xpuEnabled && value.toUpperCase().contains('XPU')) {
+      return '自动检测';
+    }
+    return value;
+  }
+
+  void _startPytorchPreparation(String message) {
+    setState(() {
+      _preparingPytorchInstall = true;
+      _maintenanceMessage = message;
+      _maintenanceProgress = null;
+    });
+  }
+
+  void _updatePytorchPreparation(String message) {
+    if (!mounted || !_preparingPytorchInstall) return;
+    setState(() => _maintenanceMessage = message);
+  }
+
+  void _finishPytorchPreparation() {
+    if (!mounted || !_preparingPytorchInstall) return;
+    setState(() {
+      _preparingPytorchInstall = false;
+      if (!_maintenanceInProgress) {
+        _maintenanceMessage = null;
+        _maintenanceProgress = null;
+      }
+    });
   }
 
   Future<void> _reinstallPythonPackage() async {
@@ -746,6 +808,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   bool get _maintenanceInProgress => _installingPytorch || _reinstallingPackage;
+  bool get _maintenanceBusy =>
+      _preparingPytorchInstall || _maintenanceInProgress;
 
   void _finishMaintenanceWatch(String message) {
     _maintenanceTimer?.cancel();
@@ -946,7 +1010,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           if (!detectionEnabled) _buildDetectionDependencyNotice(),
-          if (_maintenanceInProgress) _buildMaintenanceProgress(),
+          if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
             subtitle: '选择目标探测模型，或设为不使用',
@@ -1156,8 +1220,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(width: 12),
           FilledButton(
-            onPressed: _maintenanceInProgress ? null : _installYoloDependencies,
-            child: _installingPytorch
+            onPressed: _maintenanceBusy ? null : _installYoloDependencies,
+            child: _preparingPytorchInstall || _installingPytorch
                 ? const SizedBox(
                     width: 18,
                     height: 18,
@@ -1424,7 +1488,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildMaintenanceProgress() {
-    if (!_maintenanceInProgress) return const SizedBox.shrink();
+    if (!_maintenanceBusy) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final message = _maintenanceMessage ?? '正在安装...';
     return Padding(
@@ -1463,13 +1527,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       icon: Icons.construction_rounded,
       child: Column(
         children: [
-          if (_maintenanceInProgress) _buildMaintenanceProgress(),
+          if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: 'Python 包安装源',
             subtitle: '用于 PyTorch 依赖、ultralytics 和单个 Python 包安装',
             icon: Icons.travel_explore_rounded,
             child: _SettingsMenuButton<String>(
               value: _string('package_source', 'auto'),
+              enabled: !_maintenanceBusy,
               options: const [
                 _SettingsOption<String>(value: 'auto', label: '自动选择源'),
                 _SettingsOption<String>(value: 'official', label: '官方源'),
@@ -1489,6 +1554,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Expanded(
                   child: _SettingsMenuButton<String>(
                     value: _string('pytorch_version', '自动检测'),
+                    enabled: !_maintenanceBusy,
                     options: const [
                       _SettingsOption<String>(value: '自动检测', label: '自动检测'),
                       _SettingsOption<String>(
@@ -1519,10 +1585,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         value: 'CUDA 11.8',
                         label: 'CUDA 11.8',
                       ),
-                      _SettingsOption<String>(
-                        value: 'Intel XPU',
-                        label: 'Intel XPU',
-                      ),
+                      if (_xpuEnabled)
+                        _SettingsOption<String>(
+                          value: 'Intel XPU',
+                          label: 'Intel XPU',
+                        ),
                       _SettingsOption<String>(
                         value: 'CPU Only',
                         label: 'CPU Only',
@@ -1533,10 +1600,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-                  onPressed: _installingPytorch || _reinstallingPackage
-                      ? null
-                      : _installPytorch,
-                  child: _installingPytorch
+                  onPressed: _maintenanceBusy ? null : _installPytorch,
+                  child: _preparingPytorchInstall || _installingPytorch
                       ? const SizedBox(
                           width: 18,
                           height: 18,
@@ -1567,9 +1632,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-                  onPressed: _installingPytorch || _reinstallingPackage
-                      ? null
-                      : _reinstallPythonPackage,
+                  onPressed: _maintenanceBusy ? null : _reinstallPythonPackage,
                   child: _reinstallingPackage
                       ? const SizedBox(
                           width: 18,

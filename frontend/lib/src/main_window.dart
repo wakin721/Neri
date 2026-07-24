@@ -20,6 +20,7 @@ import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
 import 'screens/start_screen.dart';
+import 'utils/job_result_refresh.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
@@ -1290,6 +1291,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
+  Future<void> _refreshVisibleResultsPage() async {
+    await _refresh(silent: true);
+    if (!mounted || (_selectedIndex != 1 && _selectedIndex != 2)) return;
+    await _refreshPreviewItems();
+  }
+
   Future<void> _refreshPreviewItems({
     bool force = false,
     bool finishGlobalLoading = false,
@@ -1578,16 +1585,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings()
           : _settings;
-      final summariesOnly =
-          !includeJobResults || (silent && _jobProcessingBusy);
-      var jobs = await widget.apiClient.listJobs(
-        includeResults: !summariesOnly,
+      var fetchedCompleteJobResults = shouldFetchCompleteJobResults(
+        includeJobResults: includeJobResults,
+        silent: silent,
+        jobProcessingBusy: _jobProcessingBusy,
+        resultsPageVisible: _selectedIndex == 1 || _selectedIndex == 2,
       );
-      if (summariesOnly &&
+      var jobs = await widget.apiClient.listJobs(
+        includeResults: fetchedCompleteJobResults,
+      );
+      final jobFinishedSinceLastRefresh = _hasJobFinishedSinceLastRefresh(jobs);
+      if (!fetchedCompleteJobResults &&
           includeJobResults &&
-          jobs.every((job) => !job.isWorkerActive)) {
+          (jobFinishedSinceLastRefresh ||
+              jobs.every((job) => !job.isWorkerActive))) {
         jobs = await widget.apiClient.listJobs();
-      } else if (summariesOnly) {
+        fetchedCompleteJobResults = true;
+      } else if (!fetchedCompleteJobResults) {
         jobs = _mergeJobSummariesWithCachedResults(jobs);
       }
       if (!mounted || _closeFlowBlocksBackendStartup || settings == null) {
@@ -1616,7 +1630,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         }
       }
 
-      final previewJobUpdates = jobsChanged && !summariesOnly
+      final previewJobUpdates = jobsChanged && fetchedCompleteJobResults
           ? _jobResultsForInputPath(jobs, _inputController.text.trim())
           : const <DetectionItem>[];
 
@@ -1733,6 +1747,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         else
           summary,
     ];
+  }
+
+  bool _hasJobFinishedSinceLastRefresh(List<ProcessingJob> jobs) {
+    final previousById = {for (final job in _jobs) job.id: job};
+    return jobs.any((job) {
+      final previous = previousById[job.id];
+      return previous != null && previous.isWorkerActive && !job.isWorkerActive;
+    });
   }
 
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
@@ -2651,7 +2673,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                           onDestinationSelected: (index) {
                             setState(() => _selectedIndex = index);
                             if (index == 1 || index == 2) {
-                              unawaited(_refreshPreviewItems());
+                              unawaited(_refreshVisibleResultsPage());
                             }
                           },
                         ),
