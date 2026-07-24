@@ -326,6 +326,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
   }
 
+  void _dismissCloseWindowPrompt() {
+    if (_closeDialogPhase != _CloseDialogPhase.choosing ||
+        _closeSelectionSaving) {
+      return;
+    }
+    ++_closeFlowId;
+    setState(() {
+      _showClosingOverlay = false;
+      _closeDontAskAgain = false;
+      _closeSelectionSaving = false;
+      _selectedCloseAction = _CloseAction.hideToTray;
+    });
+  }
+
   Future<void> _hideWindowToTray() async {
     try {
       await windowManager.hide();
@@ -2835,6 +2849,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                 setState(() => _selectedCloseAction = action),
             onDontAskAgainChanged: (value) =>
                 setState(() => _closeDontAskAgain = value),
+            onDismiss: _dismissCloseWindowPrompt,
             onCancel: _cancelCloseWindow,
             onConfirm: () => unawaited(_confirmCloseWindow()),
           ),
@@ -3442,6 +3457,7 @@ class _ClosingOverlay extends StatelessWidget {
     required this.selectionSaving,
     required this.onActionChanged,
     required this.onDontAskAgainChanged,
+    required this.onDismiss,
     required this.onCancel,
     required this.onConfirm,
   });
@@ -3452,6 +3468,7 @@ class _ClosingOverlay extends StatelessWidget {
   final bool selectionSaving;
   final ValueChanged<_CloseAction> onActionChanged;
   final ValueChanged<bool> onDontAskAgainChanged;
+  final VoidCallback onDismiss;
   final VoidCallback onCancel;
   final VoidCallback onConfirm;
 
@@ -3473,7 +3490,11 @@ class _ClosingOverlay extends StatelessWidget {
       child: Stack(
         children: [
           ModalBarrier(
-            dismissible: false,
+            dismissible:
+                phase == _CloseDialogPhase.choosing && !selectionSaving,
+            onDismiss: phase == _CloseDialogPhase.choosing && !selectionSaving
+                ? onDismiss
+                : null,
             color: scheme.scrim.withValues(alpha: 0.36),
           ),
           Center(
@@ -3507,6 +3528,13 @@ class _ClosingOverlay extends StatelessWidget {
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ),
+                          if (phase == _CloseDialogPhase.choosing)
+                            IconButton(
+                              tooltip: '关闭',
+                              onPressed: selectionSaving ? null : onDismiss,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(Icons.close_rounded, size: 20),
+                            ),
                         ],
                       ),
                       const SizedBox(height: 10),
@@ -3544,21 +3572,26 @@ class _ClosingOverlay extends StatelessWidget {
                             ],
                           ),
                         ),
-                        CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          controlAffinity: ListTileControlAffinity.leading,
-                          value: dontAskAgain,
-                          onChanged: selectionSaving
-                              ? null
-                              : (value) =>
-                                    onDontAskAgainChanged(value ?? false),
-                          title: const Text('不再提醒'),
-                          subtitle: const Text('以后自动执行本次选择，可在基础设置中修改'),
-                        ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 8),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
+                            Expanded(
+                              child: CheckboxListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
+                                value: dontAskAgain,
+                                onChanged: selectionSaving
+                                    ? null
+                                    : (value) =>
+                                          onDontAskAgainChanged(value ?? false),
+                                title: const Text('不再提醒'),
+                                subtitle: const Text('以后自动执行本次选择'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
                             FilledButton(
                               onPressed: selectionSaving ? null : onConfirm,
                               child: selectionSaving

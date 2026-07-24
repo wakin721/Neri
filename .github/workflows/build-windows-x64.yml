@@ -31,6 +31,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Sync build version
+        shell: pwsh
+        run: python scripts/sync_version.py
+
       - name: Install Flutter 3.44.6
         shell: pwsh
         run: |

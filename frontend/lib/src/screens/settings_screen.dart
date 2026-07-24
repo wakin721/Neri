@@ -1685,26 +1685,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           _SettingsPanel(
-            title: '关闭主窗口时',
-            subtitle: '选择每次询问、隐藏到任务托盘或直接退出主程序',
-            icon: Icons.close_rounded,
-            child: _SettingsMenuButton<String>(
-              value: normalizeCloseBehavior(widget.closeBehavior),
-              options: const [
-                _SettingsOption<String>(value: closeBehaviorAsk, label: '每次询问'),
-                _SettingsOption<String>(
-                  value: closeBehaviorHideToTray,
-                  label: '隐藏到任务托盘',
-                ),
-                _SettingsOption<String>(
-                  value: closeBehaviorExit,
-                  label: '退出主程序',
-                ),
-              ],
-              onChanged: widget.onCloseBehaviorChanged,
-            ),
-          ),
-          _SettingsPanel(
             title: '物种校验界面自动分组',
             subtitle: '开启后，将根据视频文件自动对连续拍摄的照片和视频进行分组，并在文件列表中按所在组校验最多的物种统一归类显示。',
             icon: Icons.auto_awesome_motion_rounded,
@@ -1767,8 +1747,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(),
+          _buildFavoritePhotoExportMode(showDivider: true),
+          _buildCloseBehaviorSettings(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCloseBehaviorSettings({bool showDivider = false}) {
+    return _SettingsPanel(
+      title: '关闭主窗口时',
+      subtitle: '选择每次询问、隐藏到任务托盘或直接退出主程序',
+      icon: Icons.close_rounded,
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: normalizeCloseBehavior(widget.closeBehavior),
+        options: const [
+          _SettingsOption<String>(value: closeBehaviorAsk, label: '每次询问'),
+          _SettingsOption<String>(
+            value: closeBehaviorHideToTray,
+            label: '隐藏到任务托盘',
+          ),
+          _SettingsOption<String>(value: closeBehaviorExit, label: '退出主程序'),
+        ],
+        onChanged: widget.onCloseBehaviorChanged,
       ),
     );
   }
@@ -2613,38 +2615,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildFavoritePhotoExportMode() {
+  Widget _buildFavoritePhotoExportMode({bool showDivider = false}) {
     return _SettingsPanel(
       title: '同步导出收藏照片',
       subtitle: '导出校验表格时，选择是否把收藏照片复制到单独文件夹。',
       icon: Icons.star_rounded,
-      showDivider: false,
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: SegmentedButton<String>(
-          segments: const [
-            ButtonSegment<String>(
-              value: _favoritePhotoExportAlways,
-              icon: Icon(Icons.ios_share_rounded),
-              label: Text('导出'),
-            ),
-            ButtonSegment<String>(
-              value: _favoritePhotoExportNever,
-              icon: Icon(Icons.block_rounded),
-              label: Text('不导出'),
-            ),
-            ButtonSegment<String>(
-              value: _favoritePhotoExportAsk,
-              icon: Icon(Icons.help_outline_rounded),
-              label: Text('每次询问'),
-            ),
-          ],
-          selected: {_favoritePhotoExportMode()},
-          onSelectionChanged: (selection) {
-            if (selection.isEmpty) return;
-            _set('favorite_photo_export_mode', selection.first);
-          },
-        ),
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: _favoritePhotoExportMode(),
+        options: const [
+          _SettingsOption<String>(
+            value: _favoritePhotoExportAlways,
+            label: '导出',
+          ),
+          _SettingsOption<String>(
+            value: _favoritePhotoExportNever,
+            label: '不导出',
+          ),
+          _SettingsOption<String>(
+            value: _favoritePhotoExportAsk,
+            label: '每次询问',
+          ),
+        ],
+        onChanged: (value) => _set('favorite_photo_export_mode', value),
       ),
     );
   }
