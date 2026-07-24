@@ -15,4 +15,15 @@ void main() {
     expect(normalizeCloseBehavior(null), closeBehaviorAsk);
     expect(normalizeCloseBehavior('unexpected'), closeBehaviorAsk);
   });
+
+  test('normalizes the remembered close action', () {
+    expect(
+      normalizeLastCloseAction(closeBehaviorHideToTray),
+      closeBehaviorHideToTray,
+    );
+    expect(normalizeLastCloseAction(closeBehaviorExit), closeBehaviorExit);
+    expect(normalizeLastCloseAction(closeBehaviorAsk), closeBehaviorExit);
+    expect(normalizeLastCloseAction(null), closeBehaviorExit);
+    expect(normalizeLastCloseAction('unexpected'), closeBehaviorExit);
+  });
 }

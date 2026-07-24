@@ -91,6 +91,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _previewRefreshRequestId = 0;
   int _closeFlowId = 0;
   int _closeBehaviorRevision = 0;
+  int _lastCloseActionRevision = 0;
   bool _loading = true;
   bool _backendStarting = false;
   bool _backendReady = false;
@@ -114,7 +115,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _installingDownloadedAppUpdate = false;
   bool _softwareUpdateCardDismissed = false;
   _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.choosing;
-  _CloseAction _selectedCloseAction = _CloseAction.hideToTray;
+  _CloseAction _selectedCloseAction = _CloseAction.exit;
   String _closeBehavior = closeBehaviorAsk;
   _SoftwareUpdateProgress? _softwareUpdateProgress;
   _AvailableSoftwareUpdate? _availableSoftwareUpdate;
@@ -158,6 +159,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
     _loadLastInputPath();
     _loadCloseBehavior();
+    _loadLastCloseAction();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_updateWindowsShellStatus());
       unawaited(_startBackendAndInitialRefresh());
@@ -319,7 +321,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted) return;
     setState(() {
       _closeDialogPhase = _CloseDialogPhase.choosing;
-      _selectedCloseAction = _CloseAction.hideToTray;
       _closeDontAskAgain = false;
       _closeSelectionSaving = false;
       _showClosingOverlay = true;
@@ -336,7 +337,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _showClosingOverlay = false;
       _closeDontAskAgain = false;
       _closeSelectionSaving = false;
-      _selectedCloseAction = _CloseAction.hideToTray;
     });
   }
 
@@ -355,8 +355,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     final flowId = _closeFlowId;
     final selectedAction = _selectedCloseAction;
-    if (_closeDontAskAgain) {
-      setState(() => _closeSelectionSaving = true);
+    final dontAskAgain = _closeDontAskAgain;
+    setState(() => _closeSelectionSaving = true);
+    try {
+      await _saveLastCloseAction(selectedAction);
+    } catch (_) {
+      // A preference persistence failure must not block the selected action.
+    }
+    if (!mounted ||
+        flowId != _closeFlowId ||
+        _closeDialogPhase != _CloseDialogPhase.choosing) {
+      return;
+    }
+    if (dontAskAgain) {
       final behavior = selectedAction == _CloseAction.hideToTray
           ? closeBehaviorHideToTray
           : closeBehaviorExit;
@@ -503,6 +514,46 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
     if (!mounted || revision != _closeBehaviorRevision) return;
     setState(() => _closeBehavior = behavior);
+  }
+
+  Future<void> _loadLastCloseAction() async {
+    final revision = _lastCloseActionRevision;
+    final preferences = await SharedPreferences.getInstance();
+    final savedAction = normalizeLastCloseAction(
+      preferences.getString(lastCloseActionSettingKey),
+    );
+    if (!mounted || revision != _lastCloseActionRevision) return;
+    setState(() {
+      _selectedCloseAction = savedAction == closeBehaviorExit
+          ? _CloseAction.exit
+          : _CloseAction.hideToTray;
+    });
+  }
+
+  Future<void> _updateLastCloseAction(_CloseAction action) async {
+    if (_selectedCloseAction == action) return;
+    final previous = _selectedCloseAction;
+    final revision = ++_lastCloseActionRevision;
+    if (mounted) setState(() => _selectedCloseAction = action);
+    try {
+      await _saveLastCloseAction(action);
+      if (mounted && revision != _lastCloseActionRevision) {
+        await _saveLastCloseAction(_selectedCloseAction);
+      }
+    } catch (error) {
+      if (mounted && revision == _lastCloseActionRevision) {
+        setState(() => _selectedCloseAction = previous);
+        _showSnackBar('保存上次关闭选择失败：$error');
+      }
+    }
+  }
+
+  Future<void> _saveLastCloseAction(_CloseAction action) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      lastCloseActionSettingKey,
+      action == _CloseAction.exit ? closeBehaviorExit : closeBehaviorHideToTray,
+    );
   }
 
   Future<void> _updateCloseBehavior(String behavior) async {
@@ -2846,7 +2897,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             dontAskAgain: _closeDontAskAgain,
             selectionSaving: _closeSelectionSaving,
             onActionChanged: (action) =>
-                setState(() => _selectedCloseAction = action),
+                unawaited(_updateLastCloseAction(action)),
             onDontAskAgainChanged: (value) =>
                 setState(() => _closeDontAskAgain = value),
             onDismiss: _dismissCloseWindowPrompt,
