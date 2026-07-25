@@ -84,6 +84,8 @@ const _xpuEnabled = false;
 const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
+const _detectionConfidencePriority = 'detection';
+const _classificationConfidencePriority = 'classification';
 const _updateMirrorsKey = 'update_mirrors';
 const _legacyUpdateMirrorUrlKey = 'update_mirror_url';
 const _legacyUpdateCustomMirrorsKey = 'update_custom_mirrors';
@@ -242,6 +244,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
       'use_augment': _boolSetting(saved, 'use_augment', false),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
+      'confidence_priority':
+          _stringSetting(
+                saved,
+                'confidence_priority',
+                _classificationConfidencePriority,
+              ) ==
+              _detectionConfidencePriority
+          ? _detectionConfidencePriority
+          : _classificationConfidencePriority,
       'video_mode': _stringSetting(saved, 'video_mode', 'all'),
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
@@ -1022,6 +1033,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final videoMode = _string('video_mode', 'all');
     final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
+    final combinedModelsEnabled =
+        selectedModel?.isNotEmpty == true &&
+        selectedClassificationModel?.isNotEmpty == true;
+    final confidencePriority =
+        _string('confidence_priority', _classificationConfidencePriority) ==
+            _detectionConfidencePriority
+        ? _detectionConfidencePriority
+        : _classificationConfidencePriority;
 
     return SectionCard(
       title: '检测设置',
@@ -1050,8 +1069,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
               onChanged: (value) {
                 _set('selected_model', value);
-                _set('selected_species_names', <String>[]);
-                _loadModelClassesForSelection();
+                if (selectedClassificationModel?.isEmpty ?? true) {
+                  _set('selected_species_names', <String>[]);
+                  _loadModelClassesForSelection();
+                }
               },
             ),
           ),
@@ -1078,13 +1099,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                   onChanged: (value) {
                     _set('selected_classification_model', value);
-                    if (selectedModel?.isEmpty ?? true) {
-                      _set('selected_species_names', <String>[]);
-                      _loadModelClassesForSelection();
-                    }
+                    _set('selected_species_names', <String>[]);
+                    _loadModelClassesForSelection();
                   },
                 ),
                 const SizedBox(height: 8),
+              ],
+            ),
+          ),
+          _SettingsPanel(
+            title: '组合置信度策略',
+            subtitle: combinedModelsEnabled
+                ? '设置探测模型与分类模型共同使用时的综合置信度权重'
+                : '同时选择探测模型和分类模型后可用',
+            icon: Icons.balance_rounded,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment<String>(
+                      value: _detectionConfidencePriority,
+                      label: Text('探测置信度优先'),
+                      icon: Icon(Icons.center_focus_strong_rounded),
+                    ),
+                    ButtonSegment<String>(
+                      value: _classificationConfidencePriority,
+                      label: Text('分类置信度优先'),
+                      icon: Icon(Icons.account_tree_rounded),
+                    ),
+                  ],
+                  selected: {confidencePriority},
+                  showSelectedIcon: false,
+                  onSelectionChanged: detectionEnabled && combinedModelsEnabled
+                      ? (values) => _set('confidence_priority', values.first)
+                      : null,
+                ),
+                const SizedBox(height: 8),
+                _MutedText(
+                  confidencePriority == _detectionConfidencePriority
+                      ? '综合置信度：探测 60% + 分类 40%'
+                      : '综合置信度：探测 40% + 分类 60%',
+                ),
               ],
             ),
           ),
@@ -3175,22 +3231,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   String? _modelClassesSelectionPath() {
-    final detectionModel = _validModelValue(
-      _string('selected_model'),
-      widget.settings?.availableModels ?? const <ModelInfo>[],
-      allowEmpty: true,
-    );
-    if (detectionModel != null && detectionModel.isNotEmpty) {
-      return detectionModel;
-    }
     final classificationModel = _validModelValue(
       _string('selected_classification_model'),
       widget.settings?.availableClassificationModels ?? const <ModelInfo>[],
       allowEmpty: true,
     );
-    return classificationModel == null || classificationModel.isEmpty
+    if (classificationModel != null && classificationModel.isNotEmpty) {
+      return classificationModel;
+    }
+    final detectionModel = _validModelValue(
+      _string('selected_model'),
+      widget.settings?.availableModels ?? const <ModelInfo>[],
+      allowEmpty: true,
+    );
+    return detectionModel == null || detectionModel.isEmpty
         ? null
-        : classificationModel;
+        : detectionModel;
   }
 }
 

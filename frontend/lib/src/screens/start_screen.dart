@@ -7,6 +7,21 @@ import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
 const _defaultModelDirectory = 'res/model';
+const _defaultClassificationModelDirectory = 'res/model_cls';
+
+String _modelSelectorHelperText({
+  required bool enabled,
+  required List<ModelInfo> models,
+  required String directory,
+}) {
+  if (!enabled) {
+    return '检测依赖未安装，安装完成后可选择模型';
+  }
+  if (models.isEmpty) {
+    return '未在 $directory 中找到 .pt 模型';
+  }
+  return '扫描 $directory';
+}
 
 class StartScreen extends StatelessWidget {
   const StartScreen({
@@ -389,6 +404,7 @@ class _ModelSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final models = settings?.availableModels ?? const <ModelInfo>[];
+    final modelDirectory = settings?.modelDirectory ?? _defaultModelDirectory;
     final selectedValue =
         selectedModelPath == null || selectedModelPath!.isEmpty
         ? ''
@@ -402,11 +418,11 @@ class _ModelSelector extends StatelessWidget {
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('探测模型'),
-      helperText: !enabled
-          ? '检测依赖未安装，安装完成后可选择模型'
-          : models.isEmpty
-          ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
-          : '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
+      helperText: _modelSelectorHelperText(
+        enabled: enabled,
+        models: models,
+        directory: modelDirectory,
+      ),
       leadingIcon: const Icon(Icons.memory_rounded),
       dropdownMenuEntries: [
         const DropdownMenuEntry<String>(value: '', label: '不使用'),
@@ -435,6 +451,9 @@ class _ClassificationModelSelector extends StatelessWidget {
   Widget build(BuildContext context) {
     final models =
         settings?.availableClassificationModels ?? const <ModelInfo>[];
+    final modelDirectory =
+        settings?.classificationModelDirectory ??
+        _defaultClassificationModelDirectory;
     final selectedValue =
         selectedClassificationModelPath == null ||
             selectedClassificationModelPath!.isEmpty
@@ -449,8 +468,11 @@ class _ClassificationModelSelector extends StatelessWidget {
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('分类模型'),
-      helperText:
-          '扫描 ${settings?.classificationModelDirectory ?? 'res/model_cls'}',
+      helperText: _modelSelectorHelperText(
+        enabled: enabled,
+        models: models,
+        directory: modelDirectory,
+      ),
       leadingIcon: const Icon(Icons.account_tree_rounded),
       dropdownMenuEntries: [
         const DropdownMenuEntry<String>(value: '', label: '不使用'),

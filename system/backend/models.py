@@ -209,6 +209,13 @@ class ProcessingOptions(BaseModel):
     use_fp16: bool = False
     use_augment: bool = False
     use_agnostic_nms: bool = True
+    confidence_priority: Literal["detection", "classification"] = Field(
+        default="classification",
+        description=(
+            "How detection and classification confidence are weighted when "
+            "both models are enabled."
+        ),
+    )
     batch_size: int = Field(default=16, ge=1, le=64)
     thread_count: int = Field(default=4, ge=1, le=8)
     imgsz: int = Field(default=1920, ge=320, le=4096)

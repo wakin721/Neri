@@ -12,6 +12,10 @@ import json
 import torch
 import numpy as np
 from system.config import XPU_ENABLED
+from system.confidence import (
+    candidate_matches_selected_species,
+    combined_confidence_weights,
+)
 from system.utils import resource_path
 import cv2
 
@@ -444,14 +448,15 @@ class ImageProcessor:
                              preloaded_data: Optional[Tuple] = None,
                              classes: Optional[List[int]] = None,
                              imgsz: int = 1920,
+                             confidence_priority: str = "classification",
+                             selected_species_names: Optional[List[str]] = None,
                              cleanup_cache: bool = False) -> List[Dict[str, Any]]:
         """
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
         """
         device_name, use_fp16 = self._determine_device(use_fp16)
-        w_det = 0.4
-        w_cls = 0.6
+        w_det, w_cls = combined_confidence_weights(confidence_priority)
         batch_results_info = []
 
         if not self.model:
@@ -561,6 +566,7 @@ class ImageProcessor:
                 all_crops = []
                 crop_map_info = []  # 映射: list index -> (result_index_in_batch, box_index)
                 batch_candidates_maps = [{} for _ in det_results]
+                batch_selected_candidate_maps = [{} for _ in det_results]
 
                 if self.cls_model:
                     crop_tasks = []
@@ -613,13 +619,22 @@ class ImageProcessor:
                             # 温度缩放 & TopK
                             original_probs = cls_res.probs.data
                             smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
-                            topk_confs, topk_indices = torch.topk(smoothed_probs, 3)
+                            ranked_indices = torch.argsort(
+                                smoothed_probs,
+                                descending=True,
+                            ).tolist()
 
                             candidates = []
-                            for c_idx, c_conf in zip(topk_indices.tolist(), topk_confs.tolist()):
+                            for c_idx in ranked_indices:
                                 raw_name = cls_res.names[int(c_idx)]
                                 trans_name = self.translation_dict.get(raw_name, raw_name)
-                                cls_conf_val = float(c_conf)
+                                if not candidate_matches_selected_species(
+                                    str(raw_name),
+                                    str(trans_name),
+                                    selected_species_names,
+                                ):
+                                    continue
+                                cls_conf_val = float(smoothed_probs[int(c_idx)].item())
 
                                 # 加权置信度
                                 weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
@@ -630,9 +645,20 @@ class ImageProcessor:
                                     "raw_cls_conf": cls_conf_val,
                                     "raw_det_conf": det_conf
                                 })
+                                if len(candidates) >= 3:
+                                    break
 
                             candidates.sort(key=lambda x: x["conf"], reverse=True)
                             batch_candidates_maps[r_idx][b_idx] = candidates
+                            selected_candidate = next(
+                                (
+                                    candidate
+                                    for candidate in candidates
+                                    if float(candidate["conf"]) >= conf
+                                ),
+                                None,
+                            )
+                            batch_selected_candidate_maps[r_idx][b_idx] = selected_candidate
 
                 # 6. 结果整合与统计
                 # 此时 det_results 的长度等于 processed_imgs 的长度
@@ -640,6 +666,7 @@ class ImageProcessor:
 
                 det_iter = iter(det_results)
                 cand_map_iter = iter(batch_candidates_maps)
+                selected_cand_map_iter = iter(batch_selected_candidate_maps)
 
                 merge_start = time.perf_counter()
                 for idx in range(len(img_paths)):
@@ -658,33 +685,47 @@ class ImageProcessor:
                     except Exception as e:
                         logger.debug(f"Failed to move detection result to CPU: {e}")
                     candidates_map = next(cand_map_iter)
+                    selected_candidates_map = next(selected_cand_map_iter)
 
                     min_conf = None
                     detected_species_counts = {}
+                    final_confidences = []
 
                     if r.boxes:
-                        confs = r.boxes.conf.tolist()
-                        if confs:
-                            current_min = min(confs)
-                            min_conf = "%.3f" % current_min
-
                         for i, box in enumerate(r.boxes):
                             final_name = ""
-                            # 优先使用分类修正结果
-                            if i in candidates_map and candidates_map[i]:
-                                final_name = candidates_map[i][0]['name']
+                            final_confidence = float(box.conf.item())
+                            if self.cls_model is not None:
+                                selected_candidate = selected_candidates_map.get(i)
+                                if not hasattr(r, 'candidates_data'):
+                                    r.candidates_data = {}
+                                r.candidates_data[i] = candidates_map.get(i, [])
+                                if selected_candidate is None:
+                                    if not hasattr(r, 'classification_filtered_boxes'):
+                                        r.classification_filtered_boxes = set()
+                                    r.classification_filtered_boxes.add(i)
+                                    continue
+                                if not hasattr(r, 'selected_candidates_data'):
+                                    r.selected_candidates_data = {}
+                                r.selected_candidates_data[i] = selected_candidate
+                                final_name = selected_candidate['name']
+                                final_confidence = float(selected_candidate['conf'])
                             else:
                                 cls_id = int(box.cls.item())
                                 raw_name = r.names[cls_id]
                                 final_name = self.translation_dict.get(raw_name, raw_name)
 
                             detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
+                            final_confidences.append(final_confidence)
 
                             # 注入数据用于JSON保存
                             if not hasattr(r, 'candidates_data'):
                                 r.candidates_data = {}
-                            if i in candidates_map:
+                            if i in candidates_map and i not in r.candidates_data:
                                 r.candidates_data[i] = candidates_map[i]
+
+                    if final_confidences:
+                        min_conf = "%.3f" % min(final_confidences)
 
                     species_str = ",".join(list(detected_species_counts.keys()))
                     counts_str = ",".join(list(map(str, detected_species_counts.values())))
@@ -693,7 +734,12 @@ class ImageProcessor:
                         '物种名称': species_str if species_str else "空",
                         '物种数量': counts_str if counts_str else "空",
                         'detect_results': [r],  # 保持列表格式以便兼容 save_detection_info_json
-                        '最低置信度': min_conf
+                        '最低置信度': min_conf,
+                        'confidence_priority': confidence_priority,
+                        'confidence_weights': {
+                            'detection': w_det,
+                            'classification': w_cls,
+                        },
                     })
 
                 merge_elapsed = time.perf_counter() - merge_start

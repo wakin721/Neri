@@ -1179,6 +1179,21 @@ def _selected_species_class_ids(detector, selected_species_names: list[str]) -> 
     return sorted(set(matched_class_ids)) if matched_class_ids else None
 
 
+def _selected_inference_class_ids(
+    detector,
+    selected_species_names: list[str],
+) -> list[int] | None:
+    if (
+        getattr(detector, "model", None) is not None
+        and getattr(detector, "cls_model", None) is not None
+    ):
+        # With both models enabled the species selection refers to the
+        # classifier that provides the final name. Keep all detector classes
+        # so potentially relevant crops are not discarded before classifying.
+        return None
+    return _selected_species_class_ids(detector, selected_species_names)
+
+
 def _normalize_species_key(value: str) -> str:
     return value.strip().casefold()
 
@@ -1555,6 +1570,12 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
 
         names = getattr(result, "names", {}) or {}
         candidates_data = getattr(result, "candidates_data", {}) or {}
+        selected_candidates_data = (
+            getattr(result, "selected_candidates_data", {}) or {}
+        )
+        classification_filtered_boxes = (
+            getattr(result, "classification_filtered_boxes", set()) or set()
+        )
         translation_dict = getattr(detector, "translation_dict", {}) or {}
         names_map = {
             class_id: translation_dict.get(english_name, english_name)
@@ -1567,6 +1588,8 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
             pass
 
         for index, box in enumerate(result_boxes):
+            if index in classification_filtered_boxes:
+                continue
             try:
                 cls_id = int(box.cls.item())
                 raw_name = names.get(cls_id, str(cls_id))
@@ -1578,7 +1601,10 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
 
             candidates = candidates_data.get(index, [])
             if candidates:
-                best_candidate = candidates[0]
+                best_candidate = selected_candidates_data.get(
+                    index,
+                    candidates[0],
+                )
                 translated_name = str(best_candidate.get("name", translated_name))
                 box_confidence = _coerce_float(best_candidate.get("conf")) or box_confidence
 
@@ -1598,6 +1624,8 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
         "检测时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "检测框": boxes,
         "分类候选项": detection.get("分类候选项", []),
+        "confidence_priority": detection.get("confidence_priority"),
+        "confidence_weights": detection.get("confidence_weights"),
         "all_confidences": all_confidences,
         "all_classes": all_classes,
         "names_map": names_map,
@@ -1664,7 +1692,7 @@ def _detect_image_batch(
     preloaded_data: Any = None,
 ) -> list[DetectionItem]:
     try:
-        selected_class_ids = _selected_species_class_ids(
+        selected_class_ids = _selected_inference_class_ids(
             detector,
             request.options.selected_species_names,
         )
@@ -1678,6 +1706,8 @@ def _detect_image_batch(
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
             imgsz=request.options.imgsz,
+            confidence_priority=request.options.confidence_priority,
+            selected_species_names=request.options.selected_species_names,
             preloaded_data=preloaded_data,
         )
         detect_elapsed = time.perf_counter() - detect_started
@@ -1712,7 +1742,7 @@ def _detect_image_batch(
 
 def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobRequest, input_path: Path) -> DetectionItem:
     try:
-        selected_class_ids = _selected_species_class_ids(
+        selected_class_ids = _selected_inference_class_ids(
             detector,
             request.options.selected_species_names,
         )
@@ -1725,6 +1755,8 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
             imgsz=request.options.imgsz,
+            confidence_priority=request.options.confidence_priority,
+            selected_species_names=request.options.selected_species_names,
         )
         detection = detections[0] if detections else {}
         detection_data = _serialize_detector_output(detector, detection)
@@ -1895,7 +1927,7 @@ def _detect_video_fast_batch(
         sample_elapsed = time.perf_counter() - sample_started
         inference_elapsed = 0.0
         if frame_records:
-            selected_class_ids = _selected_species_class_ids(
+            selected_class_ids = _selected_inference_class_ids(
                 detector,
                 request.options.selected_species_names,
             )
@@ -1915,6 +1947,8 @@ def _detect_video_fast_batch(
                     agnostic_nms=request.options.use_agnostic_nms,
                     classes=selected_class_ids,
                     imgsz=request.options.imgsz,
+                    confidence_priority=request.options.confidence_priority,
+                    selected_species_names=request.options.selected_species_names,
                 )
                 _raise_if_cancelled(cancelled)
                 for index, record in enumerate(frame_batch):

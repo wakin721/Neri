@@ -332,7 +332,7 @@ class _ImageInfoCard extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  置信度: ${summary.confidence}',
+                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  综合置信度: ${summary.confidence}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(

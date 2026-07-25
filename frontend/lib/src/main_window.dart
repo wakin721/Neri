@@ -45,6 +45,24 @@ class MainWindow extends StatefulWidget {
 
 class _MainWindowState extends State<MainWindow> with WindowListener {
   static const _windowsShellChannel = MethodChannel('neri/windows_shell');
+  static const _supportedMediaExtensions = <String>{
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.bmp',
+    '.gif',
+    '.tiff',
+    '.webp',
+    '.mp4',
+    '.avi',
+    '.mov',
+    '.mkv',
+    '.wmv',
+    '.flv',
+    '.webm',
+    '.m4v',
+    '.ts',
+  };
   static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置'];
   static const _navigationItems = <_NavigationRailEntry>[
     _NavigationRailEntry(
@@ -85,6 +103,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   Timer? _timer;
   Timer? _previewRefreshTimer;
+  Timer? _inputDirectoryChangeTimer;
+  StreamSubscription<FileSystemEvent>? _inputDirectoryWatcher;
   Process? _backendProcess;
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
@@ -135,6 +155,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _vidStride = 1;
   int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
+  String? _watchedInputDirectory;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
   String? _lastWindowsShellStatusSignature;
@@ -155,6 +176,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     _inputController.addListener(() {
       _schedulePreviewRefresh();
+      _updateInputDirectoryWatcher();
       unawaited(_updateWindowsShellStatus());
     });
     _loadLastInputPath();
@@ -174,6 +196,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
+    _inputDirectoryChangeTimer?.cancel();
+    final inputDirectoryWatcher = _inputDirectoryWatcher;
+    if (inputDirectoryWatcher != null) {
+      unawaited(inputDirectoryWatcher.cancel());
+    }
     _appUpdater.close();
     if (_closing) {
       widget.apiClient.close();
@@ -1463,7 +1490,68 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _refreshVisibleResultsPage() async {
     await _refresh(silent: true);
     if (!mounted || (_selectedIndex != 1 && _selectedIndex != 2)) return;
-    await _refreshPreviewItems();
+    // Re-scan the input directory whenever a results page is opened. Reusing
+    // the list cached for the same path would keep files that were deleted
+    // outside Neri visible in both preview and validation.
+    await _refreshPreviewItems(force: true);
+  }
+
+  void _updateInputDirectoryWatcher() {
+    final inputPath = _inputController.text.trim();
+    if (_watchedInputDirectory == inputPath && _inputDirectoryWatcher != null) {
+      return;
+    }
+
+    _inputDirectoryChangeTimer?.cancel();
+    _inputDirectoryChangeTimer = null;
+    final previousWatcher = _inputDirectoryWatcher;
+    _inputDirectoryWatcher = null;
+    _watchedInputDirectory = null;
+    if (previousWatcher != null) {
+      unawaited(previousWatcher.cancel());
+    }
+
+    if (inputPath.isEmpty) return;
+    final directory = Directory(inputPath);
+    if (!directory.existsSync()) return;
+
+    try {
+      _inputDirectoryWatcher = directory
+          .watch(
+            events:
+                FileSystemEvent.create |
+                FileSystemEvent.delete |
+                FileSystemEvent.move,
+            recursive: true,
+          )
+          .listen(_handleInputDirectoryEvent, onError: (_) {});
+      _watchedInputDirectory = inputPath;
+    } on FileSystemException {
+      // Re-scanning when a results page is opened remains the fallback for
+      // file systems that do not support recursive directory watching.
+    }
+  }
+
+  void _handleInputDirectoryEvent(FileSystemEvent event) {
+    final destination = event is FileSystemMoveEvent ? event.destination : null;
+    final affectsMedia =
+        event.isDirectory ||
+        _isSupportedMediaPath(event.path) ||
+        (destination != null && _isSupportedMediaPath(destination));
+    if (!affectsMedia) return;
+
+    _inputDirectoryChangeTimer?.cancel();
+    _inputDirectoryChangeTimer = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted || _inputController.text.trim() != _watchedInputDirectory) {
+        return;
+      }
+      unawaited(_refreshPreviewItems(force: true));
+    });
+  }
+
+  bool _isSupportedMediaPath(String path) {
+    final normalizedPath = path.toLowerCase();
+    return _supportedMediaExtensions.any(normalizedPath.endsWith);
   }
 
   Future<void> _refreshPreviewItems({
@@ -2057,6 +2145,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return _boolSetting(_settingsOrEmpty(), 'use_agnostic_nms', true);
   }
 
+  String _confidencePriority() {
+    return _stringSetting(
+              _settingsOrEmpty(),
+              'confidence_priority',
+              'classification',
+            ) ==
+            'detection'
+        ? 'detection'
+        : 'classification';
+  }
+
   String _packageSource() {
     return _stringSetting(_settingsOrEmpty(), 'package_source', 'auto');
   }
@@ -2252,6 +2351,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(),
         threadCount: _processingThreadCount(),
         imageSize: _imageSizeSetting(),
@@ -2447,6 +2547,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(singleFile: true),
         threadCount: _processingThreadCount(singleFile: true),
         imageSize: _imageSizeSetting(),
@@ -2491,6 +2592,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
         threadCount: _processingThreadCount(singleFile: inputPaths.length == 1),
         imageSize: _imageSizeSetting(),
