@@ -368,7 +368,8 @@ def _start_maintenance(operation: str, extra_args: list[str], message: str) -> d
 
     command = [
         str(python_exe),
-        str(project_root() / "system" / "backend" / "maintenance.py"),
+        "-m",
+        "system.backend.maintenance",
         "--operation",
         operation,
         "--backend-pid",
