@@ -14,7 +14,8 @@ function Set-RequiredProductText {
         [Parameter(Mandatory = $true)]
         [string]$GeneratedText,
         [Parameter(Mandatory = $true)]
-        [string]$ProductText
+        [string]$ProductText,
+        [string[]]$AcceptedProductText = @()
     )
 
     $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
@@ -24,9 +25,12 @@ function Set-RequiredProductText {
         [System.IO.File]::WriteAllText($resolvedPath, $content, $utf8WithoutBom)
         return
     }
-    if (-not $content.Contains($ProductText)) {
-        throw "Expected generated product text was not found in $resolvedPath"
+    foreach ($acceptedText in @($ProductText) + @($AcceptedProductText)) {
+        if ($content.Contains($acceptedText)) {
+            return
+        }
     }
+    throw "Expected generated product text was not found in $resolvedPath"
 }
 
 $cmakePath = Join-Path $WindowsRoot "CMakeLists.txt"
@@ -39,9 +43,13 @@ Set-RequiredProductText $cmakePath `
 Set-RequiredProductText $cmakePath `
     'set(BINARY_NAME "neri_flutter")' `
     'set(BINARY_NAME "Neri")'
-Set-RequiredProductText $mainPath `
-    'window.Create(L"neri_flutter", origin, size)' `
-    'window.Create(L"Neri", origin, size)'
+Set-RequiredProductText `
+    -Path $mainPath `
+    -GeneratedText 'window.Create(L"neri_flutter", origin, size)' `
+    -ProductText 'window.Create(L"Neri", origin, size)' `
+    -AcceptedProductText @(
+        'window.Create(kNeriWindowTitle, origin, size)'
+    )
 Set-RequiredProductText $resourcePath `
     'VALUE "FileDescription", "neri_flutter" "\0"' `
     'VALUE "FileDescription", "Neri" "\0"'
@@ -56,3 +64,4 @@ Set-RequiredProductText $resourcePath `
     'VALUE "ProductName", "Neri" "\0"'
 
 Write-Output "Windows product name configured as Neri."
+
