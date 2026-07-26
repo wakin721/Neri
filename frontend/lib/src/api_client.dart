@@ -404,6 +404,8 @@ class NeriApiClient {
     Map<String, double>? confidenceSettings,
     bool exportFavoritePhotos = false,
     List<String>? favoritePhotoPaths,
+    bool deleteEmptyPhotos = false,
+    List<String>? emptyPhotoPaths,
     double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
@@ -418,6 +420,8 @@ class NeriApiClient {
         'export_favorite_photos': exportFavoritePhotos,
         if (favoritePhotoPaths != null)
           'favorite_photo_paths': favoritePhotoPaths,
+        'delete_empty_photos': deleteEmptyPhotos,
+        if (emptyPhotoPaths != null) 'empty_photo_paths': emptyPhotoPaths,
         'confidence_settings': confidenceSettings ?? {'global': 0.25},
         'min_frame_ratio': minFrameRatio,
       }),

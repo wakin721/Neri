@@ -328,6 +328,8 @@ class ValidationExportRequest(BaseModel):
     columns_to_export: list[str] | None = None
     export_favorite_photos: bool = False
     favorite_photo_paths: list[str] = Field(default_factory=list)
+    delete_empty_photos: bool = False
+    empty_photo_paths: list[str] = Field(default_factory=list)
     min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -339,6 +341,8 @@ class ValidationExportResponse(BaseModel):
     exported_count: int
     favorite_output_dir: str | None = None
     favorite_exported_count: int = 0
+    deleted_empty_photo_count: int = 0
+    empty_photo_delete_failed_count: int = 0
 
 
 class JobSummary(BaseModel):

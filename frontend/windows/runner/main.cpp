@@ -11,8 +11,26 @@ constexpr const wchar_t kSingleInstanceMutexName[] =
     L"Local\\Neri.Desktop.SingleInstance";
 constexpr const wchar_t kNeriWindowTitle[] = L"Neri";
 
+UINT GetNeriDuplicateLaunchMessage() {
+  static const UINT message =
+      ::RegisterWindowMessageW(L"Neri.Desktop.DuplicateLaunch");
+  return message;
+}
+
 HWND FindExistingNeriWindow() {
   return ::FindWindowW(Win32Window::GetWindowClassName(), kNeriWindowTitle);
+}
+
+HWND WaitForExistingNeriWindow() {
+  constexpr DWORD kWindowWaitIntervalMs = 100;
+  constexpr int kWindowWaitAttempts = 50;
+  for (int attempt = 0; attempt < kWindowWaitAttempts; ++attempt) {
+    if (HWND window = FindExistingNeriWindow()) {
+      return window;
+    }
+    ::Sleep(kWindowWaitIntervalMs);
+  }
+  return nullptr;
 }
 
 void RestoreExistingNeriWindow(HWND window) {
@@ -37,20 +55,20 @@ void RestoreExistingNeriWindow(HWND window) {
 }
 
 int ExitWhenNeriIsAlreadyRunning(HANDLE instance_mutex) {
-  HWND existing_window = FindExistingNeriWindow();
+  HWND existing_window = WaitForExistingNeriWindow();
   RestoreExistingNeriWindow(existing_window);
-  const wchar_t* message =
-      existing_window == nullptr
-          ? L"Neri \u5df2\u7ecf\u6253\u5f00\uff0c"
-            L"\u6b63\u5728\u542f\u52a8\u4e2d\uff0c\u8bf7\u7a0d\u5019\u3002"
-          : L"Neri \u5df2\u7ecf\u6253\u5f00\uff0c"
-            L"\u5df2\u5207\u6362\u5230\u73b0\u6709\u7a97\u53e3\u3002";
-  ::MessageBoxW(
-      nullptr,
-      message,
-      kNeriWindowTitle,
-      MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
-  RestoreExistingNeriWindow(existing_window);
+  const UINT duplicate_launch_message = GetNeriDuplicateLaunchMessage();
+  const bool notified_existing_window =
+      existing_window != nullptr && duplicate_launch_message != 0 &&
+      ::PostMessageW(existing_window, duplicate_launch_message, 0, 0);
+  if (!notified_existing_window) {
+    ::MessageBoxW(
+        nullptr,
+        L"Neri \u5df2\u7ecf\u6253\u5f00\uff0c"
+        L"\u6b63\u5728\u542f\u52a8\u4e2d\uff0c\u8bf7\u7a0d\u5019\u3002",
+        kNeriWindowTitle,
+        MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+  }
   ::CloseHandle(instance_mutex);
   return EXIT_SUCCESS;
 }

@@ -166,6 +166,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
   String? _lastWindowsShellStatusSignature;
+  bool _duplicateLaunchDialogVisible = false;
 
   @override
   void initState() {
@@ -233,6 +234,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<dynamic> _handleWindowsShellCall(MethodCall call) async {
+    if (call.method == 'duplicateLaunch') {
+      await _showAndFocusWindow();
+      await _showDuplicateLaunchDialog();
+      return null;
+    }
     if (call.method != 'trayAction') return null;
     switch (call.arguments) {
       case 'toggleProcessing':
@@ -255,6 +261,29 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (mounted) _requestCloseWindow(forceExit: true);
     }
     return null;
+  }
+
+  Future<void> _showDuplicateLaunchDialog() async {
+    if (!mounted || _duplicateLaunchDialogVisible) return;
+    _duplicateLaunchDialogVisible = true;
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          icon: const Icon(Icons.info_outline_rounded),
+          title: const Text('Neri 已经打开'),
+          content: const Text('已切换到正在运行的 Neri 窗口，无需重复启动。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _duplicateLaunchDialogVisible = false;
+    }
   }
 
   Future<void> _showAndFocusWindow() async {
@@ -2764,6 +2793,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     };
   }
 
+  String _emptyPhotoDeleteMode(NeriSettings settings) {
+    final value = _stringSetting(
+      settings,
+      'empty_photo_delete_mode',
+      emptyPhotoDeleteAsk,
+    );
+    return switch (value) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
+    };
+  }
+
   Future<void> _saveSilentSettingsPatch(Map<String, dynamic> patch) async {
     final current = _settings;
     if (current == null) {
@@ -2792,6 +2834,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     };
     return _saveSilentSettingsPatch({
       'favorite_photo_export_mode': normalizedMode,
+    });
+  }
+
+  Future<void> _updateEmptyPhotoDeleteMode(String mode) {
+    final normalizedMode = switch (mode) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
+    };
+    return _saveSilentSettingsPatch({
+      'empty_photo_delete_mode': normalizedMode,
     });
   }
 
@@ -3225,6 +3278,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         const <String>[],
       ),
       favoritePhotoExportMode: _favoritePhotoExportMode(settings),
+      emptyPhotoDeleteMode: _emptyPhotoDeleteMode(settings),
       onRefresh: () => _refreshPreviewItems(force: true),
       onLoadMetadata: _loadPreviewMetadata,
       onOpenExternal: _openFileWithSystem,
@@ -3235,6 +3289,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onRedetectItems: _redetectValidationItems,
       onFavoritePhotoPathsChanged: _updateFavoritePhotoPaths,
       onFavoritePhotoExportModeChanged: _updateFavoritePhotoExportMode,
+      onEmptyPhotoDeleteModeChanged: _updateEmptyPhotoDeleteMode,
       onAutoGroupInferredBurstSizeChanged:
           _handleAutoGroupInferredBurstSizeChanged,
     );

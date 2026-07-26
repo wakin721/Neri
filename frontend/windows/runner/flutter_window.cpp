@@ -11,6 +11,12 @@
 
 namespace {
 
+UINT GetNeriDuplicateLaunchMessage() {
+  static const UINT message =
+      ::RegisterWindowMessageW(L"Neri.Desktop.DuplicateLaunch");
+  return message;
+}
+
 std::wstring Utf16FromUtf8(const std::string& utf8_string) {
   if (utf8_string.empty()) {
     return std::wstring();
@@ -199,6 +205,10 @@ bool FlutterWindow::OnCreate() {
                       task_is_running);
         SetTaskbarProgress(state, progress);
         result->Success();
+        dart_ready_ = true;
+        if (duplicate_launch_pending_) {
+          NotifyDuplicateLaunch();
+        }
       });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -218,6 +228,8 @@ void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
     dialogs_channel_ = nullptr;
     windows_shell_channel_ = nullptr;
+    dart_ready_ = false;
+    duplicate_launch_pending_ = false;
     flutter_controller_ = nullptr;
   }
 
@@ -245,10 +257,25 @@ void FlutterWindow::OnTrayCommand(TrayCommand command) {
       "trayAction", std::make_unique<flutter::EncodableValue>(action));
 }
 
+void FlutterWindow::NotifyDuplicateLaunch() {
+  if (!dart_ready_ || !windows_shell_channel_) {
+    duplicate_launch_pending_ = true;
+    return;
+  }
+  duplicate_launch_pending_ = false;
+  windows_shell_channel_->InvokeMethod(
+      "duplicateLaunch", std::make_unique<flutter::EncodableValue>());
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == GetNeriDuplicateLaunchMessage()) {
+    NotifyDuplicateLaunch();
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

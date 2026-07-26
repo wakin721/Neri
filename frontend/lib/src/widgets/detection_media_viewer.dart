@@ -46,7 +46,8 @@ class DetectionMediaViewer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final showFavoriteButton = _isImage && onToggleFavorite != null;
+    final showFavoriteButton = onToggleFavorite != null;
+    final favoriteLabel = _isImage ? '照片' : '视频';
     // 彻底移除 Semantics(container: true)，因为它会强行抓取内部高速变换的进度条和 YOLO 框，导致 AXTree 崩溃
     return ExcludeSemantics(
       child: ClipRRect(
@@ -70,7 +71,9 @@ class DetectionMediaViewer extends StatelessWidget {
                   children: [
                     if (showFavoriteButton) ...[
                       IconButton.filledTonal(
-                        tooltip: isFavorite ? '取消收藏照片' : '收藏照片',
+                        tooltip: isFavorite
+                            ? '取消收藏$favoriteLabel'
+                            : '收藏$favoriteLabel',
                         icon: Icon(
                           isFavorite
                               ? Icons.star_rounded

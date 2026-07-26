@@ -26,6 +26,8 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  void NotifyDuplicateLaunch();
+
   // The project to run.
   flutter::DartProject project_;
 
@@ -36,6 +38,8 @@ class FlutterWindow : public Win32Window {
       dialogs_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       windows_shell_channel_;
+  bool dart_ready_ = false;
+  bool duplicate_launch_pending_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

@@ -5,6 +5,8 @@ class ValidationExportResult {
     required this.exportedCount,
     this.favoriteOutputDir,
     this.favoriteExportedCount = 0,
+    this.deletedEmptyPhotoCount = 0,
+    this.emptyPhotoDeleteFailedCount = 0,
   });
 
   factory ValidationExportResult.fromJson(Map<String, dynamic> json) {
@@ -14,6 +16,9 @@ class ValidationExportResult {
       exportedCount: json['exported_count'] as int? ?? 0,
       favoriteOutputDir: json['favorite_output_dir'] as String?,
       favoriteExportedCount: json['favorite_exported_count'] as int? ?? 0,
+      deletedEmptyPhotoCount: json['deleted_empty_photo_count'] as int? ?? 0,
+      emptyPhotoDeleteFailedCount:
+          json['empty_photo_delete_failed_count'] as int? ?? 0,
     );
   }
 
@@ -22,4 +27,6 @@ class ValidationExportResult {
   final int exportedCount;
   final String? favoriteOutputDir;
   final int favoriteExportedCount;
+  final int deletedEmptyPhotoCount;
+  final int emptyPhotoDeleteFailedCount;
 }

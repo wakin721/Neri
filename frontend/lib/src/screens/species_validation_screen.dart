@@ -42,6 +42,9 @@ typedef RedetectValidationItems =
 const favoritePhotoExportAsk = 'ask';
 const favoritePhotoExportAlways = 'export';
 const favoritePhotoExportNever = 'skip';
+const emptyPhotoDeleteAsk = 'ask';
+const emptyPhotoDeleteAlways = 'delete';
+const emptyPhotoDeleteNever = 'keep';
 
 const validationExportColumns = <String>[
   '文件名',
@@ -125,6 +128,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.exportColumns,
     required this.favoritePhotoPaths,
     required this.favoritePhotoExportMode,
+    required this.emptyPhotoDeleteMode,
     required this.onRefresh,
     required this.onLoadMetadata,
     required this.onOpenExternal,
@@ -135,6 +139,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onRedetectItems,
     required this.onFavoritePhotoPathsChanged,
     required this.onFavoritePhotoExportModeChanged,
+    required this.onEmptyPhotoDeleteModeChanged,
     required this.onAutoGroupInferredBurstSizeChanged,
     super.key,
   });
@@ -161,6 +166,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final List<String> exportColumns;
   final List<String> favoritePhotoPaths;
   final String favoritePhotoExportMode;
+  final String emptyPhotoDeleteMode;
   final Future<void> Function() onRefresh;
   final Future<void> Function(DetectionItem item) onLoadMetadata;
   final void Function(String path) onOpenExternal;
@@ -171,6 +177,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final RedetectValidationItems onRedetectItems;
   final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
   final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
+  final Future<void> Function(String mode) onEmptyPhotoDeleteModeChanged;
   final ValueChanged<int?> onAutoGroupInferredBurstSizeChanged;
 
   @override
@@ -315,6 +322,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       favoritePhotoExportAlways => favoritePhotoExportAlways,
       favoritePhotoExportNever => favoritePhotoExportNever,
       _ => favoritePhotoExportAsk,
+    };
+  }
+
+  String get _emptyPhotoDeleteMode {
+    return switch (widget.emptyPhotoDeleteMode) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
     };
   }
 
@@ -812,7 +827,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
         isFavorite: _isFavoritePhoto(item),
-        onToggleFavorite: _isImage(item)
+        onToggleFavorite: _isImage(item) || _isVideo(item)
             ? () => unawaited(_toggleFavoritePhoto(item))
             : null,
       ),
@@ -1332,12 +1347,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isFavoritePhoto(DetectionItem item) {
-    return _isImage(item) &&
+    return (_isImage(item) || _isVideo(item)) &&
         widget.favoritePhotoPaths.any((path) => path.trim() == item.path);
   }
 
   Future<void> _toggleFavoritePhoto(DetectionItem item) async {
-    if (!_isImage(item)) return;
+    if (!_isImage(item) && !_isVideo(item)) return;
 
     final favorites = <String>[];
     final seen = <String>{};
@@ -1355,7 +1370,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     try {
       await widget.onFavoritePhotoPathsChanged(favorites);
       if (!mounted) return;
-      _showSnackBar(isFavorite ? '已取消收藏照片' : '已收藏照片');
+      final mediaLabel = _isVideo(item) ? '视频' : '照片';
+      _showSnackBar(isFavorite ? '已取消收藏$mediaLabel' : '已收藏$mediaLabel');
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('更新收藏失败：$error');
@@ -3075,7 +3091,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     Future.delayed(const Duration(seconds: 4), controller.close);
   }
 
-  List<DetectionItem> _favoriteImageItemsForExport() {
+  List<DetectionItem> _favoriteMediaItemsForExport() {
     final favoritePaths = widget.favoritePhotoPaths
         .map((path) => path.trim())
         .where((path) => path.isNotEmpty)
@@ -3085,7 +3101,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final seen = <String>{};
     return [
       for (final item in widget.items)
-        if (_isImage(item) &&
+        if ((_isImage(item) || _isVideo(item)) &&
             favoritePaths.contains(item.path) &&
             seen.add(item.path))
           item,
@@ -3093,14 +3109,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   Future<bool?> _resolveFavoritePhotoExport() async {
-    final favoriteItems = _favoriteImageItemsForExport();
+    final favoriteItems = _favoriteMediaItemsForExport();
     if (favoriteItems.isEmpty) return false;
 
     final mode = _favoritePhotoExportMode;
     if (mode == favoritePhotoExportAlways) return true;
     if (mode == favoritePhotoExportNever) return false;
 
-    final choice = await _showFavoritePhotoExportDialog(favoriteItems.length);
+    final choice = await _showFavoritePhotoExportDialog(favoriteItems);
     if (choice == null) return null;
     if (choice.remember) {
       final nextMode = choice.exportPhotos
@@ -3116,8 +3132,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   Future<_FavoritePhotoExportChoice?> _showFavoritePhotoExportDialog(
-    int favoriteCount,
+    List<DetectionItem> favoriteItems,
   ) {
+    final photoCount = favoriteItems.where(_isImage).length;
+    final videoCount = favoriteItems.where(_isVideo).length;
+    final countParts = <String>[
+      if (photoCount > 0) '$photoCount 张照片',
+      if (videoCount > 0) '$videoCount 个视频',
+    ];
+    final countLabel = countParts.join('、');
     var remember = false;
     return showDialog<_FavoritePhotoExportChoice>(
       context: context,
@@ -3125,14 +3148,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: const Text('导出收藏照片？'),
+              title: const Text('导出收藏媒体？'),
               content: SizedBox(
                 width: 420,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('当前有 $favoriteCount 张收藏照片。是否在导出表格时同步复制到单独文件夹？'),
+                    Text('当前收藏了 $countLabel。是否在导出表格时同步复制到单独文件夹？'),
                     const SizedBox(height: 12),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
@@ -3176,7 +3199,111 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
   }
 
+  List<DetectionItem> _emptyImageItemsForExport() {
+    final seen = <String>{};
+    return [
+      for (final item in widget.items)
+        if (_isImage(item) &&
+            _isEmptySpeciesLabel(_primarySpeciesAfterConfidenceFilter(item)) &&
+            seen.add(item.path))
+          item,
+    ];
+  }
+
+  bool _isEmptySpeciesLabel(String value) {
+    final normalized = value.trim();
+    return normalized == '空' || normalized.toLowerCase() == 'empty';
+  }
+
+  Future<bool?> _resolveEmptyPhotoDelete() async {
+    final emptyItems = _emptyImageItemsForExport();
+    if (emptyItems.isEmpty) return false;
+
+    final mode = _emptyPhotoDeleteMode;
+    if (mode == emptyPhotoDeleteAlways) return true;
+    if (mode == emptyPhotoDeleteNever) return false;
+
+    final choice = await _showEmptyPhotoDeleteDialog(emptyItems.length);
+    if (choice == null) return null;
+    if (choice.remember) {
+      final nextMode = choice.deletePhotos
+          ? emptyPhotoDeleteAlways
+          : emptyPhotoDeleteNever;
+      try {
+        await widget.onEmptyPhotoDeleteModeChanged(nextMode);
+      } catch (error) {
+        if (mounted) _showSnackBar('保存删除偏好失败：$error');
+      }
+    }
+    return choice.deletePhotos;
+  }
+
+  Future<_EmptyPhotoDeleteChoice?> _showEmptyPhotoDeleteDialog(
+    int emptyPhotoCount,
+  ) {
+    var remember = false;
+    return showDialog<_EmptyPhotoDeleteChoice>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('删除空照片？'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '当前有 $emptyPhotoCount 张空照片。是否在导出表格成功后删除这些源照片？此操作无法撤销。',
+                    ),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: remember,
+                      onChanged: (value) =>
+                          setDialogState(() => remember = value ?? false),
+                      title: const Text('不再询问'),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _EmptyPhotoDeleteChoice(
+                      deletePhotos: false,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('不删除'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _EmptyPhotoDeleteChoice(
+                      deletePhotos: true,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('删除'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _exportData() async {
+    final deleteEmptyPhotos = await _resolveEmptyPhotoDelete();
+    if (deleteEmptyPhotos == null) return;
     final exportFavoritePhotos = await _resolveFavoritePhotoExport();
     if (exportFavoritePhotos == null) return;
 
@@ -3187,7 +3314,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       );
       confidenceSettings.putIfAbsent(_globalSpecies, () => 0.25);
       final favoritePhotoPaths = exportFavoritePhotos
-          ? _favoriteImageItemsForExport().map((item) => item.path).toList()
+          ? _favoriteMediaItemsForExport().map((item) => item.path).toList()
+          : const <String>[];
+      final emptyPhotoPaths = deleteEmptyPhotos
+          ? _emptyImageItemsForExport().map((item) => item.path).toList()
           : const <String>[];
       final result = await widget.apiClient.exportValidationData(
         inputPath: widget.inputPath,
@@ -3199,15 +3329,32 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         minFrameRatio: _minFrameRatio,
         exportFavoritePhotos: exportFavoritePhotos,
         favoritePhotoPaths: favoritePhotoPaths,
+        deleteEmptyPhotos: deleteEmptyPhotos,
+        emptyPhotoPaths: emptyPhotoPaths,
       );
       if (!mounted) return;
       final favoriteMessage =
           result.favoriteExportedCount > 0 &&
               (result.favoriteOutputDir?.isNotEmpty ?? false)
-          ? '\n已同步导出 ${result.favoriteExportedCount} 张收藏照片到 ${result.favoriteOutputDir}'
+          ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
           : '';
+      final deleteMessage = result.deletedEmptyPhotoCount > 0
+          ? '\n已删除 ${result.deletedEmptyPhotoCount} 张空照片'
+          : '';
+      final deleteFailedMessage = result.emptyPhotoDeleteFailedCount > 0
+          ? '\n${result.emptyPhotoDeleteFailedCount} 张空照片删除失败'
+          : '';
+      if (result.deletedEmptyPhotoCount > 0) {
+        try {
+          await widget.onRefresh();
+        } catch (_) {
+          // 目录监听和下次进入页面仍会重新扫描，导出结果不受刷新失败影响。
+        }
+      }
+      if (!mounted) return;
       _showSnackBar(
-        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}$favoriteMessage',
+        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}'
+        '$favoriteMessage$deleteMessage$deleteFailedMessage',
         actionLabel: '打开',
         onAction: () => widget.onOpenExternal(result.outputPath),
       );
@@ -3693,6 +3840,16 @@ class _FavoritePhotoExportChoice {
   });
 
   final bool exportPhotos;
+  final bool remember;
+}
+
+class _EmptyPhotoDeleteChoice {
+  const _EmptyPhotoDeleteChoice({
+    required this.deletePhotos,
+    required this.remember,
+  });
+
+  final bool deletePhotos;
   final bool remember;
 }
 

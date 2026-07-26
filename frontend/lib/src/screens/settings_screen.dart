@@ -84,6 +84,9 @@ const _xpuEnabled = false;
 const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
+const _emptyPhotoDeleteAsk = 'ask';
+const _emptyPhotoDeleteAlways = 'delete';
+const _emptyPhotoDeleteNever = 'keep';
 const _detectionConfidencePriority = 'detection';
 const _classificationConfidencePriority = 'classification';
 const _updateMirrorsKey = 'update_mirrors';
@@ -288,6 +291,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const <String>[],
       ),
       'favorite_photo_export_mode': _favoritePhotoExportModeSetting(saved),
+      'empty_photo_delete_mode': _emptyPhotoDeleteModeSetting(saved),
       'selected_species_names': _stringListSetting(
         saved,
         'selected_species_names',
@@ -1788,6 +1792,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _buildExportColumns(showDivider: true),
           _buildFavoritePhotoExportMode(showDivider: true),
+          _buildEmptyPhotoDeleteMode(showDivider: true),
           _buildCloseBehaviorSettings(),
         ],
       ),
@@ -2035,12 +2040,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildExportSettings() {
     return SectionCard(
       title: '导出设置',
-      subtitle: '自定义导出表格中的列和收藏照片同步策略',
+      subtitle: '自定义导出表格、收藏媒体同步和空照片删除策略',
       icon: Icons.table_chart_rounded,
       child: Column(
         children: [
           _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(),
+          _buildFavoritePhotoExportMode(showDivider: true),
+          _buildEmptyPhotoDeleteMode(),
         ],
       ),
     );
@@ -2657,8 +2663,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildFavoritePhotoExportMode({bool showDivider = false}) {
     return _SettingsPanel(
-      title: '同步导出收藏照片',
-      subtitle: '导出校验表格时，选择是否把收藏照片复制到单独文件夹。',
+      title: '同步导出收藏媒体',
+      subtitle: '导出校验表格时，选择是否把收藏的照片和视频复制到单独文件夹。',
       icon: Icons.star_rounded,
       showDivider: showDivider,
       child: _SettingsMenuButton<String>(
@@ -2678,6 +2684,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         onChanged: (value) => _set('favorite_photo_export_mode', value),
+      ),
+    );
+  }
+
+  Widget _buildEmptyPhotoDeleteMode({bool showDivider = false}) {
+    return _SettingsPanel(
+      title: '导出后删除空照片',
+      subtitle: '导出校验表格成功后，选择是否删除本次结果中标记为空的照片。',
+      icon: Icons.delete_sweep_rounded,
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: _emptyPhotoDeleteMode(),
+        options: const [
+          _SettingsOption<String>(value: _emptyPhotoDeleteAsk, label: '询问'),
+          _SettingsOption<String>(value: _emptyPhotoDeleteNever, label: '不删除'),
+          _SettingsOption<String>(value: _emptyPhotoDeleteAlways, label: '删除'),
+        ],
+        onChanged: (value) => _set('empty_photo_delete_mode', value),
       ),
     );
   }
@@ -3200,6 +3224,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _favoritePhotoExportAlways => _favoritePhotoExportAlways,
       _favoritePhotoExportNever => _favoritePhotoExportNever,
       _ => _favoritePhotoExportAsk,
+    };
+  }
+
+  String _emptyPhotoDeleteMode() {
+    return _emptyPhotoDeleteModeSetting(_draft);
+  }
+
+  String _emptyPhotoDeleteModeSetting(Map<String, dynamic> values) {
+    final value = _stringSetting(
+      values,
+      'empty_photo_delete_mode',
+      _emptyPhotoDeleteAsk,
+    );
+    return switch (value) {
+      _emptyPhotoDeleteAlways => _emptyPhotoDeleteAlways,
+      _emptyPhotoDeleteNever => _emptyPhotoDeleteNever,
+      _ => _emptyPhotoDeleteAsk,
     };
   }
 
