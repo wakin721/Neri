@@ -45,6 +45,121 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+_BATCH_LOG_RETENTION = 5
+_BATCH_LOGGER_NAMES = (__name__, "system.image_processor")
+
+
+class _BatchLogSession:
+    def __init__(
+        self,
+        path: Path,
+        handler: logging.FileHandler,
+        logger_levels: list[tuple[logging.Logger, int]],
+    ) -> None:
+        self.path = path
+        self._handler = handler
+        self._logger_levels = logger_levels
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for target_logger, previous_level in self._logger_levels:
+            try:
+                target_logger.removeHandler(self._handler)
+                target_logger.setLevel(previous_level)
+            except Exception:
+                pass
+        try:
+            self._handler.flush()
+        except Exception:
+            pass
+        try:
+            self._handler.close()
+        except Exception:
+            pass
+
+
+def batch_log_directory() -> Path:
+    return Path(__file__).resolve().parents[2] / "logs" / "batch"
+
+
+def _start_batch_log_session(
+    job_id: str,
+    *,
+    log_dir: Path | None = None,
+    retention: int = _BATCH_LOG_RETENTION,
+) -> _BatchLogSession | None:
+    target_dir = log_dir or batch_log_directory()
+    handler: logging.FileHandler | None = None
+    logger_levels: list[tuple[logging.Logger, int]] = []
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_job_id = re.sub(r"[^A-Za-z0-9_-]+", "_", job_id)[:32] or "unknown"
+        log_path = target_dir / f"batch_{timestamp}_{safe_job_id}.log"
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d %(levelname)s "
+                "[%(threadName)s] %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+
+        for logger_name in _BATCH_LOGGER_NAMES:
+            target_logger = logging.getLogger(logger_name)
+            logger_levels.append((target_logger, target_logger.level))
+            target_logger.setLevel(logging.INFO)
+            target_logger.addHandler(handler)
+
+        session = _BatchLogSession(log_path, handler, logger_levels)
+        _prune_batch_logs(
+            target_dir,
+            protected_path=log_path,
+            retention=max(1, int(retention)),
+        )
+        return session
+    except Exception as exc:  # noqa: BLE001 - logging must never block a job
+        if handler is not None:
+            for target_logger, previous_level in logger_levels:
+                try:
+                    target_logger.removeHandler(handler)
+                    target_logger.setLevel(previous_level)
+                except Exception:
+                    pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+        logger.warning("Failed to start batch log: %s", exc)
+        return None
+
+
+def _prune_batch_logs(
+    log_dir: Path,
+    *,
+    protected_path: Path,
+    retention: int,
+) -> None:
+    candidates: list[tuple[int, Path]] = []
+    for path in log_dir.glob("batch_*.log"):
+        if path == protected_path:
+            continue
+        try:
+            candidates.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            continue
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    previous_log_limit = max(0, retention - 1)
+    for _, old_log in candidates[previous_log_limit:]:
+        try:
+            old_log.unlink()
+        except OSError as exc:
+            logger.warning("Failed to remove old batch log %s: %s", old_log, exc)
+
 
 class JobNotFoundError(KeyError):
     """Raised when a requested job id is not present in memory."""
@@ -526,12 +641,44 @@ class ProcessingJobManager:
             if job_id in self._deleted_jobs:
                 return
             self._active_job_ids.add(job_id)
+        batch_log_session = _start_batch_log_session(job_id)
         detector = None
         try:
+            logger.info(
+                "Batch job started: job_id=%s input=%s output=%s resumed=%d options=%s",
+                job_id,
+                _request_input_label(request),
+                request.output_dir or "",
+                len(initial_results or []),
+                json.dumps(
+                    request.options.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, initial_results)
                 return
             input_path, files = _resolve_job_inputs(request)
+            image_count = sum(
+                path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                for path in files
+            )
+            video_count = sum(
+                path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+                for path in files
+            )
+            logger.info(
+                (
+                    "Batch inputs resolved: job_id=%s root=%s total=%d "
+                    "images=%d videos=%d"
+                ),
+                job_id,
+                input_path,
+                len(files),
+                image_count,
+                video_count,
+            )
             file_keys = {_path_key(path) for path in files}
             results = [
                 item.model_copy(deep=True)
@@ -622,6 +769,11 @@ class ProcessingJobManager:
                 detector = _load_detector(
                     request.options.model_path,
                     request.options.classification_model_path,
+                )
+                logger.info(
+                    "Batch detector ready: detection_model=%s classification_model=%s",
+                    request.options.model_path or "",
+                    request.options.classification_model_path or "",
                 )
 
             if detector is None:
@@ -987,7 +1139,15 @@ class ProcessingJobManager:
                 **progress_metrics(total_files),
                 message=message,
             )
+            logger.info(
+                "Batch job completed: job_id=%s processed=%d exported=%s elapsed=%.3fs",
+                job_id,
+                total_files,
+                exported_path or "",
+                time.monotonic() - job_started_at,
+            )
         except Exception as exc:  # noqa: BLE001 - converted to an API-visible job failure
+            logger.exception("Batch job failed: job_id=%s error=%s", job_id, exc)
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id)
             else:
@@ -998,9 +1158,26 @@ class ProcessingJobManager:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
                 except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
                     logger.warning("Detector cleanup failed: %s", exc)
+            final_job: JobSummary | None = None
             with self._lock:
                 self._active_job_ids.discard(job_id)
+                final_job = self._jobs.get(job_id)
                 self._save_state_unlocked()
+            if final_job is not None:
+                logger.info(
+                    (
+                        "Batch job closed: job_id=%s state=%s "
+                        "processed=%d/%d elapsed=%.3fs"
+                    ),
+                    job_id,
+                    final_job.state.value,
+                    final_job.processed,
+                    final_job.total,
+                    final_job.elapsed_seconds,
+                )
+            if batch_log_session is not None:
+                logger.info("Batch log saved: %s", batch_log_session.path)
+                batch_log_session.close()
 
 
 def _request_input_label(request: CreateJobRequest) -> str:
@@ -2004,6 +2181,9 @@ def _detect_video_fast_batch(
     input_path: Path,
     cancelled=None,
 ) -> list[DetectionItem]:
+    import tempfile
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="neri_video_frames_"))
     result_items: list[DetectionItem | None] = [None for _ in items]
     video_infos: list[dict[str, Any] | None] = [None for _ in items]
 
@@ -2031,8 +2211,6 @@ def _detect_video_fast_batch(
         sample_worker_elapsed = 0.0
         latest_sample_finished_at = sample_started
         frame_batch_size = max(1, int(request.options.batch_size or 1))
-        max_pending_frame_bytes = 128 * 1024 * 1024
-        pending_frame_bytes = 0
         selected_class_ids = _selected_inference_class_ids(
             detector,
             request.options.selected_species_names,
@@ -2045,6 +2223,7 @@ def _detect_video_fast_batch(
             started = time.perf_counter()
             info = _sample_fast_video_frames(
                 paths[video_index],
+                temp_dir / f"video_{video_index}",
                 sample_count,
                 frame_stride=frame_stride,
                 cancelled=cancelled,
@@ -2063,16 +2242,17 @@ def _detect_video_fast_batch(
                 return
 
             _raise_if_cancelled(cancelled)
-            frames = [record.pop("frame") for record in frame_batch]
+            frame_paths = [str(record["path"]) for record in frame_batch]
             preload_started = time.perf_counter()
-            preloaded_data = _preload_fast_video_frames(detector, frames)
+            preloaded_data = (
+                detector.preload_batch_data(frame_paths)
+                if hasattr(detector, "preload_batch_data")
+                else None
+            )
             preload_elapsed += time.perf_counter() - preload_started
             inference_started = time.perf_counter()
             detections = detector.detect_batch_species(
-                [
-                    str(paths[record["video_index"]])
-                    for record in frame_batch
-                ],
+                frame_paths,
                 conf=request.options.confidence,
                 iou=request.options.iou,
                 use_fp16=request.options.use_fp16,
@@ -2103,49 +2283,30 @@ def _detect_video_fast_batch(
             )
 
         def flush_full_frame_batches() -> None:
-            nonlocal pending_frame_bytes
-            while pending_frame_records and (
-                len(pending_frame_records) >= frame_batch_size
-                or pending_frame_bytes >= max_pending_frame_bytes
-            ):
-                take_count = min(frame_batch_size, len(pending_frame_records))
-                if len(pending_frame_records) < frame_batch_size:
-                    batch_bytes = 0
-                    take_count = 0
-                    for record in pending_frame_records:
-                        batch_bytes += int(record["frame_bytes"])
-                        take_count += 1
-                        if batch_bytes >= max_pending_frame_bytes:
-                            break
-                frame_batch = pending_frame_records[:take_count]
-                del pending_frame_records[:take_count]
-                pending_frame_bytes -= sum(
-                    int(record["frame_bytes"]) for record in frame_batch
-                )
+            while len(pending_frame_records) >= frame_batch_size:
+                frame_batch = pending_frame_records[:frame_batch_size]
+                del pending_frame_records[:frame_batch_size]
                 infer_frame_batch(frame_batch)
 
         def accept_sample_result(
             video_index: int,
             info: dict[str, Any],
         ) -> None:
-            nonlocal frame_count, pending_frame_bytes
+            nonlocal frame_count
             video_infos[video_index] = info
-            frames = info.pop("frames", [])
-            for frame_order, (frame, frame_index) in enumerate(
-                zip(frames, info["frame_points"])
+            frame_paths = info.pop("frame_paths", [])
+            for frame_order, (frame_path, frame_index) in enumerate(
+                zip(frame_paths, info["frame_points"])
             ):
-                frame_bytes = max(0, int(getattr(frame, "nbytes", 0) or 0))
                 pending_frame_records.append(
                     {
                         "video_index": video_index,
                         "frame_order": frame_order,
                         "frame_index": frame_index,
-                        "frame": frame,
-                        "frame_bytes": frame_bytes,
+                        "path": frame_path,
                     }
                 )
                 frame_count += 1
-                pending_frame_bytes += frame_bytes
             flush_full_frame_batches()
 
         sample_workers = _fast_video_sample_worker_count(
@@ -2268,39 +2429,8 @@ def _detect_video_fast_batch(
             item.model_copy(update={"error": f"视频批量快速检测失败: {exc}"})
             for item in items
         ]
-
-
-def _preload_fast_video_frames(
-    detector,
-    frames: list[Any],
-) -> tuple[list[int], list[Any], list[Any]]:
-    import cv2
-    import numpy as np
-
-    processed_frames: list[Any] = []
-    original_frames_rgb: list[Any] = []
-    valid_indices: list[int] = []
-    preprocess = getattr(detector, "_preprocess_image", None)
-    needs_rgb_crops = (
-        getattr(detector, "model", None) is not None
-        and getattr(detector, "cls_model", None) is not None
-    )
-
-    for index, frame in enumerate(frames):
-        if frame is None:
-            continue
-        processed = preprocess(frame) if callable(preprocess) else frame
-        if processed is None:
-            continue
-        processed = np.ascontiguousarray(processed)
-        valid_indices.append(index)
-        processed_frames.append(processed)
-        original_frames_rgb.append(
-            cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-            if needs_rgb_crops
-            else None
-        )
-    return valid_indices, processed_frames, original_frames_rgb
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _raise_if_cancelled(cancelled) -> None:
@@ -2310,13 +2440,15 @@ def _raise_if_cancelled(cancelled) -> None:
 
 def _sample_fast_video_frames(
     path: Path,
+    temp_dir: Path,
     sample_count: int,
     frame_stride: int | None = None,
     cancelled=None,
 ) -> dict[str, Any]:
     import cv2
 
-    frames: list[Any] = []
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths: list[Path] = []
     frame_points: list[int] = []
     cap = cv2.VideoCapture(str(path))
     try:
@@ -2330,10 +2462,10 @@ def _sample_fast_video_frames(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         def save_frame(frame, frame_index: int) -> None:
-            if frame is None:
-                return
-            frames.append(frame)
-            frame_points.append(frame_index)
+            frame_path = temp_dir / f"frame_{len(frame_paths)}.jpg"
+            if cv2.imwrite(str(frame_path), frame):
+                frame_paths.append(frame_path)
+                frame_points.append(frame_index)
 
         if frame_stride is not None:
             stride = max(1, int(frame_stride))
@@ -2369,11 +2501,11 @@ def _sample_fast_video_frames(
                 if total_frames > 0
                 else [0]
             )
-            # A short forward pass is cheaper than reopening the codec's
-            # keyframe chain. Keep the threshold deliberately small: with only
-            # a few samples, scanning hundreds of frames keeps the GPU idle.
+            # For short videos, one forward pass is more predictable than
+            # repeatedly reopening the codec's keyframe chain. Some camera
+            # codecs can block for a long time on random frame seeks.
             use_sequential_sampling = (
-                len(points) > 1 and points[-1] <= len(points) * 60
+                len(points) > 1 and points[-1] <= len(points) * 300
             )
             if use_sequential_sampling:
                 point_index = 0
@@ -2398,11 +2530,11 @@ def _sample_fast_video_frames(
                     if ok:
                         save_frame(frame, point)
 
-        if not frames:
+        if not frame_paths:
             raise RuntimeError("无法从视频中提取有效帧")
 
         return {
-            "frames": frames,
+            "frame_paths": frame_paths,
             "frame_points": frame_points,
             "width": width,
             "height": height,
