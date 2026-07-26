@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - Neri-for-md3-project
+      - dev
     tags:
       - "v*"
 
