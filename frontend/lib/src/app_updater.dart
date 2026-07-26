@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 typedef UpdateDownloadProgressCallback =
     void Function(UpdateDownloadProgress progress);
 
@@ -349,6 +351,7 @@ class AppUpdater {
     if (!await update.archive.exists()) {
       throw StateError('下载的更新包不存在：${update.archive.path}');
     }
+    final powershellExecutable = _resolveWindowsPowerShellExecutable();
     final script = File(
       _joinPath(
         Directory.systemTemp.path,
@@ -392,7 +395,7 @@ class AppUpdater {
       arguments.addAll(<String>['-ReadyPath', readyFile.path]);
 
       final process = await Process.start(
-        'powershell.exe',
+        powershellExecutable,
         arguments,
         workingDirectory: installDirectory.path,
         mode: ProcessStartMode.normal,
@@ -654,18 +657,12 @@ class AppUpdater {
 
   Future<void> _verifyDigestIfAvailable(File file, String? expected) async {
     if (expected == null || expected.isEmpty) return;
-    final result = await Process.run('powershell.exe', <String>[
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      r'& { param([string]$Path) (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }',
-      file.path,
-    ]).timeout(const Duration(minutes: 3));
-    if (result.exitCode != 0) {
-      throw StateError('无法校验更新包：${result.stderr}');
-    }
-    final actual = result.stdout.toString().trim().toLowerCase();
+    final actual = (await sha256
+            .bind(file.openRead())
+            .first
+            .timeout(const Duration(minutes: 3)))
+        .toString()
+        .toLowerCase();
     if (actual != expected.toLowerCase()) {
       throw StateError('更新包 SHA-256 校验失败');
     }
@@ -894,6 +891,40 @@ Future<bool> _waitForFile(File file, Duration timeout) async {
 
 String _joinPath(String first, String second) =>
     '$first${Platform.pathSeparator}$second';
+
+String _resolveWindowsPowerShellExecutable() {
+  final environment = Platform.environment;
+  final windowsRoots = <String>{
+    environment['SystemRoot']?.trim() ?? '',
+    environment['WINDIR']?.trim() ?? '',
+    r'C:\Windows',
+  }..removeWhere((value) => value.isEmpty);
+  final candidates = <File>[
+    for (final root in windowsRoots)
+      for (final relativePath in const <String>[
+        r'Sysnative\WindowsPowerShell\v1.0\powershell.exe',
+        r'System32\WindowsPowerShell\v1.0\powershell.exe',
+      ])
+        File('${root.replaceFirst(RegExp(r'[\\/]+$'), '')}\\$relativePath'),
+    for (final programFiles in <String?>[
+      environment['ProgramW6432'],
+      environment['ProgramFiles'],
+      environment['ProgramFiles(x86)'],
+    ])
+      if (programFiles != null && programFiles.trim().isNotEmpty)
+        File(
+          '${programFiles.trim().replaceFirst(RegExp(r'[\\/]+$'), '')}'
+          r'\PowerShell\7\pwsh.exe',
+        ),
+  ];
+  for (final candidate in candidates) {
+    if (candidate.existsSync()) return candidate.absolute.path;
+  }
+  throw StateError(
+    '找不到 Windows PowerShell，无法启动自动更新安装程序。'
+    r'请确认 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe 存在。',
+  );
+}
 
 const _windowsUpdaterScript = r'''param(
     [Parameter(Mandatory = $true)][int]$ParentProcessId,

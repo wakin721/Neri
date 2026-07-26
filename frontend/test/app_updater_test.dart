@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:neri_flutter/src/app_updater.dart';
 
@@ -98,7 +99,7 @@ void main() {
 
   group('resumable update downloads', () {
     test(
-      'keeps a partial file and resumes it with an HTTP range request',
+      'resumes a partial file and verifies SHA-256 without PowerShell',
       () async {
         final payload = List<int>.generate(32 * 1024, (index) => index % 251);
         final cutoff = 7000;
@@ -146,6 +147,7 @@ void main() {
               'http://${server.address.address}:${server.port}/Neri-test.zip',
             ),
             sizeBytes: payload.length,
+            sha256: sha256.convert(payload).toString(),
           ),
         );
         DownloadedAppUpdate? downloaded;

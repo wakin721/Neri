@@ -54,6 +54,34 @@ PACKAGE_SOURCE_CACHE_SECONDS = 30 * 60
 HARDWARE_PROBE_TIMEOUT_SECONDS = 8
 NVIDIA_SMI_TIMEOUT_SECONDS = 3
 HARDWARE_STATUS_CACHE_SECONDS = 60
+PIP_NETWORK_TIMEOUT_SECONDS = 60
+PIP_NETWORK_RETRIES = 8
+WINDOWS_LEGACY_DIRECTORY_PATH_LIMIT = 247
+
+_PYTORCH_LONG_PATH_PROBE = Path(
+    "toolkit",
+    "Lib",
+    "site-packages",
+    "torch-2.13.0+cpu.dist-info",
+    "licenses",
+    "third_party",
+    "kineto",
+    "libkineto",
+    "third_party",
+    "dynolog",
+    "third_party",
+    "prometheus-cpp",
+    "3rdparty",
+    "civetweb",
+    "src",
+    "third_party",
+    "duktape-1.5.2",
+)
+_PYTORCH_PACKAGE_ARTIFACTS = {
+    "torch": ("torch", "functorch", "torchgen"),
+    "torchvision": ("torchvision", "torchvision.libs"),
+    "torchaudio": ("torchaudio", "torchaudio.lib", "torchaudio.libs"),
+}
 
 _package_source_cache: tuple[float, str] | None = None
 _package_source_cache_lock = threading.Lock()
@@ -97,6 +125,12 @@ def maintenance_pip_cache_dir() -> Path:
     """Return the app-owned pip cache used only during environment maintenance."""
 
     return project_root() / "temp" / "maintenance_pip_cache"
+
+
+def toolkit_site_packages_dir() -> Path:
+    """Return the embedded Python environment's site-packages directory."""
+
+    return toolkit_python().parent / "Lib" / "site-packages"
 
 
 def read_maintenance_status() -> dict[str, Any]:
@@ -611,6 +645,8 @@ def _run_pytorch_install(
     progress_end: int = 90,
 ) -> None:
     python_exe = toolkit_python()
+    _ensure_pytorch_install_path_supported()
+    _repair_broken_pytorch_installations()
     plan = resolve_pytorch_install_plan(env_choice)
     actual_env = str(plan["actual_env"])
     index_url = str(plan["index_url"])
@@ -638,6 +674,10 @@ def _run_pytorch_install(
         "install",
         "--progress-bar",
         "raw",
+        "--timeout",
+        str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "--retries",
+        str(PIP_NETWORK_RETRIES),
         "--cache-dir",
         str(maintenance_pip_cache_dir()),
         "torch",
@@ -672,6 +712,92 @@ def _run_pytorch_install(
     )
 
 
+def _ensure_pytorch_install_path_supported() -> None:
+    """Reject legacy Windows paths that cannot hold PyTorch's package metadata."""
+
+    if os.name != "nt" or _windows_long_paths_enabled():
+        return
+    projected_path = project_root() / _PYTORCH_LONG_PATH_PROBE
+    if len(str(projected_path)) <= WINDOWS_LEGACY_DIRECTORY_PATH_LIMIT:
+        return
+    raise RuntimeError(
+        "当前 Neri 安装路径过长，Windows 无法写入 PyTorch 文件。"
+        "请将整个 Neri 文件夹移动或重新解压到 C:\\Neri、D:\\Neri 等短路径后重试；"
+        "移动后无需重新下载安装包。"
+    )
+
+
+def _windows_long_paths_enabled() -> bool:
+    """Return whether Windows has opted in to Win32 long-path support."""
+
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+        return int(value) == 1
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _repair_broken_pytorch_installations() -> list[Path]:
+    """Remove only PyTorch distributions whose pip RECORD file is missing."""
+
+    site_packages = toolkit_site_packages_dir()
+    if not site_packages.is_dir():
+        return []
+    resolved_site_packages = site_packages.resolve()
+    resolved_toolkit = toolkit_python().parent.resolve()
+    try:
+        resolved_site_packages.relative_to(resolved_toolkit)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"拒绝清理 Neri 内嵌 Python 之外的依赖目录: {site_packages}"
+        ) from exc
+
+    removed: list[Path] = []
+    for package_name, artifact_names in _PYTORCH_PACKAGE_ARTIFACTS.items():
+        metadata_dirs = [
+            path
+            for path in site_packages.glob(f"{package_name}-*.dist-info")
+            if path.is_dir()
+        ]
+        artifacts = [
+            site_packages / artifact_name
+            for artifact_name in artifact_names
+            if (site_packages / artifact_name).exists()
+        ]
+        artifacts.extend(metadata_dirs)
+        if not artifacts:
+            continue
+        if metadata_dirs and all(
+            (metadata_dir / "RECORD").is_file() for metadata_dir in metadata_dirs
+        ):
+            continue
+
+        for artifact in dict.fromkeys(artifacts):
+            if artifact.is_symlink() or artifact.is_file():
+                artifact.unlink()
+            elif artifact.exists():
+                shutil.rmtree(artifact)
+            removed.append(artifact)
+
+    if removed:
+        log_path = maintenance_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8", errors="replace") as log:
+            names = ", ".join(path.name for path in removed)
+            log.write(
+                f"[{_utc_now()}] removed incomplete PyTorch artifacts: {names}\n"
+            )
+    return removed
+
+
 def _run_package_reinstall(package_spec: str, package_source: str = "auto") -> None:
     package_spec = _validate_package_spec(package_spec)
     python_exe = toolkit_python()
@@ -684,6 +810,10 @@ def _run_package_reinstall(package_spec: str, package_source: str = "auto") -> N
             "install",
             "--progress-bar",
             "raw",
+            "--timeout",
+            str(PIP_NETWORK_TIMEOUT_SECONDS),
+            "--retries",
+            str(PIP_NETWORK_RETRIES),
             "--cache-dir",
             str(maintenance_pip_cache_dir()),
             "--upgrade",
@@ -739,6 +869,10 @@ def _run_ultralytics_install(
         "install",
         "--progress-bar",
         "raw",
+        "--timeout",
+        str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "--retries",
+        str(PIP_NETWORK_RETRIES),
         "--cache-dir",
         str(maintenance_pip_cache_dir()),
         "--upgrade",
