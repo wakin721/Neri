@@ -200,6 +200,7 @@ def settings() -> SettingsResponse:
     stored_settings = settings_manager.load_settings() or {}
     stored_settings.setdefault("package_source", "auto")
     stored_settings.setdefault("auto_group", True)
+    stored_settings.setdefault("collapse_groups", True)
     stored_settings.setdefault("auto_group_detect_burst", True)
     stored_settings.setdefault("undo_steps", 200)
     quick_mark_settings = settings_manager.load_quick_mark_species() or {}

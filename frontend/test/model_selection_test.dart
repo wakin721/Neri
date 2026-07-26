@@ -4,12 +4,24 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/models/settings.dart';
+import 'package:neri_flutter/src/models/theme_settings.dart';
+import 'package:neri_flutter/src/screens/preview_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 import 'package:neri_flutter/src/utils/detection_species.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 
 void main() {
+  test('默认主题色为调色板中的珊瑚红', () {
+    const settings = ThemeSettings();
+    final coralOption = kSeedColorOptions.singleWhere(
+      (option) => option.label == '珊瑚红',
+    );
+
+    expect(settings.seedColor, kDefaultSeedColor);
+    expect(settings.seedColor, coralOption.color);
+  });
+
   testWidgets('探测模型可以选择不使用', (tester) async {
     final inputController = TextEditingController();
     addTearDown(inputController.dispose);
@@ -80,6 +92,56 @@ void main() {
 
     detectionModelDropdown.onSelected?.call('');
     expect(selectedModelPath, '');
+  });
+
+  testWidgets('仅双模型启用时显示综合置信度', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    const item = DetectionItem(
+      filename: 'missing.jpg',
+      path: 'missing.jpg',
+      fileType: 'jpg',
+      species: <String>['灰雁'],
+      confidence: 0.85,
+    );
+
+    Future<void> pumpPreview({required bool useCombinedConfidence}) {
+      return tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PreviewScreen(
+              inputPath: '.',
+              items: const <DetectionItem>[item],
+              selectedIndex: 0,
+              selectedItem: item,
+              speciesTypes: const <String, String>{},
+              useCombinedConfidence: useCombinedConfidence,
+              showDetections: true,
+              onShowDetectionsChanged: (_) {},
+              selectedSpeciesFilter: previewAllSpeciesLabel,
+              onSpeciesFilterChanged: (_) {},
+              confidenceThreshold: 0.25,
+              onConfidenceThresholdChanged: (_) {},
+              detecting: false,
+              loading: false,
+              onDetectCurrentImage: (_) {},
+              onSelected: (_, __) {},
+              onLoadMetadata: (_) async {},
+              onRefresh: () async {},
+              onOpenExternal: (_) {},
+            ),
+          ),
+        ),
+      );
+    }
+
+    await pumpPreview(useCombinedConfidence: true);
+    expect(find.textContaining('综合置信度: 0.85'), findsOneWidget);
+
+    await pumpPreview(useCombinedConfidence: false);
+    expect(find.textContaining('综合置信度'), findsNothing);
+    expect(find.textContaining('置信度: 0.85'), findsOneWidget);
   });
 
   test('候选物种选项包含纯分类和检测框的 Top2/Top3', () {

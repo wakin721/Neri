@@ -74,7 +74,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-beta5(581d87)',
+  defaultValue: '3.0.5-beta6(4cfd72)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -257,7 +257,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
-      'collapse_groups': _boolSetting(saved, 'collapse_groups', false),
+      'collapse_groups': _boolSetting(saved, 'collapse_groups', true),
       'auto_group_detect_burst': _boolSetting(
         saved,
         'auto_group_detect_burst',
@@ -1107,43 +1107,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          _SettingsPanel(
-            title: '组合置信度策略',
-            subtitle: combinedModelsEnabled
-                ? '设置探测模型与分类模型共同使用时的综合置信度权重'
-                : '同时选择探测模型和分类模型后可用',
-            icon: Icons.balance_rounded,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment<String>(
-                      value: _detectionConfidencePriority,
-                      label: Text('探测置信度优先'),
-                      icon: Icon(Icons.center_focus_strong_rounded),
-                    ),
-                    ButtonSegment<String>(
-                      value: _classificationConfidencePriority,
-                      label: Text('分类置信度优先'),
-                      icon: Icon(Icons.account_tree_rounded),
-                    ),
-                  ],
-                  selected: {confidencePriority},
-                  showSelectedIcon: false,
-                  onSelectionChanged: detectionEnabled && combinedModelsEnabled
-                      ? (values) => _set('confidence_priority', values.first)
-                      : null,
-                ),
-                const SizedBox(height: 8),
-                _MutedText(
-                  confidencePriority == _detectionConfidencePriority
-                      ? '综合置信度：探测 60% + 分类 40%'
-                      : '综合置信度：探测 40% + 分类 60%',
-                ),
-              ],
+          if (combinedModelsEnabled)
+            _SettingsPanel(
+              title: '组合置信度策略',
+              subtitle: '设置探测模型与分类模型共同使用时的综合置信度权重',
+              icon: Icons.balance_rounded,
+              child: _SettingsMenuButton<String>(
+                value: confidencePriority,
+                enabled: detectionEnabled,
+                options: const [
+                  _SettingsOption<String>(
+                    value: _detectionConfidencePriority,
+                    label: '探测置信度优先',
+                  ),
+                  _SettingsOption<String>(
+                    value: _classificationConfidencePriority,
+                    label: '分类置信度优先',
+                  ),
+                ],
+                onChanged: (value) => _set('confidence_priority', value),
+              ),
             ),
-          ),
           _SettingsPanel(
             title: '识别物种设置',
             subtitle: '不选择时默认识别全部物种',

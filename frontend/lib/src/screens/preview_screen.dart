@@ -18,6 +18,7 @@ class PreviewScreen extends StatelessWidget {
     required this.selectedIndex,
     required this.selectedItem,
     required this.speciesTypes,
+    required this.useCombinedConfidence,
     required this.showDetections,
     required this.onShowDetectionsChanged,
     required this.selectedSpeciesFilter,
@@ -39,6 +40,7 @@ class PreviewScreen extends StatelessWidget {
   final int selectedIndex;
   final DetectionItem? selectedItem;
   final Map<String, String> speciesTypes;
+  final bool useCombinedConfidence;
   final bool showDetections;
   final ValueChanged<bool> onShowDetectionsChanged;
   final String selectedSpeciesFilter;
@@ -187,6 +189,7 @@ class PreviewScreen extends StatelessWidget {
           item: item,
           visibleBoxes: visibleBoxes,
           speciesTypes: speciesTypes,
+          useCombinedConfidence: useCombinedConfidence,
         ),
         const SizedBox(height: 10), // 与校验界面保持 10 的间距
         _PreviewDetectionControls(
@@ -318,16 +321,19 @@ class _ImageInfoCard extends StatelessWidget {
     required this.item,
     required this.visibleBoxes,
     required this.speciesTypes,
+    required this.useCombinedConfidence,
   });
 
   final DetectionItem item;
   final List<DetectionBox> visibleBoxes;
   final Map<String, String> speciesTypes;
+  final bool useCombinedConfidence;
 
   @override
   Widget build(BuildContext context) {
     final summary = _summaryFor(item, visibleBoxes);
     final colorScheme = Theme.of(context).colorScheme;
+    final confidenceLabel = useCombinedConfidence ? '综合置信度' : '置信度';
 
     return Card.outlined(
       margin: EdgeInsets.zero,
@@ -350,7 +356,7 @@ class _ImageInfoCard extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  综合置信度: ${summary.confidence}',
+                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(

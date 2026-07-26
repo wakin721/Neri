@@ -3134,6 +3134,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       selectedIndex: selectedIndex,
       selectedItem: selectedItem,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      useCombinedConfidence:
+          _selectedModelPath?.trim().isNotEmpty == true &&
+          _selectedClassificationModelPath?.trim().isNotEmpty == true,
       showDetections: _previewShowDetections,
       onShowDetectionsChanged: (value) =>
           setState(() => _previewShowDetections = value),
@@ -3176,13 +3179,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       loading: _previewLoading,
       refreshVersion: _previewRefreshRequestId,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      useCombinedConfidence:
+          _selectedModelPath?.trim().isNotEmpty == true &&
+          _selectedClassificationModelPath?.trim().isNotEmpty == true,
       minFrameRatio: _doubleSetting(
         settings,
         'min_frame_ratio',
         0.0,
       ).clamp(0.0, 1.0).toDouble(),
       autoGroup: _boolSetting(settings, 'auto_group', true),
-      collapseGroups: _boolSetting(settings, 'collapse_groups', false),
+      collapseGroups: _boolSetting(settings, 'collapse_groups', true),
       autoGroupDetectBurst: _boolSetting(
         settings,
         'auto_group_detect_burst',

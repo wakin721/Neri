@@ -68,7 +68,7 @@ Future<ThemeSettings> _loadThemeSettings() async {
   final themeModeIndex = prefs.getInt(_kThemeModeKey) ?? ThemeMode.system.index;
   final useDynamic = prefs.getBool(_kUseDynamicColorKey) ?? false;
   final seedValue =
-      prefs.getInt(_kSeedColorKey) ?? kSeedColorOptions.first.color.toARGB32();
+      prefs.getInt(_kSeedColorKey) ?? kDefaultSeedColor.toARGB32();
 
   return ThemeSettings(
     themeMode:

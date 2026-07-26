@@ -68,6 +68,8 @@ jobs:
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name neri_flutter .
           Remove-Item "test\widget_test.dart" -Force -ErrorAction SilentlyContinue
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          & (Join-Path $env:GITHUB_WORKSPACE "scripts\configure_windows_product.ps1")
 
           foreach ($file in $customFiles) {
             Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force
@@ -156,6 +158,9 @@ jobs:
           }
           if (-not (Test-Path $productExe)) {
             throw "Neri.exe was not produced by the Flutter build."
+          }
+          if (Test-Path $generatedExe) {
+            throw "The legacy neri_flutter.exe name is still present in the package."
           }
 
           & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, uvicorn"

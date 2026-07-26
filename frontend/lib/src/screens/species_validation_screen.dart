@@ -109,6 +109,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.loading,
     required this.refreshVersion,
     required this.speciesTypes,
+    required this.useCombinedConfidence,
     required this.minFrameRatio,
     required this.autoGroup,
     required this.collapseGroups,
@@ -144,6 +145,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final bool loading;
   final int refreshVersion;
   final Map<String, String> speciesTypes;
+  final bool useCombinedConfidence;
   final double minFrameRatio;
   final bool autoGroup;
   final bool collapseGroups;
@@ -943,6 +945,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   ) {
     final summary = _summaryFor(item, visibleBoxes);
     final colorScheme = Theme.of(context).colorScheme;
+    final confidenceLabel = widget.useCombinedConfidence ? '综合置信度' : '置信度';
 
     return _ValidationPanel(
       child: Padding(
@@ -964,7 +967,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  综合置信度: ${summary.confidence}',
+                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
