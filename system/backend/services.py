@@ -233,7 +233,13 @@ def preview_media_items(
         else []
     )
     detection_index = (
-        _load_detection_index(detection_db_roots, recursive=False) if include_cached else {}
+        _load_detection_index(
+            detection_db_roots,
+            recursive=False,
+            filenames={path.name for path in files},
+        )
+        if include_cached
+        else {}
     )
     validation_index = (
         _load_validation_index(detection_db_roots, recursive=False) if include_cached else {}
@@ -538,6 +544,7 @@ class ProcessingJobManager:
             job_started_at = time.monotonic()
             start_processed = processed
             total_files = len(files)
+            missing_file_keys: set[str] = set()
 
             def progress_metrics(current_processed: int) -> dict[str, object]:
                 elapsed = max(0.0, time.monotonic() - job_started_at)
@@ -550,6 +557,33 @@ class ProcessingJobManager:
                     "speed": speed,
                     "remaining_seconds": remaining_seconds,
                 }
+
+            def existing_paths(paths: Iterable[Path]) -> list[Path]:
+                nonlocal total_files
+                existing: list[Path] = []
+                removed = 0
+                for path in paths:
+                    if path.is_file():
+                        existing.append(path)
+                        continue
+                    key = _path_key(path)
+                    if key in missing_file_keys:
+                        continue
+                    missing_file_keys.add(key)
+                    removed += 1
+                    logger.info("Skipping deleted input file: %s", path)
+                if removed:
+                    total_files = max(processed, total_files - removed)
+                    self._mutate_job(
+                        job_id,
+                        persist=False,
+                        total=total_files,
+                        processed=min(processed, total_files),
+                        results=results,
+                        **progress_metrics(min(processed, total_files)),
+                        message=f"已跳过 {len(missing_file_keys)} 个已删除文件",
+                    )
+                return existing
 
             self._mutate_job(
                 job_id,
@@ -577,7 +611,12 @@ class ProcessingJobManager:
                 else []
             )
             detection_index = (
-                _load_detection_index(detection_db_roots) if request.options.enable_detection else {}
+                _load_detection_index(
+                    detection_db_roots,
+                    filenames={path.name for path in files},
+                )
+                if request.options.enable_detection
+                else {}
             )
             if request.options.enable_detection:
                 detector = _load_detector(
@@ -590,6 +629,8 @@ class ProcessingJobManager:
                     if self._is_cancelled(job_id):
                         self._mark_cancelled(job_id, results)
                         return
+                    if not existing_paths([path]):
+                        continue
                     item = _build_fast_metadata_item(path)
                     results.append(item)
                     processed += 1
@@ -652,12 +693,14 @@ class ProcessingJobManager:
 
                 fill_preload_queue(0)
                 try:
-                    for batch_index, batch in enumerate(image_batches):
+                    for batch_index, original_batch in enumerate(image_batches):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
                         batch_started = time.perf_counter()
                         fill_preload_queue(batch_index)
+                        batch = existing_paths(original_batch)
+                        metadata_paths = list(batch)
                         metadata_started = time.perf_counter()
                         batch_items: list[DetectionItem] = []
                         for path in batch:
@@ -672,6 +715,23 @@ class ProcessingJobManager:
                         preloaded_data = take_preloaded(batch_index)
                         preload_wait_elapsed = time.perf_counter() - preload_wait_started
                         fill_preload_queue(batch_index + 1)
+                        batch = existing_paths(batch)
+                        if batch != original_batch:
+                            # Preloaded indices refer to the original batch.
+                            # Reload the surviving paths so deleted files cannot
+                            # remain processable merely because they were read ahead.
+                            preloaded_data = None
+                            surviving_items = {
+                                path: item
+                                for path, item in zip(metadata_paths, batch_items)
+                            }
+                            batch_items = [
+                                surviving_items[path]
+                                for path in batch
+                                if path in surviving_items
+                            ]
+                        if not batch:
+                            continue
                         detect_started = time.perf_counter()
                         detected_items = _detect_image_batch(
                             detector,
@@ -717,10 +777,13 @@ class ProcessingJobManager:
                         preload_executor.shutdown(wait=False, cancel_futures=True)
 
                 if request.options.video_mode == "fast":
-                    for batch in _chunked(video_files, batch_size):
+                    for original_batch in _chunked(video_files, batch_size):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
+                        batch = existing_paths(original_batch)
+                        if not batch:
+                            continue
                         batch_items: list[DetectionItem] = []
                         for path in batch:
                             item = _build_metadata_item(path)
@@ -755,10 +818,12 @@ class ProcessingJobManager:
                             ),
                         )
                 else:
-                    for path in video_files:
+                    for path in existing_paths(video_files):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
+                        if not existing_paths([path]):
+                            continue
                         item = _build_metadata_item(path)
                         db_detection_data = detection_index.get(path.stem)
                         if db_detection_data:
@@ -788,6 +853,12 @@ class ProcessingJobManager:
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, results)
                 return
+            results = [
+                item
+                for item in results
+                if item.path and Path(item.path).is_file()
+            ]
+            total_files = len(results)
             exported_path = _export_results(request.output_dir, results)
             message = "预扫描完成" if not request.options.enable_detection else "处理完成"
             if exported_path is not None:
@@ -795,6 +866,7 @@ class ProcessingJobManager:
             self._mutate_job(
                 job_id,
                 state=JobState.COMPLETED,
+                total=total_files,
                 processed=total_files,
                 results=results,
                 **progress_metrics(total_files),
@@ -1200,13 +1272,18 @@ def _load_detection_index(
     search_roots: list[Path],
     *,
     recursive: bool = True,
+    filenames: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for db_path in _candidate_detection_dbs_for_roots(search_roots, recursive=recursive):
         try:
             with sqlite3.connect(str(db_path)) as conn:
-                rows = conn.execute("SELECT base_name, detection_json FROM detections").fetchall()
-            for base_name, detection_json in rows:
+                rows = conn.execute(
+                    "SELECT base_name, image_filename, detection_json FROM detections"
+                ).fetchall()
+            for base_name, image_filename, detection_json in rows:
+                if filenames is not None and str(image_filename) not in filenames:
+                    continue
                 if base_name in index:
                     continue
                 data = json.loads(detection_json)
@@ -1241,9 +1318,17 @@ def _load_detection_data_for_path(
     base_name = path.stem
     for db_path in _candidate_detection_dbs(path, search_roots, recursive=recursive):
         try:
-            from system.detection_db import get_detection
-
-            data = get_detection(str(db_path), base_name)
+            with sqlite3.connect(str(db_path)) as conn:
+                row = conn.execute(
+                    (
+                        "SELECT image_filename, detection_json "
+                        "FROM detections WHERE base_name = ?"
+                    ),
+                    (base_name,),
+                ).fetchone()
+            if row is None or str(row[0]) != path.name:
+                continue
+            data = json.loads(row[1])
             if isinstance(data, dict):
                 return data
         except Exception:
@@ -1492,6 +1577,9 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
     validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
     for path, detection_data in detections:
+        if not path.is_file():
+            logger.info("Not saving detection data for deleted file: %s", path)
+            continue
         roots = [path.parent]
         if input_path.is_dir():
             roots.append(input_path)
@@ -1541,6 +1629,17 @@ def _detect_image_batch(
     input_path: Path,
     preloaded_data: Any = None,
 ) -> list[DetectionItem]:
+    surviving_pairs = [
+        (path, item)
+        for path, item in zip(paths, items)
+        if path.is_file()
+    ]
+    if not surviving_pairs:
+        return []
+    if len(surviving_pairs) != len(paths):
+        paths = [path for path, _ in surviving_pairs]
+        items = [item for _, item in surviving_pairs]
+        preloaded_data = None
     try:
         selected_class_ids = _selected_species_class_ids(
             detector,
@@ -2088,7 +2187,11 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
         for root in _unique_existing_dirs([path.parent, *roots]):
             index = detection_indexes.get(root)
             if index is None:
-                index = _load_detection_index([root], recursive=False)
+                index = _load_detection_index(
+                    [root],
+                    recursive=False,
+                    filenames={path.name},
+                )
                 detection_indexes[root] = index
             data = index.get(path.stem)
             if isinstance(data, dict):

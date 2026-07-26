@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/job.dart';
+import '../utils/detection_species.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/selectable_list_card.dart';
@@ -156,20 +157,15 @@ class PreviewScreen extends StatelessWidget {
   }
 
   Widget _buildPreviewDetail(BuildContext context, DetectionItem item) {
-    final filterApplies =
-        item.detectionBoxes.any(
-          (box) => box.species == selectedSpeciesFilter,
-        ) ||
-        item.species.contains(selectedSpeciesFilter);
+    final speciesOptions = detectionSpeciesOptions(
+      item,
+      globalOption: previewAllSpeciesLabel,
+    );
+    final filterApplies = speciesOptions.contains(selectedSpeciesFilter);
     final effectiveSpecies = filterApplies
         ? selectedSpeciesFilter
         : previewAllSpeciesLabel;
     final visibleBoxes = _filteredPreviewBoxes(item, effectiveSpecies);
-    final speciesOptions = <String>{
-      previewAllSpeciesLabel,
-      ...item.species,
-      ...item.detectionBoxes.map((box) => box.species),
-    }.where((species) => species.isNotEmpty).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -213,15 +209,37 @@ class PreviewScreen extends StatelessWidget {
     DetectionItem item,
     String selectedSpecies,
   ) {
-    return item.detectionBoxes.where((box) {
-      final matchesSpecies =
-          selectedSpecies == previewAllSpeciesLabel ||
-          box.species == selectedSpecies;
-      final confidence = box.confidence;
+    final boxes = <DetectionBox>[];
+    for (final box in item.detectionBoxes) {
+      var visibleBox = box;
+      if (selectedSpecies != previewAllSpeciesLabel &&
+          box.species != selectedSpecies) {
+        Map<String, dynamic>? candidate;
+        for (final value in box.candidates) {
+          if (value['name']?.toString().trim() == selectedSpecies) {
+            candidate = value;
+            break;
+          }
+        }
+        if (candidate == null) continue;
+        visibleBox = DetectionBox(
+          species: selectedSpecies,
+          confidence: candidateConfidence(candidate),
+          bbox: box.bbox,
+          frameIndex: box.frameIndex,
+          timestamp: box.timestamp,
+          trackId: box.trackId,
+          candidates: box.candidates,
+        );
+      }
+      final confidence = visibleBox.confidence;
       final matchesConfidence =
           confidence == null || confidence >= confidenceThreshold;
-      return matchesSpecies && matchesConfidence && box.bbox.length >= 4;
-    }).toList();
+      if (matchesConfidence && visibleBox.bbox.length >= 4) {
+        boxes.add(visibleBox);
+      }
+    }
+    return boxes;
   }
 
   String _finalResultLabel(DetectionItem item) {

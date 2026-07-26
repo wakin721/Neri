@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../api_client.dart';
 import '../models/job.dart';
+import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
@@ -189,7 +190,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   static String _savedSelectedQuantity = '1';
   static String _savedSelectedSpeciesFilter = _globalSpecies;
   static String _savedExportFormat = 'csv';
-  static double _savedConfidence = 0.25;
+  static final Map<String, double> _savedConfidenceSettings = <String, double>{
+    _globalSpecies: 0.25,
+  };
   static bool _savedShowDetections = true;
   static _ValidationListFocus? _savedActiveList;
 
@@ -209,8 +212,21 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String get _exportFormat => _savedExportFormat;
   set _exportFormat(String value) => _savedExportFormat = value;
 
-  double get _confidence => _savedConfidence;
-  set _confidence(double value) => _savedConfidence = value;
+  double _confidenceFor(String species) {
+    return _savedConfidenceSettings[species] ??
+        _savedConfidenceSettings[_globalSpecies] ??
+        0.25;
+  }
+
+  double get _confidence => _confidenceFor(_selectedSpeciesFilter);
+
+  String get _confidenceSettingsSignature {
+    final entries = _savedConfidenceSettings.entries.toList()
+      ..sort((left, right) => left.key.compareTo(right.key));
+    return entries
+        .map((entry) => '${entry.key}:${entry.value.toStringAsFixed(6)}')
+        .join('|');
+  }
 
   bool get _showDetections => _savedShowDetections;
   set _showDetections(bool value) => _savedShowDetections = value;
@@ -233,7 +249,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool? _bucketCacheAutoGroupDetectBurst;
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
-  double? _bucketCacheConfidence;
+  String? _bucketCacheConfidenceSignature;
   double? _bucketCacheMinFrameRatio;
   String? _bucketCachePathSignature;
   String? _bucketCacheGroupingSignature;
@@ -308,7 +324,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheAutoGroupDetectBurst = null;
       _bucketCacheBurstSize = null;
       _bucketCacheGapSeconds = null;
-      _bucketCacheConfidence = null;
+      _bucketCacheConfidenceSignature = null;
       _bucketCacheMinFrameRatio = null;
       _bucketCachePathSignature = null;
       _bucketCacheGroupingSignature = null;
@@ -948,15 +964,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
-    final speciesOptions = <String>{
-      _globalSpecies,
-      ...item.species,
-      ...item.detectionBoxes.map((box) => box.species),
-    }.where((value) => value.isNotEmpty).toList();
+    final speciesOptions = detectionSpeciesOptions(
+      item,
+      globalOption: _globalSpecies,
+    );
 
     final selectedSpecies = speciesOptions.contains(_selectedSpeciesFilter)
         ? _selectedSpeciesFilter
         : _globalSpecies;
+    final selectedConfidence = _confidenceFor(selectedSpecies);
 
     return _ValidationPanel(
       child: Padding(
@@ -986,15 +1002,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(width: 16),
             Expanded(
               child: Slider(
-                value: _confidence,
+                value: selectedConfidence,
                 min: 0.05,
                 max: 0.95,
                 divisions: 90,
-                label: _confidence.toStringAsFixed(2),
-                onChanged: (value) => setState(() => _confidence = value),
+                label: selectedConfidence.toStringAsFixed(2),
+                onChanged: (value) => setState(
+                  () => _savedConfidenceSettings[selectedSpecies] = value,
+                ),
               ),
             ),
-            SizedBox(width: 36, child: Text(_confidence.toStringAsFixed(2))),
+            SizedBox(
+              width: 36,
+              child: Text(selectedConfidence.toStringAsFixed(2)),
+            ),
           ],
         ),
       ),
@@ -1566,7 +1587,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
         _bucketCacheBurstSize == widget.autoGroupBurstSize &&
         _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
-        _bucketCacheConfidence == _confidence &&
+        _bucketCacheConfidenceSignature == _confidenceSettingsSignature &&
         _bucketCacheMinFrameRatio == _minFrameRatio &&
         _bucketCacheRefreshVersion == widget.refreshVersion;
 
@@ -1614,7 +1635,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
-    _bucketCacheConfidence = _confidence;
+    _bucketCacheConfidenceSignature = _confidenceSettingsSignature;
     _bucketCacheMinFrameRatio = _minFrameRatio;
     _bucketCachePathSignature = pathSignature;
     _bucketCacheGroupingSignature = groupingSignature;
@@ -2095,35 +2116,95 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         .toList();
   }
 
+  double _thresholdForSpecies(String species) {
+    return _savedConfidenceSettings[species] ??
+        _savedConfidenceSettings[_globalSpecies] ??
+        0.25;
+  }
+
+  String _speciesFilterFor(DetectionItem item) {
+    return detectionSpeciesOptions(
+          item,
+          globalOption: _globalSpecies,
+        ).contains(_selectedSpeciesFilter)
+        ? _selectedSpeciesFilter
+        : _globalSpecies;
+  }
+
+  DetectionBox? _boxAfterConfidenceFilter(DetectionBox box) {
+    if (box.candidates.isNotEmpty) {
+      for (final candidate in box.candidates) {
+        final species = candidate['name']?.toString().trim() ?? '';
+        if (species.isEmpty) continue;
+        final confidence = candidateConfidence(candidate);
+        if (confidence < _thresholdForSpecies(species)) continue;
+        return DetectionBox(
+          species: species,
+          confidence: confidence,
+          bbox: box.bbox,
+          frameIndex: box.frameIndex,
+          timestamp: box.timestamp,
+          trackId: box.trackId,
+          candidates: box.candidates,
+        );
+      }
+      return null;
+    }
+
+    final confidence = box.confidence;
+    if (confidence != null && confidence < _thresholdForSpecies(box.species)) {
+      return null;
+    }
+    return box;
+  }
+
+  Map<dynamic, dynamic>? _classificationCandidateAfterConfidence(
+    DetectionItem item,
+  ) {
+    final rawCandidates = item.detectionData['分类候选项'];
+    if (rawCandidates is! List) return null;
+    for (final candidate in rawCandidates) {
+      if (candidate is! Map) continue;
+      final species = candidate['name']?.toString().trim() ?? '';
+      if (species.isEmpty) continue;
+      if (candidateConfidence(candidate) >= _thresholdForSpecies(species)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
   List<DetectionBox> _filteredBoxes(DetectionItem item) {
     final trackFrameCounts = _trackFrameCountsForFilter(item);
-    return item.detectionBoxes.where((box) {
+    final selectedSpeciesFilter = _speciesFilterFor(item);
+    final filtered = <DetectionBox>[];
+    for (final originalBox in item.detectionBoxes) {
+      final box = _boxAfterConfidenceFilter(originalBox);
+      if (box == null) continue;
       final matchesSpecies =
-          _selectedSpeciesFilter == _globalSpecies ||
-          box.species == _selectedSpeciesFilter;
-      final confidence = box.confidence;
-      final matchesConfidence = _passesConfidenceFilter(confidence);
-      return matchesSpecies &&
-          matchesConfidence &&
+          selectedSpeciesFilter == _globalSpecies ||
+          box.species == selectedSpeciesFilter;
+      if (matchesSpecies &&
           _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
-          box.bbox.length >= 4;
-    }).toList();
+          box.bbox.length >= 4) {
+        filtered.add(box);
+      }
+    }
+    return filtered;
   }
 
   List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
     final trackFrameCounts = _trackFrameCountsForFilter(item);
-    return item.detectionBoxes
-        .where(
-          (box) =>
-              _passesConfidenceFilter(box.confidence) &&
-              _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
-              box.bbox.length >= 4,
-        )
-        .toList();
-  }
-
-  bool _passesConfidenceFilter(double? confidence) {
-    return confidence == null || confidence >= _confidence;
+    final filtered = <DetectionBox>[];
+    for (final originalBox in item.detectionBoxes) {
+      final box = _boxAfterConfidenceFilter(originalBox);
+      if (box != null &&
+          _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
+          box.bbox.length >= 4) {
+        filtered.add(box);
+      }
+    }
+    return filtered;
   }
 
   double get _minFrameRatio => widget.minFrameRatio.clamp(0.0, 1.0).toDouble();
@@ -2179,8 +2260,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_isManualDetection(item)) return false;
     if (_confidenceFilteredBoxes(item).isNotEmpty) return false;
     if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      return _classificationCandidateAfterConfidence(item) == null;
+    }
     final confidence = _itemConfidence(item);
-    return confidence != null && confidence < _confidence;
+    return confidence != null &&
+        confidence < _thresholdForSpecies(_primarySpecies(item));
   }
 
   bool _isFilteredOutByVisibleFilters(
@@ -2189,8 +2276,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   ) {
     if (_isManualDetection(item) || visibleBoxes.isNotEmpty) return false;
     if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      return _classificationCandidateAfterConfidence(item) == null;
+    }
     final confidence = _itemConfidence(item);
-    return confidence != null && confidence < _confidence;
+    return confidence != null &&
+        confidence < _thresholdForSpecies(_primarySpecies(item));
   }
 
   String _primarySpeciesAfterConfidenceFilter(DetectionItem item) {
@@ -2206,6 +2299,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           .where((name) => name.isNotEmpty)
           .toList();
       if (species.isNotEmpty) return species.join(',');
+    }
+
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      final candidate = _classificationCandidateAfterConfidence(item);
+      return candidate?['name']?.toString().trim().isNotEmpty == true
+          ? candidate!['name'].toString().trim()
+          : '空';
     }
 
     if (_isFilteredOutByConfidence(item)) return '空';
@@ -2337,9 +2439,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
-    var species = _primarySpecies(item);
+    var species = _primarySpeciesAfterConfidenceFilter(item);
     var count = item.detectionData['物种数量']?.toString() ?? '';
     var confidence = item.detectionData['最低置信度']?.toString() ?? '';
+    final classificationCandidate = _classificationCandidateAfterConfidence(
+      item,
+    );
+    if (classificationCandidate != null && item.detectionBoxes.isEmpty) {
+      confidence = candidateConfidence(
+        classificationCandidate,
+      ).toStringAsFixed(2);
+      count = '1';
+    }
 
     if (visibleBoxes.isNotEmpty && item.detectionData['最低置信度'] != '人工校验') {
       final counts = _isVideo(item)
@@ -3060,9 +3171,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
     setState(() => _exporting = true);
     try {
-      final confidenceSettings = _selectedSpeciesFilter == _globalSpecies
-          ? {'global': _confidence}
-          : {'global': 0.25, _selectedSpeciesFilter: _confidence};
+      final confidenceSettings = Map<String, double>.from(
+        _savedConfidenceSettings,
+      );
+      confidenceSettings.putIfAbsent(_globalSpecies, () => 0.25);
       final favoritePhotoPaths = exportFavoritePhotos
           ? _favoriteImageItemsForExport().map((item) => item.path).toList()
           : const <String>[];

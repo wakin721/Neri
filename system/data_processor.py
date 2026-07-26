@@ -14,6 +14,33 @@ from system.utils import resource_path
 logger = logging.getLogger(__name__)
 
 
+def select_classification_candidate(
+    candidates: object,
+    confidence_settings: Dict[str, float],
+) -> tuple[str, float] | None:
+    """Return the highest-ranked candidate that passes its species threshold."""
+
+    if not isinstance(candidates, list):
+        return None
+    global_threshold = float(confidence_settings.get("global", 0.25))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            confidence = float(
+                candidate.get("conf", candidate.get("confidence", 0))
+            )
+        except (TypeError, ValueError):
+            continue
+        threshold = float(confidence_settings.get(name, global_threshold))
+        if confidence >= threshold:
+            return name, confidence
+    return None
+
+
 class DataProcessor:
     """数据处理类，处理图像信息集合"""
 
@@ -89,27 +116,36 @@ class DataProcessor:
                 species_names = list(set(track_species_list)) if track_species_list else ['空']
 
             else:
-                # 图片文件处理 (保持原有逻辑)
-                confidences = img_info.get('all_confidences', [])
-                classes = img_info.get('all_classes', [])
-                names_map = img_info.get('names_map', {})
-
-                if not confidences or not classes or not names_map:
-                    img_info['独立探测首只'] = ''
-                    continue
-
-                final_species_counts = Counter()
-                for cls, conf in zip(classes, confidences):
-                    species_name = names_map.get(str(int(cls)))
-                    if species_name:
-                        threshold = confidence_settings.get(species_name, confidence_settings.get("global", 0.25))
-                        if conf >= threshold:
-                            final_species_counts[species_name] += 1
-
-                if not final_species_counts:
+                classification_candidate = select_classification_candidate(
+                    img_info.get('分类候选项'),
+                    confidence_settings,
+                )
+                if classification_candidate is not None:
+                    species_names = [classification_candidate[0]]
+                elif img_info.get('分类候选项'):
                     species_names = ['空']
                 else:
-                    species_names = list(final_species_counts.keys())
+                    # 图片文件处理 (保持原有逻辑)
+                    confidences = img_info.get('all_confidences', [])
+                    classes = img_info.get('all_classes', [])
+                    names_map = img_info.get('names_map', {})
+
+                    if not confidences or not classes or not names_map:
+                        img_info['独立探测首只'] = ''
+                        continue
+
+                    final_species_counts = Counter()
+                    for cls, conf in zip(classes, confidences):
+                        species_name = names_map.get(str(int(cls)))
+                        if species_name:
+                            threshold = confidence_settings.get(species_name, confidence_settings.get("global", 0.25))
+                            if conf >= threshold:
+                                final_species_counts[species_name] += 1
+
+                    if not final_species_counts:
+                        species_names = ['空']
+                    else:
+                        species_names = list(final_species_counts.keys())
             # --- 过滤逻辑结束 ---
 
             current_time = img_info.get('拍摄日期对象')
@@ -146,18 +182,21 @@ class DataProcessor:
             logger.warning("没有数据可导出")
             return False
 
+        requested_confidence_settings = dict(confidence_settings or {})
+        confidence_settings = {}
         conf_path = os.path.join("temp", "conf.json")
         if os.path.exists(conf_path):
             try:
                 with open(conf_path, 'r', encoding='utf-8') as f:
                     file_conf = json.load(f)
                     if isinstance(file_conf, dict):
-                        if confidence_settings is None:
-                            confidence_settings = {}
                         confidence_settings.update(file_conf)
                         logger.info(f"导出数据时已加载并应用阈值配置文件: {conf_path}")
             except Exception as e:
                 logger.error(f"加载阈值配置文件失败: {e}，将继续使用默认设置", exc_info=True)
+        # Values selected in the current UI are newer and must override the
+        # optional legacy conf.json defaults.
+        confidence_settings.update(requested_confidence_settings)
 
         # --- 加载生物物种名录 ---
         species_info_map = {}
@@ -310,6 +349,16 @@ class DataProcessor:
                             final_species_counts[chosen_species] += 1
                             valid_confidences.append(chosen_conf)
 
+
+                    elif info.get('分类候选项'):
+                        selected_candidate = select_classification_candidate(
+                            info.get('分类候选项'),
+                            confidence_settings,
+                        )
+                        if selected_candidate is not None:
+                            chosen_species, chosen_confidence = selected_candidate
+                            final_species_counts[chosen_species] += 1
+                            valid_confidences.append(chosen_confidence)
 
                     # 兼容旧逻辑 (如果没有 '检测框' 字段)
                     elif 'all_confidences' in info and 'all_classes' in info:

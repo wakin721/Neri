@@ -17,6 +17,7 @@ import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
 import 'screens/start_screen.dart';
+import 'utils/local_detection_items.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
@@ -100,8 +101,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
   double _confidence = 0.25;
   double _iou = 0.45;
-  double _previewConfidenceThreshold = 0.25;
+  final Map<String, double> _previewConfidenceSettings = <String, double>{
+    previewAllSpeciesLabel: 0.25,
+  };
   String _previewSpeciesFilter = previewAllSpeciesLabel;
+  double get _previewConfidenceThreshold =>
+      _previewConfidenceSettings[_previewSpeciesFilter] ??
+      _previewConfidenceSettings[previewAllSpeciesLabel] ??
+      0.25;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
   String _backendOutputTail = '';
@@ -1157,9 +1164,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         }
       }
 
-      final previewJobUpdates = jobsChanged && !summariesOnly
+      var previewJobUpdates = jobsChanged && !summariesOnly
           ? _jobResultsForInputPath(jobs, _inputController.text.trim())
           : const <DetectionItem>[];
+      if (previewJobUpdates.isNotEmpty) {
+        previewJobUpdates = await existingLocalDetectionItems(
+          previewJobUpdates,
+        );
+        if (!mounted || _closeFlowBlocksBackendStartup) return;
+      }
 
       if (settingsChanged || jobsChanged) {
         setState(() {
@@ -2226,8 +2239,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onSpeciesFilterChanged: (value) =>
           setState(() => _previewSpeciesFilter = value),
       confidenceThreshold: _previewConfidenceThreshold,
-      onConfidenceThresholdChanged: (value) =>
-          setState(() => _previewConfidenceThreshold = value),
+      onConfidenceThresholdChanged: (value) => setState(
+        () => _previewConfidenceSettings[_previewSpeciesFilter] = value,
+      ),
       detecting: _previewDetecting,
       loading: _previewLoading,
       onDetectCurrentImage: _detectCurrentPreviewImage,
