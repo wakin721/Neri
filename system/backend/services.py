@@ -2889,7 +2889,6 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
         ) = _delete_empty_photos(
             files,
             request.empty_photo_paths,
-            processed_data,
         )
 
     return ValidationExportResponse(
@@ -3063,7 +3062,6 @@ def _export_favorite_photos(
 def _delete_empty_photos(
     files: Iterable[Path],
     empty_photo_paths: Iterable[str],
-    rows: Iterable[dict[str, Any]],
 ) -> tuple[int, int]:
     requested_keys: list[str] = []
     seen_keys: set[str] = set()
@@ -3081,15 +3079,10 @@ def _delete_empty_photos(
         for path in files
         if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
     }
-    empty_keys = {
-        _path_key(row.get("_source_path"))
-        for row in rows
-        if _is_empty_species_name(row.get("物种名称"))
-    }
     selected_files = [
         available_images[key]
         for key in requested_keys
-        if key in available_images and key in empty_keys
+        if key in available_images
     ]
 
     deleted = 0
@@ -3101,12 +3094,14 @@ def _delete_empty_photos(
         except OSError as exc:
             failed += 1
             logger.warning("删除空照片失败: %s: %s", source, exc)
+    logger.info(
+        "空照片删除完成: requested=%d matched=%d deleted=%d failed=%d",
+        len(requested_keys),
+        len(selected_files),
+        deleted,
+        failed,
+    )
     return deleted, failed
-
-
-def _is_empty_species_name(value: object) -> bool:
-    species = str(value or "").strip()
-    return species == "空" or species.casefold() == "empty"
 
 
 def _export_species_by_path(rows: Iterable[dict[str, Any]]) -> dict[str, str]:

@@ -3220,22 +3220,32 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (emptyItems.isEmpty) return false;
 
     final mode = _emptyPhotoDeleteMode;
-    if (mode == emptyPhotoDeleteAlways) return true;
     if (mode == emptyPhotoDeleteNever) return false;
 
-    final choice = await _showEmptyPhotoDeleteDialog(emptyItems.length);
-    if (choice == null) return null;
-    if (choice.remember) {
-      final nextMode = choice.deletePhotos
-          ? emptyPhotoDeleteAlways
-          : emptyPhotoDeleteNever;
-      try {
-        await widget.onEmptyPhotoDeleteModeChanged(nextMode);
-      } catch (error) {
-        if (mounted) _showSnackBar('保存删除偏好失败：$error');
+    var deletePhotos = mode == emptyPhotoDeleteAlways;
+    if (!deletePhotos) {
+      final choice = await _showEmptyPhotoDeleteDialog(emptyItems.length);
+      if (choice == null) return null;
+      deletePhotos = choice.deletePhotos;
+      if (choice.remember) {
+        final nextMode = choice.deletePhotos
+            ? emptyPhotoDeleteAlways
+            : emptyPhotoDeleteNever;
+        try {
+          await widget.onEmptyPhotoDeleteModeChanged(nextMode);
+        } catch (error) {
+          if (mounted) _showSnackBar('保存删除偏好失败：$error');
+        }
       }
     }
-    return choice.deletePhotos;
+    if (!deletePhotos) return false;
+
+    final unvalidatedEmptyPhotoCount = emptyItems
+        .where((item) => !_isItemValidated(item))
+        .length;
+    if (unvalidatedEmptyPhotoCount == 0) return true;
+    if (!mounted) return null;
+    return _showUnvalidatedEmptyPhotoDeleteDialog(unvalidatedEmptyPhotoCount);
   }
 
   Future<_EmptyPhotoDeleteChoice?> _showEmptyPhotoDeleteDialog(
@@ -3296,6 +3306,40 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               ],
             );
           },
+        );
+      },
+    );
+  }
+
+  Future<bool?> _showUnvalidatedEmptyPhotoDeleteDialog(
+    int unvalidatedEmptyPhotoCount,
+  ) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('删除未校验的空照片？'),
+          content: SizedBox(
+            width: 420,
+            child: Text(
+              '其中有 $unvalidatedEmptyPhotoCount 张空照片尚未人工校验。'
+              '是否仍在导出表格成功后删除这些源照片？此操作无法撤销。',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('不删除'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('删除'),
+            ),
+          ],
         );
       },
     );
