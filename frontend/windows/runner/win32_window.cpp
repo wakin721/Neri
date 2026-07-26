@@ -130,6 +130,11 @@ Win32Window::~Win32Window() {
   Destroy();
 }
 
+// static
+const wchar_t* Win32Window::GetWindowClassName() {
+  return kWindowClassName;
+}
+
 bool Win32Window::Create(const std::wstring& title,
                          const Point& origin,
                          const Size& size) {

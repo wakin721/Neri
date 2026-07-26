@@ -776,74 +776,18 @@ class ImageProcessor:
 
         return batch_results_info
 
-    def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:
-        """
-        [修改] 读取源视频，应用跳帧和LAB增强，保存为临时MP4文件。
-        使用 Batch + ThreadPool 优化处理速度。
-        """
+    @staticmethod
+    def _video_processed_frame_count(source_path: str, stride: int) -> int:
+        """读取视频元数据，估算应用跳帧后的待处理帧数。"""
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
-            raise Exception(f"无法打开源视频: {source_path}")
-
-        # 获取原始信息
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        orig_fps = cap.get(cv2.CAP_PROP_FPS)
-        if orig_fps <= 0: orig_fps = 25
-
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(temp_path, fourcc, orig_fps, (orig_w, orig_h))
-
-        if not writer.isOpened():
-            cap.release()
-            raise Exception("无法创建临时视频写入器")
-
-        idx = 0
-        saved_count = 0
-        batch_size = 32  # 批处理大小，控制内存占用
-        
+            return 0
         try:
-            while True:
-                frames_batch = []
-                # 1. 预读取一批符合 stride 的帧
-                for _ in range(batch_size):
-                    # 循环读取直到找到符合 stride 的帧或视频结束
-                    while True:
-                        success, frame = cap.read()
-                        if not success:
-                            break # 视频结束
-                        
-                        current_idx = idx
-                        idx += 1
-                        
-                        if current_idx % stride == 0:
-                            frames_batch.append(frame)
-                            break # 找到一帧，加入批次
-                    
-                    if not success: # 如果视频读取完毕，跳出批次循环
-                        break
-
-                if not frames_batch:
-                    break
-
-                # 2. 并行预处理 (LAB增强)
-                processed_batch = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(frames_batch), 8)) as executor:
-                    # 使用 map 保证结果顺序与 frames_batch 一致
-                    results = executor.map(self._preprocess_image, frames_batch)
-                    processed_batch = list(results)
-
-                # 3. 顺序写入视频
-                for p_frame in processed_batch:
-                    if p_frame is not None:
-                        writer.write(p_frame)
-                        saved_count += 1
-
+            total_frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
         finally:
             cap.release()
-            writer.release()
-
-        return saved_count
+        stride = max(1, int(stride))
+        return (total_frames + stride - 1) // stride if total_frames else 0
 
     def detect_video_species(self, video_source: str, output_dir: str,
                              use_fp16: bool = False, iou: float = 0.3,
@@ -857,28 +801,16 @@ class ImageProcessor:
                              extra_db_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
-        策略：先生成跳帧+增强后的临时视频(保持原分辨率)，再进行追踪。
+        直接从原视频按 vid_stride 解码并追踪，避免重复转码阻塞 GPU。
         """
-        if hasattr(self, 'model_path') and self.model_path:
-            try:
-                self.model = self._load_model(self.model_path)
-            except Exception as e:
-                logger.warning(f"重置模型状态失败: {e}")
-
         if not self.model: return {'error': 'Model not loaded'}
         device_name, use_fp16 = self._determine_device(use_fp16)
+        vid_stride = max(1, int(vid_stride))
 
         # 准备路径
         output_dir = os.path.normpath(output_dir)
         video_name = os.path.splitext(os.path.basename(video_source))[0]
         if "http" in video_source: video_name = "stream_result"
-
-        # 确定临时文件夹
-        work_temp_dir = temp_video_dir if temp_video_dir else os.path.join(output_dir, "temp")
-        os.makedirs(work_temp_dir, exist_ok=True)
-
-        # 定义临时增强视频路径
-        temp_enhanced_video_path = os.path.join(work_temp_dir, f"{video_name}_enhanced_temp.mp4")
 
         # YOLO 日志路径
         temp_run_project = _runtime_logs_dir("yolo")
@@ -887,24 +819,22 @@ class ImageProcessor:
         tracker_config = resource_path(os.path.join("res", "model_cls", "tracker.yaml"))
         if not os.path.exists(tracker_config): tracker_config = "botsort.yaml"
 
-        logger.info(f"开始预处理视频 (LAB增强, 保持原分辨率): {video_source}")
+        logger.info(
+            "开始直接追踪视频: source=%s stride=%d device=%s",
+            video_source,
+            vid_stride,
+            device_name,
+        )
 
         try:
-            # === 第一步：生成增强后的临时视频 ===
-            # processed_frame_count 是实际生成的帧数（已包含跳帧逻辑）
-            # 这将作为进度条的“总帧数”
-            processed_frame_count = self._create_temp_enhanced_video(
-                video_source, temp_enhanced_video_path, vid_stride
+            # 只读取容器元数据用于进度估算，不再先解码并重新编码整段视频。
+            processed_frame_count = self._video_processed_frame_count(
+                video_source,
+                vid_stride,
             )
 
-            if processed_frame_count == 0:
-                raise Exception("预处理后未生成有效帧")
-
-            logger.info(f"预处理完成，生成临时视频: {temp_enhanced_video_path} (共 {processed_frame_count} 帧)")
-
-            # === 第二步：运行 YOLO 追踪 ===
             results = self.model.track(
-                source=temp_enhanced_video_path,
+                source=video_source,
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
@@ -914,13 +844,15 @@ class ImageProcessor:
                 iou=iou,
                 conf=conf,
                 classes=classes,
-                persist=True,
+                # 视频调用之间必须重置追踪器，但同一视频内仍会持续追踪。
+                # 这既避免重新加载模型，也防止不同视频之间串用 track ID。
+                persist=False,
                 save=False,
                 project=temp_run_project,
                 name="track_log",
                 exist_ok=True,
                 stream=True,
-                vid_stride=1
+                vid_stride=vid_stride
             )
 
             tracks_data = defaultdict(list)
@@ -954,8 +886,9 @@ class ImageProcessor:
 
                         # 4. [关键] 调用回调函数
                         # current_track_frame: 当前处理到的帧数（分子）
-                        # processed_frame_count: 临时视频的总帧数（分母，由 _create_temp_enhanced_video 返回）
-                        status_callback(current_track_frame, processed_frame_count, w, h, frame_counts, speed_ms)
+                        # 某些流媒体无法提前获得总帧数，此时至少保证分母不小于分子。
+                        progress_total = max(processed_frame_count, current_track_frame)
+                        status_callback(current_track_frame, progress_total, w, h, frame_counts, speed_ms)
 
                     except Exception as e:
                         if "强制停止" in str(e): raise e
@@ -1025,15 +958,6 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"视频追踪失败: {e}")
             return {"error": str(e), "status": "failed"}
-
-        finally:
-            # === 第五步：清理临时文件 ===
-            if os.path.exists(temp_enhanced_video_path):
-                try:
-                    os.remove(temp_enhanced_video_path)
-                    logger.info(f"已删除临时增强视频: {temp_enhanced_video_path}")
-                except Exception as e:
-                    logger.warning(f"删除临时视频失败: {e}")
 
     def _get_first_detected_species(self, results: Any) -> str:
         """从检测结果中获取第一个物种的名称"""

@@ -777,7 +777,17 @@ class ProcessingJobManager:
                         preload_executor.shutdown(wait=False, cancel_futures=True)
 
                 if request.options.video_mode == "fast":
-                    for original_batch in _chunked(video_files, batch_size):
+                    fast_video_group_size = max(
+                        batch_size,
+                        min(
+                            len(video_files),
+                            max(1, int(request.options.thread_count or 1)),
+                        ),
+                    )
+                    for original_batch in _chunked(
+                        video_files,
+                        fast_video_group_size,
+                    ):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
@@ -1076,6 +1086,16 @@ def _tracked_video_worker_count(item_count: int, thread_count: int) -> int:
     # Full video tracking loads model state and decodes frames per worker, so
     # keep the cap conservative even when a larger value is requested.
     return max(1, min(item_count, configured, cpu_budget))
+
+
+def _fast_video_sample_worker_count(item_count: int, thread_count: int) -> int:
+    if item_count <= 1:
+        return 1
+    configured = max(1, min(int(thread_count or 1), 8))
+    cpu_count = os.cpu_count() or 1
+    # Video decoding is CPU and I/O heavy. A small cap avoids making HDD and
+    # network-drive workloads slower through excessive parallel seeking.
+    return max(1, min(item_count, configured, cpu_count, 4))
 
 
 def _unique_detection_items(items: Iterable[DetectionItem]) -> list[DetectionItem]:
@@ -2002,33 +2022,76 @@ def _detect_video_fast_batch(
             if classification_only and request.options.video_mode == "all"
             else None
         )
-        for video_index, (path, item) in enumerate(zip(paths, items)):
-            try:
-                _raise_if_cancelled(cancelled)
-                info = _sample_fast_video_frames(
-                    path,
+        sample_results: list[dict[str, Any] | None] = [None for _ in items]
+        sample_errors: list[Exception | None] = [None for _ in items]
+
+        def sample_video(video_index: int) -> tuple[int, dict[str, Any]]:
+            _raise_if_cancelled(cancelled)
+            return (
+                video_index,
+                _sample_fast_video_frames(
+                    paths[video_index],
                     temp_dir / f"video_{video_index}",
                     sample_count,
                     frame_stride=frame_stride,
                     cancelled=cancelled,
-                )
-                video_infos[video_index] = info
-                for frame_order, (frame_path, frame_index) in enumerate(
-                    zip(info["frame_paths"], info["frame_points"])
-                ):
-                    frame_records.append(
-                        {
-                            "video_index": video_index,
-                            "frame_order": frame_order,
-                            "frame_index": frame_index,
-                            "path": frame_path,
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001 - keep the rest of the video batch alive
+                ),
+            )
+
+        sample_workers = _fast_video_sample_worker_count(
+            len(paths),
+            request.options.thread_count,
+        )
+        if sample_workers <= 1:
+            for video_index in range(len(paths)):
+                try:
+                    _, sample_results[video_index] = sample_video(video_index)
+                except Exception as exc:  # noqa: BLE001 - isolate per-video failures
+                    sample_errors[video_index] = exc
+        else:
+            with ThreadPoolExecutor(
+                max_workers=sample_workers,
+                thread_name_prefix="neri-video-sample",
+            ) as sample_executor:
+                future_to_index = {
+                    sample_executor.submit(sample_video, video_index): video_index
+                    for video_index in range(len(paths))
+                }
+                for future in as_completed(future_to_index):
+                    video_index = future_to_index[future]
+                    try:
+                        completed_index, info = future.result()
+                        sample_results[completed_index] = info
+                    except Exception as exc:  # noqa: BLE001 - isolate per-video failures
+                        sample_errors[video_index] = exc
+
+        _raise_if_cancelled(cancelled)
+        for video_index, (path, item) in enumerate(zip(paths, items)):
+            sample_error = sample_errors[video_index]
+            if sample_error is not None:
                 if cancelled is not None and cancelled():
                     raise
                 result_items[video_index] = item.model_copy(
-                    update={"error": f"视频快速检测失败: {exc}"}
+                    update={"error": f"视频快速检测失败: {sample_error}"}
+                )
+                continue
+            info = sample_results[video_index]
+            if info is None:
+                result_items[video_index] = item.model_copy(
+                    update={"error": "视频快速检测失败: 无法从视频中提取有效帧"}
+                )
+                continue
+            video_infos[video_index] = info
+            for frame_order, (frame_path, frame_index) in enumerate(
+                zip(info["frame_paths"], info["frame_points"])
+            ):
+                frame_records.append(
+                    {
+                        "video_index": video_index,
+                        "frame_order": frame_order,
+                        "frame_index": frame_index,
+                        "path": frame_path,
+                    }
                 )
 
         sample_elapsed = time.perf_counter() - sample_started
@@ -2070,6 +2133,7 @@ def _detect_video_fast_batch(
             detections_by_video = [[] for _ in items]
 
         detection_payloads: list[tuple[Path, dict[str, Any]]] = []
+        serialize_started = time.perf_counter()
         for video_index, (path, item) in enumerate(zip(paths, items)):
             if result_items[video_index] is not None:
                 continue
@@ -2102,10 +2166,12 @@ def _detect_video_fast_batch(
 
         logger.info(
             (
-                "Fast video batch timing: videos=%d frames=%d sample=%.3fs "
-                "infer=%.3fs serialize=%.3fs save=%.3fs total=%.3fs"
+                "Fast video batch timing: videos=%d sample_workers=%d "
+                "frames=%d sample=%.3fs infer=%.3fs serialize=%.3fs "
+                "save=%.3fs total=%.3fs"
             ),
             len(paths),
+            sample_workers,
             len(frame_records),
             sample_elapsed,
             inference_elapsed,
@@ -2154,26 +2220,75 @@ def _sample_fast_video_frames(
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames > 0 and frame_stride is not None:
-            points = list(range(0, total_frames, max(1, frame_stride)))
-        elif total_frames > 0:
-            points = [
-                min(total_frames - 1, max(0, round(total_frames * (index + 1) / (sample_count + 1))))
-                for index in range(sample_count)
-            ]
-        else:
-            points = [0]
 
-        for index, point in enumerate(points):
-            _raise_if_cancelled(cancelled)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, point)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            frame_path = temp_dir / f"frame_{index}.jpg"
+        def save_frame(frame, frame_index: int) -> None:
+            frame_path = temp_dir / f"frame_{len(frame_paths)}.jpg"
             if cv2.imwrite(str(frame_path), frame):
                 frame_paths.append(frame_path)
-                frame_points.append(point)
+                frame_points.append(frame_index)
+
+        if frame_stride is not None:
+            stride = max(1, int(frame_stride))
+            frame_index = 0
+            while True:
+                if frame_index % 32 == 0:
+                    _raise_if_cancelled(cancelled)
+                if not cap.grab():
+                    break
+                if frame_index % stride == 0:
+                    ok, frame = cap.retrieve()
+                    if ok:
+                        save_frame(frame, frame_index)
+                frame_index += 1
+        else:
+            points = (
+                sorted(
+                    {
+                        min(
+                            total_frames - 1,
+                            max(
+                                0,
+                                round(
+                                    total_frames
+                                    * (index + 1)
+                                    / (sample_count + 1)
+                                ),
+                            ),
+                        )
+                        for index in range(sample_count)
+                    }
+                )
+                if total_frames > 0
+                else [0]
+            )
+            # For short videos, one forward pass is cheaper than reopening the
+            # codec's keyframe chain for every sampled point. Keep random seeks
+            # for long videos where decoding the entire stream would cost more.
+            use_sequential_sampling = (
+                len(points) > 1 and points[-1] <= len(points) * 300
+            )
+            if use_sequential_sampling:
+                point_index = 0
+                frame_index = 0
+                while point_index < len(points):
+                    if frame_index % 32 == 0:
+                        _raise_if_cancelled(cancelled)
+                    if not cap.grab():
+                        break
+                    if frame_index == points[point_index]:
+                        ok, frame = cap.retrieve()
+                        if ok:
+                            save_frame(frame, frame_index)
+                        point_index += 1
+                    frame_index += 1
+            else:
+                for point in points:
+                    _raise_if_cancelled(cancelled)
+                    if point > 0:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                    ok, frame = cap.read()
+                    if ok:
+                        save_frame(frame, point)
 
         if not frame_paths:
             raise RuntimeError("无法从视频中提取有效帧")

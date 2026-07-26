@@ -57,6 +57,7 @@ jobs:
           $customFiles = @(
             "flutter_window.cpp",
             "flutter_window.h",
+            "main.cpp",
             "win32_window.cpp",
             "win32_window.h"
           )

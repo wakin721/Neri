@@ -71,5 +71,6 @@ frontend/windows/*
 frontend/windows/runner/*
 !frontend/windows/runner/flutter_window.cpp
 !frontend/windows/runner/flutter_window.h
+!frontend/windows/runner/main.cpp
 !frontend/windows/runner/win32_window.cpp
 !frontend/windows/runner/win32_window.h
