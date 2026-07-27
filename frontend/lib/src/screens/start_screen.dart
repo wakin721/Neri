@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../models/job.dart';
 import '../models/settings.dart';
+import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
@@ -376,7 +377,8 @@ class _StartOptionGrid extends StatelessWidget {
             SizedBox(
               width: itemWidth,
               child: _VideoStrideSelector(
-                enabled: enabled,
+                enabled: enabled && videoProcessingEnabled(videoMode),
+                videoMode: videoMode,
                 vidStride: vidStride,
                 onChanged: onVidStrideChanged,
               ),
@@ -497,18 +499,30 @@ class _VideoModeSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selectedValue = videoMode == 'fast' ? 'fast' : 'all';
+    final selectedValue = normalizeVideoProcessingMode(videoMode);
+    final helperText = switch (selectedValue) {
+      videoProcessingModeFast => '抽帧批量识别',
+      videoProcessingModeSkip => '任务中忽略视频文件',
+      _ => '按帧间隔追踪',
+    };
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频处理模式'),
-      helperText: selectedValue == 'fast' ? '抽帧批量识别' : '按帧间隔追踪',
+      helperText: helperText,
       leadingIcon: const Icon(Icons.video_collection_rounded),
       dropdownMenuEntries: const [
-        DropdownMenuEntry<String>(value: 'all', label: '全部识别'),
-        DropdownMenuEntry<String>(value: 'fast', label: '快速识别'),
+        DropdownMenuEntry<String>(value: videoProcessingModeAll, label: '全部识别'),
+        DropdownMenuEntry<String>(
+          value: videoProcessingModeFast,
+          label: '快速识别',
+        ),
+        DropdownMenuEntry<String>(
+          value: videoProcessingModeSkip,
+          label: '跳过视频',
+        ),
       ],
       onSelected: enabled
           ? (value) {
@@ -522,11 +536,13 @@ class _VideoModeSelector extends StatelessWidget {
 class _VideoStrideSelector extends StatelessWidget {
   const _VideoStrideSelector({
     required this.enabled,
+    required this.videoMode,
     required this.vidStride,
     required this.onChanged,
   });
 
   final bool enabled;
+  final String videoMode;
   final int vidStride;
   final ValueChanged<int> onChanged;
 
@@ -539,7 +555,9 @@ class _VideoStrideSelector extends StatelessWidget {
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频跳帧'),
-      helperText: '全部识别为帧间隔，快速识别为抽帧数',
+      helperText: videoProcessingEnabled(videoMode)
+          ? '全部识别为帧间隔，快速识别为抽帧数'
+          : '跳过视频时不可用',
       leadingIcon: const Icon(Icons.skip_next_rounded),
       dropdownMenuEntries: [
         for (var value = 1; value <= 30; value++)

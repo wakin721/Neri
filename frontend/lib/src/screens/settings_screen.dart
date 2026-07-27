@@ -14,6 +14,7 @@ import '../local_maintenance_status.dart';
 import '../models/close_behavior.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
+import '../models/video_processing_mode.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
@@ -201,6 +202,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     final dependenciesReady =
         settings == null || settings.missingYoloDependencies.isEmpty;
+    final gpuAvailable = settings?.gpuAvailable == true;
     final updateMirrors = saved.containsKey(_updateMirrorsKey)
         ? _normalizedUpdateMirrors(
             _stringListSetting(saved, _updateMirrorsKey, const <String>[]),
@@ -239,8 +241,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
-      'batch_size': _intSetting(saved, 'batch_size', 16),
-      'thread_count': _intSetting(saved, 'thread_count', 4),
+      'batch_size': gpuAvailable ? _intSetting(saved, 'batch_size', 16) : 1,
+      'thread_count': gpuAvailable ? _intSetting(saved, 'thread_count', 4) : 1,
       'use_fp16': !dependenciesReady
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
@@ -256,7 +258,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _detectionConfidencePriority
           ? _detectionConfidencePriority
           : _classificationConfidencePriority,
-      'video_mode': _stringSetting(saved, 'video_mode', 'all'),
+      'video_mode': normalizeVideoProcessingMode(
+        _stringSetting(saved, 'video_mode', videoProcessingModeAll),
+      ),
       'vid_stride': _intSetting(saved, 'vid_stride', 1),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
@@ -1034,9 +1038,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       settings?.availableClassificationModels ?? const <ModelInfo>[],
       allowEmpty: true,
     );
-    final videoMode = _string('video_mode', 'all');
-    final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
+    final videoMode = normalizeVideoProcessingMode(
+      _string('video_mode', videoProcessingModeAll),
+    );
+    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
+    final gpuAvailable = settings?.gpuAvailable == true;
+    final batchSize = gpuAvailable ? _int('batch_size') : 1;
+    final threadCount = gpuAvailable ? _int('thread_count', 4) : 1;
     final combinedModelsEnabled =
         selectedModel?.isNotEmpty == true &&
         selectedClassificationModel?.isNotEmpty == true;
@@ -1177,28 +1186,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '模型加速选项',
-            subtitle: '批处理数控制单次推理规模，线程数控制完整视频文件并发',
+            subtitle: gpuAvailable
+                ? '批处理数控制单次推理规模，线程数控制完整视频文件并发'
+                : 'CPU 模式下批处理数和线程数固定为 1',
             icon: Icons.bolt_rounded,
             child: Column(
               children: [
                 _LabeledSlider(
                   label: '批处理数',
-                  value: _int('batch_size').toDouble(),
+                  value: batchSize.toDouble(),
                   min: 1,
                   max: 32,
                   divisions: 31,
-                  valueLabel: _int('batch_size').toString(),
-                  enabled: detectionEnabled,
+                  valueLabel: batchSize.toString(),
+                  enabled: detectionEnabled && gpuAvailable,
                   onChanged: (value) => _set('batch_size', value.round()),
                 ),
                 _LabeledSlider(
                   label: '线程数',
-                  value: _int('thread_count', 4).toDouble(),
+                  value: threadCount.toDouble(),
                   min: 1,
                   max: 8,
                   divisions: 7,
-                  valueLabel: _int('thread_count', 4).toString(),
-                  enabled: detectionEnabled,
+                  valueLabel: threadCount.toString(),
+                  enabled: detectionEnabled && gpuAvailable,
                   onChanged: (value) => _set('thread_count', value.round()),
                 ),
                 SwitchListTile(
@@ -1471,8 +1482,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildVideoSettings() {
-    final videoMode = _string('video_mode', 'all');
-    final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
+    final videoMode = normalizeVideoProcessingMode(
+      _string('video_mode', videoProcessingModeAll),
+    );
+    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
 
     return SectionCard(
       title: '视频检测设置',
@@ -1496,45 +1509,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return [
       _SettingsPanel(
         title: '视频处理模式',
-        subtitle: '全部识别会按帧间隔处理，快速识别只抽取关键帧',
+        subtitle: '选择完整识别、快速识别，或在任务中忽略视频',
         icon: Icons.play_circle_outline_rounded,
-        child: SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(
-              value: 'all',
-              icon: Icon(Icons.video_collection_rounded),
-              label: Text('全部识别'),
+        child: _SettingsMenuButton<String>(
+          value: videoMode,
+          enabled: enabled,
+          options: const [
+            _SettingsOption<String>(
+              value: videoProcessingModeAll,
+              label: '全部识别',
             ),
-            ButtonSegment(
-              value: 'fast',
-              icon: Icon(Icons.flash_on_rounded),
-              label: Text('快速识别'),
+            _SettingsOption<String>(
+              value: videoProcessingModeFast,
+              label: '快速识别',
+            ),
+            _SettingsOption<String>(
+              value: videoProcessingModeSkip,
+              label: '跳过视频',
             ),
           ],
-          selected: {videoMode},
-          onSelectionChanged: enabled
-              ? (selection) {
-                  if (selection.isEmpty) return;
-                  _set('video_mode', selection.first);
-                }
-              : null,
+          onChanged: (value) => _set('video_mode', value),
         ),
       ),
-      _SettingsPanel(
-        title: '跳帧设置',
-        subtitle: videoMode == 'all' ? '全部识别模式下表示帧间隔' : '快速识别模式下表示抽取检测的帧数',
-        icon: Icons.skip_next_rounded,
-        child: _LabeledSlider(
-          label: strideLabel,
-          value: _int('vid_stride').toDouble(),
-          min: 1,
-          max: 30,
-          divisions: 29,
-          valueLabel: _int('vid_stride').toString(),
-          enabled: enabled,
-          onChanged: (value) => _set('vid_stride', value.round()),
+      if (videoProcessingEnabled(videoMode))
+        _SettingsPanel(
+          title: '跳帧设置',
+          subtitle: videoMode == videoProcessingModeAll
+              ? '全部识别模式下表示帧间隔'
+              : '快速识别模式下表示抽取检测的帧数',
+          icon: Icons.skip_next_rounded,
+          child: _LabeledSlider(
+            label: strideLabel,
+            value: _int('vid_stride').toDouble(),
+            min: 1,
+            max: 30,
+            divisions: 29,
+            valueLabel: _int('vid_stride').toString(),
+            enabled: enabled,
+            onChanged: (value) => _set('vid_stride', value.round()),
+          ),
         ),
-      ),
       _SettingsPanel(
         title: '检测过滤',
         subtitle: '设置检测到的最低帧数比例',

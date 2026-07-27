@@ -17,6 +17,7 @@ import 'models/close_behavior.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
+import 'models/video_processing_mode.dart';
 import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
@@ -1983,10 +1984,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             _useFp16 =
                 settings.gpuAvailable &&
                 _boolSetting(settings, 'use_fp16', _useFp16);
-            _videoMode =
-                _stringSetting(settings, 'video_mode', _videoMode) == 'fast'
-                ? 'fast'
-                : 'all';
+            _videoMode = normalizeVideoProcessingMode(
+              _stringSetting(settings, 'video_mode', _videoMode),
+            );
             _vidStride = _intSetting(
               settings,
               'vid_stride',
@@ -2091,9 +2091,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ).clamp(320, 4096).toInt();
         _useFp16 =
             saved.gpuAvailable && _boolSetting(saved, 'use_fp16', _useFp16);
-        _videoMode = _stringSetting(saved, 'video_mode', _videoMode) == 'fast'
-            ? 'fast'
-            : 'all';
+        _videoMode = normalizeVideoProcessingMode(
+          _stringSetting(saved, 'video_mode', _videoMode),
+        );
         _vidStride = _intSetting(
           saved,
           'vid_stride',
@@ -2159,7 +2159,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   int _processingThreadCount({bool singleFile = false}) {
-    if (singleFile) return 1;
+    if (singleFile || _settings?.gpuAvailable != true) return 1;
     final settings = _settingsOrEmpty();
     return _intSetting(settings, 'thread_count', 4).clamp(1, 8).toInt();
   }
@@ -2181,7 +2181,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   String _effectiveVideoMode() {
-    return _videoMode == 'fast' ? 'fast' : 'all';
+    return normalizeVideoProcessingMode(_videoMode);
   }
 
   bool _useAugment() {

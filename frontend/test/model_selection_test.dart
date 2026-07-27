@@ -2,16 +2,29 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/models/settings.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
+import 'package:neri_flutter/src/models/video_processing_mode.dart';
 import 'package:neri_flutter/src/screens/preview_screen.dart';
+import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 import 'package:neri_flutter/src/utils/detection_species.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 
 void main() {
+  test('视频处理模式保留跳过视频并兼容旧值', () {
+    expect(
+      normalizeVideoProcessingMode(videoProcessingModeSkip),
+      videoProcessingModeSkip,
+    );
+    expect(normalizeVideoProcessingMode('unknown'), videoProcessingModeAll);
+  });
+
   test('默认主题色为调色板中的珊瑚红', () {
     const settings = ThemeSettings();
     final coralOption = kSeedColorOptions.singleWhere(
@@ -92,6 +105,150 @@ void main() {
 
     detectionModelDropdown.onSelected?.call('');
     expect(selectedModelPath, '');
+  });
+
+  testWidgets('跳过视频时主界面禁用视频跳帧', (tester) async {
+    final inputController = TextEditingController();
+    addTearDown(inputController.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StartScreen(
+            settings: const NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: <String>['.jpg'],
+              supportedVideoExtensions: <String>['.mp4'],
+              modelDirectory: 'res/model',
+              classificationModelDirectory: 'res/model_cls',
+              availableModels: <ModelInfo>[],
+              availableClassificationModels: <ModelInfo>[],
+              speciesTypes: <String, String>{},
+              settings: <String, dynamic>{},
+              gpuAvailable: false,
+              missingYoloDependencies: <String>[],
+            ),
+            inputController: inputController,
+            selectedModelPath: '',
+            onModelChanged: (_) {},
+            selectedClassificationModelPath: '',
+            onClassificationModelChanged: (_) {},
+            videoMode: videoProcessingModeSkip,
+            onVideoModeChanged: (_) {},
+            vidStride: 5,
+            onVidStrideChanged: (_) {},
+            useFp16: false,
+            onUseFp16Changed: (_) {},
+            confidence: 0.25,
+            onConfidenceChanged: (_) {},
+            iou: 0.30,
+            onIouChanged: (_) {},
+            submitting: false,
+            onCreateJob: () {},
+            onCancelJob: (_) {},
+            onResumeJob: (_) {},
+            onDeleteJob: (_) {},
+            onClearJobs: () {},
+            pendingStartJobIds: const <String>{},
+            pendingStopJobIds: const <String>{},
+            jobs: const [],
+          ),
+        ),
+      ),
+    );
+
+    final videoModeDropdown = tester
+        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .singleWhere(
+          (dropdown) => dropdown.dropdownMenuEntries.any(
+            (entry) => entry.value == videoProcessingModeSkip,
+          ),
+        );
+    final strideDropdown = tester.widget<DropdownMenu<int>>(
+      find.byType(DropdownMenu<int>),
+    );
+
+    expect(videoModeDropdown.initialSelection, videoProcessingModeSkip);
+    expect(
+      videoModeDropdown.dropdownMenuEntries
+          .map((entry) => entry.label)
+          .toList(),
+      contains('跳过视频'),
+    );
+    expect(strideDropdown.enabled, isFalse);
+    expect(strideDropdown.onSelected, isNull);
+  });
+
+  testWidgets('检测设置使用弹出菜单选择视频模式并隐藏跳帧设置', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((_) async => http.Response('{}', 200)),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: const NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: <String>['.jpg'],
+              supportedVideoExtensions: <String>['.mp4'],
+              modelDirectory: 'res/model',
+              classificationModelDirectory: 'res/model_cls',
+              availableModels: <ModelInfo>[],
+              availableClassificationModels: <ModelInfo>[],
+              speciesTypes: <String, String>{},
+              settings: <String, dynamic>{
+                'video_mode': videoProcessingModeSkip,
+              },
+              gpuAvailable: false,
+              missingYoloDependencies: <String>[],
+            ),
+            autoGroupInferredBurstSize: null,
+            apiClient: apiClient,
+            themeNotifier: themeNotifier,
+            onUpdateTheme: (_) {},
+            closeBehavior: 'ask',
+            onCloseBehaviorChanged: (_) {},
+            onSaveSettings: (_) async {},
+            onCheckForUpdates:
+                ({
+                  required channel,
+                  required mirror,
+                  required mirrorTemplates,
+                }) async {},
+            onShowMessage: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('视频处理模式'), findsOneWidget);
+    expect(find.text('跳帧设置'), findsNothing);
+    expect(find.byType(SegmentedButton<String>), findsNothing);
+    expect(find.text('CPU 模式下批处理数和线程数固定为 1'), findsOneWidget);
+    final cpuLockedSliders = tester
+        .widgetList<Slider>(find.byType(Slider))
+        .where((slider) => slider.value == 1 && slider.onChanged == null);
+    expect(cpuLockedSliders, hasLength(2));
+
+    final modeButton = find.widgetWithText(TextButton, '跳过视频');
+    expect(modeButton, findsOneWidget);
+    await tester.ensureVisible(modeButton);
+    await tester.pumpAndSettle();
+    await tester.tap(modeButton);
+    await tester.pumpAndSettle();
+
+    expect(find.text('全部识别'), findsWidgets);
+    expect(find.text('快速识别'), findsWidgets);
+    expect(find.text('跳过视频'), findsWidgets);
   });
 
   testWidgets('仅双模型启用时显示综合置信度', (tester) async {

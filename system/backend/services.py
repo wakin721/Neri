@@ -306,6 +306,29 @@ def detect_gpu_available() -> bool:
         return False
 
 
+def _effective_processing_request(
+    request: CreateJobRequest,
+) -> CreateJobRequest:
+    if not request.options.enable_detection:
+        return request
+    if (
+        request.options.batch_size == 1
+        and request.options.thread_count == 1
+        and not request.options.use_fp16
+    ):
+        return request
+    if detect_gpu_available():
+        return request
+    options = request.options.model_copy(
+        update={
+            "batch_size": 1,
+            "thread_count": 1,
+            "use_fp16": False,
+        }
+    )
+    return request.model_copy(update={"options": options})
+
+
 def missing_yolo_dependencies() -> list[str]:
     """Return Python modules required before YOLO inference can run."""
 
@@ -414,6 +437,7 @@ class ProcessingJobManager:
     ) -> JobSummary:
         """Create a job and start it on a background worker."""
 
+        request = _effective_processing_request(request)
         initial_results = _unique_detection_items(initial_results or [])
         job_id = uuid.uuid4().hex
         now = utc_now()
@@ -660,6 +684,7 @@ class ProcessingJobManager:
             if job_id in self._deleted_jobs:
                 return
             self._active_job_ids.add(job_id)
+        request = _effective_processing_request(request)
         batch_log_session = _start_batch_log_session(job_id)
         detector = None
         try:
@@ -718,13 +743,24 @@ class ProcessingJobManager:
             processed = len(results)
             job_started_at = time.monotonic()
             start_processed = processed
+            speed_started_at = job_started_at
+            speed_start_processed = start_processed
             total_files = len(files)
             missing_file_keys: set[str] = set()
 
             def progress_metrics(current_processed: int) -> dict[str, object]:
-                elapsed = max(0.0, time.monotonic() - job_started_at)
-                completed_this_run = max(0, current_processed - start_processed)
-                speed = completed_this_run / elapsed if elapsed > 0 else 0.0
+                now = time.monotonic()
+                elapsed = max(0.0, now - job_started_at)
+                speed_elapsed = max(0.0, now - speed_started_at)
+                completed_for_speed = max(
+                    0,
+                    current_processed - speed_start_processed,
+                )
+                speed = (
+                    completed_for_speed / speed_elapsed
+                    if speed_elapsed > 0
+                    else 0.0
+                )
                 remaining = max(0, total_files - current_processed)
                 remaining_seconds = remaining / speed if speed > 0 else None
                 return {
@@ -732,6 +768,11 @@ class ProcessingJobManager:
                     "speed": speed,
                     "remaining_seconds": remaining_seconds,
                 }
+
+            def reset_speed_metrics(current_processed: int) -> None:
+                nonlocal speed_started_at, speed_start_processed
+                speed_started_at = time.monotonic()
+                speed_start_processed = current_processed
 
             def existing_paths(paths: Iterable[Path]) -> list[Path]:
                 nonlocal total_files
@@ -964,6 +1005,27 @@ class ProcessingJobManager:
                     if preload_executor is not None:
                         preload_executor.shutdown(wait=False, cancel_futures=True)
 
+                video_files = existing_paths(video_files)
+                if video_files:
+                    reset_speed_metrics(processed)
+                    self._mutate_job(
+                        job_id,
+                        persist=False,
+                        processed=processed,
+                        results=results,
+                        **progress_metrics(processed),
+                        message=f"正在准备处理视频 0/{len(video_files)}",
+                    )
+                    logger.info(
+                        (
+                            "Progress speed baseline reset for video phase: "
+                            "job_id=%s processed=%d remaining_videos=%d"
+                        ),
+                        job_id,
+                        processed,
+                        len(video_files),
+                    )
+
                 if request.options.video_mode == "fast":
                     fast_video_group_size = max(
                         batch_size,
@@ -1016,7 +1078,6 @@ class ProcessingJobManager:
                             ),
                         )
                 else:
-                    video_files = existing_paths(video_files)
                     video_items: list[DetectionItem] = []
                     for path in video_files:
                         item = _build_metadata_item(path)
@@ -1243,9 +1304,15 @@ def _resolve_job_inputs(
 
     files: list[Path] = []
     seen: set[str] = set()
+    skip_videos = request.options.video_mode == "skip"
     for source in sources:
         _raise_if_cancelled(cancelled)
         for path in _resolve_supported_inputs(source, cancelled=cancelled):
+            if (
+                skip_videos
+                and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+            ):
+                continue
             key = _path_key(path)
             if key in seen:
                 continue
@@ -1253,6 +1320,10 @@ def _resolve_job_inputs(
             files.append(path)
 
     if not files:
+        if skip_videos:
+            raise ValueError(
+                "输入路径中没有支持的图片（视频处理模式已设置为跳过视频）"
+            )
         raise ValueError(
             f"输入路径中没有支持的媒体文件: {_request_input_label(request)}"
         )
