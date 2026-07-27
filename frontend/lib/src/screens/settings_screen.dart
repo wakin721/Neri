@@ -176,6 +176,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _resetDraft();
         _loadModelClassesForSelection();
       } else {
+        _syncModelDraftFromSettings();
         _syncQuickMarkDraftFromSettings();
       }
     }
@@ -317,6 +318,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_resettingDraft) return;
     _draft['package'] = _packageController.text.trim();
     _markDirty();
+  }
+
+  void _syncModelDraftFromSettings() {
+    final settings = widget.settings;
+    if (settings == null) return;
+    final detectionModel = _stringSetting(
+      settings.settings,
+      'selected_model',
+      settings.selectedModel ?? '',
+    );
+    final classificationModel = _stringSetting(
+      settings.settings,
+      'selected_classification_model',
+      settings.selectedClassificationModel ?? '',
+    );
+    if (_string('selected_model') == detectionModel &&
+        _string('selected_classification_model') == classificationModel) {
+      return;
+    }
+    _draft['selected_model'] = detectionModel;
+    _draft['selected_classification_model'] = classificationModel;
+    _markDraftChanged();
+    _scheduleAutoSave();
+    unawaited(_loadModelClassesForSelection());
   }
 
   void _syncQuickMarkDraftFromSettings() {

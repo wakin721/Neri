@@ -251,6 +251,98 @@ void main() {
     expect(find.text('跳过视频'), findsWidgets);
   });
 
+  testWidgets('设置页有未保存修改时仍同步开始页的模型选择', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/models/classes') {
+          return http.Response('[]', 200);
+        }
+        return http.Response('{}', 200);
+      }),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+    final savedDrafts = <Map<String, dynamic>>[];
+    late StateSetter updateHost;
+    var currentSettings = const NeriSettings(
+      appTitle: 'Neri',
+      appVersion: 'test',
+      supportedImageExtensions: <String>['.jpg'],
+      supportedVideoExtensions: <String>['.mp4'],
+      modelDirectory: 'res/model',
+      classificationModelDirectory: 'res/model_cls',
+      availableModels: <ModelInfo>[
+        ModelInfo(name: 'detector-a.pt', path: 'res/model/detector-a.pt'),
+        ModelInfo(name: 'detector-b.pt', path: 'res/model/detector-b.pt'),
+      ],
+      availableClassificationModels: <ModelInfo>[],
+      selectedModel: 'res/model/detector-a.pt',
+      speciesTypes: <String, String>{},
+      settings: <String, dynamic>{'selected_model': 'res/model/detector-a.pt'},
+      gpuAvailable: false,
+      missingYoloDependencies: <String>[],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) {
+            updateHost = setState;
+            return Scaffold(
+              body: SettingsScreen(
+                settings: currentSettings,
+                autoGroupInferredBurstSize: null,
+                apiClient: apiClient,
+                themeNotifier: themeNotifier,
+                onUpdateTheme: (_) {},
+                closeBehavior: 'ask',
+                onCloseBehaviorChanged: (_) {},
+                onSaveSettings: (settings) async {
+                  savedDrafts.add(Map<String, dynamic>.from(settings));
+                },
+                onCheckForUpdates:
+                    ({
+                      required channel,
+                      required mirror,
+                      required mirrorTemplates,
+                    }) async {},
+                onShowMessage: (_) {},
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.widgetWithText(TextButton, 'detector-a.pt'), findsOneWidget);
+    final enabledSwitch = tester
+        .widgetList<Switch>(find.byType(Switch))
+        .firstWhere((control) => control.onChanged != null);
+    enabledSwitch.onChanged?.call(!enabledSwitch.value);
+    await tester.pump();
+
+    updateHost(() {
+      currentSettings = currentSettings.copyWith(
+        selectedModel: 'res/model/detector-b.pt',
+        settings: <String, dynamic>{
+          ...currentSettings.settings,
+          'selected_model': 'res/model/detector-b.pt',
+        },
+      );
+    });
+    await tester.pump();
+
+    expect(find.widgetWithText(TextButton, 'detector-b.pt'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 900));
+    await tester.pump();
+    expect(savedDrafts, isNotEmpty);
+    expect(savedDrafts.last['selected_model'], 'res/model/detector-b.pt');
+  });
+
   testWidgets('仅双模型启用时显示综合置信度', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));

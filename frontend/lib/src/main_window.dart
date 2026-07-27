@@ -106,12 +106,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Timer? _timer;
   Timer? _previewRefreshTimer;
   Timer? _inputDirectoryChangeTimer;
+  Timer? _modelSelectionSaveTimer;
   StreamSubscription<FileSystemEvent>? _inputDirectoryWatcher;
   Process? _backendProcess;
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
   int _previewContentVersion = 0;
+  int _modelSelectionRevision = 0;
   int _closeFlowId = 0;
   int _closeBehaviorRevision = 0;
   int _lastCloseActionRevision = 0;
@@ -121,6 +123,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _submitting = false;
   bool _previewLoading = false;
   bool _settingsSaving = false;
+  bool _modelSelectionSaveInProgress = false;
   bool _validationBusy = false;
   int _validationBusyRequests = 0;
   final Map<String, int> _pendingStartJobBaselines = <String, int>{};
@@ -207,6 +210,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
     _inputDirectoryChangeTimer?.cancel();
+    _modelSelectionSaveTimer?.cancel();
     final inputDirectoryWatcher = _inputDirectoryWatcher;
     if (inputDirectoryWatcher != null) {
       unawaited(inputDirectoryWatcher.cancel());
@@ -3121,15 +3125,96 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
+  void _updateStartModelSelection(
+    String? value, {
+    required bool classification,
+  }) {
+    final normalizedValue = value ?? '';
+    setState(() {
+      if (classification) {
+        _selectedClassificationModelPath = normalizedValue;
+      } else {
+        _selectedModelPath = normalizedValue;
+      }
+      final current = _settings;
+      if (current != null) {
+        final nextSettings = Map<String, dynamic>.from(current.settings)
+          ..['selected_model'] = _selectedModelPath ?? ''
+          ..['selected_classification_model'] =
+              _selectedClassificationModelPath ?? '';
+        _settings = current.copyWith(
+          settings: nextSettings,
+          selectedModel: _selectedModelPath ?? '',
+          selectedClassificationModel: _selectedClassificationModelPath ?? '',
+        );
+      }
+      _modelSelectionRevision += 1;
+    });
+    _scheduleModelSelectionSave();
+  }
+
+  void _scheduleModelSelectionSave() {
+    _modelSelectionSaveTimer?.cancel();
+    _modelSelectionSaveTimer = Timer(
+      const Duration(milliseconds: 300),
+      () => unawaited(_persistModelSelections()),
+    );
+  }
+
+  Future<void> _persistModelSelections() async {
+    _modelSelectionSaveTimer?.cancel();
+    _modelSelectionSaveTimer = null;
+    if (_modelSelectionSaveInProgress) return;
+    final current = _settings;
+    if (current == null) return;
+
+    final saveRevision = _modelSelectionRevision;
+    final detectionModel = _selectedModelPath ?? '';
+    final classificationModel = _selectedClassificationModelPath ?? '';
+    final nextSettings = Map<String, dynamic>.from(current.settings)
+      ..['selected_model'] = detectionModel
+      ..['selected_classification_model'] = classificationModel;
+    _modelSelectionSaveInProgress = true;
+    try {
+      final saved = await widget.apiClient.saveSettings(nextSettings);
+      if (!mounted) return;
+      setState(() {
+        if (saveRevision == _modelSelectionRevision) {
+          _settings = saved;
+          return;
+        }
+        final latestSettings = Map<String, dynamic>.from(saved.settings)
+          ..['selected_model'] = _selectedModelPath ?? ''
+          ..['selected_classification_model'] =
+              _selectedClassificationModelPath ?? '';
+        _settings = saved.copyWith(
+          settings: latestSettings,
+          selectedModel: _selectedModelPath ?? '',
+          selectedClassificationModel: _selectedClassificationModelPath ?? '',
+        );
+      });
+    } catch (error) {
+      if (mounted && saveRevision == _modelSelectionRevision) {
+        _showSnackBar('保存模型选择失败：$error');
+      }
+    } finally {
+      _modelSelectionSaveInProgress = false;
+      if (mounted && saveRevision != _modelSelectionRevision) {
+        _scheduleModelSelectionSave();
+      }
+    }
+  }
+
   Widget _buildStartScreen() {
     return StartScreen(
       settings: _settings,
       inputController: _inputController,
       selectedModelPath: _selectedModelPath,
-      onModelChanged: (value) => setState(() => _selectedModelPath = value),
+      onModelChanged: (value) =>
+          _updateStartModelSelection(value, classification: false),
       selectedClassificationModelPath: _selectedClassificationModelPath,
       onClassificationModelChanged: (value) =>
-          setState(() => _selectedClassificationModelPath = value ?? ''),
+          _updateStartModelSelection(value, classification: true),
       videoMode: _videoMode,
       onVideoModeChanged: (value) => setState(() => _videoMode = value),
       vidStride: _vidStride,
