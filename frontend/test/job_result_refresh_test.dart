@@ -50,5 +50,25 @@ void main() {
         isFalse,
       );
     });
+
+    test('keeps visible preview content during a same-path refresh', () {
+      expect(
+        shouldClearPreviewItemsBeforeRefresh(
+          loadedPath: r'D:\photos',
+          inputPath: r'D:\photos',
+        ),
+        isFalse,
+      );
+    });
+
+    test('clears preview content when the input path changes', () {
+      expect(
+        shouldClearPreviewItemsBeforeRefresh(
+          loadedPath: r'D:\old-photos',
+          inputPath: r'D:\new-photos',
+        ),
+        isTrue,
+      );
+    });
   });
 }

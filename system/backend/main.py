@@ -556,10 +556,7 @@ def export_validation(request: ValidationExportRequest) -> ValidationExportRespo
 def list_jobs(include_results: bool = Query(True)) -> list[JobSummary]:
     """List all jobs known to this backend process."""
 
-    jobs = job_manager.list_jobs()
-    if include_results:
-        return jobs
-    return [job.model_copy(update={"results": []}, deep=True) for job in jobs]
+    return job_manager.list_jobs(include_results=include_results)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobSummary)

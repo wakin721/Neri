@@ -8,3 +8,10 @@ bool shouldFetchCompleteJobResults({
   if (!silent || !jobProcessingBusy) return true;
   return resultsPageVisible;
 }
+
+bool shouldClearPreviewItemsBeforeRefresh({
+  required String? loadedPath,
+  required String inputPath,
+}) {
+  return loadedPath != inputPath;
+}

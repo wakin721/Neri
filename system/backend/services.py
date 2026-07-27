@@ -532,20 +532,35 @@ class ProcessingJobManager:
                 raise JobNotFoundError(job_id)
             return self._snapshot_unlocked(job_id)
 
-    def list_jobs(self) -> list[JobSummary]:
+    def list_jobs(self, *, include_results: bool = True) -> list[JobSummary]:
         """Return all jobs with newest first."""
 
         with self._lock:
-            jobs = [self._snapshot_unlocked(job_id) for job_id in self._jobs]
+            jobs = [
+                self._snapshot_unlocked(
+                    job_id,
+                    include_results=include_results,
+                )
+                for job_id in self._jobs
+            ]
         return sorted(jobs, key=lambda item: item.created_at, reverse=True)
 
-    def _snapshot_unlocked(self, job_id: str) -> JobSummary:
+    def _snapshot_unlocked(
+        self,
+        job_id: str,
+        *,
+        include_results: bool = True,
+    ) -> JobSummary:
         job = self._jobs.get(job_id)
         if job is None:
             raise JobNotFoundError(job_id)
+        results = list(job.results) if include_results else []
         return job.model_copy(
-            update={"active": job_id in self._active_job_ids},
-            deep=True,
+            update={
+                "active": job_id in self._active_job_ids,
+                "results": results,
+            },
+            deep=False,
         )
 
     def _mutate_job(self, job_id: str, *, persist: bool = True, **changes: object) -> None:
@@ -553,10 +568,14 @@ class ProcessingJobManager:
             current = self._jobs.get(job_id)
             if current is None or job_id in self._deleted_jobs:
                 return
-            data = current.model_dump()
-            data.update(changes)
-            data["updated_at"] = utc_now()
-            self._jobs[job_id] = JobSummary(**data)
+            updates = dict(changes)
+            if "results" in updates:
+                updates["results"] = list(updates["results"])  # type: ignore[arg-type]
+            updates["updated_at"] = utc_now()
+            self._jobs[job_id] = current.model_copy(
+                update=updates,
+                deep=False,
+            )
             if persist:
                 self._save_state_unlocked()
 
@@ -659,7 +678,16 @@ class ProcessingJobManager:
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, initial_results)
                 return
-            input_path, files = _resolve_job_inputs(request)
+            self._mutate_job(
+                job_id,
+                persist=False,
+                state=JobState.RUNNING,
+                message="正在预扫描输入文件",
+            )
+            input_path, files = _resolve_job_inputs(
+                request,
+                cancelled=lambda: self._is_cancelled(job_id),
+            )
             image_count = sum(
                 path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
                 for path in files
@@ -777,6 +805,7 @@ class ProcessingJobManager:
                 )
 
             if detector is None:
+                last_progress_publish = time.monotonic()
                 for path in remaining_files:
                     if self._is_cancelled(job_id):
                         self._mark_cancelled(job_id, results)
@@ -787,13 +816,20 @@ class ProcessingJobManager:
                     results.append(item)
                     processed += 1
                     media_label = "照片" if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else "视频"
-                    self._mutate_job(
-                        job_id,
-                        processed=processed,
-                        results=results,
-                        **progress_metrics(processed),
-                        message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
-                    )
+                    now = time.monotonic()
+                    if (
+                        processed >= total_files
+                        or now - last_progress_publish >= 0.2
+                    ):
+                        self._mutate_job(
+                            job_id,
+                            persist=False,
+                            processed=processed,
+                            results=results,
+                            **progress_metrics(processed),
+                            message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
+                        )
+                        last_progress_publish = now
             else:
                 image_files = [
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
@@ -1188,7 +1224,11 @@ def _request_input_label(request: CreateJobRequest) -> str:
     return request.input_dir or ""
 
 
-def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
+def _resolve_job_inputs(
+    request: CreateJobRequest,
+    *,
+    cancelled=None,
+) -> tuple[Path, list[Path]]:
     raw_inputs = request.input_paths or (
         [request.input_dir] if request.input_dir else []
     )
@@ -1204,7 +1244,8 @@ def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
     files: list[Path] = []
     seen: set[str] = set()
     for source in sources:
-        for path in _resolve_supported_inputs(source):
+        _raise_if_cancelled(cancelled)
+        for path in _resolve_supported_inputs(source, cancelled=cancelled):
             key = _path_key(path)
             if key in seen:
                 continue
@@ -1237,7 +1278,11 @@ def _common_input_root(files: list[Path]) -> Path:
     )
 
 
-def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:
+def _resolve_supported_inputs(
+    input_path: Path,
+    *,
+    cancelled=None,
+) -> Iterable[Path]:
     supported = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
     if input_path.is_file():
         if input_path.suffix.lower() in supported:
@@ -1245,7 +1290,7 @@ def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:
         return
 
     if input_path.is_dir():
-        yield from _iter_supported_files(input_path)
+        yield from _iter_supported_files(input_path, cancelled=cancelled)
 
 
 def _chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
@@ -1297,22 +1342,34 @@ def _path_key(path: str | Path) -> str:
         return text.replace("\\", "/").casefold()
 
 
-def _iter_supported_files(input_dir: Path) -> Iterable[Path]:
-    supported = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
+def _iter_supported_files(
+    input_dir: Path,
+    *,
+    cancelled=None,
+) -> Iterable[Path]:
+    supported = set(SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS)
     image_files: list[Path] = []
     video_files: list[Path] = []
-    for path in sorted(input_dir.rglob("*")):
-        if _is_generated_favorite_export_path(path):
-            continue
-        if not path.is_file():
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in supported:
-            continue
-        if suffix in SUPPORTED_IMAGE_EXTENSIONS:
-            image_files.append(path)
-        else:
-            video_files.append(path)
+    if _is_generated_favorite_export_path(input_dir):
+        return
+
+    for root, directory_names, file_names in os.walk(input_dir):
+        _raise_if_cancelled(cancelled)
+        root_path = Path(root)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if not _is_generated_favorite_export_path(root_path / name)
+        )
+        for file_name in sorted(file_names):
+            path = root_path / file_name
+            suffix = path.suffix.lower()
+            if suffix not in supported:
+                continue
+            if suffix in SUPPORTED_IMAGE_EXTENSIONS:
+                image_files.append(path)
+            else:
+                video_files.append(path)
     yield from image_files
     yield from video_files
 

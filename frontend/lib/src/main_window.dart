@@ -110,6 +110,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
+  int _previewContentVersion = 0;
   int _closeFlowId = 0;
   int _closeBehaviorRevision = 0;
   int _lastCloseActionRevision = 0;
@@ -1616,7 +1617,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted) return;
     setState(() {
       _previewLoading = true;
-      if (_previewLoadedPath != inputPath || force) {
+      if (shouldClearPreviewItemsBeforeRefresh(
+        loadedPath: _previewLoadedPath,
+        inputPath: inputPath,
+      )) {
         _previewItems = const <DetectionItem>[];
         _previewMetadataCache.clear();
         _previewMetadataLoading.clear();
@@ -1641,6 +1645,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _previewItems = sortedItems;
         _previewLoadedPath = inputPath;
         _previewLoading = false;
+        _previewContentVersion++;
         if (finishGlobalLoading) {
           _loading = false;
         }
@@ -3230,7 +3235,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       inputPath: inputPath,
       items: items,
       loading: _previewLoading,
-      refreshVersion: _previewRefreshRequestId,
+      refreshVersion: _previewContentVersion,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
       useCombinedConfidence:
           _selectedModelPath?.trim().isNotEmpty == true &&
