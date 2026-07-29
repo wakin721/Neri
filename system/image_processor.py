@@ -443,7 +443,7 @@ class ImageProcessor:
         return batch_results_info
 
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
-                             conf: float = 0.25, augment: bool = False,
+                             conf: float = 0.25, augment: bool = True,
                              agnostic_nms: bool = True, timeout: float = 60.0,
                              preloaded_data: Optional[Tuple] = None,
                              classes: Optional[List[int]] = None,

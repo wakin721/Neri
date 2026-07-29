@@ -18,11 +18,13 @@ import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 
 void main() {
   test('视频处理模式保留跳过视频并兼容旧值', () {
+    expect(defaultVideoProcessingMode, videoProcessingModeFast);
+    expect(defaultVideoSampleCount, 3);
     expect(
       normalizeVideoProcessingMode(videoProcessingModeSkip),
       videoProcessingModeSkip,
     );
-    expect(normalizeVideoProcessingMode('unknown'), videoProcessingModeAll);
+    expect(normalizeVideoProcessingMode('unknown'), defaultVideoProcessingMode);
   });
 
   test('默认主题色为调色板中的珊瑚红', () {

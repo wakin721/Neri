@@ -1,12 +1,15 @@
 const videoProcessingModeAll = 'all';
 const videoProcessingModeFast = 'fast';
 const videoProcessingModeSkip = 'skip';
+const defaultVideoProcessingMode = videoProcessingModeFast;
+const defaultVideoSampleCount = 3;
 
 String normalizeVideoProcessingMode(String? value) {
   return switch (value) {
+    videoProcessingModeAll => videoProcessingModeAll,
     videoProcessingModeFast => videoProcessingModeFast,
     videoProcessingModeSkip => videoProcessingModeSkip,
-    _ => videoProcessingModeAll,
+    _ => defaultVideoProcessingMode,
   };
 }
 

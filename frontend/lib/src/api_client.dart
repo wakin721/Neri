@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
+import 'models/video_processing_mode.dart';
 
 class NeriApiClient {
   NeriApiClient({
@@ -241,14 +242,14 @@ class NeriApiClient {
     required double confidence,
     required double iou,
     required bool useFp16,
-    bool useAugment = false,
+    bool useAugment = true,
     bool useAgnosticNms = true,
     String confidencePriority = 'classification',
     int batchSize = 16,
     int threadCount = 4,
     int imageSize = 1920,
-    int vidStride = 1,
-    String videoMode = 'all',
+    int vidStride = defaultVideoSampleCount,
+    String videoMode = defaultVideoProcessingMode,
     required bool enableDetection,
     List<String> selectedSpeciesNames = const <String>[],
   }) async {

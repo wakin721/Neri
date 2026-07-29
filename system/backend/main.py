@@ -202,6 +202,9 @@ def settings() -> SettingsResponse:
     stored_settings = settings_manager.load_settings() or {}
     stored_settings.setdefault("package_source", "auto")
     stored_settings.setdefault("update_source", "auto")
+    stored_settings.setdefault("use_augment", True)
+    stored_settings.setdefault("video_mode", "fast")
+    stored_settings.setdefault("vid_stride", 3)
     stored_settings.setdefault("auto_group", True)
     stored_settings.setdefault("collapse_groups", True)
     stored_settings.setdefault("auto_group_detect_burst", True)

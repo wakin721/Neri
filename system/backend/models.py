@@ -213,7 +213,7 @@ class ProcessingOptions(BaseModel):
     confidence: float = Field(default=0.25, ge=0.0, le=1.0)
     iou: float = Field(default=0.45, ge=0.0, le=1.0)
     use_fp16: bool = False
-    use_augment: bool = False
+    use_augment: bool = True
     use_agnostic_nms: bool = True
     confidence_priority: Literal["detection", "classification"] = Field(
         default="classification",
@@ -225,8 +225,8 @@ class ProcessingOptions(BaseModel):
     batch_size: int = Field(default=16, ge=1, le=64)
     thread_count: int = Field(default=4, ge=1, le=8)
     imgsz: int = Field(default=1920, ge=320, le=4096)
-    vid_stride: int = Field(default=1, ge=1, le=120)
-    video_mode: Literal["all", "fast", "skip"] = "all"
+    vid_stride: int = Field(default=3, ge=1, le=120)
+    video_mode: Literal["all", "fast", "skip"] = "fast"
     enable_detection: bool = Field(
         default=False,
         description="When false, the job indexes supported files and EXIF metadata without loading YOLO.",

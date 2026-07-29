@@ -162,9 +162,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String? _selectedClassificationModelPath;
   MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
-  String _videoMode = 'all';
+  String _videoMode = defaultVideoProcessingMode;
   int _imageSize = 1920;
-  int _vidStride = 1;
+  int _vidStride = defaultVideoSampleCount;
   int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
   String? _watchedInputDirectory;
@@ -2186,7 +2186,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   bool _useAugment() {
-    return _boolSetting(_settingsOrEmpty(), 'use_augment', false);
+    return _boolSetting(_settingsOrEmpty(), 'use_augment', true);
   }
 
   bool _useAgnosticNms() {

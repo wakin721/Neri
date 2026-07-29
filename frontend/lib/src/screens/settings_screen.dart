@@ -224,7 +224,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
                 _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
-      'use_augment': _boolSetting(saved, 'use_augment', false),
+      'use_augment': _boolSetting(saved, 'use_augment', true),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
       'confidence_priority':
           _stringSetting(
@@ -236,9 +236,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? _detectionConfidencePriority
           : _classificationConfidencePriority,
       'video_mode': normalizeVideoProcessingMode(
-        _stringSetting(saved, 'video_mode', videoProcessingModeAll),
+        _stringSetting(saved, 'video_mode', defaultVideoProcessingMode),
       ),
-      'vid_stride': _intSetting(saved, 'vid_stride', 1),
+      'vid_stride': _intSetting(saved, 'vid_stride', defaultVideoSampleCount),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
       'collapse_groups': _boolSetting(saved, 'collapse_groups', true),
@@ -1048,7 +1048,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       allowEmpty: true,
     );
     final videoMode = normalizeVideoProcessingMode(
-      _string('video_mode', videoProcessingModeAll),
+      _string('video_mode', defaultVideoProcessingMode),
     );
     final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
@@ -1492,7 +1492,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildVideoSettings() {
     final videoMode = normalizeVideoProcessingMode(
-      _string('video_mode', videoProcessingModeAll),
+      _string('video_mode', defaultVideoProcessingMode),
     );
     final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
 
@@ -2090,7 +2090,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildUpdateSettingsSection() {
     return SectionCard(
       title: '软件更新',
-      subtitle: '选择更新通道，下载源按公共 IP 自动匹配',
+      subtitle: '选择更新通道',
       icon: Icons.system_update_alt_rounded,
       child: _buildUpdateSettings(),
     );
@@ -2843,7 +2843,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         _SettingsPanel(
           title: '下载源',
-          subtitle: '自动模式按公共 IP 选择，也可手动指定',
+          subtitle: '自动或者手动选择更新源',
           icon: Icons.public_rounded,
           child: _SettingsMenuButton<String>(
             value: _string('update_source', 'auto'),
