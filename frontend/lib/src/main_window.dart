@@ -786,7 +786,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final downloadSourceDetail = switch (selectedDownloadSource) {
       'domestic' => '将使用 Neri 国内源检查并下载更新。',
       'github' => '将使用 GitHub 官方源检查并下载更新。',
-      _ => '正在自动选择最合适的更新源',
+      _ => '正在选择最合适的更新源',
     };
 
     _checkingForAppUpdate = true;
