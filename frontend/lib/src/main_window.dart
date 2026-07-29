@@ -749,8 +749,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _checkForSoftwareUpdate({
     required bool manual,
     String? channel,
-    String? mirror,
-    List<String>? mirrorTemplates,
+    String? downloadSource,
   }) async {
     if (_checkingForAppUpdate || _closing) {
       if (manual) _showSnackBar('正在检查或安装更新，请稍候。');
@@ -780,28 +779,34 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (manual) _showSnackBar('未找到程序目录，无法执行自动更新。');
       return;
     }
+    final selectedChannel =
+        channel ?? _stringSetting(settings, 'update_channel', 'Preview');
+    final selectedDownloadSource =
+        downloadSource ?? _stringSetting(settings, 'update_source', 'auto');
+    final downloadSourceDetail = switch (selectedDownloadSource) {
+      'domestic' => '将使用 Neri 国内源检查并下载更新。',
+      'github' => '将使用 GitHub 官方源检查并下载更新。',
+      _ => '将根据当前公共 IP 自动选择更新源。',
+    };
 
     _checkingForAppUpdate = true;
     if (manual && mounted) {
       setState(() {
         _softwareUpdateCardDismissed = false;
-        _softwareUpdateProgress = const _SoftwareUpdateProgress(
-          message: '正在从 GitHub 检查最新版本…',
-          detail: '这通常只需要几秒钟。',
+        _softwareUpdateProgress = _SoftwareUpdateProgress(
+          message: '正在检查最新版本…',
+          detail: downloadSourceDetail,
         );
       });
     }
 
     try {
-      final selectedChannel =
-          channel ?? _stringSetting(settings, 'update_channel', 'Preview');
-      final selectedMirror =
-          mirror ?? _stringSetting(settings, 'update_mirror', 'KKGitHub');
-      final selectedMirrorTemplates =
-          mirrorTemplates ?? _updateMirrorTemplatesSetting(settings);
+      final useMainlandChinaSource = await widget.apiClient
+          .shouldUseMainlandUpdateSource(selectedDownloadSource);
       final release = await _appUpdater.checkForUpdate(
         currentVersion: settings.appVersion,
         channel: selectedChannel,
+        useMainlandChinaSource: useMainlandChinaSource,
       );
       if (!mounted || _closing) return;
       setState(() => _softwareUpdateProgress = null);
@@ -813,8 +818,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _softwareUpdateCardDismissed = false;
         _availableSoftwareUpdate = _AvailableSoftwareUpdate(
           release: release,
-          mirror: selectedMirror,
-          mirrorTemplates: selectedMirrorTemplates,
           installDirectory: installDirectory,
         );
       });
@@ -848,8 +851,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     unawaited(
       _downloadAppUpdate(
             available.release,
-            mirror: available.mirror,
-            mirrorTemplates: available.mirrorTemplates,
             installDirectory: available.installDirectory,
           )
           .catchError((Object error, StackTrace stackTrace) {
@@ -864,8 +865,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Future<void> _downloadAppUpdate(
     AppUpdateRelease release, {
-    required String mirror,
-    required List<String> mirrorTemplates,
     required Directory installDirectory,
   }) async {
     _lastSoftwareUpdateProgressPaint = null;
@@ -882,8 +881,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     try {
       final downloaded = await _appUpdater.downloadUpdate(
         release,
-        mirror: mirror,
-        mirrorTemplates: mirrorTemplates,
         onProgress: _handleSoftwareUpdateDownloadProgress,
       );
       if (!mounted || _closing) {
@@ -2227,34 +2224,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return fallback;
   }
 
-  List<String> _updateMirrorTemplatesSetting(NeriSettings settings) {
-    final values = settings.settings.containsKey('update_mirrors')
-        ? _stringListSetting(settings, 'update_mirrors', const <String>[])
-        : <String>[
-            _stringSetting(
-              settings,
-              'update_mirror_url',
-              defaultGithubMirrorTemplate,
-            ),
-            defaultGithubMirrorTemplate,
-            ..._stringListSetting(
-              settings,
-              'update_custom_mirrors',
-              const <String>[],
-            ),
-          ];
-    final mirrors = <String>[];
-    for (final value in values) {
-      try {
-        final normalized = normalizeGithubMirrorTemplate(value);
-        if (!mirrors.contains(normalized)) mirrors.add(normalized);
-      } on FormatException {
-        // Ignore malformed entries saved by older or manually edited settings.
-      }
-    }
-    return mirrors;
-  }
-
   Map<String, int> _intMapSetting(NeriSettings settings, String key) {
     final value = settings.settings[key];
     if (value is! Map) return const <String, int>{};
@@ -3249,16 +3218,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           unawaited(_updateCloseBehaviorFromSettings(behavior)),
       onSaveSettings: _saveAdvancedSettings,
       onCheckForUpdates:
-          ({
-            required String channel,
-            required String mirror,
-            required List<String> mirrorTemplates,
-          }) => _checkForSoftwareUpdate(
-            manual: true,
-            channel: channel,
-            mirror: mirror,
-            mirrorTemplates: mirrorTemplates,
-          ),
+          ({required String channel, required String downloadSource}) =>
+              _checkForSoftwareUpdate(
+                manual: true,
+                channel: channel,
+                downloadSource: downloadSource,
+              ),
       onShowMessage: _showSnackBar,
     );
   }
@@ -3491,14 +3456,10 @@ class _StartupMaintenanceOverlay extends StatelessWidget {
 class _AvailableSoftwareUpdate {
   const _AvailableSoftwareUpdate({
     required this.release,
-    required this.mirror,
-    required this.mirrorTemplates,
     required this.installDirectory,
   });
 
   final AppUpdateRelease release;
-  final String mirror;
-  final List<String> mirrorTemplates;
   final Directory installDirectory;
 }
 

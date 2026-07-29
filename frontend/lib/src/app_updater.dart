@@ -7,102 +7,6 @@ import 'package:crypto/crypto.dart';
 typedef UpdateDownloadProgressCallback =
     void Function(UpdateDownloadProgress progress);
 
-const defaultGithubMirrorTemplate = 'https://kkgithub.com';
-
-String normalizeGithubMirrorTemplate(String value) {
-  var template = value.trim();
-  if (template.isEmpty) {
-    throw const FormatException('镜像地址不能为空');
-  }
-  if (template.length > 500) {
-    throw const FormatException('镜像地址不能超过 500 个字符');
-  }
-  final unknownPlaceholder = RegExp(
-    r'\{(?!url\}|path\})[^}]+\}',
-  ).firstMatch(template);
-  if (unknownPlaceholder != null) {
-    throw FormatException('不支持的占位符：${unknownPlaceholder.group(0)}');
-  }
-  if (!template.contains('{url}') && !template.contains('{path}')) {
-    final base = Uri.tryParse(template);
-    if (base == null ||
-        (base.scheme != 'http' && base.scheme != 'https') ||
-        base.host.isEmpty ||
-        base.userInfo.isNotEmpty) {
-      throw const FormatException('请输入有效且不包含账号密码的 HTTP 或 HTTPS 镜像地址');
-    }
-  }
-  final probe = resolveGithubMirrorUri(
-    Uri.parse(
-      'https://github.com/wakin721/Neri/releases/download/v1.0.0/Neri.zip',
-    ),
-    template,
-    normalize: false,
-  );
-  if (probe.scheme != 'http' && probe.scheme != 'https') {
-    throw const FormatException('镜像地址仅支持 HTTP 或 HTTPS');
-  }
-  if (probe.host.isEmpty || probe.userInfo.isNotEmpty) {
-    throw const FormatException('请输入有效且不包含账号密码的镜像地址');
-  }
-  if (!template.contains('{url}') && !template.contains('{path}')) {
-    template = template.replaceFirst(RegExp(r'/+$'), '');
-  }
-  return template;
-}
-
-Uri resolveGithubMirrorUri(
-  Uri officialUri,
-  String template, {
-  bool normalize = true,
-}) {
-  final normalized = normalize
-      ? normalizeGithubMirrorTemplate(template)
-      : template;
-  final officialPath = officialUri.hasQuery
-      ? '${officialUri.path}?${officialUri.query}'
-      : officialUri.path;
-  if (normalized.contains('{url}')) {
-    return Uri.parse(normalized.replaceAll('{url}', officialUri.toString()));
-  }
-  if (normalized.contains('{path}')) {
-    return Uri.parse(normalized.replaceAll('{path}', officialPath));
-  }
-
-  final base = Uri.parse(normalized);
-  if (base.path.isEmpty || base.path == '/') {
-    return officialUri.replace(
-      scheme: base.scheme,
-      host: base.host,
-      port: base.hasPort ? base.port : null,
-    );
-  }
-  final prefix = normalized.endsWith('/') ? normalized : '$normalized/';
-  return Uri.parse('$prefix${officialUri.toString()}');
-}
-
-List<Uri> buildGithubDownloadUris({
-  required Uri officialUri,
-  required bool useMirrors,
-  required Iterable<String> mirrorTemplates,
-}) {
-  if (!useMirrors || officialUri.host.toLowerCase() != 'github.com') {
-    return <Uri>[officialUri];
-  }
-  final uris = <Uri>[];
-  final seen = <String>{officialUri.toString()};
-  for (final template in mirrorTemplates) {
-    try {
-      final mirrorUri = resolveGithubMirrorUri(officialUri, template);
-      if (seen.add(mirrorUri.toString())) uris.add(mirrorUri);
-    } on FormatException {
-      // Ignore malformed entries that may come from manually edited settings.
-    }
-  }
-  uris.add(officialUri);
-  return uris;
-}
-
 class AppUpdateAsset {
   const AppUpdateAsset({
     required this.name,
@@ -168,8 +72,21 @@ class DownloadedAppUpdate {
 }
 
 class AppUpdater {
-  AppUpdater({HttpClient? httpClient})
-    : _httpClient = httpClient ?? HttpClient() {
+  AppUpdater({
+    HttpClient? httpClient,
+    Uri? channelsUri,
+    Uri? mainlandReleaseUri,
+    Uri? mainlandPreviewReleaseUri,
+  }) : _httpClient = httpClient ?? HttpClient(),
+       _channelsUri =
+           channelsUri ??
+           Uri.parse('https://download.myneri.top/channels.json'),
+       _mainlandReleaseUri =
+           mainlandReleaseUri ??
+           Uri.parse('https://download.myneri.top/latest/release.json'),
+       _mainlandPreviewReleaseUri =
+           mainlandPreviewReleaseUri ??
+           Uri.parse('https://download.myneri.top/preview/release.json') {
     _httpClient.connectionTimeout = const Duration(seconds: 12);
   }
 
@@ -183,12 +100,16 @@ class AppUpdater {
   static const _streamIdleTimeout = Duration(seconds: 45);
 
   final HttpClient _httpClient;
+  final Uri _channelsUri;
+  final Uri _mainlandReleaseUri;
+  final Uri _mainlandPreviewReleaseUri;
 
   bool get isSupported => Platform.isWindows;
 
   Future<AppUpdateRelease?> checkForUpdate({
     required String currentVersion,
     required String channel,
+    required bool useMainlandChinaSource,
   }) async {
     if (!isSupported) return null;
     final installedVersion = _NeriVersion.tryParse(currentVersion);
@@ -197,6 +118,13 @@ class AppUpdater {
     }
 
     await cleanupStaleDownloads();
+    if (useMainlandChinaSource) {
+      return _checkMainlandChinaChannel(
+        installedVersion: installedVersion,
+        channel: channel,
+      );
+    }
+
     final request = await _httpClient
         .getUrl(_releasesUri)
         .timeout(_requestTimeout);
@@ -272,10 +200,85 @@ class AppUpdater {
     );
   }
 
+  Future<AppUpdateRelease?> _checkMainlandChinaChannel({
+    required _NeriVersion installedVersion,
+    required String channel,
+  }) async {
+    final payload = await _getJsonObject(
+      _channelsUri,
+      serviceLabel: 'Neri 国内下载通道',
+    );
+    final channelKey = channel.trim().toLowerCase() == 'release'
+        ? 'release'
+        : 'preview';
+    final releaseMetadataUri = channelKey == 'release'
+        ? _mainlandReleaseUri
+        : _mainlandPreviewReleaseUri;
+    final rawRelease = payload[channelKey];
+    if (rawRelease is! Map) {
+      throw FormatException('Neri 国内版本响应缺少 $channelKey 通道');
+    }
+    final channelRelease = Map<String, dynamic>.from(rawRelease);
+    final release = await _getJsonObject(
+      releaseMetadataUri,
+      serviceLabel: 'Neri 国内更新说明',
+    );
+    final tag = release['tag_name']?.toString().trim() ?? '';
+    final version = _NeriVersion.tryParse(tag);
+    if (tag.isEmpty || version == null) {
+      throw const FormatException('Neri 国内版本响应中的版本号无效');
+    }
+    if (channelRelease['tag']?.toString().trim() != tag) {
+      throw const FormatException('Neri 国内下载通道与更新说明的版本不一致');
+    }
+    if (version.compareTo(installedVersion) <= 0) return null;
+
+    final asset = _selectMainlandWindowsAsset(channelRelease['files']);
+    if (asset == null) {
+      throw const FormatException('Neri 国内版本中没有可用的 Windows .zip 或 .7z 更新包');
+    }
+    final pageUri = Uri.tryParse(release['html_url']?.toString() ?? '');
+    return AppUpdateRelease(
+      tag: tag,
+      name: release['name']?.toString() ?? '',
+      notes: release['body']?.toString() ?? '',
+      pageUri:
+          pageUri ??
+          Uri.https('github.com', '/wakin721/Neri/releases/tag/$tag'),
+      prerelease: release['prerelease'] == true,
+      asset: asset,
+    );
+  }
+
+  Future<Map<String, dynamic>> _getJsonObject(
+    Uri uri, {
+    required String serviceLabel,
+  }) async {
+    final request = await _httpClient.getUrl(uri).timeout(_requestTimeout);
+    request.headers
+      ..set(HttpHeaders.acceptHeader, 'application/json')
+      ..set(HttpHeaders.userAgentHeader, _userAgent);
+    final response = await request.close().timeout(_requestTimeout);
+    final responseText = await utf8.decoder
+        .bind(response.timeout(_streamIdleTimeout))
+        .join();
+    if (response.statusCode != HttpStatus.ok) {
+      final detail = responseText.trim();
+      throw HttpException(
+        '$serviceLabel返回 ${response.statusCode}'
+        '${detail.isEmpty ? '' : '：${_shorten(detail, 240)}'}',
+        uri: uri,
+      );
+    }
+    final decoded = jsonDecode(responseText);
+    if (decoded is! Map) {
+      throw FormatException('$serviceLabel响应格式无效');
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
   Future<DownloadedAppUpdate> downloadUpdate(
     AppUpdateRelease release, {
-    required String mirror,
-    List<String> mirrorTemplates = const <String>[defaultGithubMirrorTemplate],
     UpdateDownloadProgressCallback? onProgress,
   }) async {
     final updateRoot = _updatesRoot();
@@ -304,39 +307,33 @@ class AppUpdater {
         updateDirectory: updateDirectory,
       );
     }
-    final sources = _downloadSources(
-      release.asset.downloadUri,
-      mirror,
-      mirrorTemplates,
-    );
-    final errors = <String>[];
-
-    for (final source in sources) {
-      try {
-        await _downloadFromSource(
-          source,
-          release.asset,
-          partialArchive,
-          onProgress,
-        );
-        if (await archive.exists()) await archive.delete();
-        await partialArchive.rename(archive.path);
-        await _verifyDigestIfAvailable(archive, release.asset.sha256);
-        return DownloadedAppUpdate(
-          release: release,
-          archive: archive,
-          updateDirectory: updateDirectory,
-        );
-      } catch (error) {
-        errors.add('${source.label}：$error');
-        if (await archive.exists()) {
-          try {
-            await archive.delete();
-          } catch (_) {}
-        }
+    final source = _downloadSource(release.asset.downloadUri);
+    try {
+      await _downloadFromSource(
+        source,
+        release.asset,
+        partialArchive,
+        onProgress,
+      );
+      if (await archive.exists()) await archive.delete();
+      await partialArchive.rename(archive.path);
+      await _verifyDigestIfAvailable(archive, release.asset.sha256);
+      return DownloadedAppUpdate(
+        release: release,
+        archive: archive,
+        updateDirectory: updateDirectory,
+      );
+    } catch (error) {
+      if (await archive.exists()) {
+        try {
+          await archive.delete();
+        } catch (_) {}
       }
+      throw HttpException(
+        '${source.label}下载失败：$error。已保留下载进度，下次可继续下载。',
+        uri: source.uri,
+      );
     }
-    throw HttpException('所有下载源均失败：${errors.join('；')}。已保留下载进度，下次可继续下载。');
   }
 
   Future<void> launchInstaller({
@@ -498,9 +495,6 @@ class AppUpdater {
       if (existingBytes > 0) {
         request.headers.set(HttpHeaders.rangeHeader, 'bytes=$existingBytes-');
       }
-      if (source.referer != null) {
-        request.headers.set(HttpHeaders.refererHeader, source.referer!);
-      }
       final response = await request.close().timeout(_requestTimeout);
 
       if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
@@ -657,12 +651,13 @@ class AppUpdater {
 
   Future<void> _verifyDigestIfAvailable(File file, String? expected) async {
     if (expected == null || expected.isEmpty) return;
-    final actual = (await sha256
-            .bind(file.openRead())
-            .first
-            .timeout(const Duration(minutes: 3)))
-        .toString()
-        .toLowerCase();
+    final actual =
+        (await sha256
+                .bind(file.openRead())
+                .first
+                .timeout(const Duration(minutes: 3)))
+            .toString()
+            .toLowerCase();
     if (actual != expected.toLowerCase()) {
       throw StateError('更新包 SHA-256 校验失败');
     }
@@ -710,28 +705,60 @@ class AppUpdater {
     return assets.first.asset;
   }
 
-  List<_DownloadSource> _downloadSources(
-    Uri officialUri,
-    String mirror,
-    List<String> mirrorTemplates,
-  ) {
-    final useOfficial = mirror.trim().toLowerCase() == 'official';
-    final uris = buildGithubDownloadUris(
-      officialUri: officialUri,
-      useMirrors: !useOfficial,
-      mirrorTemplates: mirrorTemplates,
-    );
-    return <_DownloadSource>[
-      for (var index = 0; index < uris.length; index++)
-        if (uris[index] == officialUri)
-          _DownloadSource(label: 'GitHub 官方源', uri: officialUri)
-        else
-          _DownloadSource(
-            label: '国内镜像 ${index + 1}（${uris[index].host}）',
-            uri: uris[index],
-            referer: '${uris[index].scheme}://${uris[index].authority}/',
-          ),
-    ];
+  AppUpdateAsset? _selectMainlandWindowsAsset(dynamic rawFiles) {
+    if (rawFiles is! Map) return null;
+    final assets = <({AppUpdateAsset asset, int score})>[];
+    for (final entry in rawFiles.entries) {
+      final name = entry.key.toString().trim();
+      if (entry.value is! Map) continue;
+      final data = Map<String, dynamic>.from(entry.value as Map);
+      final lowerName = name.toLowerCase();
+      if (!lowerName.endsWith('.zip') && !lowerName.endsWith('.7z')) continue;
+      if (lowerName.contains('source') ||
+          lowerName.contains('symbols') ||
+          lowerName.contains('debug')) {
+        continue;
+      }
+      final uri = Uri.tryParse(data['url']?.toString() ?? '');
+      final sizeBytes = _intValue(data['size']);
+      final digest = data['sha256']?.toString().trim().toLowerCase() ?? '';
+      final sha256 = RegExp(r'^[0-9a-f]{64}$').hasMatch(digest) ? digest : null;
+      if (name.isEmpty ||
+          uri == null ||
+          uri.scheme != 'https' ||
+          uri.host.toLowerCase() != 'download.myneri.top' ||
+          uri.userInfo.isNotEmpty ||
+          sizeBytes <= 0 ||
+          sha256 == null) {
+        continue;
+      }
+      var score = lowerName.endsWith('.zip') ? 5 : 0;
+      if (lowerName.contains('neri')) score += 4;
+      if (lowerName.contains('windows') || lowerName.contains('win')) {
+        score += 3;
+      }
+      if (lowerName.contains('x64') || lowerName.contains('amd64')) score += 2;
+      if (lowerName.contains('lite')) score += 1;
+      assets.add((
+        asset: AppUpdateAsset(
+          name: name,
+          downloadUri: uri,
+          sizeBytes: sizeBytes,
+          sha256: sha256,
+        ),
+        score: score,
+      ));
+    }
+    if (assets.isEmpty) return null;
+    assets.sort((left, right) => right.score.compareTo(left.score));
+    return assets.first.asset;
+  }
+
+  _DownloadSource _downloadSource(Uri uri) {
+    if (uri.host.toLowerCase() == 'download.myneri.top') {
+      return _DownloadSource(label: 'Neri 国内源', uri: uri);
+    }
+    return _DownloadSource(label: 'GitHub 官方源', uri: uri);
   }
 
   Directory _updatesRoot() => Directory(
@@ -761,11 +788,10 @@ class _ReleaseCandidate {
 }
 
 class _DownloadSource {
-  const _DownloadSource({required this.label, required this.uri, this.referer});
+  const _DownloadSource({required this.label, required this.uri});
 
   final String label;
   final Uri uri;
-  final String? referer;
 }
 
 class _NeriVersion implements Comparable<_NeriVersion> {

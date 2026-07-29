@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -25,75 +26,115 @@ void main() {
     });
   });
 
-  group('GitHub mirror templates', () {
-    final official = Uri.parse(
-      'https://github.com/wakin721/Neri/releases/download/v1/Neri.zip',
-    );
+  group('mainland China update channel', () {
+    test('loads the validated download URL from channels.json', () async {
+      if (!Platform.isWindows) return;
 
-    test('replaces the GitHub host for a mirror root', () {
-      expect(
-        resolveGithubMirrorUri(official, 'https://kkgithub.com').toString(),
-        'https://kkgithub.com/wakin721/Neri/releases/download/v1/Neri.zip',
-      );
-    });
-
-    test('supports URL and path placeholders', () {
-      expect(
-        resolveGithubMirrorUri(
-          official,
-          'https://proxy.example.com/{url}',
-        ).toString(),
-        'https://proxy.example.com/https://github.com/wakin721/Neri/releases/download/v1/Neri.zip',
-      );
-      expect(
-        resolveGithubMirrorUri(
-          official,
-          'https://mirror.example.com/github{path}',
-        ).toString(),
-        'https://mirror.example.com/github/wakin721/Neri/releases/download/v1/Neri.zip',
-      );
-    });
-
-    test('rejects unsupported or unsafe mirror addresses', () {
-      expect(
-        () => normalizeGithubMirrorTemplate('ftp://mirror.example.com'),
-        throwsFormatException,
-      );
-      expect(
-        () => normalizeGithubMirrorTemplate(
-          'https://user:secret@mirror.example.com',
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final requestedPaths = <String>[];
+      final subscription = server.listen((request) async {
+        requestedPaths.add(request.uri.path);
+        request.response
+          ..statusCode = HttpStatus.ok
+          ..headers.contentType = ContentType.json
+          ..write(
+            jsonEncode(
+              request.uri.path == '/channels.json'
+                  ? <String, dynamic>{
+                      'release': <String, dynamic>{
+                        'tag': 'v3.0.4-release(dfc280)',
+                        'files': <String, dynamic>{
+                          'Neri_v3.0.4_release_x64_lite.zip': <String, dynamic>{
+                            'url':
+                                'https://download.myneri.top/releases/release/id/Neri_v3.0.4_release_x64_lite.zip',
+                            'size': 12345,
+                            'sha256':
+                                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                          },
+                        },
+                      },
+                      'preview': <String, dynamic>{
+                        'tag': 'v3.0.5-beta7(58b040)',
+                        'files': <String, dynamic>{
+                          'Neri_v3.0.5_beta7_x64_lite.zip': <String, dynamic>{
+                            'url':
+                                'https://download.myneri.top/releases/preview/id/Neri_v3.0.5_beta7_x64_lite.zip',
+                            'size': 54321,
+                            'sha256':
+                                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                          },
+                        },
+                      },
+                    }
+                  : <String, dynamic>{
+                      'tag_name': request.uri.path.startsWith('/preview/')
+                          ? 'v3.0.5-beta7(58b040)'
+                          : 'v3.0.4-release(dfc280)',
+                      'name': request.uri.path.startsWith('/preview/')
+                          ? 'Neri 3.0.5 beta7'
+                          : 'Neri 3.0.4',
+                      'body': request.uri.path.startsWith('/preview/')
+                          ? '国内预览版更新说明'
+                          : '国内稳定版更新说明',
+                      'html_url':
+                          'https://github.com/wakin721/Neri/releases/tag/v3.0.4-release',
+                      'prerelease': request.uri.path.startsWith('/preview/'),
+                    },
+            ),
+          );
+        await request.response.close();
+      });
+      final serverRoot = 'http://${server.address.address}:${server.port}';
+      final updater = AppUpdater(
+        channelsUri: Uri.parse('$serverRoot/channels.json'),
+        mainlandReleaseUri: Uri.parse('$serverRoot/latest/release.json'),
+        mainlandPreviewReleaseUri: Uri.parse(
+          '$serverRoot/preview/release.json',
         ),
-        throwsFormatException,
-      );
-    });
-
-    test('keeps mirror order, removes duplicates, and uses official last', () {
-      final downloadUris = buildGithubDownloadUris(
-        officialUri: official,
-        useMirrors: true,
-        mirrorTemplates: const <String>[
-          'https://first.example.com',
-          'https://second.example.com/{url}',
-          'https://first.example.com',
-        ],
       );
 
-      expect(downloadUris.map((uri) => uri.toString()), <String>[
-        'https://first.example.com/wakin721/Neri/releases/download/v1/Neri.zip',
-        'https://second.example.com/https://github.com/wakin721/Neri/releases/download/v1/Neri.zip',
-        official.toString(),
-      ]);
-    });
+      try {
+        final release = await updater.checkForUpdate(
+          currentVersion: '3.0.3',
+          channel: 'Release',
+          useMainlandChinaSource: true,
+        );
 
-    test('skips mirrors when the official source is selected', () {
-      expect(
-        buildGithubDownloadUris(
-          officialUri: official,
-          useMirrors: false,
-          mirrorTemplates: const <String>['https://first.example.com'],
-        ),
-        <Uri>[official],
-      );
+        expect(release, isNotNull);
+        expect(release!.tag, 'v3.0.4-release(dfc280)');
+        expect(
+          release.asset.downloadUri.toString(),
+          'https://download.myneri.top/releases/release/id/Neri_v3.0.4_release_x64_lite.zip',
+        );
+        expect(release.asset.sizeBytes, 12345);
+        expect(
+          release.asset.sha256,
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        );
+        expect(release.notes, '国内稳定版更新说明');
+        final preview = await updater.checkForUpdate(
+          currentVersion: '3.0.4',
+          channel: 'Preview',
+          useMainlandChinaSource: true,
+        );
+        expect(preview, isNotNull);
+        expect(preview!.tag, 'v3.0.5-beta7(58b040)');
+        expect(preview.notes, '国内预览版更新说明');
+        expect(
+          preview.asset.downloadUri.toString(),
+          'https://download.myneri.top/releases/preview/id/Neri_v3.0.5_beta7_x64_lite.zip',
+        );
+        expect(requestedPaths, <String>[
+          '/channels.json',
+          '/latest/release.json',
+          '/channels.json',
+          '/preview/release.json',
+        ]);
+      } finally {
+        updater.close();
+        await subscription.cancel();
+        await server.close(force: true);
+      }
     });
   });
 
@@ -154,14 +195,13 @@ void main() {
 
         try {
           await expectLater(
-            updater.downloadUpdate(release, mirror: 'Official'),
+            updater.downloadUpdate(release),
             throwsA(isA<HttpException>()),
           );
 
           final progress = <UpdateDownloadProgress>[];
           downloaded = await updater.downloadUpdate(
             release,
-            mirror: 'Official',
             onProgress: progress.add,
           );
 
@@ -170,10 +210,7 @@ void main() {
           expect(ranges, <String?>[null, 'bytes=$cutoff-']);
           expect(progress.any((item) => item.receivedBytes == cutoff), isTrue);
 
-          final reused = await updater.downloadUpdate(
-            release,
-            mirror: 'Official',
-          );
+          final reused = await updater.downloadUpdate(release);
           expect(reused.archive.path, downloaded.archive.path);
           expect(requestCount, 2, reason: '完整更新包应直接复用，不应重新请求');
         } finally {

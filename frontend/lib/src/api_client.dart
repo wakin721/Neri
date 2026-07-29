@@ -60,6 +60,24 @@ class NeriApiClient {
     );
   }
 
+  Future<bool> shouldUseMainlandUpdateSource([String source = 'auto']) async {
+    switch (source.trim().toLowerCase()) {
+      case 'domestic':
+        return true;
+      case 'github':
+        return false;
+    }
+    final response = await _httpClient.get(
+      _uri('/api/environment/update-source'),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('更新源地区响应格式无效');
+    }
+    return decoded['mainland_china'] == true;
+  }
+
   Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
     final uri = Uri.parse(
       '$baseUrl/api/models/classes',

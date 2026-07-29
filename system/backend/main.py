@@ -38,12 +38,14 @@ from .models import (
     RuntimeDiagnostics,
     SettingsResponse,
     SettingsUpdateRequest,
+    UpdateSourceResponse,
     ValidationBatchMarkRequest,
     ValidationExportRequest,
     ValidationExportResponse,
     ValidationMarkRequest,
 )
 from .maintenance import (
+    is_mainland_china,
     read_maintenance_status,
     resolve_package_source,
     resolve_pytorch_install_plan,
@@ -199,6 +201,7 @@ def settings() -> SettingsResponse:
 
     stored_settings = settings_manager.load_settings() or {}
     stored_settings.setdefault("package_source", "auto")
+    stored_settings.setdefault("update_source", "auto")
     stored_settings.setdefault("auto_group", True)
     stored_settings.setdefault("collapse_groups", True)
     stored_settings.setdefault("auto_group_detect_burst", True)
@@ -321,6 +324,13 @@ def package_source(
 
     source_key, source_label, _ = resolve_package_source(source)
     return PackageSourceResponse(source=source_key, label=source_label)
+
+
+@app.get("/api/environment/update-source", response_model=UpdateSourceResponse)
+def update_source() -> UpdateSourceResponse:
+    """Use the Python package detector for the desktop update download source."""
+
+    return UpdateSourceResponse(mainland_china=is_mainland_china())
 
 
 @app.get("/api/debug/packages", response_model=list[InstalledPackageInfo])

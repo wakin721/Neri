@@ -460,6 +460,12 @@ def _public_ip_country_code() -> str | None:
 def _automatic_package_source() -> str:
     """Use Aliyun in mainland China and official PyPI everywhere else."""
 
+    return "aliyun" if is_mainland_china() else "official"
+
+
+def is_mainland_china() -> bool:
+    """Return whether the shared automatic source detector selects mainland China."""
+
     global _package_source_cache
 
     now = time.monotonic()
@@ -468,18 +474,17 @@ def _automatic_package_source() -> str:
             _package_source_cache is not None
             and now - _package_source_cache[0] < PACKAGE_SOURCE_CACHE_SECONDS
         ):
-            return _package_source_cache[1]
+            return _package_source_cache[1] == "aliyun"
 
         # A mainland-China timezone is a reliable, zero-network-cost hint for
         # the common case. The public-IP lookup remains the authority elsewhere.
-        source = (
-            "aliyun"
-            if _local_timezone_indicates_mainland_china()
+        mainland_china = (
+            _local_timezone_indicates_mainland_china()
             or _public_ip_country_code() == "CN"
-            else "official"
         )
+        source = "aliyun" if mainland_china else "official"
         _package_source_cache = (now, source)
-        return source
+        return mainland_china
 
 
 def _local_timezone_indicates_mainland_china() -> bool:

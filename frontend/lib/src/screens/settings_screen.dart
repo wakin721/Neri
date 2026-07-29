@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
-import '../app_updater.dart';
 import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
 import '../local_debug_logs.dart';
@@ -75,7 +74,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.5-beta7(456e36)',
+  defaultValue: '3.0.5-beta8(58b040)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -90,15 +89,11 @@ const _emptyPhotoDeleteAlways = 'delete';
 const _emptyPhotoDeleteNever = 'keep';
 const _detectionConfidencePriority = 'detection';
 const _classificationConfidencePriority = 'classification';
-const _updateMirrorsKey = 'update_mirrors';
-const _legacyUpdateMirrorUrlKey = 'update_mirror_url';
-const _legacyUpdateCustomMirrorsKey = 'update_custom_mirrors';
 
 typedef SoftwareUpdateCheckCallback =
     Future<void> Function({
       required String channel,
-      required String mirror,
-      required List<String> mirrorTemplates,
+      required String downloadSource,
     });
 
 class SettingsScreen extends StatefulWidget {
@@ -204,25 +199,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final dependenciesReady =
         settings == null || settings.missingYoloDependencies.isEmpty;
     final gpuAvailable = settings?.gpuAvailable == true;
-    final updateMirrors = saved.containsKey(_updateMirrorsKey)
-        ? _normalizedUpdateMirrors(
-            _stringListSetting(saved, _updateMirrorsKey, const <String>[]),
-          )
-        : _normalizedUpdateMirrors(<String>[
-            _normalizedUpdateMirror(
-              _stringSetting(
-                saved,
-                _legacyUpdateMirrorUrlKey,
-                defaultGithubMirrorTemplate,
-              ),
-            ),
-            defaultGithubMirrorTemplate,
-            ..._stringListSetting(
-              saved,
-              _legacyUpdateCustomMirrorsKey,
-              const <String>[],
-            ),
-          ]);
     _draft = <String, dynamic>{
       ...saved,
       'selected_model': _stringSetting(
@@ -303,8 +279,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const <String>[],
       ),
       'update_channel': _stringSetting(saved, 'update_channel', 'Preview'),
-      'update_mirror': _stringSetting(saved, 'update_mirror', 'KKGitHub'),
-      _updateMirrorsKey: updateMirrors,
+      'update_source': _normalizedUpdateSource(
+        _stringSetting(saved, 'update_source', 'auto'),
+      ),
       _debugModeKey: _boolSetting(saved, _debugModeKey, false),
     };
     _resettingDraft = true;
@@ -658,6 +635,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return '自动检测';
     }
     return value;
+  }
+
+  String _normalizedUpdateSource(String value) {
+    final normalized = value.trim().toLowerCase();
+    return const {'auto', 'domestic', 'github'}.contains(normalized)
+        ? normalized
+        : 'auto';
   }
 
   void _startMaintenancePreparation({
@@ -2106,7 +2090,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildUpdateSettingsSection() {
     return SectionCard(
       title: '软件更新',
-      subtitle: '选择更新通道和镜像源',
+      subtitle: '选择更新通道，下载源按公共 IP 自动匹配',
       icon: Icons.system_update_alt_rounded,
       child: _buildUpdateSettings(),
     );
@@ -2836,281 +2820,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  String _normalizedUpdateMirror(String value) {
-    try {
-      return normalizeGithubMirrorTemplate(value);
-    } on FormatException {
-      return defaultGithubMirrorTemplate;
-    }
-  }
-
-  List<String> _normalizedUpdateMirrors(Iterable<String> values) {
-    final mirrors = <String>[];
-    for (final value in values) {
-      try {
-        final normalized = normalizeGithubMirrorTemplate(value);
-        if (!mirrors.contains(normalized)) {
-          mirrors.add(normalized);
-        }
-      } on FormatException {
-        // Ignore malformed entries saved by older or manually edited settings.
-      }
-    }
-    return mirrors;
-  }
-
-  List<String> _updateMirrors() {
-    return _normalizedUpdateMirrors(_stringList(_updateMirrorsKey));
-  }
-
-  String _updateSourceSummary() {
-    if (_string('update_mirror', 'KKGitHub') == 'Official') {
-      return 'GitHub 官方源';
-    }
-    final mirrorCount = _updateMirrors().length;
-    return mirrorCount == 0 ? '国内源 · 仅使用官方回退' : '国内源 · $mirrorCount 个镜像';
-  }
-
-  Future<String?> _promptForUpdateMirror(BuildContext ownerContext) async {
-    final controller = TextEditingController();
-    String? validationMessage;
-    final result = await showDialog<String>(
-      context: ownerContext,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            void submit() {
-              try {
-                final normalized = normalizeGithubMirrorTemplate(
-                  controller.text,
-                );
-                final officialProbe = Uri.parse(
-                  'https://github.com/wakin721/Neri/releases/download/v1/Neri.zip',
-                );
-                final resolved = resolveGithubMirrorUri(
-                  officialProbe,
-                  normalized,
-                );
-                if (resolved == officialProbe) {
-                  throw const FormatException('该地址仍指向 GitHub 官方源');
-                }
-                Navigator.of(dialogContext).pop(normalized);
-              } on FormatException catch (error) {
-                setDialogState(() => validationMessage = error.message);
-              }
-            }
-
-            return AlertDialog(
-              title: const Text('添加 GitHub 镜像站'),
-              content: SizedBox(
-                width: 520,
-                child: TextField(
-                  controller: controller,
-                  autofocus: true,
-                  maxLength: 500,
-                  keyboardType: TextInputType.url,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => submit(),
-                  decoration: InputDecoration(
-                    labelText: '镜像地址或模板',
-                    hintText: 'https://mirror.example.com',
-                    helperText:
-                        '站点根地址会替换 github.com；代理前缀可写成 https://example.com/{url}，也支持 {path}。',
-                    helperMaxLines: 3,
-                    errorText: validationMessage,
-                  ),
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('取消'),
-                ),
-                FilledButton(onPressed: submit, child: const Text('添加')),
-              ],
-            );
-          },
-        );
-      },
-    );
-    controller.dispose();
-    return result;
-  }
-
-  Future<void> _showUpdateSourcesDialog() async {
-    var source = _string('update_mirror', 'KKGitHub') == 'Official'
-        ? 'Official'
-        : 'KKGitHub';
-    final mirrors = _updateMirrors().toList(growable: true);
-    final result = await showDialog<({String source, List<String> mirrors})>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            Future<void> addMirror() async {
-              final mirror = await _promptForUpdateMirror(dialogContext);
-              if (mirror == null || mirrors.contains(mirror)) return;
-              setDialogState(() => mirrors.add(mirror));
-            }
-
-            Widget sourceButton({
-              required String value,
-              required IconData icon,
-              required String label,
-            }) {
-              final selected = source == value;
-              return TextButton.icon(
-                onPressed: () => setDialogState(() => source = value),
-                icon: Icon(selected ? Icons.check_circle_rounded : icon),
-                label: Text(label),
-              );
-            }
-
-            return AlertDialog(
-              title: const Text('选择更新镜像源'),
-              content: SizedBox(
-                width: 460,
-                height: 480,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      children: [
-                        sourceButton(
-                          value: 'Official',
-                          icon: Icons.public_rounded,
-                          label: 'GitHub 官方源',
-                        ),
-                        sourceButton(
-                          value: 'KKGitHub',
-                          icon: Icons.dns_rounded,
-                          label: '国内镜像源',
-                        ),
-                        if (source == 'KKGitHub')
-                          TextButton.icon(
-                            onPressed: addMirror,
-                            icon: const Icon(Icons.add_rounded),
-                            label: const Text('添加'),
-                          ),
-                        if (source == 'KKGitHub')
-                          TextButton.icon(
-                            onPressed: mirrors.isEmpty
-                                ? null
-                                : () => setDialogState(mirrors.clear),
-                            icon: const Icon(Icons.deselect_rounded),
-                            label: const Text('清空'),
-                          ),
-                      ],
-                    ),
-                    const Divider(height: 20),
-                    if (source == 'Official')
-                      const Expanded(
-                        child: Center(
-                          child: _MutedText('更新文件将直接从 GitHub 官方地址下载。'),
-                        ),
-                      )
-                    else ...[
-                      const _MutedText('按从上到下的顺序逐个尝试；全部失败后使用 GitHub 官方源。'),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: mirrors.isEmpty
-                            ? const Center(
-                                child: _MutedText('当前没有国内镜像，将直接使用 GitHub 官方源。'),
-                              )
-                            : ReorderableListView.builder(
-                                buildDefaultDragHandles: false,
-                                itemCount: mirrors.length,
-                                onReorderItem: (oldIndex, newIndex) {
-                                  setDialogState(() {
-                                    final mirror = mirrors.removeAt(oldIndex);
-                                    mirrors.insert(newIndex, mirror);
-                                  });
-                                },
-                                itemBuilder: (context, index) {
-                                  final mirror = mirrors[index];
-                                  return ListTile(
-                                    key: ValueKey('update-mirror-$mirror'),
-                                    dense: true,
-                                    leading: SizedBox(
-                                      width: 28,
-                                      child: Text(
-                                        '${index + 1}',
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    ),
-                                    title: Text(
-                                      mirror == defaultGithubMirrorTemplate
-                                          ? 'KKGitHub'
-                                          : mirror,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    subtitle:
-                                        mirror == defaultGithubMirrorTemplate
-                                        ? Text(mirror)
-                                        : null,
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: '删除镜像',
-                                          onPressed: () {
-                                            setDialogState(
-                                              () => mirrors.removeAt(index),
-                                            );
-                                          },
-                                          icon: const Icon(
-                                            Icons.delete_outline_rounded,
-                                          ),
-                                        ),
-                                        ReorderableDragStartListener(
-                                          index: index,
-                                          child: const Padding(
-                                            padding: EdgeInsets.all(12),
-                                            child: Icon(
-                                              Icons.drag_handle_rounded,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('取消'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(
-                    dialogContext,
-                  ).pop((source: source, mirrors: List<String>.from(mirrors))),
-                  child: const Text('确定'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    if (!mounted || result == null) return;
-
-    setState(() {
-      _draft['update_mirror'] = result.source;
-      _draft[_updateMirrorsKey] = result.mirrors;
-      _markDraftChanged();
-    });
-    _scheduleAutoSave();
-  }
-
   Widget _buildUpdateSettings() {
     return Column(
       children: [
@@ -3133,12 +2842,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         _SettingsPanel(
-          title: '镜像源',
-          subtitle: '管理国内镜像的增删与下载顺序',
+          title: '下载源',
+          subtitle: '自动模式按公共 IP 选择，也可手动指定',
           icon: Icons.public_rounded,
-          child: _SummaryDialogButton(
-            summary: _updateSourceSummary(),
-            onPressed: _showUpdateSourcesDialog,
+          child: _SettingsMenuButton<String>(
+            value: _string('update_source', 'auto'),
+            options: const [
+              _SettingsOption<String>(value: 'auto', label: '自动选择源'),
+              _SettingsOption<String>(value: 'domestic', label: 'Neri 国内源'),
+              _SettingsOption<String>(value: 'github', label: 'GitHub 官方源'),
+            ],
+            onChanged: (value) => _set('update_source', value),
           ),
         ),
         _SettingsPanel(
@@ -3171,8 +2885,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       await widget.onCheckForUpdates(
         channel: _string('update_channel', 'Preview'),
-        mirror: _string('update_mirror', 'KKGitHub'),
-        mirrorTemplates: _updateMirrors(),
+        downloadSource: _string('update_source', 'auto'),
       );
     } finally {
       if (mounted) setState(() => _checkingForUpdates = false);

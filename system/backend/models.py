@@ -72,6 +72,12 @@ class PackageSourceResponse(BaseModel):
     label: str
 
 
+class UpdateSourceResponse(BaseModel):
+    """Automatic desktop update source selected by the shared region detector."""
+
+    mainland_china: bool
+
+
 class InstallPytorchRequest(BaseModel):
     """Request to reinstall PyTorch for a selected runtime target."""
 

@@ -218,11 +218,7 @@ void main() {
             onCloseBehaviorChanged: (_) {},
             onSaveSettings: (_) async {},
             onCheckForUpdates:
-                ({
-                  required channel,
-                  required mirror,
-                  required mirrorTemplates,
-                }) async {},
+                ({required channel, required downloadSource}) async {},
             onShowMessage: (_) {},
           ),
         ),
@@ -304,11 +300,7 @@ void main() {
                   savedDrafts.add(Map<String, dynamic>.from(settings));
                 },
                 onCheckForUpdates:
-                    ({
-                      required channel,
-                      required mirror,
-                      required mirrorTemplates,
-                    }) async {},
+                    ({required channel, required downloadSource}) async {},
                 onShowMessage: (_) {},
               ),
             );
