@@ -3,9 +3,9 @@ import re
 import subprocess
 from pathlib import Path
 
-BASE_VERSION = "3.0.5-beta8"
-DEFAULT_BUILD_CODE = "58b040"
-DEFAULT_BUILD_NUMBER = 445
+BASE_VERSION = "3.0.5-release"
+DEFAULT_BUILD_CODE = "8c544f"
+DEFAULT_BUILD_NUMBER = 457
 
 _BUILD_CODE_PATTERN = re.compile(r"^[0-9a-fA-F]{6}$")
 _BUILD_NUMBER_PATTERN = re.compile(r"^\d{1,5}$")
