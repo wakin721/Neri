@@ -7,6 +7,8 @@ from system.version import APP_DISPLAY_VERSION, APP_TITLE, APP_VERSION
 
 # 应用信息常量
 DEFAULT_EXCEL_FILENAME = "物种检测信息.xlsx"
+# XPU 暂时关闭；恢复时同时启用后端维护、自动设备选择和前端入口。
+XPU_ENABLED = False
 
 # 文件支持相关常量
 SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp')

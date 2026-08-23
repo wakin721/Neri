@@ -3,10 +3,26 @@ import 'package:flutter/services.dart';
 
 import '../models/job.dart';
 import '../models/settings.dart';
+import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
 const _defaultModelDirectory = 'res/model';
+const _defaultClassificationModelDirectory = 'res/model_cls';
+
+String _modelSelectorHelperText({
+  required bool enabled,
+  required List<ModelInfo> models,
+  required String directory,
+}) {
+  if (!enabled) {
+    return '检测依赖未安装，安装完成后可选择模型';
+  }
+  if (models.isEmpty) {
+    return '未在 $directory 中找到 .pt 模型';
+  }
+  return '扫描 $directory';
+}
 
 class StartScreen extends StatelessWidget {
   const StartScreen({
@@ -258,8 +274,8 @@ class _CreateJobCard extends StatelessWidget {
             title: const Text('使用 FP16 加速'),
             subtitle: Text(
               fp16Enabled
-                  ? '需要支持半精度推理的 GPU 或 Intel XPU'
-                  : '未检测到 GPU / Intel XPU，已禁用 FP16',
+                  ? '需要支持半精度推理的 NVIDIA GPU'
+                  : '未检测到可用的 NVIDIA GPU，已禁用 FP16',
             ),
           ),
           _ProcessingSlider(
@@ -361,7 +377,8 @@ class _StartOptionGrid extends StatelessWidget {
             SizedBox(
               width: itemWidth,
               child: _VideoStrideSelector(
-                enabled: enabled,
+                enabled: enabled && videoProcessingEnabled(videoMode),
+                videoMode: videoMode,
                 vidStride: vidStride,
                 onChanged: onVidStrideChanged,
               ),
@@ -389,34 +406,28 @@ class _ModelSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final models = settings?.availableModels ?? const <ModelInfo>[];
-    final selectedValue = models.any((model) => model.path == selectedModelPath)
-        ? selectedModelPath
-        : (models.isEmpty ? null : models.first.path);
-
-    if (models.isEmpty) {
-      return InputDecorator(
-        decoration: InputDecoration(
-          labelText: '模型文件',
-          helperText: enabled
-              ? '未在 ${settings?.modelDirectory ?? _defaultModelDirectory} 中找到 .pt 模型'
-              : '检测依赖未安装，安装完成后可选择模型',
-          prefixIcon: const Icon(Icons.folder_off_rounded),
-          border: const OutlineInputBorder(),
-          enabled: enabled,
-        ),
-        child: const Text('暂无可用模型'),
-      );
-    }
+    final modelDirectory = settings?.modelDirectory ?? _defaultModelDirectory;
+    final selectedValue =
+        selectedModelPath == null || selectedModelPath!.isEmpty
+        ? ''
+        : (models.any((model) => model.path == selectedModelPath)
+              ? selectedModelPath
+              : '');
 
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
-      label: const Text('模型文件'),
-      helperText: '扫描 ${settings?.modelDirectory ?? _defaultModelDirectory}',
+      label: const Text('探测模型'),
+      helperText: _modelSelectorHelperText(
+        enabled: enabled,
+        models: models,
+        directory: modelDirectory,
+      ),
       leadingIcon: const Icon(Icons.memory_rounded),
       dropdownMenuEntries: [
+        const DropdownMenuEntry<String>(value: '', label: '不使用'),
         for (final model in models)
           DropdownMenuEntry<String>(value: model.path, label: model.name),
       ],
@@ -442,6 +453,9 @@ class _ClassificationModelSelector extends StatelessWidget {
   Widget build(BuildContext context) {
     final models =
         settings?.availableClassificationModels ?? const <ModelInfo>[];
+    final modelDirectory =
+        settings?.classificationModelDirectory ??
+        _defaultClassificationModelDirectory;
     final selectedValue =
         selectedClassificationModelPath == null ||
             selectedClassificationModelPath!.isEmpty
@@ -456,8 +470,11 @@ class _ClassificationModelSelector extends StatelessWidget {
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('分类模型'),
-      helperText:
-          '扫描 ${settings?.classificationModelDirectory ?? 'res/model_cls'}',
+      helperText: _modelSelectorHelperText(
+        enabled: enabled,
+        models: models,
+        directory: modelDirectory,
+      ),
       leadingIcon: const Icon(Icons.account_tree_rounded),
       dropdownMenuEntries: [
         const DropdownMenuEntry<String>(value: '', label: '不使用'),
@@ -482,18 +499,30 @@ class _VideoModeSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selectedValue = videoMode == 'fast' ? 'fast' : 'all';
+    final selectedValue = normalizeVideoProcessingMode(videoMode);
+    final helperText = switch (selectedValue) {
+      videoProcessingModeFast => '抽帧批量识别',
+      videoProcessingModeSkip => '任务中忽略视频文件',
+      _ => '按帧间隔追踪',
+    };
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频处理模式'),
-      helperText: selectedValue == 'fast' ? '抽帧批量识别' : '按帧间隔追踪',
+      helperText: helperText,
       leadingIcon: const Icon(Icons.video_collection_rounded),
       dropdownMenuEntries: const [
-        DropdownMenuEntry<String>(value: 'all', label: '全部识别'),
-        DropdownMenuEntry<String>(value: 'fast', label: '快速识别'),
+        DropdownMenuEntry<String>(value: videoProcessingModeAll, label: '全部识别'),
+        DropdownMenuEntry<String>(
+          value: videoProcessingModeFast,
+          label: '快速识别',
+        ),
+        DropdownMenuEntry<String>(
+          value: videoProcessingModeSkip,
+          label: '跳过视频',
+        ),
       ],
       onSelected: enabled
           ? (value) {
@@ -507,11 +536,13 @@ class _VideoModeSelector extends StatelessWidget {
 class _VideoStrideSelector extends StatelessWidget {
   const _VideoStrideSelector({
     required this.enabled,
+    required this.videoMode,
     required this.vidStride,
     required this.onChanged,
   });
 
   final bool enabled;
+  final String videoMode;
   final int vidStride;
   final ValueChanged<int> onChanged;
 
@@ -524,7 +555,9 @@ class _VideoStrideSelector extends StatelessWidget {
       enabled: enabled,
       menuStyle: appDropdownMenuStyle(context),
       label: const Text('视频跳帧'),
-      helperText: '全部识别为帧间隔，快速识别为抽帧数',
+      helperText: videoProcessingEnabled(videoMode)
+          ? '全部识别为帧间隔，快速识别为抽帧数'
+          : '跳过视频时不可用',
       leadingIcon: const Icon(Icons.skip_next_rounded),
       dropdownMenuEntries: [
         for (var value = 1; value <= 30; value++)

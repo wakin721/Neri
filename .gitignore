@@ -17,6 +17,7 @@ htmlcov/
 venv/
 env/
 ENV/
+/tests/
 
 # Build outputs
 build/
@@ -55,4 +56,21 @@ logs/
 frontend/*
 !frontend/lib/
 !frontend/lib/**
+!frontend/test/
+frontend/test/*
+!frontend/test/app_updater_test.dart
+!frontend/test/close_behavior_test.dart
+!frontend/test/job_result_refresh_test.dart
+!frontend/test/model_selection_test.dart
+!frontend/test/package_source_resolution_test.dart
 !frontend/pubspec.yaml
+# Keep Neri's customized Windows shell integration under version control.
+!frontend/windows/
+frontend/windows/*
+!frontend/windows/runner/
+frontend/windows/runner/*
+!frontend/windows/runner/flutter_window.cpp
+!frontend/windows/runner/flutter_window.h
+!frontend/windows/runner/main.cpp
+!frontend/windows/runner/win32_window.cpp
+!frontend/windows/runner/win32_window.h

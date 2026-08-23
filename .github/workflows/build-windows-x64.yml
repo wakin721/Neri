@@ -1,0 +1,176 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Sync build version
+        shell: pwsh
+        run: python scripts/sync_version.py
+
+      - name: Install Flutter 3.44.6
+        shell: pwsh
+        run: |
+          git clone `
+            --branch 3.44.6 `
+            --depth 1 `
+            https://github.com/flutter/flutter.git `
+            C:\flutter
+
+          "C:\flutter\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate Windows project files
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          $backup = Join-Path $env:RUNNER_TEMP "neri-windows-runner"
+          New-Item -ItemType Directory -Path $backup -Force | Out-Null
+
+          $customFiles = @(
+            "flutter_window.cpp",
+            "flutter_window.h",
+            "main.cpp",
+            "win32_window.cpp",
+            "win32_window.h"
+          )
+
+          foreach ($file in $customFiles) {
+            Copy-Item "windows\runner\$file" $backup -Force
+          }
+
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name neri_flutter .
+          Remove-Item "test\widget_test.dart" -Force -ErrorAction SilentlyContinue
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          & (Join-Path $env:GITHUB_WORKSPACE "scripts\configure_windows_product.ps1")
+
+          foreach ($file in $customFiles) {
+            Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force
+          }
+
+          Copy-Item "..\res\ico.ico" "windows\runner\resources\app_icon.ico" -Force
+
+      - name: Get Flutter dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run Flutter tests
+        shell: pwsh
+        working-directory: frontend
+        run: flutter test
+
+      - name: Build Flutter Windows release
+        shell: pwsh
+        working-directory: frontend
+        run: flutter build windows --release
+
+      - name: Install Python backend dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements.txt
+
+      - name: Determine artifact name
+        id: artifact
+        shell: pwsh
+        run: |
+          $versionMatch = Select-String `
+            -Path "frontend\pubspec.yaml" `
+            -Pattern '^version:\s*(\S+)' |
+            Select-Object -First 1
+          if ($null -eq $versionMatch) {
+            throw "Unable to read the application version from frontend/pubspec.yaml."
+          }
+
+          $pubspecVersion = $versionMatch.Matches[0].Groups[1].Value.Trim()
+          $baseVersion = ($pubspecVersion -split '\+', 2)[0]
+          $versionParts = $baseVersion -split '-', 2
+          $versionNumber = $versionParts[0]
+          $releaseLabel = if ($versionParts.Count -eq 2) {
+            $versionParts[1]
+          } else {
+            "release"
+          }
+
+          if ($versionNumber -notmatch '^\d+(?:\.\d+)+$') {
+            throw "Invalid application version: $versionNumber"
+          }
+          if ($releaseLabel -notmatch '^[A-Za-z0-9.-]+$') {
+            throw "Invalid release label: $releaseLabel"
+          }
+
+          $artifactName = "Neri_v${versionNumber}_${releaseLabel}_x64_lite"
+          "artifact_name=$artifactName" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "Artifact: $artifactName.zip" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Assemble portable application
+        shell: pwsh
+        env:
+          NERI_ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+        run: |
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE "package\$env:NERI_ARTIFACT_NAME"
+          $package = Join-Path $packageRoot "Neri"
+          $release = Join-Path $env:GITHUB_WORKSPACE "frontend\build\windows\x64\runner\Release"
+          $pythonRoot = Split-Path -Parent (Get-Command python).Source
+
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          Copy-Item "$release\*" $package -Recurse -Force
+          Copy-Item "system" $package -Recurse -Force
+          Copy-Item "res" $package -Recurse -Force
+          Copy-Item "requirements.txt" $package -Force
+
+          $toolkit = Join-Path $package "toolkit"
+          New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
+          Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
+
+          $generatedExe = Join-Path $package "neri_flutter.exe"
+          $productExe = Join-Path $package "Neri.exe"
+          if (Test-Path $generatedExe) {
+            Move-Item $generatedExe $productExe -Force
+          }
+          if (-not (Test-Path $productExe)) {
+            throw "Neri.exe was not produced by the Flutter build."
+          }
+          if (Test-Path $generatedExe) {
+            throw "The legacy neri_flutter.exe name is still present in the package."
+          }
+
+          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, uvicorn"
+
+      - name: Upload Windows x64 application
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: package/${{ steps.artifact.outputs.artifact_name }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,6 +20,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
+
+from system.config import XPU_ENABLED
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = "721"
@@ -43,7 +46,47 @@ PIP_SOURCES = {
     "official": ("官方源", "https://pypi.org/simple"),
     "aliyun": ("阿里源", "https://mirrors.aliyun.com/pypi/simple"),
     "tsinghua": ("清华源", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    "nju": ("南京大学源", "https://mirror.nju.edu.cn/pypi/web/simple"),
 }
+PUBLIC_IP_COUNTRY_URL = "https://api.country.is/"
+PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS = 1.5
+PACKAGE_SOURCE_CACHE_SECONDS = 30 * 60
+HARDWARE_PROBE_TIMEOUT_SECONDS = 8
+NVIDIA_SMI_TIMEOUT_SECONDS = 3
+HARDWARE_STATUS_CACHE_SECONDS = 60
+PIP_NETWORK_TIMEOUT_SECONDS = 60
+PIP_NETWORK_RETRIES = 8
+WINDOWS_LEGACY_DIRECTORY_PATH_LIMIT = 247
+
+_PYTORCH_LONG_PATH_PROBE = Path(
+    "toolkit",
+    "Lib",
+    "site-packages",
+    "torch-2.13.0+cpu.dist-info",
+    "licenses",
+    "third_party",
+    "kineto",
+    "libkineto",
+    "third_party",
+    "dynolog",
+    "third_party",
+    "prometheus-cpp",
+    "3rdparty",
+    "civetweb",
+    "src",
+    "third_party",
+    "duktape-1.5.2",
+)
+_PYTORCH_PACKAGE_ARTIFACTS = {
+    "torch": ("torch", "functorch", "torchgen"),
+    "torchvision": ("torchvision", "torchvision.libs"),
+    "torchaudio": ("torchaudio", "torchaudio.lib", "torchaudio.libs"),
+}
+
+_package_source_cache: tuple[float, str] | None = None
+_package_source_cache_lock = threading.Lock()
+_intel_driver_status_cache: tuple[float, dict[str, Any]] | None = None
+_intel_driver_status_cache_lock = threading.Lock()
 
 _PACKAGE_SPEC_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -64,12 +107,30 @@ def toolkit_python() -> Path:
     return project_root() / "toolkit" / "python.exe"
 
 
+def logs_dir() -> Path:
+    """Return the project software log directory."""
+
+    return project_root() / "logs"
+
+
 def maintenance_status_path() -> Path:
-    return project_root() / "temp" / "backend_maintenance_status.json"
+    return logs_dir() / "backend_maintenance_status.json"
 
 
 def maintenance_log_path() -> Path:
-    return project_root() / "temp" / "backend_maintenance.log"
+    return logs_dir() / "backend_maintenance.log"
+
+
+def maintenance_pip_cache_dir() -> Path:
+    """Return the app-owned pip cache used only during environment maintenance."""
+
+    return project_root() / "temp" / "maintenance_pip_cache"
+
+
+def toolkit_site_packages_dir() -> Path:
+    """Return the embedded Python environment's site-packages directory."""
+
+    return toolkit_python().parent / "Lib" / "site-packages"
 
 
 def read_maintenance_status() -> dict[str, Any]:
@@ -88,6 +149,28 @@ def read_maintenance_status() -> dict[str, Any]:
 def intel_graphics_driver_status() -> dict[str, Any]:
     """Return best-effort Intel display driver status for XPU installs."""
 
+    global _intel_driver_status_cache
+
+    now = time.monotonic()
+    with _intel_driver_status_cache_lock:
+        if (
+            _intel_driver_status_cache is not None
+            and now - _intel_driver_status_cache[0] < HARDWARE_STATUS_CACHE_SECONDS
+        ):
+            return dict(_intel_driver_status_cache[1])
+
+        status = _probe_intel_graphics_driver_status()
+        _intel_driver_status_cache = (time.monotonic(), dict(status))
+        return status
+
+
+def _reset_intel_driver_status_cache() -> None:
+    global _intel_driver_status_cache
+    with _intel_driver_status_cache_lock:
+        _intel_driver_status_cache = None
+
+
+def _probe_intel_graphics_driver_status() -> dict[str, Any]:
     status = _empty_intel_driver_status()
     if os.name != "nt":
         status.update(
@@ -112,6 +195,14 @@ def intel_graphics_driver_status() -> dict[str, Any]:
 
     devices = _as_list(payload.get("devices"))
     drivers = _as_list(payload.get("drivers"))
+    raw_processor_names = payload.get("processors")
+    if not isinstance(raw_processor_names, list):
+        raw_processor_names = [raw_processor_names] if raw_processor_names else []
+    processor_names = [
+        str(value).strip()
+        for value in raw_processor_names
+        if str(value).strip()
+    ]
     intel_devices = [device for device in devices if _is_intel_display_device(device)]
     intel_drivers = [driver for driver in drivers if _is_intel_display_driver(driver)]
     installed_driver = next(
@@ -132,6 +223,7 @@ def intel_graphics_driver_status() -> dict[str, Any]:
                 "Name",
                 "DeviceName",
             ),
+            "processor_names": processor_names,
             "message": (
                 "已检测到 Intel 显卡驱动。"
                 if installed_driver is not None
@@ -223,11 +315,11 @@ def install_intel_graphics_driver() -> Path:
 
 def start_pytorch_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     install_intel_driver: bool = False,
 ) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = (
         "Intel 显卡驱动与 PyTorch 安装已开始，Python 后端会在安装完成后自动重启。"
         if install_intel_driver
@@ -243,9 +335,9 @@ def start_pytorch_install(
     )
 
 
-def start_package_reinstall(package_spec: str, package_source: str = "official") -> dict[str, Any]:
+def start_package_reinstall(package_spec: str, package_source: str = "auto") -> dict[str, Any]:
     package_spec = _validate_package_spec(package_spec)
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = f"{package_spec} 重新安装已开始，Python 后端会在安装完成后自动重启。"
     return _start_maintenance(
         operation="reinstall_package",
@@ -256,11 +348,11 @@ def start_package_reinstall(package_spec: str, package_source: str = "official")
 
 def start_yolo_dependencies_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     install_intel_driver: bool = False,
 ) -> dict[str, Any]:
     env_choice = (env_choice or "自动检测").strip()
-    source_key, _, _ = _resolve_package_source(package_source)
+    source_key, _, _ = resolve_package_source(package_source)
     message = (
         "YOLO 依赖安装已开始，将先安装 Intel 显卡驱动和 PyTorch，再安装 ultralytics，完成后自动重启 Python 后端。"
         if install_intel_driver
@@ -300,27 +392,32 @@ def _start_maintenance(operation: str, extra_args: list[str], message: str) -> d
         "operation": operation,
         "state": "starting",
         "message": message,
+        "progress": 0,
         "started_at": _utc_now(),
         "updated_at": _utc_now(),
         "log_path": str(maintenance_log_path()),
+        "status_path": str(maintenance_status_path()),
     }
     _write_status(status, replace=True)
 
     command = [
         str(python_exe),
-        str(project_root() / "system" / "backend" / "maintenance.py"),
+        "-m",
+        "system.backend.maintenance",
         "--operation",
         operation,
         "--backend-pid",
         str(os.getpid()),
         *extra_args,
     ]
-    subprocess.Popen(
+    process = subprocess.Popen(
         command,
         cwd=str(project_root()),
         creationflags=_creation_flags(),
         close_fds=True,
     )
+    status["maintenance_pid"] = process.pid
+    _write_status({"maintenance_pid": process.pid})
     return status
 
 
@@ -335,9 +432,95 @@ def _validate_package_spec(package_spec: str) -> str:
     return cleaned
 
 
-def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
-    cleaned = (package_source or "official").strip().lower()
+def _public_ip_country_code() -> str | None:
+    """Return the public-IP country code, or None when detection is unavailable."""
+
+    request = urllib.request.Request(
+        PUBLIC_IP_COUNTRY_URL,
+        headers={"User-Agent": "Neri package source selector"},
+    )
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - fixed HTTPS endpoint.
+            request,
+            timeout=PUBLIC_IP_COUNTRY_TIMEOUT_SECONDS,
+        ) as response:
+            payload = json.loads(response.read(4096).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    country = payload.get("country")
+    if not isinstance(country, str):
+        return None
+    normalized = country.strip().upper()
+    return normalized if len(normalized) == 2 else None
+
+
+def _automatic_package_source() -> str:
+    """Use Aliyun in mainland China and official PyPI everywhere else."""
+
+    return "aliyun" if is_mainland_china() else "official"
+
+
+def is_mainland_china() -> bool:
+    """Return whether the shared automatic source detector selects mainland China."""
+
+    global _package_source_cache
+
+    now = time.monotonic()
+    with _package_source_cache_lock:
+        if (
+            _package_source_cache is not None
+            and now - _package_source_cache[0] < PACKAGE_SOURCE_CACHE_SECONDS
+        ):
+            return _package_source_cache[1] == "aliyun"
+
+        # A mainland-China timezone is a reliable, zero-network-cost hint for
+        # the common case. The public-IP lookup remains the authority elsewhere.
+        mainland_china = (
+            _local_timezone_indicates_mainland_china()
+            or _public_ip_country_code() == "CN"
+        )
+        source = "aliyun" if mainland_china else "official"
+        _package_source_cache = (now, source)
+        return mainland_china
+
+
+def _local_timezone_indicates_mainland_china() -> bool:
+    timezone_names = {
+        str(value).strip().lower().replace("\\", "/")
+        for value in (*time.tzname, os.environ.get("TZ", ""))
+        if value
+    }
+    return bool(
+        timezone_names
+        & {
+            "asia/shanghai",
+            "china standard time",
+            "中国标准时间",
+            "prc",
+        }
+    )
+
+
+def _reset_package_source_cache() -> None:
+    """Clear automatic source state for tests and explicit runtime refreshes."""
+
+    global _package_source_cache
+    with _package_source_cache_lock:
+        _package_source_cache = None
+
+
+def resolve_package_source(package_source: str = "auto") -> tuple[str, str, str]:
+    """Resolve an automatic or explicitly selected Python package source."""
+
+    cleaned = (package_source or "auto").strip().lower()
     alias_map = {
+        "auto": "auto",
+        "automatic": "auto",
+        "自动": "auto",
+        "自动检测": "auto",
         "official": "official",
         "pypi": "official",
         "官方源": "official",
@@ -347,14 +530,20 @@ def _resolve_package_source(package_source: str) -> tuple[str, str, str]:
         "清华源": "tsinghua",
         "tsinghua": "tsinghua",
         "tuna": "tsinghua",
+        "nju": "nju",
+        "nanjing": "nju",
+        "南京大学源": "nju",
+        "南大源": "nju",
     }
     key = alias_map.get(cleaned, "official")
+    if key == "auto":
+        key = _automatic_package_source()
     label, url = PIP_SOURCES[key]
     return key, label, url
 
 
 def _pip_source_args(package_source: str) -> list[str]:
-    _, _, source_url = _resolve_package_source(package_source)
+    _, _, source_url = resolve_package_source(package_source)
     return ["-i", source_url]
 
 
@@ -368,7 +557,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--backend-pid", type=int, required=True)
     parser.add_argument("--env-choice", default="自动检测")
     parser.add_argument("--package", default="")
-    parser.add_argument("--package-source", default="official")
+    parser.add_argument("--package-source", default="auto")
     parser.add_argument("--install-intel-driver", action="store_true")
     args = parser.parse_args(argv)
 
@@ -378,6 +567,7 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
                 "operation": args.operation,
                 "state": "waiting_for_backend",
                 "message": "正在等待旧 Python 后端退出...",
+                "progress": 5,
             }
         )
         _wait_for_process_exit(args.backend_pid)
@@ -400,8 +590,17 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
 
         _write_status(
             {
+                "state": "running",
+                "message": "安装完成，正在清理依赖下载缓存...",
+                "progress": 92,
+            }
+        )
+        cache_cleanup_error = _clear_maintenance_pip_cache()
+        _write_status(
+            {
                 "state": "restarting",
                 "message": "安装完成，正在重启 Python 后端...",
+                "progress": 95,
                 "return_code": 0,
             }
         )
@@ -409,9 +608,15 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
         _write_status(
             {
                 "state": "completed",
-                "message": "安装完成，Python 后端已重启。",
+                "message": (
+                    "安装完成，下载缓存已清理，Python 后端已重启。"
+                    if cache_cleanup_error is None
+                    else "安装完成，Python 后端已重启，但下载缓存清理失败。"
+                ),
+                "progress": 100,
                 "return_code": 0,
                 "error": None,
+                "cache_cleanup_error": cache_cleanup_error,
             }
         )
         return 0
@@ -438,34 +643,55 @@ def _run_cli(argv: Sequence[str] | None = None) -> int:
 
 def _run_pytorch_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     *,
     install_intel_driver: bool = False,
+    progress_start: int = 10,
+    progress_end: int = 90,
 ) -> None:
     python_exe = toolkit_python()
+    _ensure_pytorch_install_path_supported()
+    _repair_broken_pytorch_installations()
     plan = resolve_pytorch_install_plan(env_choice)
     actual_env = str(plan["actual_env"])
     index_url = str(plan["index_url"])
-    source_key, source_label, source_url = _resolve_package_source(package_source)
+    _, source_label, source_url = resolve_package_source(package_source)
+    command_progress_start = progress_start
     if plan.get("needs_intel_driver"):
         if not install_intel_driver:
             raise RuntimeError(
                 "安装 Intel XPU 版本 PyTorch 前需要先安装 Intel 显卡驱动。"
             )
-        _install_intel_graphics_driver_for_xpu()
+        driver_progress_end = progress_start + max(
+            1,
+            round((progress_end - progress_start) * 0.3),
+        )
+        _install_intel_graphics_driver_for_xpu(
+            progress_start=progress_start,
+            progress_end=driver_progress_end,
+        )
+        command_progress_start = driver_progress_end
 
     install_command = [
         str(python_exe),
         "-m",
         "pip",
         "install",
+        "--progress-bar",
+        "raw",
+        "--timeout",
+        str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "--retries",
+        str(PIP_NETWORK_RETRIES),
+        "--cache-dir",
+        str(maintenance_pip_cache_dir()),
         "torch",
         "torchvision",
         "--index-url",
         index_url,
+        "--extra-index-url",
+        source_url,
     ]
-    if source_key != "official":
-        install_command.extend(["-i", source_url])
     commands = [
         [str(python_exe), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"],
         install_command,
@@ -474,22 +700,127 @@ def _run_pytorch_install(
         {
             "state": "running",
             "message": f"正在安装 PyTorch ({actual_env}，{source_label})...",
+            "progress": command_progress_start,
             "command": " && ".join(_format_command(command) for command in commands),
         }
     )
-    _run_commands(commands)
+    _run_commands(
+        commands,
+        progress_start=command_progress_start,
+        progress_end=progress_end,
+        progress_weights=[0.05, 0.95],
+        progress_message=f"正在安装 PyTorch ({actual_env}，{source_label})...",
+        command_messages=[
+            "正在卸载旧版 PyTorch、torchvision 和 torchaudio...",
+            f"正在安装 PyTorch ({actual_env}，{source_label})...",
+        ],
+    )
 
 
-def _run_package_reinstall(package_spec: str, package_source: str = "official") -> None:
+def _ensure_pytorch_install_path_supported() -> None:
+    """Reject legacy Windows paths that cannot hold PyTorch's package metadata."""
+
+    if os.name != "nt" or _windows_long_paths_enabled():
+        return
+    projected_path = project_root() / _PYTORCH_LONG_PATH_PROBE
+    if len(str(projected_path)) <= WINDOWS_LEGACY_DIRECTORY_PATH_LIMIT:
+        return
+    raise RuntimeError(
+        "当前 Neri 安装路径过长，Windows 无法写入 PyTorch 文件。"
+        "请将整个 Neri 文件夹移动或重新解压到 C:\\Neri、D:\\Neri 等短路径后重试；"
+        "移动后无需重新下载安装包。"
+    )
+
+
+def _windows_long_paths_enabled() -> bool:
+    """Return whether Windows has opted in to Win32 long-path support."""
+
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+        return int(value) == 1
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _repair_broken_pytorch_installations() -> list[Path]:
+    """Remove only PyTorch distributions whose pip RECORD file is missing."""
+
+    site_packages = toolkit_site_packages_dir()
+    if not site_packages.is_dir():
+        return []
+    resolved_site_packages = site_packages.resolve()
+    resolved_toolkit = toolkit_python().parent.resolve()
+    try:
+        resolved_site_packages.relative_to(resolved_toolkit)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"拒绝清理 Neri 内嵌 Python 之外的依赖目录: {site_packages}"
+        ) from exc
+
+    removed: list[Path] = []
+    for package_name, artifact_names in _PYTORCH_PACKAGE_ARTIFACTS.items():
+        metadata_dirs = [
+            path
+            for path in site_packages.glob(f"{package_name}-*.dist-info")
+            if path.is_dir()
+        ]
+        artifacts = [
+            site_packages / artifact_name
+            for artifact_name in artifact_names
+            if (site_packages / artifact_name).exists()
+        ]
+        artifacts.extend(metadata_dirs)
+        if not artifacts:
+            continue
+        if metadata_dirs and all(
+            (metadata_dir / "RECORD").is_file() for metadata_dir in metadata_dirs
+        ):
+            continue
+
+        for artifact in dict.fromkeys(artifacts):
+            if artifact.is_symlink() or artifact.is_file():
+                artifact.unlink()
+            elif artifact.exists():
+                shutil.rmtree(artifact)
+            removed.append(artifact)
+
+    if removed:
+        log_path = maintenance_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8", errors="replace") as log:
+            names = ", ".join(path.name for path in removed)
+            log.write(
+                f"[{_utc_now()}] removed incomplete PyTorch artifacts: {names}\n"
+            )
+    return removed
+
+
+def _run_package_reinstall(package_spec: str, package_source: str = "auto") -> None:
     package_spec = _validate_package_spec(package_spec)
     python_exe = toolkit_python()
-    _, source_label, _ = _resolve_package_source(package_source)
+    _, source_label, _ = resolve_package_source(package_source)
     commands = [
         [
             str(python_exe),
             "-m",
             "pip",
             "install",
+            "--progress-bar",
+            "raw",
+            "--timeout",
+            str(PIP_NETWORK_TIMEOUT_SECONDS),
+            "--retries",
+            str(PIP_NETWORK_RETRIES),
+            "--cache-dir",
+            str(maintenance_pip_cache_dir()),
             "--upgrade",
             "--force-reinstall",
             package_spec,
@@ -500,15 +831,21 @@ def _run_package_reinstall(package_spec: str, package_source: str = "official") 
         {
             "state": "running",
             "message": f"正在从{source_label}重新安装 {package_spec}...",
+            "progress": 10,
             "command": _format_command(commands[0]),
         }
     )
-    _run_commands(commands)
+    _run_commands(
+        commands,
+        progress_start=10,
+        progress_end=90,
+        progress_message=f"正在从{source_label}重新安装 {package_spec}...",
+    )
 
 
 def _run_yolo_dependencies_install(
     env_choice: str,
-    package_source: str = "official",
+    package_source: str = "auto",
     *,
     install_intel_driver: bool = False,
 ) -> None:
@@ -516,18 +853,33 @@ def _run_yolo_dependencies_install(
         env_choice,
         package_source,
         install_intel_driver=install_intel_driver,
+        progress_start=10,
+        progress_end=70,
     )
-    _run_ultralytics_install(package_source)
+    _run_ultralytics_install(package_source, progress_start=70, progress_end=90)
 
 
-def _run_ultralytics_install(package_source: str = "official") -> None:
+def _run_ultralytics_install(
+    package_source: str = "auto",
+    *,
+    progress_start: int = 70,
+    progress_end: int = 90,
+) -> None:
     python_exe = toolkit_python()
-    _, source_label, _ = _resolve_package_source(package_source)
+    _, source_label, _ = resolve_package_source(package_source)
     command = [
         str(python_exe),
         "-m",
         "pip",
         "install",
+        "--progress-bar",
+        "raw",
+        "--timeout",
+        str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "--retries",
+        str(PIP_NETWORK_RETRIES),
+        "--cache-dir",
+        str(maintenance_pip_cache_dir()),
         "--upgrade",
         ULTRALYTICS_PACKAGE_SPEC,
         *_pip_source_args(package_source),
@@ -536,30 +888,227 @@ def _run_ultralytics_install(package_source: str = "official") -> None:
         {
             "state": "running",
             "message": f"正在从{source_label}安装 ultralytics...",
+            "progress": progress_start,
             "command": _format_command(command),
         }
     )
-    _run_commands([command])
+    _run_commands(
+        [command],
+        progress_start=progress_start,
+        progress_end=progress_end,
+        progress_message=f"正在从{source_label}安装 ultralytics...",
+    )
 
 
-def _run_commands(commands: list[list[str]]) -> None:
+def _run_commands(
+    commands: list[list[str]],
+    *,
+    progress_start: int,
+    progress_end: int,
+    progress_weights: Sequence[float] | None = None,
+    progress_message: str = "正在安装依赖...",
+    command_messages: Sequence[str] | None = None,
+) -> None:
+    if not commands:
+        return
+    weights = list(progress_weights or [1.0] * len(commands))
+    if len(weights) != len(commands) or any(weight < 0 for weight in weights):
+        raise ValueError("维护命令的进度权重无效。")
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        raise ValueError("维护命令的进度权重总和必须大于 0。")
+    messages = list(command_messages or [progress_message] * len(commands))
+    if len(messages) != len(commands):
+        raise ValueError("维护命令与阶段提示的数量不一致。")
+
     log_path = maintenance_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n[{_utc_now()}] maintenance start\n")
-        for command in commands:
+        completed_weight = 0.0
+        for index, command in enumerate(commands):
+            command_message = messages[index]
+            command_progress_start = progress_start + round(
+                (progress_end - progress_start) * completed_weight / total_weight
+            )
+            command_progress_end = progress_start + round(
+                (progress_end - progress_start)
+                * (completed_weight + weights[index])
+                / total_weight
+            )
             log.write(f"\n> {_format_command(command)}\n")
             log.flush()
-            completed = subprocess.run(
+            _write_status(
+                {"progress": command_progress_start, "message": command_message}
+            )
+            process = subprocess.Popen(
                 command,
                 cwd=str(project_root()),
-                stdout=log,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
             )
-            if completed.returncode != 0:
-                raise RuntimeError(f"命令执行失败 ({completed.returncode}): {_format_command(command)}")
+            tracker = _PipProgressTracker(
+                command,
+                progress_start=command_progress_start,
+                progress_end=command_progress_end,
+                base_message=command_message,
+            )
+            if process.stdout is not None:
+                for line in process.stdout:
+                    log.write(line)
+                    log.flush()
+                    tracker.consume(line)
+            return_code = process.wait()
+            if return_code != 0:
+                raise RuntimeError(f"命令执行失败 ({return_code}): {_format_command(command)}")
+            completed_weight += weights[index]
+            _write_status({"progress": command_progress_end, "message": command_message})
         log.write(f"\n[{_utc_now()}] maintenance completed\n")
+
+
+class _PipProgressTracker:
+    _RAW_PROGRESS_PATTERN = re.compile(r"^Progress\s+(\d+)\s+of\s+(\d+)\s*$", re.IGNORECASE)
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        progress_start: int,
+        progress_end: int,
+        base_message: str,
+    ) -> None:
+        lowered_args = [str(part).lower() for part in command]
+        self._enabled = "pip" in lowered_args and "install" in lowered_args
+        self._pytorch_install = "torch" in lowered_args and "torchvision" in lowered_args
+        self._progress_start = progress_start
+        self._progress_end = progress_end
+        self._base_message = base_message
+        self._last_progress = progress_start
+        self._last_status_write = 0.0
+        self._download_label = "依赖包"
+        self._download_range = (0.08, 0.82)
+        self._download_count = 0
+
+    def consume(self, line: str) -> None:
+        if not self._enabled:
+            return
+        text = line.strip()
+        if not text:
+            return
+        lowered = text.lower()
+
+        if lowered.startswith("collecting "):
+            self._update(0.02, self._base_message)
+            return
+        if lowered.startswith("downloading "):
+            self._start_download(lowered)
+            return
+        if lowered.startswith("installing collected packages"):
+            self._update(0.94, "正在写入已下载的依赖文件...")
+            return
+        if lowered.startswith("successfully installed"):
+            self._update(1.0, self._base_message, force=True)
+            return
+
+        match = self._RAW_PROGRESS_PATTERN.match(text)
+        if match is None:
+            return
+        current, total = (int(value) for value in match.groups())
+        if total <= 0:
+            return
+        fraction = min(1.0, max(0.0, current / total))
+        range_start, range_end = self._download_range
+        local_progress = range_start + (range_end - range_start) * fraction
+        message = (
+            f"正在下载 {self._download_label}"
+            f"（{_format_transfer_size(current)} / {_format_transfer_size(total)}）..."
+        )
+        self._update(local_progress, message)
+
+    def _start_download(self, lowered_line: str) -> None:
+        is_metadata = ".metadata" in lowered_line
+        if is_metadata:
+            self._download_label = "依赖信息"
+            self._download_range = (0.02, 0.06)
+            return
+
+        self._download_label = _download_label(lowered_line)
+        if self._pytorch_install:
+            if self._download_label == "PyTorch":
+                self._download_range = (0.08, 0.84)
+            elif self._download_label == "torchvision":
+                self._download_range = (0.84, 0.91)
+            else:
+                self._download_range = (0.06, 0.08)
+            return
+
+        if self._download_count == 0:
+            self._download_range = (0.08, 0.82)
+        else:
+            self._download_range = (0.82, 0.90)
+        self._download_count += 1
+
+    def _update(self, local_progress: float, message: str, *, force: bool = False) -> None:
+        absolute_progress = self._progress_start + round(
+            (self._progress_end - self._progress_start)
+            * min(1.0, max(0.0, local_progress))
+        )
+        absolute_progress = max(self._last_progress, absolute_progress)
+        now = time.monotonic()
+        if (
+            not force
+            and absolute_progress == self._last_progress
+            and now - self._last_status_write < 1.5
+        ):
+            return
+        self._last_progress = absolute_progress
+        self._last_status_write = now
+        _write_status({"progress": absolute_progress, "message": message})
+
+
+def _download_label(lowered_line: str) -> str:
+    if "torchvision-" in lowered_line:
+        return "torchvision"
+    if re.search(r"(?:^|[/\\])torch-", lowered_line) or " torch-" in lowered_line:
+        return "PyTorch"
+    if "ultralytics-" in lowered_line:
+        return "ultralytics"
+    return "依赖包"
+
+
+def _format_transfer_size(size_bytes: int) -> str:
+    value = float(max(0, size_bytes))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            precision = 0 if unit == "B" else 1
+            return f"{value:.{precision}f} {unit}"
+        value /= 1024
+    return f"{size_bytes} B"
+
+
+def _clear_maintenance_pip_cache() -> str | None:
+    """Delete only Neri's maintenance cache and leave the user's global pip cache alone."""
+
+    cache_dir = maintenance_pip_cache_dir().resolve()
+    expected_parent = (project_root() / "temp").resolve()
+    if cache_dir.parent != expected_parent:
+        return f"拒绝清理非预期缓存目录: {cache_dir}"
+    if not cache_dir.exists():
+        return None
+    try:
+        shutil.rmtree(cache_dir)
+    except OSError as exc:
+        message = str(exc)
+        log_path = maintenance_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8", errors="replace") as log:
+            log.write(f"[{_utc_now()}] pip cache cleanup failed: {message}\n")
+        return message
+    return None
 
 
 def _empty_intel_driver_status() -> dict[str, Any]:
@@ -571,6 +1120,7 @@ def _empty_intel_driver_status() -> dict[str, Any]:
         "driver_version": None,
         "driver_provider": None,
         "device_name": None,
+        "processor_names": [],
         "message": "",
         "error": None,
     }
@@ -581,13 +1131,21 @@ def _query_windows_display_devices() -> dict[str, Any]:
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
-$devices = Get-CimInstance Win32_PnPEntity |
-    Where-Object { $_.PNPClass -eq 'Display' -or $_.ClassGuid -eq '{4d36e968-e325-11ce-bfc1-08002be10318}' } |
-    Select-Object Name, Manufacturer, PNPDeviceID, Status
-$drivers = Get-CimInstance Win32_PnPSignedDriver |
-    Where-Object { $_.DeviceClass -eq 'DISPLAY' } |
-    Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DeviceID, InfName
-[pscustomobject]@{ devices = @($devices); drivers = @($drivers) } |
+$devices = Get-CimInstance Win32_VideoController |
+    Select-Object Name, @{Name='Manufacturer'; Expression={$_.AdapterCompatibility}}, PNPDeviceID, Status
+$hasIntelDisplay = @(
+    $devices | Where-Object {
+        "$($_.Name) $($_.Manufacturer) $($_.PNPDeviceID)" -match '(?i)Intel|VEN_8086'
+    }
+).Count -gt 0
+$drivers = @()
+$processors = @()
+if ($hasIntelDisplay) {
+    $drivers = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass = 'DISPLAY'" |
+        Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DeviceID, InfName
+    $processors = Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name
+}
+[pscustomobject]@{ devices = @($devices); drivers = @($drivers); processors = @($processors) } |
     ConvertTo-Json -Depth 5 -Compress
 """
     completed = subprocess.run(
@@ -603,7 +1161,7 @@ $drivers = Get-CimInstance Win32_PnPSignedDriver |
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         try:
@@ -629,7 +1187,7 @@ def _query_windows_display_devices_with_pnputil() -> dict[str, Any]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout).strip()
@@ -768,13 +1326,18 @@ def _validate_intel_download_url(url: str) -> None:
         raise ValueError(f"不是受信任的 Intel 驱动下载地址: {url}")
 
 
-def _install_intel_graphics_driver_for_xpu() -> None:
+def _install_intel_graphics_driver_for_xpu(
+    *,
+    progress_start: int,
+    progress_end: int,
+) -> None:
     log_path = maintenance_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _write_status(
         {
             "state": "running",
             "message": "正在从 Intel 官网下载显卡驱动安装程序...",
+            "progress": progress_start,
             "command": INTEL_GRAPHICS_DRIVER_DOWNLOAD_URL,
         }
     )
@@ -790,6 +1353,8 @@ def _install_intel_graphics_driver_for_xpu() -> None:
             {
                 "state": "running",
                 "message": "正在运行 Intel 显卡驱动安装程序，请按安装程序提示完成操作...",
+                "progress": progress_start
+                + round((progress_end - progress_start) * 0.5),
                 "command": _format_command([str(installer_path)]),
             }
         )
@@ -805,7 +1370,9 @@ def _install_intel_graphics_driver_for_xpu() -> None:
         if completed.returncode != 0:
             raise RuntimeError(f"Intel 显卡驱动安装程序退出码为 {completed.returncode}。")
         log.write(f"[{_utc_now()}] Intel graphics driver installer completed\n")
+        _write_status({"progress": progress_end})
 
+    _reset_intel_driver_status_cache()
     refreshed = intel_graphics_driver_status()
     if refreshed.get("gpu_present") and not refreshed.get("driver_installed"):
         _write_status(
@@ -821,6 +1388,8 @@ def _resolve_pytorch_index(env_choice: str) -> tuple[str, str]:
     if choice == "自动检测":
         return _auto_detect_pytorch_index()
     if "XPU" in choice.upper():
+        if not XPU_ENABLED:
+            raise RuntimeError("Intel XPU 安装当前已暂时关闭，请选择 CUDA 或 CPU Only。")
         return "Intel XPU", PYTORCH_XPU_INDEX_URL
     if "CPU" in choice.upper():
         return "CPU Only", PYTORCH_CPU_INDEX_URL
@@ -842,9 +1411,10 @@ def _auto_detect_pytorch_index() -> tuple[str, str]:
     if cuda_choice is not None:
         return cuda_choice
 
-    intel_choice = _detect_intel_xpu_pytorch_index()
-    if intel_choice is not None:
-        return intel_choice
+    if XPU_ENABLED:
+        intel_choice = _detect_intel_xpu_pytorch_index()
+        if intel_choice is not None:
+            return intel_choice
 
     return "CPU Only (未检测到支持的 GPU)", PYTORCH_CPU_INDEX_URL
 
@@ -857,54 +1427,66 @@ def _detect_nvidia_cuda_pytorch_index() -> tuple[str, str] | None:
             text=True,
             encoding="gbk",
             errors="ignore",
-            timeout=10,
+            timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
         )
     except Exception:
-        return _detect_intel_xpu_pytorch_index() or _auto_detect_intel_or_cpu(
-            "CPU Only (自动检测失败)"
-        )
+        return None
 
     if result.returncode != 0:
-        return _detect_intel_xpu_pytorch_index() or _auto_detect_intel_or_cpu(
-            "CPU Only (未检测到 NVIDIA GPU)"
+        return None
+
+    cuda_version = _parse_nvidia_cuda_version(result.stdout)
+    if cuda_version is None:
+        raise RuntimeError(
+            "检测到 NVIDIA GPU，但无法从 nvidia-smi 识别 CUDA 驱动版本；"
+            "请在环境维护中手动选择 CUDA 版本。"
         )
 
-    match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", result.stdout)
-    if not match:
-        return "CUDA 12.4 (自动检测默认)", "https://download.pytorch.org/whl/cu124"
-
-    major, minor = (int(value) for value in match.groups())
-    if major > 13 or (major == 13 and minor >= 2):
+    major, minor = cuda_version
+    if (major, minor) >= (13, 2):
         return f"CUDA 13.2 (检测到 CUDA {major}.{minor})", PYTORCH_CUDA_132_INDEX_URL
-    if major == 13:
+    if (major, minor) >= (13, 0):
         return f"CUDA 13.0 (检测到 CUDA {major}.{minor})", PYTORCH_CUDA_130_INDEX_URL
-    if major >= 12 and minor >= 8:
+    if (major, minor) >= (12, 8):
         return f"CUDA 12.8 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu128"
-    if major >= 12 and minor >= 6:
+    if (major, minor) >= (12, 6):
         return f"CUDA 12.6 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu126"
-    if major >= 12 and minor >= 4:
+    if (major, minor) >= (12, 4):
         return f"CUDA 12.4 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu124"
-    if major >= 12 and minor >= 1:
+    if (major, minor) >= (12, 1):
         return f"CUDA 12.1 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu121"
-    if major >= 11 and minor >= 8:
+    if (major, minor) >= (11, 8):
         return f"CUDA 11.8 (检测到 CUDA {major}.{minor})", "https://download.pytorch.org/whl/cu118"
     return f"CPU Only (CUDA {major}.{minor} 过旧)", PYTORCH_CPU_INDEX_URL
 
 
+def _parse_nvidia_cuda_version(output: str) -> tuple[int, int] | None:
+    match = re.search(
+        r"\bCUDA(?:\s+UMD)?\s+Version:\s*(\d+)\.(\d+)\b",
+        output,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    major, minor = (int(value) for value in match.groups())
+    return major, minor
+
+
 def _detect_intel_xpu_pytorch_index() -> tuple[str, str] | None:
-    gpu_names = _windows_video_controller_names()
-    intel_gpu_names = [
-        name for name in gpu_names if "intel" in _normalize_hardware_name(name)
-    ]
-    if not intel_gpu_names:
+    status = intel_graphics_driver_status()
+    if not status.get("gpu_present"):
         return None
 
-    cpu_names = _windows_processor_names()
-    for gpu_name in intel_gpu_names:
-        if _is_supported_intel_xpu_gpu(gpu_name, cpu_names):
-            return f"Intel XPU (检测到 {gpu_name})", PYTORCH_XPU_INDEX_URL
+    gpu_name = str(status.get("device_name") or status.get("driver_name") or "Intel GPU")
+    cpu_names = [
+        str(value)
+        for value in status.get("processor_names", [])
+        if str(value).strip()
+    ]
+    if _is_supported_intel_xpu_gpu(gpu_name, cpu_names):
+        return f"Intel XPU (检测到 {gpu_name})", PYTORCH_XPU_INDEX_URL
 
-    return f"CPU Only (Intel GPU 暂不支持 XPU: {intel_gpu_names[0]})", PYTORCH_CPU_INDEX_URL
+    return f"CPU Only (Intel GPU 暂不支持 XPU: {gpu_name})", PYTORCH_CPU_INDEX_URL
 
 
 def _is_supported_intel_xpu_gpu(gpu_name: str, cpu_names: Sequence[str]) -> bool:
@@ -969,7 +1551,7 @@ def _powershell_cim_property_values(cim_class: str, property_name: str) -> list[
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=10,
+            timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
         )
     except Exception:
         return []
@@ -988,7 +1570,7 @@ def _wmic_property_values(command: Sequence[str]) -> list[str]:
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=10,
+            timeout=HARDWARE_PROBE_TIMEOUT_SECONDS,
         )
     except Exception:
         return []
@@ -1006,18 +1588,6 @@ def _normalize_hardware_name(value: str) -> str:
     text = text.encode("ascii", "ignore").decode("ascii").lower()
     text = re.sub(r"[\(\)\[\],._+\-/]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _auto_detect_intel_or_cpu(cpu_reason: str) -> tuple[str, str]:
-    status = intel_graphics_driver_status()
-    if status.get("gpu_present"):
-        if status.get("driver_installed"):
-            return "Intel XPU (检测到 Intel GPU)", "https://download.pytorch.org/whl/xpu"
-        return (
-            "Intel XPU (检测到 Intel GPU，需安装 Intel 驱动)",
-            "https://download.pytorch.org/whl/xpu",
-        )
-    return cpu_reason, "https://download.pytorch.org/whl/cpu"
 
 
 def _start_backend() -> None:

@@ -1,5 +1,5 @@
 name: neri_flutter
-version: 3.0.4-release+dfc280
+version: 3.0.5-beta8+445
 publish_to: none
 description: Material 3 Flutter frontend for the Neri infrared-camera processing backend.
 
@@ -7,6 +7,7 @@ environment:
   sdk: ^3.8.0
 
 dependencies:
+  crypto: ^3.0.7
   dynamic_color: ^1.7.0
   flutter:
     sdk: flutter

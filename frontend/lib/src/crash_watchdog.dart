@@ -74,14 +74,10 @@ class CrashWatchdog {
       return false;
     }
 
-    final tempDirectory = Directory(
-      [projectRoot.path, 'temp'].join(Platform.pathSeparator),
-    );
     final logsDirectory = Directory(
       [projectRoot.path, 'logs'].join(Platform.pathSeparator),
     );
     try {
-      tempDirectory.createSync(recursive: true);
       logsDirectory.createSync(recursive: true);
       CrashReporter.prepareForNewCrashSession();
     } catch (error, stackTrace) {
@@ -104,7 +100,7 @@ class CrashWatchdog {
     final crashLogStartOffset = CrashReporter.crashLogSize();
     final sessionFile = File(
       [
-        tempDirectory.path,
+        logsDirectory.path,
         'crash_watchdog_$pid.json',
       ].join(Platform.pathSeparator),
     );
@@ -115,11 +111,11 @@ class CrashWatchdog {
       crashLogStartOffset: crashLogStartOffset,
     );
     final diagnosticLog = File(
-      [tempDirectory.path, 'crash_watchdog.tmp'].join(Platform.pathSeparator),
+      [logsDirectory.path, 'crash_watchdog.log'].join(Platform.pathSeparator),
     );
     final startupReport = File(
       [
-        tempDirectory.path,
+        logsDirectory.path,
         'crash_startup_report.json',
       ].join(Platform.pathSeparator),
     );
@@ -306,11 +302,16 @@ class CrashWatchdog {
   ]) {
     try {
       final directory = projectRoot == null
-          ? Directory.current.absolute
-          : Directory([projectRoot.path, 'temp'].join(Platform.pathSeparator));
+          ? Directory(
+              [
+                Directory.current.absolute.path,
+                'logs',
+              ].join(Platform.pathSeparator),
+            )
+          : Directory([projectRoot.path, 'logs'].join(Platform.pathSeparator));
       directory.createSync(recursive: true);
       final file = File(
-        [directory.path, 'crash_watchdog.tmp'].join(Platform.pathSeparator),
+        [directory.path, 'crash_watchdog.log'].join(Platform.pathSeparator),
       );
       final buffer = StringBuffer()
         ..writeln('[${DateTime.now().toIso8601String()}] $message');

@@ -2,16 +2,15 @@
 
 import 'package:flutter/material.dart';
 
+const Color kDefaultSeedColor = Color(0xFFFA9D85);
+
 /// Persistent theme preferences held in a [ValueNotifier].
 class ThemeSettings {
   const ThemeSettings({
     this.themeMode = ThemeMode.system,
     this.useDynamicColor = false,
-    this.seedColor = _kDefaultSeed,
+    this.seedColor = kDefaultSeedColor,
   });
-
-  // 将默认种子色更新为调色板的第一个颜色（抹茶绿），或者你喜欢的任何一个
-  static const Color _kDefaultSeed = Color(0xFF94CC84);
 
   final ThemeMode themeMode;
   final bool useDynamicColor;

@@ -8,8 +8,12 @@ import 'package:flutter/services.dart';
 import '../api_client.dart';
 import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
+import '../local_debug_logs.dart';
+import '../local_maintenance_status.dart';
+import '../models/close_behavior.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
+import '../models/video_processing_mode.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
@@ -70,15 +74,27 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.4-release(dfc280)',
+  defaultValue: '3.0.5-beta8(58b040)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
 const _autoSaveDelay = Duration(milliseconds: 800);
+const _xpuEnabled = false;
 const _favoritePhotoExportAsk = 'ask';
 const _favoritePhotoExportAlways = 'export';
 const _favoritePhotoExportNever = 'skip';
+const _emptyPhotoDeleteAsk = 'ask';
+const _emptyPhotoDeleteAlways = 'delete';
+const _emptyPhotoDeleteNever = 'keep';
+const _detectionConfidencePriority = 'detection';
+const _classificationConfidencePriority = 'classification';
+
+typedef SoftwareUpdateCheckCallback =
+    Future<void> Function({
+      required String channel,
+      required String downloadSource,
+    });
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -87,7 +103,10 @@ class SettingsScreen extends StatefulWidget {
     required this.apiClient,
     required this.themeNotifier,
     required this.onUpdateTheme,
+    required this.closeBehavior,
+    required this.onCloseBehaviorChanged,
     required this.onSaveSettings,
+    required this.onCheckForUpdates,
     required this.onShowMessage,
     super.key,
   });
@@ -97,7 +116,10 @@ class SettingsScreen extends StatefulWidget {
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final ValueChanged<ThemeSettings> onUpdateTheme;
+  final String closeBehavior;
+  final ValueChanged<String> onCloseBehaviorChanged;
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
+  final SoftwareUpdateCheckCallback onCheckForUpdates;
   final ValueChanged<String> onShowMessage;
 
   @override
@@ -106,21 +128,26 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _packageController = TextEditingController();
+  final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   Map<String, dynamic> _draft = <String, dynamic>{};
   int _sectionIndex = 0;
   bool _saving = false;
   bool _dirty = false;
   bool _resettingDraft = false;
   bool _loadingModelClasses = false;
+  String? _maintenancePreparationOperation;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
   bool _debugModeSaving = false;
   bool _clearingCache = false;
+  bool _checkingForUpdates = false;
   int _draftRevision = 0;
   Timer? _autoSaveTimer;
   Timer? _maintenanceTimer;
   String? _maintenanceOperation;
   String? _maintenanceMessage;
+  double? _maintenanceProgress;
+  String? _maintenanceStatusPath;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -130,7 +157,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _packageController.addListener(_handlePackageChanged);
     _resetDraft();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _loadModelClassesForSelection();
+      if (!mounted) return;
+      _loadModelClassesForSelection();
+      unawaited(_resumeMaintenanceWatchIfActive());
     });
   }
 
@@ -142,6 +171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _resetDraft();
         _loadModelClassesForSelection();
       } else {
+        _syncModelDraftFromSettings();
         _syncQuickMarkDraftFromSettings();
       }
     }
@@ -168,6 +198,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     final dependenciesReady =
         settings == null || settings.missingYoloDependencies.isEmpty;
+    final gpuAvailable = settings?.gpuAvailable == true;
     _draft = <String, dynamic>{
       ...saved,
       'selected_model': _stringSetting(
@@ -180,30 +211,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'selected_classification_model',
         settings?.selectedClassificationModel ?? '',
       ),
-      'package_source': _stringSetting(saved, 'package_source', 'official'),
+      'package_source': _stringSetting(saved, 'package_source', 'auto'),
+      'pytorch_version': _normalizedPytorchVersion(
+        _stringSetting(saved, 'pytorch_version', '自动检测'),
+      ),
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
-      'batch_size': !dependenciesReady
-          ? _intSetting(saved, 'batch_size', 16)
-          : settings?.gpuAvailable == true
-          ? _intSetting(saved, 'batch_size', 16)
-          : 1,
+      'batch_size': gpuAvailable ? _intSetting(saved, 'batch_size', 16) : 1,
+      'thread_count': gpuAvailable ? _intSetting(saved, 'thread_count', 4) : 1,
       'use_fp16': !dependenciesReady
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
                 _boolSetting(saved, 'use_fp16', settings?.gpuAvailable == true),
-      'use_augment': _boolSetting(saved, 'use_augment', false),
+      'use_augment': _boolSetting(saved, 'use_augment', true),
       'use_agnostic_nms': _boolSetting(saved, 'use_agnostic_nms', true),
-      'video_mode': _stringSetting(saved, 'video_mode', 'all'),
-      'vid_stride': _intSetting(saved, 'vid_stride', 1),
+      'confidence_priority':
+          _stringSetting(
+                saved,
+                'confidence_priority',
+                _classificationConfidencePriority,
+              ) ==
+              _detectionConfidencePriority
+          ? _detectionConfidencePriority
+          : _classificationConfidencePriority,
+      'video_mode': normalizeVideoProcessingMode(
+        _stringSetting(saved, 'video_mode', defaultVideoProcessingMode),
+      ),
+      'vid_stride': _intSetting(saved, 'vid_stride', defaultVideoSampleCount),
       'min_frame_ratio': _doubleSetting(saved, 'min_frame_ratio', 0.0),
       'auto_group': _boolSetting(saved, 'auto_group', true),
-      'collapse_groups': _boolSetting(saved, 'collapse_groups', false),
+      'collapse_groups': _boolSetting(saved, 'collapse_groups', true),
       'auto_group_detect_burst': _boolSetting(
         saved,
         'auto_group_detect_burst',
-        false,
+        true,
       ),
       'auto_group_burst_size': _intSetting(saved, 'auto_group_burst_size', 3),
       'auto_group_gap_seconds': _intSetting(
@@ -230,13 +272,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const <String>[],
       ),
       'favorite_photo_export_mode': _favoritePhotoExportModeSetting(saved),
+      'empty_photo_delete_mode': _emptyPhotoDeleteModeSetting(saved),
       'selected_species_names': _stringListSetting(
         saved,
         'selected_species_names',
         const <String>[],
       ),
       'update_channel': _stringSetting(saved, 'update_channel', 'Preview'),
-      'update_mirror': _stringSetting(saved, 'update_mirror', 'KKGitHub'),
+      'update_source': _normalizedUpdateSource(
+        _stringSetting(saved, 'update_source', 'auto'),
+      ),
       _debugModeKey: _boolSetting(saved, _debugModeKey, false),
     };
     _resettingDraft = true;
@@ -250,6 +295,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_resettingDraft) return;
     _draft['package'] = _packageController.text.trim();
     _markDirty();
+  }
+
+  void _syncModelDraftFromSettings() {
+    final settings = widget.settings;
+    if (settings == null) return;
+    final detectionModel = _stringSetting(
+      settings.settings,
+      'selected_model',
+      settings.selectedModel ?? '',
+    );
+    final classificationModel = _stringSetting(
+      settings.settings,
+      'selected_classification_model',
+      settings.selectedClassificationModel ?? '',
+    );
+    if (_string('selected_model') == detectionModel &&
+        _string('selected_classification_model') == classificationModel) {
+      return;
+    }
+    _draft['selected_model'] = detectionModel;
+    _draft['selected_classification_model'] = classificationModel;
+    _markDraftChanged();
+    _scheduleAutoSave();
+    unawaited(_loadModelClassesForSelection());
   }
 
   void _syncQuickMarkDraftFromSettings() {
@@ -312,7 +381,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _autoSaveTimer = Timer(_autoSaveDelay, () => unawaited(_save()));
   }
 
-  Future<void> _loadModelClassesForSelection([String? modelPath]) async {
+  Future<void> _loadModelClassesForSelection() async {
     if (!_detectionDependenciesReady) {
       if (!mounted) return;
       setState(() {
@@ -323,12 +392,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    final path =
-        modelPath ??
-        _validModelValue(
-          _string('selected_model'),
-          widget.settings?.availableModels ?? const <ModelInfo>[],
-        );
+    final path = _modelClassesSelectionPath();
     if (path == null || path.isEmpty) {
       if (!mounted) return;
       setState(() {
@@ -347,13 +411,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     try {
       final classes = await widget.apiClient.fetchModelClasses(path);
-      if (!mounted || _string('selected_model') != path) return;
+      if (!mounted || _modelClassesSelectionPath() != path) return;
       setState(() {
         _modelClassOptions = classes;
         _loadingModelClasses = false;
       });
     } catch (error) {
-      if (!mounted || _string('selected_model') != path) return;
+      if (!mounted || _modelClassesSelectionPath() != path) return;
       setState(() {
         _modelClassOptions = const <ModelClassInfo>[];
         _loadingModelClasses = false;
@@ -386,24 +450,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installPytorch() async {
-    final envChoice = _string('pytorch_version', '自动检测');
-    final packageSource = _string('package_source', 'official');
-    final sourceLabel = _packageSourceLabel(packageSource);
-    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    if (_maintenanceBusy) return;
+    _startMaintenancePreparation(
+      operation: 'install_pytorch',
+      message: '正在检查环境维护状态...',
+    );
+
+    final envChoice = _normalizedPytorchVersion(
+      _string('pytorch_version', '自动检测'),
+    );
+    late final PackageSourceResolution? packageSource;
+    late final bool? installIntelDriver;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updateMaintenancePreparation('正在检测 Python 包安装源和运行环境...');
+      final checks = await Future.wait<Object?>([
+        _resolvePackageSource(),
+        _resolveIntelDriverInstall(envChoice),
+      ]);
+      packageSource = checks[0] as PackageSourceResolution?;
+      installIntelDriver = checks[1] as bool?;
+    } finally {
+      _finishMaintenancePreparation();
+    }
+
+    if (packageSource == null || !mounted) return;
     if (installIntelDriver == null || !mounted) return;
 
     final installStep = installIntelDriver
-        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再退出当前 Python 后端，随后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。'
-        : '将先退出当前 Python 后端，然后使用 toolkit\\python.exe 重新安装适用于 $envChoice 的 PyTorch。';
-    final confirmed = await _confirmMaintenance(
+        ? '将先从 Intel 官网下载并运行显卡驱动安装程序，再使用${packageSource.label}重新安装适用于$envChoice的 PyTorch。'
+        : '将使用${packageSource.label}重新安装适用于$envChoice的 PyTorch。';
+    final confirmed = await _confirmPythonInstallation(
       title: '安装 PyTorch',
-      message: '$installStep\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '开始安装',
+      message: installStep,
     );
     if (confirmed != true) return;
 
     final installUltralytics = _missingYoloDependencies.contains('ultralytics')
-        ? await _confirmInstallUltralyticsWithPytorch(sourceLabel)
+        ? await _confirmInstallUltralyticsWithPytorch(packageSource.label)
         : false;
     if (installUltralytics == null || !mounted) return;
 
@@ -420,12 +504,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = installUltralytics
           ? await widget.apiClient.installYoloDependencies(
               envChoice: envChoice,
-              packageSource: packageSource,
+              packageSource: packageSource.source,
               installIntelDriver: installIntelDriver,
             )
           : await widget.apiClient.installPytorch(
               envChoice,
-              packageSource: packageSource,
+              packageSource: packageSource.source,
               installIntelDriver: installIntelDriver,
             );
       if (!mounted) return;
@@ -436,17 +520,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : 'install_pytorch')
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _installingPytorch = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 PyTorch 安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 PyTorch 安装失败');
     }
   }
 
@@ -477,25 +556,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _installYoloDependencies() async {
-    if (_maintenanceInProgress) return;
+    if (_maintenanceBusy) return;
+    _startMaintenancePreparation(
+      operation: 'install_yolo_dependencies',
+      message: '正在检查环境维护状态...',
+    );
+
     const envChoice = '自动检测';
-    final packageSource = _string('package_source', 'official');
-    final sourceLabel = _packageSourceLabel(packageSource);
-    final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
+    late final PackageSourceResolution? packageSource;
+    late final bool? installIntelDriver;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updateMaintenancePreparation('正在检测 Python 包安装源和运行环境...');
+      final checks = await Future.wait<Object?>([
+        _resolvePackageSource(),
+        _resolveIntelDriverInstall(envChoice),
+      ]);
+      packageSource = checks[0] as PackageSourceResolution?;
+      installIntelDriver = checks[1] as bool?;
+    } finally {
+      _finishMaintenancePreparation();
+    }
+
+    if (packageSource == null || !mounted) return;
     if (installIntelDriver == null || !mounted) return;
 
     final driverStep = installIntelDriver
-        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。'
-        : '安装时会先自动检测并安装适用的 PyTorch，然后从$sourceLabel安装 ultralytics。';
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用${packageSource.label}及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从${packageSource.label}安装 ultralytics。'
+        : '安装时会使用${packageSource.label}及对应硬件版本的 PyTorch wheel 源自动安装适用的 PyTorch，然后从${packageSource.label}安装 ultralytics。';
     final missingText = _missingYoloDependenciesLabel.isEmpty
         ? 'YOLO 处理依赖'
         : _missingYoloDependenciesLabel;
-    final confirmed = await _confirmMaintenance(
-      title: '需要安装 YOLO 依赖',
-      message:
-          '当前缺少：$missingText。\n\n$driverStep'
-          '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '安装依赖',
+    final confirmed = await _confirmPythonInstallation(
+      title: '安装 YOLO 检测库',
+      message: '当前缺少：$missingText。\n\n$driverStep',
     );
     if (confirmed != true || !mounted) return;
 
@@ -507,7 +601,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final response = await widget.apiClient.installYoloDependencies(
         envChoice: envChoice,
-        packageSource: packageSource,
+        packageSource: packageSource.source,
         installIntelDriver: installIntelDriver,
       );
       if (!mounted) return;
@@ -516,41 +610,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? 'install_yolo_dependencies'
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _installingPytorch = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 YOLO 依赖安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 YOLO 依赖安装失败');
     }
   }
 
-  String _packageSourceLabel(String packageSource) {
-    return switch (packageSource) {
-      'aliyun' => '阿里源',
-      'tsinghua' => '清华源',
-      _ => '官方源',
-    };
+  Future<PackageSourceResolution?> _resolvePackageSource() async {
+    try {
+      return await widget.apiClient.resolvePackageSource(
+        _string('package_source', 'auto'),
+      );
+    } catch (error) {
+      widget.onShowMessage('检测 Python 包安装源失败：$error');
+      return null;
+    }
+  }
+
+  String _normalizedPytorchVersion(String value) {
+    if (!_xpuEnabled && value.toUpperCase().contains('XPU')) {
+      return '自动检测';
+    }
+    return value;
+  }
+
+  String _normalizedUpdateSource(String value) {
+    final normalized = value.trim().toLowerCase();
+    return const {'auto', 'domestic', 'github'}.contains(normalized)
+        ? normalized
+        : 'auto';
+  }
+
+  void _startMaintenancePreparation({
+    required String operation,
+    required String message,
+  }) {
+    setState(() {
+      _maintenancePreparationOperation = operation;
+      _maintenanceMessage = message;
+      _maintenanceProgress = null;
+    });
+  }
+
+  void _updateMaintenancePreparation(String message) {
+    if (!mounted || _maintenancePreparationOperation == null) return;
+    setState(() => _maintenanceMessage = message);
+  }
+
+  void _finishMaintenancePreparation() {
+    if (!mounted || _maintenancePreparationOperation == null) return;
+    setState(() {
+      _maintenancePreparationOperation = null;
+      if (!_maintenanceInProgress) {
+        _maintenanceMessage = null;
+        _maintenanceProgress = null;
+      }
+    });
   }
 
   Future<void> _reinstallPythonPackage() async {
+    if (_maintenanceBusy) return;
     final packageSpec = _packageController.text.trim();
-    final packageSource = _string('package_source', 'official');
     if (packageSpec.isEmpty) {
       widget.onShowMessage('请输入要重新安装的 Python 包名。');
       return;
     }
 
-    final confirmed = await _confirmMaintenance(
-      title: '重新安装 Python 包',
+    _startMaintenancePreparation(
+      operation: 'reinstall_package',
+      message: '正在检查环境维护状态...',
+    );
+    PackageSourceResolution? packageSource;
+    try {
+      if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+      _updateMaintenancePreparation('正在检测 Python 包安装源...');
+      packageSource = await _resolvePackageSource();
+    } finally {
+      _finishMaintenancePreparation();
+    }
+
+    if (packageSource == null || !mounted) return;
+    final confirmed = await _confirmPythonInstallation(
+      title: '安装 Python 库',
       message:
-          '将使用 toolkit\\python.exe 对 $packageSpec 执行强制重新安装。\n\n安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
-      confirmLabel: '开始安装',
+          '将使用${packageSource.label}通过 toolkit\\python.exe 强制重新安装 $packageSpec。',
     );
     if (confirmed != true) return;
 
@@ -562,7 +708,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final response = await widget.apiClient.reinstallPythonPackage(
         packageSpec,
-        packageSource,
+        packageSource.source,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -570,28 +716,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? 'reinstall_package'
             : response.operation,
         message: response.message,
+        progress: response.progress,
+        statusPath: response.statusPath,
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _reinstallingPackage = false;
-          _maintenanceOperation = null;
-          _maintenanceMessage = null;
-        });
-      }
-      widget.onShowMessage('启动 Python 包重新安装失败：$error');
+      await _handleMaintenanceStartFailure(error, '启动 Python 包重新安装失败');
     }
+  }
+
+  Future<void> _handleMaintenanceStartFailure(
+    Object error,
+    String prefix,
+  ) async {
+    if (await _resumeMaintenanceWatchIfActive(announce: true)) return;
+    if (!mounted) return;
+    setState(() {
+      _installingPytorch = false;
+      _reinstallingPackage = false;
+      _maintenanceOperation = null;
+      _maintenanceMessage = null;
+      _maintenanceProgress = null;
+      _maintenanceStatusPath = null;
+    });
+    widget.onShowMessage('$prefix：$error');
+  }
+
+  Future<bool> _resumeMaintenanceWatchIfActive({bool announce = false}) async {
+    MaintenanceStatus? status;
+    try {
+      status = await widget.apiClient.fetchMaintenanceStatus().timeout(
+        const Duration(seconds: 1),
+      );
+    } catch (_) {
+      status = await _maintenanceStatusStore.tryRead(
+        path: _maintenanceStatusPath,
+      );
+    }
+    if (!mounted ||
+        status == null ||
+        !_maintenanceStatusStore.isActive(status)) {
+      return false;
+    }
+
+    final operation = status.operation ?? '';
+    if (!const {
+      'install_pytorch',
+      'install_yolo_dependencies',
+      'reinstall_package',
+    }.contains(operation)) {
+      return false;
+    }
+    _startMaintenanceWatch(
+      operation: operation,
+      message: status.message,
+      progress: status.progress,
+      statusPath: status.statusPath ?? _maintenanceStatusStore.statusFile.path,
+    );
+    if (announce) widget.onShowMessage('已恢复正在执行的环境维护任务。');
+    return true;
   }
 
   void _startMaintenanceWatch({
     required String operation,
     required String message,
+    required int progress,
+    String? statusPath,
   }) {
     _maintenanceTimer?.cancel();
     setState(() {
       _maintenanceOperation = operation;
       _maintenanceMessage = message.isEmpty ? '正在安装...' : message;
+      _maintenanceProgress = progress.clamp(0, 100) / 100;
+      _maintenanceStatusPath = statusPath;
       _installingPytorch =
           operation == 'install_pytorch' ||
           operation == 'install_yolo_dependencies';
@@ -607,16 +804,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _pollMaintenanceStatus() async {
     if (!_maintenanceInProgress) return;
     try {
-      final status = await widget.apiClient.fetchMaintenanceStatus();
+      late final MaintenanceStatus status;
+      try {
+        status = await widget.apiClient.fetchMaintenanceStatus();
+      } catch (_) {
+        status = await _readLocalMaintenanceStatus();
+      }
       if (!mounted || !_maintenanceInProgress) return;
       final operation = status.operation ?? _maintenanceOperation;
       final message = status.message.isEmpty
           ? (_maintenanceMessage ?? '正在安装...')
           : status.message;
-      if (_isMaintenanceActive(status.state)) {
+      if (_maintenanceStatusStore.isActive(status)) {
         setState(() {
           _maintenanceOperation = operation;
           _maintenanceMessage = message;
+          _maintenanceProgress = status.progress / 100;
+          _maintenanceStatusPath = status.statusPath ?? _maintenanceStatusPath;
           _installingPytorch =
               operation == 'install_pytorch' ||
               operation == 'install_yolo_dependencies';
@@ -629,21 +833,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {
       if (!mounted || !_maintenanceInProgress) return;
       setState(() {
-        _maintenanceMessage = '正在安装，Python 后端暂时离线，完成后会自动重启...';
+        _maintenanceMessage = '正在安装，暂时无法读取最新进度；Python 后端完成后会自动重启...';
       });
     }
   }
 
-  bool _isMaintenanceActive(String state) {
-    return const {
-      'starting',
-      'waiting_for_backend',
-      'running',
-      'restarting',
-    }.contains(state);
+  Future<MaintenanceStatus> _readLocalMaintenanceStatus() async {
+    return _maintenanceStatusStore.read(path: _maintenanceStatusPath);
   }
 
   bool get _maintenanceInProgress => _installingPytorch || _reinstallingPackage;
+  bool get _maintenanceBusy =>
+      _maintenancePreparationOperation != null || _maintenanceInProgress;
 
   void _finishMaintenanceWatch(String message) {
     _maintenanceTimer?.cancel();
@@ -653,6 +854,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _reinstallingPackage = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
+      _maintenanceProgress = null;
+      _maintenanceStatusPath = null;
     });
     if (message.isNotEmpty) widget.onShowMessage(message);
   }
@@ -678,6 +881,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Future<bool?> _confirmPythonInstallation({
+    required String title,
+    required String message,
+  }) {
+    return _confirmMaintenance(
+      title: title,
+      message:
+          '$message\n\n'
+          '安装完成后 Python 后端会自动重启，期间界面可能短暂显示后端离线。',
+      confirmLabel: '开始安装',
     );
   }
 
@@ -824,15 +1040,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final selectedModel = _validModelValue(
       _string('selected_model'),
       settings?.availableModels ?? const <ModelInfo>[],
+      allowEmpty: true,
     );
     final selectedClassificationModel = _validModelValue(
       _string('selected_classification_model'),
       settings?.availableClassificationModels ?? const <ModelInfo>[],
       allowEmpty: true,
     );
-    final videoMode = _string('video_mode', 'all');
-    final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
+    final videoMode = normalizeVideoProcessingMode(
+      _string('video_mode', defaultVideoProcessingMode),
+    );
+    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
+    final gpuAvailable = settings?.gpuAvailable == true;
+    final batchSize = gpuAvailable ? _int('batch_size') : 1;
+    final threadCount = gpuAvailable ? _int('thread_count', 4) : 1;
+    final combinedModelsEnabled =
+        selectedModel?.isNotEmpty == true &&
+        selectedClassificationModel?.isNotEmpty == true;
+    final confidencePriority =
+        _string('confidence_priority', _classificationConfidencePriority) ==
+            _detectionConfidencePriority
+        ? _detectionConfidencePriority
+        : _classificationConfidencePriority;
 
     return SectionCard(
       title: '检测设置',
@@ -841,33 +1071,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           if (!detectionEnabled) _buildDetectionDependencyNotice(),
-          if (_maintenanceInProgress) _buildMaintenanceProgress(),
+          if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
-            subtitle: '选择用于照片和视频目标检测的模型',
+            subtitle: '选择目标探测模型，或设为不使用',
             icon: Icons.build_rounded,
             child: _SettingsMenuButton<String>(
               value: selectedModel,
               placeholder: '未发现探测模型',
               enabled: detectionEnabled,
-              options: (settings?.availableModels ?? const <ModelInfo>[])
-                  .map(
-                    (model) => _SettingsOption<String>(
-                      value: model.path,
-                      label: model.name,
-                    ),
-                  )
-                  .toList(),
+              options: [
+                const _SettingsOption<String>(value: '', label: '不使用'),
+                ...(settings?.availableModels ?? const <ModelInfo>[]).map(
+                  (model) => _SettingsOption<String>(
+                    value: model.path,
+                    label: model.name,
+                  ),
+                ),
+              ],
               onChanged: (value) {
                 _set('selected_model', value);
-                _set('selected_species_names', <String>[]);
-                _loadModelClassesForSelection(value);
+                if (selectedClassificationModel?.isEmpty ?? true) {
+                  _set('selected_species_names', <String>[]);
+                  _loadModelClassesForSelection();
+                }
               },
             ),
           ),
           _SettingsPanel(
             title: '分类模型',
-            subtitle: '选择二次分类模型，或设为不使用',
+            subtitle: '用于整图识别或探测后的二次分类，也可设为不使用',
             icon: Icons.account_tree_rounded,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -886,13 +1119,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                   ],
-                  onChanged: (value) =>
-                      _set('selected_classification_model', value),
+                  onChanged: (value) {
+                    _set('selected_classification_model', value);
+                    _set('selected_species_names', <String>[]);
+                    _loadModelClassesForSelection();
+                  },
                 ),
                 const SizedBox(height: 8),
               ],
             ),
           ),
+          if (combinedModelsEnabled)
+            _SettingsPanel(
+              title: '组合置信度策略',
+              subtitle: '设置探测模型与分类模型共同使用时的综合置信度权重',
+              icon: Icons.balance_rounded,
+              child: _SettingsMenuButton<String>(
+                value: confidencePriority,
+                enabled: detectionEnabled,
+                options: const [
+                  _SettingsOption<String>(
+                    value: _detectionConfidencePriority,
+                    label: '探测置信度优先',
+                  ),
+                  _SettingsOption<String>(
+                    value: _classificationConfidencePriority,
+                    label: '分类置信度优先',
+                  ),
+                ],
+                onChanged: (value) => _set('confidence_priority', value),
+              ),
+            ),
           _SettingsPanel(
             title: '识别物种设置',
             subtitle: '不选择时默认识别全部物种',
@@ -938,19 +1195,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _SettingsPanel(
             title: '模型加速选项',
-            subtitle: 'CPU 模式会锁定 batch=1 并禁用 FP16',
+            subtitle: gpuAvailable
+                ? '批处理数控制单次推理规模，线程数控制完整视频文件并发'
+                : 'CPU 模式下批处理数和线程数固定为 1',
             icon: Icons.bolt_rounded,
             child: Column(
               children: [
                 _LabeledSlider(
-                  label: '批处理大小',
-                  value: _int('batch_size').toDouble(),
+                  label: '批处理数',
+                  value: batchSize.toDouble(),
                   min: 1,
                   max: 32,
                   divisions: 31,
-                  valueLabel: _int('batch_size').toString(),
-                  enabled: detectionEnabled && settings?.gpuAvailable == true,
+                  valueLabel: batchSize.toString(),
+                  enabled: detectionEnabled && gpuAvailable,
                   onChanged: (value) => _set('batch_size', value.round()),
+                ),
+                _LabeledSlider(
+                  label: '线程数',
+                  value: threadCount.toDouble(),
+                  min: 1,
+                  max: 8,
+                  divisions: 7,
+                  valueLabel: threadCount.toString(),
+                  enabled: detectionEnabled && gpuAvailable,
+                  onChanged: (value) => _set('thread_count', value.round()),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -965,7 +1234,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: Text(
                     settings?.gpuAvailable == true
                         ? '需要支持半精度推理的 GPU'
-                        : '当前为 CPU 模式，已禁用 FP16 并锁定 batch=1',
+                        : '当前为 CPU 模式，已禁用 FP16',
                   ),
                 ),
               ],
@@ -1035,8 +1304,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(width: 12),
           FilledButton(
-            onPressed: _maintenanceInProgress ? null : _installYoloDependencies,
-            child: _installingPytorch
+            onPressed: _maintenanceBusy ? null : _installYoloDependencies,
+            child:
+                _maintenancePreparationOperation ==
+                        'install_yolo_dependencies' ||
+                    _installingPytorch
                 ? const SizedBox(
                     width: 18,
                     height: 18,
@@ -1219,8 +1491,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildVideoSettings() {
-    final videoMode = _string('video_mode', 'all');
-    final strideLabel = videoMode == 'all' ? '帧间隔' : '快速识别帧数';
+    final videoMode = normalizeVideoProcessingMode(
+      _string('video_mode', defaultVideoProcessingMode),
+    );
+    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
 
     return SectionCard(
       title: '视频检测设置',
@@ -1244,45 +1518,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return [
       _SettingsPanel(
         title: '视频处理模式',
-        subtitle: '全部识别会按帧间隔处理，快速识别只抽取关键帧',
+        subtitle: '选择完整识别、快速识别，或在任务中忽略视频',
         icon: Icons.play_circle_outline_rounded,
-        child: SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(
-              value: 'all',
-              icon: Icon(Icons.video_collection_rounded),
-              label: Text('全部识别'),
+        child: _SettingsMenuButton<String>(
+          value: videoMode,
+          enabled: enabled,
+          options: const [
+            _SettingsOption<String>(
+              value: videoProcessingModeAll,
+              label: '全部识别',
             ),
-            ButtonSegment(
-              value: 'fast',
-              icon: Icon(Icons.flash_on_rounded),
-              label: Text('快速识别'),
+            _SettingsOption<String>(
+              value: videoProcessingModeFast,
+              label: '快速识别',
+            ),
+            _SettingsOption<String>(
+              value: videoProcessingModeSkip,
+              label: '跳过视频',
             ),
           ],
-          selected: {videoMode},
-          onSelectionChanged: enabled
-              ? (selection) {
-                  if (selection.isEmpty) return;
-                  _set('video_mode', selection.first);
-                }
-              : null,
+          onChanged: (value) => _set('video_mode', value),
         ),
       ),
-      _SettingsPanel(
-        title: '跳帧设置',
-        subtitle: videoMode == 'all' ? '全部识别模式下表示帧间隔' : '快速识别模式下表示抽取检测的帧数',
-        icon: Icons.skip_next_rounded,
-        child: _LabeledSlider(
-          label: strideLabel,
-          value: _int('vid_stride').toDouble(),
-          min: 1,
-          max: 30,
-          divisions: 29,
-          valueLabel: _int('vid_stride').toString(),
-          enabled: enabled,
-          onChanged: (value) => _set('vid_stride', value.round()),
+      if (videoProcessingEnabled(videoMode))
+        _SettingsPanel(
+          title: '跳帧设置',
+          subtitle: videoMode == videoProcessingModeAll
+              ? '全部识别模式下表示帧间隔'
+              : '快速识别模式下表示抽取检测的帧数',
+          icon: Icons.skip_next_rounded,
+          child: _LabeledSlider(
+            label: strideLabel,
+            value: _int('vid_stride').toDouble(),
+            min: 1,
+            max: 30,
+            divisions: 29,
+            valueLabel: _int('vid_stride').toString(),
+            enabled: enabled,
+            onChanged: (value) => _set('vid_stride', value.round()),
+          ),
         ),
-      ),
       _SettingsPanel(
         title: '检测过滤',
         subtitle: '设置检测到的最低帧数比例',
@@ -1303,7 +1578,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildMaintenanceProgress() {
-    if (!_maintenanceInProgress) return const SizedBox.shrink();
+    if (!_maintenanceBusy) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final message = _maintenanceMessage ?? '正在安装...';
     return Padding(
@@ -1314,8 +1589,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             width: 22,
             height: 22,
             child: CircularProgressIndicator(
+              value: _maintenanceProgress,
               strokeWidth: 2.6,
               color: scheme.primary,
+              backgroundColor: scheme.surfaceContainerHighest,
             ),
           ),
           const SizedBox(width: 12),
@@ -1340,17 +1617,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       icon: Icons.construction_rounded,
       child: Column(
         children: [
-          if (_maintenanceInProgress) _buildMaintenanceProgress(),
+          if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: 'Python 包安装源',
-            subtitle: '用于 ultralytics 和单个 Python 包安装',
+            subtitle: '用于 PyTorch 依赖、ultralytics 和单个 Python 包安装',
             icon: Icons.travel_explore_rounded,
             child: _SettingsMenuButton<String>(
-              value: _string('package_source', 'official'),
+              value: _string('package_source', 'auto'),
+              enabled: !_maintenanceBusy,
               options: const [
+                _SettingsOption<String>(value: 'auto', label: '自动选择源'),
                 _SettingsOption<String>(value: 'official', label: '官方源'),
                 _SettingsOption<String>(value: 'aliyun', label: '阿里源'),
                 _SettingsOption<String>(value: 'tsinghua', label: '清华源'),
+                _SettingsOption<String>(value: 'nju', label: '南京大学源'),
               ],
               onChanged: (value) => _set('package_source', value),
             ),
@@ -1364,6 +1644,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Expanded(
                   child: _SettingsMenuButton<String>(
                     value: _string('pytorch_version', '自动检测'),
+                    enabled: !_maintenanceBusy,
                     options: const [
                       _SettingsOption<String>(value: '自动检测', label: '自动检测'),
                       _SettingsOption<String>(
@@ -1394,10 +1675,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         value: 'CUDA 11.8',
                         label: 'CUDA 11.8',
                       ),
-                      _SettingsOption<String>(
-                        value: 'Intel XPU',
-                        label: 'Intel XPU',
-                      ),
+                      if (_xpuEnabled)
+                        _SettingsOption<String>(
+                          value: 'Intel XPU',
+                          label: 'Intel XPU',
+                        ),
                       _SettingsOption<String>(
                         value: 'CPU Only',
                         label: 'CPU Only',
@@ -1408,10 +1690,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-                  onPressed: _installingPytorch || _reinstallingPackage
-                      ? null
-                      : _installPytorch,
-                  child: _installingPytorch
+                  onPressed: _maintenanceBusy ? null : _installPytorch,
+                  child:
+                      _maintenancePreparationOperation == 'install_pytorch' ||
+                          _installingPytorch
                       ? const SizedBox(
                           width: 18,
                           height: 18,
@@ -1442,10 +1724,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(width: 10),
                 FilledButton(
-                  onPressed: _installingPytorch || _reinstallingPackage
-                      ? null
-                      : _reinstallPythonPackage,
-                  child: _reinstallingPackage
+                  onPressed: _maintenanceBusy ? null : _reinstallPythonPackage,
+                  child:
+                      _maintenancePreparationOperation == 'reinstall_package' ||
+                          _reinstallingPackage
                       ? const SizedBox(
                           width: 18,
                           height: 18,
@@ -1465,7 +1747,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final undoSteps = _undoStepsSetting(_draft);
     return SectionCard(
       title: '基础设置',
-      subtitle: '校验辅助、缓存清理、快速标记和导出字段',
+      subtitle: '窗口关闭、校验辅助、缓存清理、快速标记和导出字段',
       icon: Icons.fact_check_rounded,
       child: Column(
         children: [
@@ -1481,30 +1763,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
-          _SettingsPanel(
-            title: '折叠分组',
-            subtitle:
-                '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
-            icon: Icons.folder_copy_rounded,
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: Switch(
-                value: _bool('auto_group') && _bool('collapse_groups'),
-                onChanged: _bool('auto_group')
-                    ? (value) => _set('collapse_groups', value)
-                    : null,
+          if (_bool('auto_group')) ...[
+            _SettingsPanel(
+              title: '折叠分组',
+              subtitle:
+                  '开启后，物种校验界面的分组默认折叠，点击标记会直接标记该分组内的所有照片和视频；在文件列表中右键可展开或折叠分组。',
+              icon: Icons.folder_copy_rounded,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Switch(
+                  value: _bool('collapse_groups'),
+                  onChanged: (value) => _set('collapse_groups', value),
+                ),
               ),
             ),
-          ),
-          _SettingsPanel(
-            title: '自动分组规则',
-            subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
-            icon: Icons.timelapse_rounded,
-            child: _SummaryDialogButton(
-              summary: _autoGroupRuleSummary(),
-              onPressed: _bool('auto_group') ? _showAutoGroupRulesDialog : null,
+            _SettingsPanel(
+              title: '自动分组规则',
+              subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
+              icon: Icons.timelapse_rounded,
+              child: _SummaryDialogButton(
+                summary: _autoGroupRuleSummary(),
+                onPressed: _showAutoGroupRulesDialog,
+              ),
             ),
-          ),
+          ],
           _SettingsPanel(
             title: '可撤回记录步数',
             subtitle: '最多保留多少次校验操作可供逐步撤回；批量标记会作为一次操作整体记录。',
@@ -1532,8 +1814,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(),
+          _buildFavoritePhotoExportMode(showDivider: true),
+          _buildEmptyPhotoDeleteMode(showDivider: true),
+          _buildCloseBehaviorSettings(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCloseBehaviorSettings({bool showDivider = false}) {
+    return _SettingsPanel(
+      title: '关闭主窗口时',
+      subtitle: '选择每次询问、隐藏到任务托盘或直接退出主程序',
+      icon: Icons.close_rounded,
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: normalizeCloseBehavior(widget.closeBehavior),
+        options: const [
+          _SettingsOption<String>(value: closeBehaviorAsk, label: '每次询问'),
+          _SettingsOption<String>(
+            value: closeBehaviorHideToTray,
+            label: '隐藏到任务托盘',
+          ),
+          _SettingsOption<String>(value: closeBehaviorExit, label: '退出主程序'),
+        ],
+        onChanged: widget.onCloseBehaviorChanged,
       ),
     );
   }
@@ -1543,7 +1848,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final burst = _int('auto_group_burst_size').clamp(1, 20).toInt();
     final gap = _int('auto_group_gap_seconds').clamp(1, 3600).toInt();
     final burstText = _bool('auto_group_detect_burst')
-        ? '自动识别，当前 ${_autoGroupDisplayBurstSize(burst)} 张'
+        ? '自动识别 · 当前 ${_autoGroupDisplayBurstSize(burst)} 张'
         : '$burst 张';
     return '$burstText · $gap 秒';
   }
@@ -1682,7 +1987,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       onChanged: (value) =>
                           setDialogState(() => clearLogs = value ?? false),
                       title: const Text('清除日志'),
-                      subtitle: const Text('清除 logs 目录和临时目录中的软件日志。'),
+                      subtitle: const Text('清除 logs 目录中的软件日志。'),
                     ),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
@@ -1758,12 +2063,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildExportSettings() {
     return SectionCard(
       title: '导出设置',
-      subtitle: '自定义导出表格中的列和收藏照片同步策略',
+      subtitle: '自定义导出表格、收藏媒体同步和空照片删除策略',
       icon: Icons.table_chart_rounded,
       child: Column(
         children: [
           _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(),
+          _buildFavoritePhotoExportMode(showDivider: true),
+          _buildEmptyPhotoDeleteMode(),
         ],
       ),
     );
@@ -1784,7 +2090,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildUpdateSettingsSection() {
     return SectionCard(
       title: '软件更新',
-      subtitle: '选择更新通道和镜像源',
+      subtitle: '选择更新通道',
       icon: Icons.system_update_alt_rounded,
       child: _buildUpdateSettings(),
     );
@@ -2378,38 +2684,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildFavoritePhotoExportMode() {
+  Widget _buildFavoritePhotoExportMode({bool showDivider = false}) {
     return _SettingsPanel(
-      title: '同步导出收藏照片',
-      subtitle: '导出校验表格时，选择是否把收藏照片复制到单独文件夹。',
+      title: '同步导出收藏媒体',
+      subtitle: '导出校验表格时，选择是否把收藏的照片和视频复制到单独文件夹。',
       icon: Icons.star_rounded,
-      showDivider: false,
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: SegmentedButton<String>(
-          segments: const [
-            ButtonSegment<String>(
-              value: _favoritePhotoExportAlways,
-              icon: Icon(Icons.ios_share_rounded),
-              label: Text('导出'),
-            ),
-            ButtonSegment<String>(
-              value: _favoritePhotoExportNever,
-              icon: Icon(Icons.block_rounded),
-              label: Text('不导出'),
-            ),
-            ButtonSegment<String>(
-              value: _favoritePhotoExportAsk,
-              icon: Icon(Icons.help_outline_rounded),
-              label: Text('每次询问'),
-            ),
-          ],
-          selected: {_favoritePhotoExportMode()},
-          onSelectionChanged: (selection) {
-            if (selection.isEmpty) return;
-            _set('favorite_photo_export_mode', selection.first);
-          },
-        ),
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: _favoritePhotoExportMode(),
+        options: const [
+          _SettingsOption<String>(
+            value: _favoritePhotoExportAlways,
+            label: '导出',
+          ),
+          _SettingsOption<String>(
+            value: _favoritePhotoExportNever,
+            label: '不导出',
+          ),
+          _SettingsOption<String>(
+            value: _favoritePhotoExportAsk,
+            label: '每次询问',
+          ),
+        ],
+        onChanged: (value) => _set('favorite_photo_export_mode', value),
+      ),
+    );
+  }
+
+  Widget _buildEmptyPhotoDeleteMode({bool showDivider = false}) {
+    return _SettingsPanel(
+      title: '导出后删除空照片',
+      subtitle: '导出校验表格成功后，选择是否删除本次结果中标记为空的照片。',
+      icon: Icons.delete_sweep_rounded,
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: _emptyPhotoDeleteMode(),
+        options: const [
+          _SettingsOption<String>(value: _emptyPhotoDeleteAsk, label: '询问'),
+          _SettingsOption<String>(value: _emptyPhotoDeleteNever, label: '不删除'),
+          _SettingsOption<String>(value: _emptyPhotoDeleteAlways, label: '删除'),
+        ],
+        onChanged: (value) => _set('empty_photo_delete_mode', value),
       ),
     );
   }
@@ -2527,33 +2842,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         _SettingsPanel(
-          title: '镜像源',
-          subtitle: '选择检查更新时使用的下载源',
+          title: '下载源',
+          subtitle: '自动或者手动选择更新源',
           icon: Icons.public_rounded,
           child: _SettingsMenuButton<String>(
-            value: _string('update_mirror', 'KKGitHub'),
+            value: _string('update_source', 'auto'),
             options: const [
-              _SettingsOption<String>(value: 'Official', label: '官方源'),
-              _SettingsOption<String>(value: 'KKGitHub', label: '国内源'),
+              _SettingsOption<String>(value: 'auto', label: '自动选择源'),
+              _SettingsOption<String>(value: 'domestic', label: 'Neri 国内源'),
+              _SettingsOption<String>(value: 'github', label: 'GitHub 官方源'),
             ],
-            onChanged: (value) => _set('update_mirror', value),
+            onChanged: (value) => _set('update_source', value),
           ),
         ),
         _SettingsPanel(
           title: '检查更新',
-          subtitle: '保留软件更新检查入口',
+          subtitle: '立即扫描所选通道的最新 Windows 版本',
           icon: Icons.system_update_alt_rounded,
           showDivider: false,
           child: Align(
             alignment: Alignment.centerRight,
             child: FilledButton(
-              onPressed: () => widget.onShowMessage('软件更新检查入口已保留，后续可接入更新服务。'),
-              child: const Text('检查更新'),
+              onPressed: _checkingForUpdates ? null : _checkForUpdates,
+              child: _checkingForUpdates
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('检查更新'),
             ),
           ),
         ),
       ],
     );
+  }
+
+  Future<void> _checkForUpdates() async {
+    if (_checkingForUpdates) return;
+    setState(() => _checkingForUpdates = true);
+    try {
+      await _save();
+      if (!mounted) return;
+      await widget.onCheckForUpdates(
+        channel: _string('update_channel', 'Preview'),
+        downloadSource: _string('update_source', 'auto'),
+      );
+    } finally {
+      if (mounted) setState(() => _checkingForUpdates = false);
+    }
   }
 
   Future<void> _save() async {
@@ -2568,7 +2904,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _draft['package'] = _packageController.text.trim();
       if (_detectionDependenciesReady &&
           widget.settings?.gpuAvailable != true) {
-        _draft['batch_size'] = 1;
         _draft['use_fp16'] = false;
       }
       await widget.onSaveSettings(Map<String, dynamic>.from(_draft));
@@ -2611,7 +2946,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   int _undoStepsSetting(Map<String, dynamic> values) {
-    return _normalizeUndoSteps(_intSetting(values, 'undo_steps', 10));
+    return _normalizeUndoSteps(_intSetting(values, 'undo_steps', 200));
   }
 
   int _normalizeUndoSteps(int value) {
@@ -2644,6 +2979,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     };
   }
 
+  String _emptyPhotoDeleteMode() {
+    return _emptyPhotoDeleteModeSetting(_draft);
+  }
+
+  String _emptyPhotoDeleteModeSetting(Map<String, dynamic> values) {
+    final value = _stringSetting(
+      values,
+      'empty_photo_delete_mode',
+      _emptyPhotoDeleteAsk,
+    );
+    return switch (value) {
+      _emptyPhotoDeleteAlways => _emptyPhotoDeleteAlways,
+      _emptyPhotoDeleteNever => _emptyPhotoDeleteNever,
+      _ => _emptyPhotoDeleteAsk,
+    };
+  }
+
   String? _validModelValue(
     String value,
     List<ModelInfo> models, {
@@ -2653,6 +3005,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (models.any((model) => model.path == value)) return value;
     if (allowEmpty) return '';
     return models.isEmpty ? null : models.first.path;
+  }
+
+  String? _modelClassesSelectionPath() {
+    final classificationModel = _validModelValue(
+      _string('selected_classification_model'),
+      widget.settings?.availableClassificationModels ?? const <ModelInfo>[],
+      allowEmpty: true,
+    );
+    if (classificationModel != null && classificationModel.isNotEmpty) {
+      return classificationModel;
+    }
+    final detectionModel = _validModelValue(
+      _string('selected_model'),
+      widget.settings?.availableModels ?? const <ModelInfo>[],
+      allowEmpty: true,
+    );
+    return detectionModel == null || detectionModel.isEmpty
+        ? null
+        : detectionModel;
   }
 }
 
@@ -3143,10 +3514,7 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
   void _showSoftwareLogs(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (_) => _SoftwareLogsDialog(
-        apiClient: widget.apiClient,
-        onShowMessage: widget.onShowMessage,
-      ),
+      builder: (_) => _SoftwareLogsDialog(onShowMessage: widget.onShowMessage),
     );
   }
 
@@ -3497,12 +3865,8 @@ class _InstalledPackagesDialogState extends State<_InstalledPackagesDialog> {
 }
 
 class _SoftwareLogsDialog extends StatefulWidget {
-  const _SoftwareLogsDialog({
-    required this.apiClient,
-    required this.onShowMessage,
-  });
+  const _SoftwareLogsDialog({required this.onShowMessage});
 
-  final NeriApiClient apiClient;
   final ValueChanged<String> onShowMessage;
 
   @override
@@ -3512,6 +3876,7 @@ class _SoftwareLogsDialog extends StatefulWidget {
 class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   static const _logPreviewMaxBytes = 32000;
 
+  final _logReader = LocalDebugLogReader();
   late final Future<List<DebugLogInfo>> _logsFuture;
   DebugLogInfo? _selectedLog;
   Future<DebugLogContent>? _contentFuture;
@@ -3519,16 +3884,13 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
   @override
   void initState() {
     super.initState();
-    _logsFuture = widget.apiClient.fetchDebugLogs();
+    _logsFuture = _logReader.listLogs();
   }
 
   void _selectLog(DebugLogInfo log) {
     setState(() {
       _selectedLog = log;
-      _contentFuture = widget.apiClient.fetchDebugLogContent(
-        log.path,
-        maxBytes: _logPreviewMaxBytes,
-      );
+      _contentFuture = _logReader.readLog(log, maxBytes: _logPreviewMaxBytes);
     });
   }
 
@@ -3536,10 +3898,7 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
     final log = _selectedLog;
     if (log == null) return;
     setState(() {
-      _contentFuture = widget.apiClient.fetchDebugLogContent(
-        log.path,
-        maxBytes: _logPreviewMaxBytes,
-      );
+      _contentFuture = _logReader.readLog(log, maxBytes: _logPreviewMaxBytes);
     });
   }
 

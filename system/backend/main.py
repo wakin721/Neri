@@ -31,19 +31,23 @@ from .models import (
     ModelClassInfo,
     MaintenanceStartResponse,
     MaintenanceStatusResponse,
-    PytorchInstallPlanResponse,
     JobSummary,
+    PackageSourceResponse,
+    PytorchInstallPlanResponse,
     ReinstallPackageRequest,
     RuntimeDiagnostics,
     SettingsResponse,
     SettingsUpdateRequest,
+    UpdateSourceResponse,
     ValidationBatchMarkRequest,
     ValidationExportRequest,
     ValidationExportResponse,
     ValidationMarkRequest,
 )
 from .maintenance import (
+    is_mainland_china,
     read_maintenance_status,
+    resolve_package_source,
     resolve_pytorch_install_plan,
     schedule_backend_shutdown,
     start_package_reinstall,
@@ -196,6 +200,15 @@ def settings() -> SettingsResponse:
     """Return Neri runtime settings and supported media formats."""
 
     stored_settings = settings_manager.load_settings() or {}
+    stored_settings.setdefault("package_source", "auto")
+    stored_settings.setdefault("update_source", "auto")
+    stored_settings.setdefault("use_augment", True)
+    stored_settings.setdefault("video_mode", "fast")
+    stored_settings.setdefault("vid_stride", 3)
+    stored_settings.setdefault("auto_group", True)
+    stored_settings.setdefault("collapse_groups", True)
+    stored_settings.setdefault("auto_group_detect_burst", True)
+    stored_settings.setdefault("undo_steps", 200)
     quick_mark_settings = settings_manager.load_quick_mark_species() or {}
     if "quick_mark_list" not in stored_settings and isinstance(quick_mark_settings.get("list"), list):
         stored_settings["quick_mark_list"] = quick_mark_settings["list"]
@@ -215,15 +228,22 @@ def settings() -> SettingsResponse:
         stored_settings["quick_mark_usage_counts"] = quick_mark_counts
     available_models = list_available_models()
     available_classification_models = list_available_classification_models()
+    has_saved_model = "selected_model" in stored_settings
     saved_model = stored_settings.get("selected_model")
-    saved_classification_model = stored_settings.get("selected_classification_model") or stored_settings.get("selected_cls_model")
+    if "selected_classification_model" in stored_settings:
+        saved_classification_model = stored_settings.get(
+            "selected_classification_model"
+        )
+    else:
+        saved_classification_model = stored_settings.get("selected_cls_model")
     selected_model = None
-    if isinstance(saved_model, str):
+    if isinstance(saved_model, str) and saved_model:
         selected_model = next(
             (model.path for model in available_models if model.name == saved_model or model.path == saved_model),
             None,
         )
-    selected_model = selected_model or (available_models[0].path if available_models else None)
+    if not has_saved_model:
+        selected_model = available_models[0].path if available_models else None
 
     selected_classification_model = None
     if isinstance(saved_classification_model, str) and saved_classification_model:
@@ -297,6 +317,23 @@ def maintenance_status() -> MaintenanceStatusResponse:
     """Return the last environment-maintenance status."""
 
     return MaintenanceStatusResponse(**read_maintenance_status())
+
+
+@app.get("/api/environment/package-source", response_model=PackageSourceResponse)
+def package_source(
+    source: str = Query("auto", min_length=1, max_length=32),
+) -> PackageSourceResponse:
+    """Resolve the configured Python package source for the current public IP."""
+
+    source_key, source_label, _ = resolve_package_source(source)
+    return PackageSourceResponse(source=source_key, label=source_label)
+
+
+@app.get("/api/environment/update-source", response_model=UpdateSourceResponse)
+def update_source() -> UpdateSourceResponse:
+    """Use the Python package detector for the desktop update download source."""
+
+    return UpdateSourceResponse(mainland_china=is_mainland_china())
 
 
 @app.get("/api/debug/packages", response_model=list[InstalledPackageInfo])
@@ -374,7 +411,7 @@ def install_pytorch(request: InstallPytorchRequest, background_tasks: Background
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/environment/install-yolo-dependencies", response_model=MaintenanceStartResponse, status_code=202)
@@ -393,7 +430,7 @@ def install_yolo_dependencies(
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/environment/reinstall-package", response_model=MaintenanceStartResponse, status_code=202)
@@ -408,7 +445,7 @@ def reinstall_package(
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(schedule_backend_shutdown)
-    return MaintenanceStartResponse(operation=str(status["operation"]), message=str(status["message"]))
+    return MaintenanceStartResponse(**status)
 
 
 @app.post("/api/jobs", response_model=JobSummary, status_code=202)
@@ -532,10 +569,7 @@ def export_validation(request: ValidationExportRequest) -> ValidationExportRespo
 def list_jobs(include_results: bool = Query(True)) -> list[JobSummary]:
     """List all jobs known to this backend process."""
 
-    jobs = job_manager.list_jobs()
-    if include_results:
-        return jobs
-    return [job.model_copy(update={"results": []}, deep=True) for job in jobs]
+    return job_manager.list_jobs(include_results=include_results)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobSummary)

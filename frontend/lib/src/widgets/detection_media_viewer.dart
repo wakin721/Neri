@@ -8,6 +8,19 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/job.dart';
 
+const _viewerImageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
+const _viewerVideoTypes = {
+  'mp4',
+  'avi',
+  'mov',
+  'mkv',
+  'wmv',
+  'flv',
+  'webm',
+  'm4v',
+  'ts',
+};
+
 class DetectionMediaViewer extends StatelessWidget {
   const DetectionMediaViewer({
     required this.item,
@@ -27,14 +40,14 @@ class DetectionMediaViewer extends StatelessWidget {
   final VoidCallback? onToggleFavorite;
 
   bool get _isImage {
-    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
-    return imageTypes.contains(item.fileType.toLowerCase());
+    return _viewerImageTypes.contains(item.fileType.toLowerCase());
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final showFavoriteButton = _isImage && onToggleFavorite != null;
+    final showFavoriteButton = onToggleFavorite != null;
+    final favoriteLabel = _isImage ? '照片' : '视频';
     // 彻底移除 Semantics(container: true)，因为它会强行抓取内部高速变换的进度条和 YOLO 框，导致 AXTree 崩溃
     return ExcludeSemantics(
       child: ClipRRect(
@@ -58,7 +71,9 @@ class DetectionMediaViewer extends StatelessWidget {
                   children: [
                     if (showFavoriteButton) ...[
                       IconButton.filledTonal(
-                        tooltip: isFavorite ? '取消收藏照片' : '收藏照片',
+                        tooltip: isFavorite
+                            ? '取消收藏$favoriteLabel'
+                            : '收藏$favoriteLabel',
                         icon: Icon(
                           isFavorite
                               ? Icons.star_rounded
@@ -104,8 +119,7 @@ class _MediaContent extends StatelessWidget {
   final VoidCallback onOpenExternal;
 
   bool get isVideo {
-    const videoTypes = {'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'};
-    return videoTypes.contains(item.fileType.toLowerCase());
+    return _viewerVideoTypes.contains(item.fileType.toLowerCase());
   }
 
   @override
@@ -145,6 +159,9 @@ class _ImageMediaViewer extends StatefulWidget {
 
 class _ImageMediaViewerState extends State<_ImageMediaViewer> {
   Size? _imageSize;
+  Object? _imageError;
+  ImageStream? _imageStream;
+  ImageStreamListener? _imageStreamListener;
 
   @override
   void initState() {
@@ -160,28 +177,74 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
     }
   }
 
+  @override
+  void dispose() {
+    _removeImageStreamListener();
+    super.dispose();
+  }
+
+  void _removeImageStreamListener() {
+    final stream = _imageStream;
+    final listener = _imageStreamListener;
+    if (stream != null && listener != null) {
+      stream.removeListener(listener);
+    }
+    _imageStream = null;
+    _imageStreamListener = null;
+  }
+
   void _resolveImageSize() {
-    final imageProvider = FileImage(File(widget.path));
+    _removeImageStreamListener();
+    _imageSize = null;
+    _imageError = null;
+    final file = File(widget.path);
+    if (!file.existsSync()) {
+      _imageError = FileSystemException('文件不存在', widget.path);
+      return;
+    }
+
+    final imageProvider = FileImage(file);
     final imageStream = imageProvider.resolve(const ImageConfiguration());
-    final listener = ImageStreamListener((info, _) {
-      if (mounted) {
-        setState(() {
-          _imageSize = Size(
-            info.image.width.toDouble(),
-            info.image.height.toDouble(),
-          );
-        });
-      }
-    });
+    final listener = ImageStreamListener(
+      (info, _) {
+        if (mounted) {
+          setState(() {
+            _imageSize = Size(
+              info.image.width.toDouble(),
+              info.image.height.toDouble(),
+            );
+          });
+        }
+      },
+      onError: (error, _) {
+        if (mounted) {
+          setState(() {
+            _imageError = error;
+            _imageSize = null;
+          });
+        }
+      },
+    );
+    _imageStream = imageStream;
+    _imageStreamListener = listener;
     imageStream.addListener(listener);
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_imageError != null) {
+      return _MissingImagePlaceholder(path: widget.path);
+    }
     return Stack(
       fit: StackFit.expand,
       children: [
-        Image.file(File(widget.path), fit: BoxFit.contain),
+        Image.file(
+          File(widget.path),
+          key: ValueKey(widget.path),
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) =>
+              _MissingImagePlaceholder(path: widget.path),
+        ),
         if (widget.showDetections && _imageSize != null)
           CustomPaint(
             painter: _DetectionOverlayPainter(
@@ -190,6 +253,45 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _MissingImagePlaceholder extends StatelessWidget {
+  const _MissingImagePlaceholder({required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final pathSegments = File(path).uri.pathSegments;
+    final filename = pathSegments.isEmpty ? path : pathSegments.last;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.image_not_supported_outlined,
+              size: 48,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(height: 12),
+            Text('图片已被删除或移动', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              filename,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

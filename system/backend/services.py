@@ -20,13 +20,13 @@ import sqlite3
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
+from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS, XPU_ENABLED
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 
@@ -44,6 +44,121 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BATCH_LOG_RETENTION = 5
+_BATCH_LOGGER_NAMES = (__name__, "system.image_processor")
+
+
+class _BatchLogSession:
+    def __init__(
+        self,
+        path: Path,
+        handler: logging.FileHandler,
+        logger_levels: list[tuple[logging.Logger, int]],
+    ) -> None:
+        self.path = path
+        self._handler = handler
+        self._logger_levels = logger_levels
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for target_logger, previous_level in self._logger_levels:
+            try:
+                target_logger.removeHandler(self._handler)
+                target_logger.setLevel(previous_level)
+            except Exception:
+                pass
+        try:
+            self._handler.flush()
+        except Exception:
+            pass
+        try:
+            self._handler.close()
+        except Exception:
+            pass
+
+
+def batch_log_directory() -> Path:
+    return Path(__file__).resolve().parents[2] / "logs" / "batch"
+
+
+def _start_batch_log_session(
+    job_id: str,
+    *,
+    log_dir: Path | None = None,
+    retention: int = _BATCH_LOG_RETENTION,
+) -> _BatchLogSession | None:
+    target_dir = log_dir or batch_log_directory()
+    handler: logging.FileHandler | None = None
+    logger_levels: list[tuple[logging.Logger, int]] = []
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_job_id = re.sub(r"[^A-Za-z0-9_-]+", "_", job_id)[:32] or "unknown"
+        log_path = target_dir / f"batch_{timestamp}_{safe_job_id}.log"
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d %(levelname)s "
+                "[%(threadName)s] %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+
+        for logger_name in _BATCH_LOGGER_NAMES:
+            target_logger = logging.getLogger(logger_name)
+            logger_levels.append((target_logger, target_logger.level))
+            target_logger.setLevel(logging.INFO)
+            target_logger.addHandler(handler)
+
+        session = _BatchLogSession(log_path, handler, logger_levels)
+        _prune_batch_logs(
+            target_dir,
+            protected_path=log_path,
+            retention=max(1, int(retention)),
+        )
+        return session
+    except Exception as exc:  # noqa: BLE001 - logging must never block a job
+        if handler is not None:
+            for target_logger, previous_level in logger_levels:
+                try:
+                    target_logger.removeHandler(handler)
+                    target_logger.setLevel(previous_level)
+                except Exception:
+                    pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+        logger.warning("Failed to start batch log: %s", exc)
+        return None
+
+
+def _prune_batch_logs(
+    log_dir: Path,
+    *,
+    protected_path: Path,
+    retention: int,
+) -> None:
+    candidates: list[tuple[int, Path]] = []
+    for path in log_dir.glob("batch_*.log"):
+        if path == protected_path:
+            continue
+        try:
+            candidates.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            continue
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    previous_log_limit = max(0, retention - 1)
+    for _, old_log in candidates[previous_log_limit:]:
+        try:
+            old_log.unlink()
+        except OSError as exc:
+            logger.warning("Failed to remove old batch log %s: %s", old_log, exc)
 
 
 class JobNotFoundError(KeyError):
@@ -63,7 +178,7 @@ def _clear_torch_runtime_cache() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        xpu = getattr(torch, "xpu", None)
+        xpu = getattr(torch, "xpu", None) if XPU_ENABLED else None
         if xpu is not None and xpu.is_available() and hasattr(xpu, "empty_cache"):
             xpu.empty_cache()
     except Exception:
@@ -184,11 +299,34 @@ def detect_gpu_available() -> bool:
         import torch
 
         cuda_available = bool(torch.cuda.is_available())
-        xpu = getattr(torch, "xpu", None)
+        xpu = getattr(torch, "xpu", None) if XPU_ENABLED else None
         xpu_available = bool(xpu is not None and xpu.is_available())
         return cuda_available or xpu_available
     except Exception:
         return False
+
+
+def _effective_processing_request(
+    request: CreateJobRequest,
+) -> CreateJobRequest:
+    if not request.options.enable_detection:
+        return request
+    if (
+        request.options.batch_size == 1
+        and request.options.thread_count == 1
+        and not request.options.use_fp16
+    ):
+        return request
+    if detect_gpu_available():
+        return request
+    options = request.options.model_copy(
+        update={
+            "batch_size": 1,
+            "thread_count": 1,
+            "use_fp16": False,
+        }
+    )
+    return request.model_copy(update={"options": options})
 
 
 def missing_yolo_dependencies() -> list[str]:
@@ -233,7 +371,13 @@ def preview_media_items(
         else []
     )
     detection_index = (
-        _load_detection_index(detection_db_roots, recursive=False) if include_cached else {}
+        _load_detection_index(
+            detection_db_roots,
+            recursive=False,
+            filenames={path.name for path in files},
+        )
+        if include_cached
+        else {}
     )
     validation_index = (
         _load_validation_index(detection_db_roots, recursive=False) if include_cached else {}
@@ -293,6 +437,7 @@ class ProcessingJobManager:
     ) -> JobSummary:
         """Create a job and start it on a background worker."""
 
+        request = _effective_processing_request(request)
         initial_results = _unique_detection_items(initial_results or [])
         job_id = uuid.uuid4().hex
         now = utc_now()
@@ -411,20 +556,35 @@ class ProcessingJobManager:
                 raise JobNotFoundError(job_id)
             return self._snapshot_unlocked(job_id)
 
-    def list_jobs(self) -> list[JobSummary]:
+    def list_jobs(self, *, include_results: bool = True) -> list[JobSummary]:
         """Return all jobs with newest first."""
 
         with self._lock:
-            jobs = [self._snapshot_unlocked(job_id) for job_id in self._jobs]
+            jobs = [
+                self._snapshot_unlocked(
+                    job_id,
+                    include_results=include_results,
+                )
+                for job_id in self._jobs
+            ]
         return sorted(jobs, key=lambda item: item.created_at, reverse=True)
 
-    def _snapshot_unlocked(self, job_id: str) -> JobSummary:
+    def _snapshot_unlocked(
+        self,
+        job_id: str,
+        *,
+        include_results: bool = True,
+    ) -> JobSummary:
         job = self._jobs.get(job_id)
         if job is None:
             raise JobNotFoundError(job_id)
+        results = list(job.results) if include_results else []
         return job.model_copy(
-            update={"active": job_id in self._active_job_ids},
-            deep=True,
+            update={
+                "active": job_id in self._active_job_ids,
+                "results": results,
+            },
+            deep=False,
         )
 
     def _mutate_job(self, job_id: str, *, persist: bool = True, **changes: object) -> None:
@@ -432,10 +592,14 @@ class ProcessingJobManager:
             current = self._jobs.get(job_id)
             if current is None or job_id in self._deleted_jobs:
                 return
-            data = current.model_dump()
-            data.update(changes)
-            data["updated_at"] = utc_now()
-            self._jobs[job_id] = JobSummary(**data)
+            updates = dict(changes)
+            if "results" in updates:
+                updates["results"] = list(updates["results"])  # type: ignore[arg-type]
+            updates["updated_at"] = utc_now()
+            self._jobs[job_id] = current.model_copy(
+                update=updates,
+                deep=False,
+            )
             if persist:
                 self._save_state_unlocked()
 
@@ -520,12 +684,54 @@ class ProcessingJobManager:
             if job_id in self._deleted_jobs:
                 return
             self._active_job_ids.add(job_id)
+        request = _effective_processing_request(request)
+        batch_log_session = _start_batch_log_session(job_id)
         detector = None
         try:
+            logger.info(
+                "Batch job started: job_id=%s input=%s output=%s resumed=%d options=%s",
+                job_id,
+                _request_input_label(request),
+                request.output_dir or "",
+                len(initial_results or []),
+                json.dumps(
+                    request.options.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, initial_results)
                 return
-            input_path, files = _resolve_job_inputs(request)
+            self._mutate_job(
+                job_id,
+                persist=False,
+                state=JobState.RUNNING,
+                message="正在预扫描输入文件",
+            )
+            input_path, files = _resolve_job_inputs(
+                request,
+                cancelled=lambda: self._is_cancelled(job_id),
+            )
+            image_count = sum(
+                path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                for path in files
+            )
+            video_count = sum(
+                path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+                for path in files
+            )
+            logger.info(
+                (
+                    "Batch inputs resolved: job_id=%s root=%s total=%d "
+                    "images=%d videos=%d"
+                ),
+                job_id,
+                input_path,
+                len(files),
+                image_count,
+                video_count,
+            )
             file_keys = {_path_key(path) for path in files}
             results = [
                 item.model_copy(deep=True)
@@ -537,12 +743,24 @@ class ProcessingJobManager:
             processed = len(results)
             job_started_at = time.monotonic()
             start_processed = processed
+            speed_started_at = job_started_at
+            speed_start_processed = start_processed
             total_files = len(files)
+            missing_file_keys: set[str] = set()
 
             def progress_metrics(current_processed: int) -> dict[str, object]:
-                elapsed = max(0.0, time.monotonic() - job_started_at)
-                completed_this_run = max(0, current_processed - start_processed)
-                speed = completed_this_run / elapsed if elapsed > 0 else 0.0
+                now = time.monotonic()
+                elapsed = max(0.0, now - job_started_at)
+                speed_elapsed = max(0.0, now - speed_started_at)
+                completed_for_speed = max(
+                    0,
+                    current_processed - speed_start_processed,
+                )
+                speed = (
+                    completed_for_speed / speed_elapsed
+                    if speed_elapsed > 0
+                    else 0.0
+                )
                 remaining = max(0, total_files - current_processed)
                 remaining_seconds = remaining / speed if speed > 0 else None
                 return {
@@ -550,6 +768,38 @@ class ProcessingJobManager:
                     "speed": speed,
                     "remaining_seconds": remaining_seconds,
                 }
+
+            def reset_speed_metrics(current_processed: int) -> None:
+                nonlocal speed_started_at, speed_start_processed
+                speed_started_at = time.monotonic()
+                speed_start_processed = current_processed
+
+            def existing_paths(paths: Iterable[Path]) -> list[Path]:
+                nonlocal total_files
+                existing: list[Path] = []
+                removed = 0
+                for path in paths:
+                    if path.is_file():
+                        existing.append(path)
+                        continue
+                    key = _path_key(path)
+                    if key in missing_file_keys:
+                        continue
+                    missing_file_keys.add(key)
+                    removed += 1
+                    logger.info("Skipping deleted input file: %s", path)
+                if removed:
+                    total_files = max(processed, total_files - removed)
+                    self._mutate_job(
+                        job_id,
+                        persist=False,
+                        total=total_files,
+                        processed=min(processed, total_files),
+                        results=results,
+                        **progress_metrics(min(processed, total_files)),
+                        message=f"已跳过 {len(missing_file_keys)} 个已删除文件",
+                    )
+                return existing
 
             self._mutate_job(
                 job_id,
@@ -577,30 +827,50 @@ class ProcessingJobManager:
                 else []
             )
             detection_index = (
-                _load_detection_index(detection_db_roots) if request.options.enable_detection else {}
+                _load_detection_index(
+                    detection_db_roots,
+                    filenames={path.name for path in files},
+                )
+                if request.options.enable_detection
+                else {}
             )
             if request.options.enable_detection:
                 detector = _load_detector(
                     request.options.model_path,
                     request.options.classification_model_path,
                 )
+                logger.info(
+                    "Batch detector ready: detection_model=%s classification_model=%s",
+                    request.options.model_path or "",
+                    request.options.classification_model_path or "",
+                )
 
             if detector is None:
+                last_progress_publish = time.monotonic()
                 for path in remaining_files:
                     if self._is_cancelled(job_id):
                         self._mark_cancelled(job_id, results)
                         return
+                    if not existing_paths([path]):
+                        continue
                     item = _build_fast_metadata_item(path)
                     results.append(item)
                     processed += 1
                     media_label = "照片" if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else "视频"
-                    self._mutate_job(
-                        job_id,
-                        processed=processed,
-                        results=results,
-                        **progress_metrics(processed),
-                        message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
-                    )
+                    now = time.monotonic()
+                    if (
+                        processed >= total_files
+                        or now - last_progress_publish >= 0.2
+                    ):
+                        self._mutate_job(
+                            job_id,
+                            persist=False,
+                            processed=processed,
+                            results=results,
+                            **progress_metrics(processed),
+                            message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
+                        )
+                        last_progress_publish = now
             else:
                 image_files = [
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
@@ -652,12 +922,14 @@ class ProcessingJobManager:
 
                 fill_preload_queue(0)
                 try:
-                    for batch_index, batch in enumerate(image_batches):
+                    for batch_index, original_batch in enumerate(image_batches):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
                         batch_started = time.perf_counter()
                         fill_preload_queue(batch_index)
+                        batch = existing_paths(original_batch)
+                        metadata_paths = list(batch)
                         metadata_started = time.perf_counter()
                         batch_items: list[DetectionItem] = []
                         for path in batch:
@@ -672,6 +944,23 @@ class ProcessingJobManager:
                         preloaded_data = take_preloaded(batch_index)
                         preload_wait_elapsed = time.perf_counter() - preload_wait_started
                         fill_preload_queue(batch_index + 1)
+                        batch = existing_paths(batch)
+                        if batch != original_batch:
+                            # Preloaded indices refer to the original batch.
+                            # Reload the surviving paths so deleted files cannot
+                            # remain processable merely because they were read ahead.
+                            preloaded_data = None
+                            surviving_items = {
+                                path: item
+                                for path, item in zip(metadata_paths, batch_items)
+                            }
+                            batch_items = [
+                                surviving_items[path]
+                                for path in batch
+                                if path in surviving_items
+                            ]
+                        if not batch:
+                            continue
                         detect_started = time.perf_counter()
                         detected_items = _detect_image_batch(
                             detector,
@@ -716,11 +1005,45 @@ class ProcessingJobManager:
                     if preload_executor is not None:
                         preload_executor.shutdown(wait=False, cancel_futures=True)
 
+                video_files = existing_paths(video_files)
+                if video_files:
+                    reset_speed_metrics(processed)
+                    self._mutate_job(
+                        job_id,
+                        persist=False,
+                        processed=processed,
+                        results=results,
+                        **progress_metrics(processed),
+                        message=f"正在准备处理视频 0/{len(video_files)}",
+                    )
+                    logger.info(
+                        (
+                            "Progress speed baseline reset for video phase: "
+                            "job_id=%s processed=%d remaining_videos=%d"
+                        ),
+                        job_id,
+                        processed,
+                        len(video_files),
+                    )
+
                 if request.options.video_mode == "fast":
-                    for batch in _chunked(video_files, batch_size):
+                    fast_video_group_size = max(
+                        batch_size,
+                        min(
+                            len(video_files),
+                            max(1, int(request.options.thread_count or 1)),
+                        ),
+                    )
+                    for original_batch in _chunked(
+                        video_files,
+                        fast_video_group_size,
+                    ):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
+                        batch = existing_paths(original_batch)
+                        if not batch:
+                            continue
                         batch_items: list[DetectionItem] = []
                         for path in batch:
                             item = _build_metadata_item(path)
@@ -755,39 +1078,151 @@ class ProcessingJobManager:
                             ),
                         )
                 else:
+                    video_items: list[DetectionItem] = []
                     for path in video_files:
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
                         item = _build_metadata_item(path)
                         db_detection_data = detection_index.get(path.stem)
                         if db_detection_data:
                             item = _apply_detection_data(item, db_detection_data)
+                        video_items.append(item)
 
-                        item = _detect_video(
-                            detector,
-                            path,
-                            item,
-                            request,
-                            input_path,
-                            cancelled=lambda: self._is_cancelled(job_id),
+                    video_worker_count = _tracked_video_worker_count(
+                        len(video_files),
+                        request.options.thread_count,
+                    )
+                    if video_worker_count <= 1:
+                        for path, item in zip(video_files, video_items):
+                            if self._is_cancelled(job_id):
+                                self._mark_cancelled(job_id, results)
+                                return
+                            if not existing_paths([path]):
+                                continue
+
+                            item = _detect_video(
+                                detector,
+                                path,
+                                item,
+                                request,
+                                input_path,
+                                cancelled=lambda: self._is_cancelled(job_id),
+                            )
+                            if self._is_cancelled(job_id):
+                                self._mark_cancelled(job_id, results)
+                                return
+                            results.append(item)
+                            processed += 1
+                            self._mutate_job(
+                                job_id,
+                                processed=processed,
+                                results=results,
+                                **progress_metrics(processed),
+                                message=f"正在处理视频 {processed}/{total_files}: {path.name}",
+                            )
+                    else:
+                        logger.info(
+                            "Tracked video parallel workers: videos=%d workers=%d",
+                            len(video_files),
+                            video_worker_count,
                         )
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
-                        results.append(item)
-                        processed += 1
-                        self._mutate_job(
-                            job_id,
-                            processed=processed,
-                            results=results,
-                            **progress_metrics(processed),
-                            message=f"正在处理视频 {processed}/{total_files}: {path.name}",
-                        )
+                        base_results = list(results)
+                        detected_video_items: list[DetectionItem | None] = [
+                            None for _ in video_items
+                        ]
+                        worker_state = threading.local()
+                        primary_detector_lock = threading.Lock()
+                        primary_detector_available = True
+
+                        def detector_for_worker():
+                            nonlocal primary_detector_available
+                            worker_detector = getattr(worker_state, "detector", None)
+                            if worker_detector is not None:
+                                return worker_detector
+                            with primary_detector_lock:
+                                if primary_detector_available:
+                                    primary_detector_available = False
+                                    worker_state.detector = detector
+                                    return detector
+                            worker_detector = _load_detector(
+                                request.options.model_path,
+                                request.options.classification_model_path,
+                            )
+                            worker_state.detector = worker_detector
+                            return worker_detector
+
+                        def detect_one_video(video_index: int) -> tuple[int, DetectionItem]:
+                            _raise_if_cancelled(lambda: self._is_cancelled(job_id))
+                            path = video_files[video_index]
+                            if not path.is_file():
+                                raise FileNotFoundError(f"文件已删除: {path}")
+                            item = video_items[video_index]
+                            detected_item = _detect_video(
+                                detector_for_worker(),
+                                path,
+                                item,
+                                request,
+                                input_path,
+                                cancelled=lambda: self._is_cancelled(job_id),
+                            )
+                            return video_index, detected_item
+
+                        with ThreadPoolExecutor(
+                            max_workers=video_worker_count,
+                            thread_name_prefix="neri-video",
+                        ) as video_executor:
+                            future_to_index = {
+                                video_executor.submit(detect_one_video, index): index
+                                for index in range(len(video_files))
+                            }
+                            for future in as_completed(future_to_index):
+                                if self._is_cancelled(job_id):
+                                    self._mark_cancelled(job_id, results)
+                                    return
+                                video_index = future_to_index[future]
+                                try:
+                                    completed_index, item = future.result()
+                                except Exception as exc:
+                                    if self._is_cancelled(job_id):
+                                        self._mark_cancelled(job_id, results)
+                                        return
+                                    completed_index = video_index
+                                    if not video_files[completed_index].is_file():
+                                        existing_paths(
+                                            [video_files[completed_index]]
+                                        )
+                                        continue
+                                    item = video_items[completed_index].model_copy(
+                                        update={"error": f"视频检测失败: {exc}"}
+                                    )
+                                detected_video_items[completed_index] = item
+                                processed += 1
+                                current_video_results = [
+                                    detected
+                                    for detected in detected_video_items
+                                    if detected is not None
+                                ]
+                                results = [*base_results, *current_video_results]
+                                self._mutate_job(
+                                    job_id,
+                                    processed=processed,
+                                    results=results,
+                                    **progress_metrics(processed),
+                                    message=(
+                                        f"正在并发处理视频 {processed}/{total_files} "
+                                        f"(workers={video_worker_count}): "
+                                        f"{video_files[completed_index].name}"
+                                    ),
+                                )
+                        _clear_torch_runtime_cache()
 
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, results)
                 return
+            results = [
+                item
+                for item in results
+                if item.path and Path(item.path).is_file()
+            ]
+            total_files = len(results)
             exported_path = _export_results(request.output_dir, results)
             message = "预扫描完成" if not request.options.enable_detection else "处理完成"
             if exported_path is not None:
@@ -795,12 +1230,21 @@ class ProcessingJobManager:
             self._mutate_job(
                 job_id,
                 state=JobState.COMPLETED,
+                total=total_files,
                 processed=total_files,
                 results=results,
                 **progress_metrics(total_files),
                 message=message,
             )
+            logger.info(
+                "Batch job completed: job_id=%s processed=%d exported=%s elapsed=%.3fs",
+                job_id,
+                total_files,
+                exported_path or "",
+                time.monotonic() - job_started_at,
+            )
         except Exception as exc:  # noqa: BLE001 - converted to an API-visible job failure
+            logger.exception("Batch job failed: job_id=%s error=%s", job_id, exc)
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id)
             else:
@@ -811,9 +1255,26 @@ class ProcessingJobManager:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
                 except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
                     logger.warning("Detector cleanup failed: %s", exc)
+            final_job: JobSummary | None = None
             with self._lock:
                 self._active_job_ids.discard(job_id)
+                final_job = self._jobs.get(job_id)
                 self._save_state_unlocked()
+            if final_job is not None:
+                logger.info(
+                    (
+                        "Batch job closed: job_id=%s state=%s "
+                        "processed=%d/%d elapsed=%.3fs"
+                    ),
+                    job_id,
+                    final_job.state.value,
+                    final_job.processed,
+                    final_job.total,
+                    final_job.elapsed_seconds,
+                )
+            if batch_log_session is not None:
+                logger.info("Batch log saved: %s", batch_log_session.path)
+                batch_log_session.close()
 
 
 def _request_input_label(request: CreateJobRequest) -> str:
@@ -824,7 +1285,11 @@ def _request_input_label(request: CreateJobRequest) -> str:
     return request.input_dir or ""
 
 
-def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
+def _resolve_job_inputs(
+    request: CreateJobRequest,
+    *,
+    cancelled=None,
+) -> tuple[Path, list[Path]]:
     raw_inputs = request.input_paths or (
         [request.input_dir] if request.input_dir else []
     )
@@ -839,8 +1304,15 @@ def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
 
     files: list[Path] = []
     seen: set[str] = set()
+    skip_videos = request.options.video_mode == "skip"
     for source in sources:
-        for path in _resolve_supported_inputs(source):
+        _raise_if_cancelled(cancelled)
+        for path in _resolve_supported_inputs(source, cancelled=cancelled):
+            if (
+                skip_videos
+                and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+            ):
+                continue
             key = _path_key(path)
             if key in seen:
                 continue
@@ -848,6 +1320,10 @@ def _resolve_job_inputs(request: CreateJobRequest) -> tuple[Path, list[Path]]:
             files.append(path)
 
     if not files:
+        if skip_videos:
+            raise ValueError(
+                "输入路径中没有支持的图片（视频处理模式已设置为跳过视频）"
+            )
         raise ValueError(
             f"输入路径中没有支持的媒体文件: {_request_input_label(request)}"
         )
@@ -873,7 +1349,11 @@ def _common_input_root(files: list[Path]) -> Path:
     )
 
 
-def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:
+def _resolve_supported_inputs(
+    input_path: Path,
+    *,
+    cancelled=None,
+) -> Iterable[Path]:
     supported = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
     if input_path.is_file():
         if input_path.suffix.lower() in supported:
@@ -881,13 +1361,34 @@ def _resolve_supported_inputs(input_path: Path) -> Iterable[Path]:
         return
 
     if input_path.is_dir():
-        yield from _iter_supported_files(input_path)
+        yield from _iter_supported_files(input_path, cancelled=cancelled)
 
 
 def _chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
     size = max(1, size)
     for index in range(0, len(items), size):
         yield items[index : index + size]
+
+
+def _tracked_video_worker_count(item_count: int, thread_count: int) -> int:
+    if item_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    configured = max(1, min(int(thread_count or 1), 8))
+    cpu_budget = max(1, cpu_count // 2)
+    # Full video tracking loads model state and decodes frames per worker, so
+    # keep the cap conservative even when a larger value is requested.
+    return max(1, min(item_count, configured, cpu_budget))
+
+
+def _fast_video_sample_worker_count(item_count: int, thread_count: int) -> int:
+    if item_count <= 1:
+        return 1
+    configured = max(1, min(int(thread_count or 1), 8))
+    cpu_count = os.cpu_count() or 1
+    # Video decoding is CPU and I/O heavy. A small cap avoids making HDD and
+    # network-drive workloads slower through excessive parallel seeking.
+    return max(1, min(item_count, configured, cpu_count, 4))
 
 
 def _unique_detection_items(items: Iterable[DetectionItem]) -> list[DetectionItem]:
@@ -912,28 +1413,43 @@ def _path_key(path: str | Path) -> str:
         return text.replace("\\", "/").casefold()
 
 
-def _iter_supported_files(input_dir: Path) -> Iterable[Path]:
-    supported = SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
+def _iter_supported_files(
+    input_dir: Path,
+    *,
+    cancelled=None,
+) -> Iterable[Path]:
+    supported = set(SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS)
     image_files: list[Path] = []
     video_files: list[Path] = []
-    for path in sorted(input_dir.rglob("*")):
-        if _is_generated_favorite_export_path(path):
-            continue
-        if not path.is_file():
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in supported:
-            continue
-        if suffix in SUPPORTED_IMAGE_EXTENSIONS:
-            image_files.append(path)
-        else:
-            video_files.append(path)
+    if _is_generated_favorite_export_path(input_dir):
+        return
+
+    for root, directory_names, file_names in os.walk(input_dir):
+        _raise_if_cancelled(cancelled)
+        root_path = Path(root)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if not _is_generated_favorite_export_path(root_path / name)
+        )
+        for file_name in sorted(file_names):
+            path = root_path / file_name
+            suffix = path.suffix.lower()
+            if suffix not in supported:
+                continue
+            if suffix in SUPPORTED_IMAGE_EXTENSIONS:
+                image_files.append(path)
+            else:
+                video_files.append(path)
     yield from image_files
     yield from video_files
 
 
 def _is_generated_favorite_export_path(path: Path) -> bool:
-    return any(part.endswith("_收藏照片") for part in path.parts)
+    return any(
+        part.endswith(("_收藏照片", "_收藏媒体"))
+        for part in path.parts
+    )
 
 
 def _file_size(path: Path) -> int | None:
@@ -1005,16 +1521,27 @@ def _build_metadata_item(path: Path) -> DetectionItem:
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
     from system.image_processor import ImageProcessor
 
-    resolved_model_path = _resolve_model_path(model_path)
-    detector = ImageProcessor(str(resolved_model_path))
+    resolved_model_path = _resolve_model_path(model_path) if model_path else None
     resolved_classification_path = _resolve_classification_model_path(classification_model_path)
+    if classification_model_path and resolved_classification_path is None:
+        raise FileNotFoundError(f"分类模型文件不存在: {classification_model_path}")
+    if resolved_model_path is None and resolved_classification_path is None:
+        raise ValueError("探测模型和分类模型至少需要选择一个。")
+
+    detector = ImageProcessor(
+        str(resolved_model_path) if resolved_model_path is not None else None
+    )
     if resolved_classification_path is not None:
         detector.load_cls_model(str(resolved_classification_path))
+    if detector.model is None and detector.cls_model is None:
+        raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
 
 
 def _detector_model_names(detector) -> dict[int, str]:
     model = getattr(detector, "model", None)
+    if model is None:
+        model = getattr(detector, "cls_model", None)
     names = getattr(model, "names", None)
     if isinstance(names, dict):
         normalized: dict[int, str] = {}
@@ -1058,6 +1585,21 @@ def _selected_species_class_ids(detector, selected_species_names: list[str]) -> 
             matched_class_ids.append(class_id)
 
     return sorted(set(matched_class_ids)) if matched_class_ids else None
+
+
+def _selected_inference_class_ids(
+    detector,
+    selected_species_names: list[str],
+) -> list[int] | None:
+    if (
+        getattr(detector, "model", None) is not None
+        and getattr(detector, "cls_model", None) is not None
+    ):
+        # With both models enabled the species selection refers to the
+        # classifier that provides the final name. Keep all detector classes
+        # so potentially relevant crops are not discarded before classifying.
+        return None
+    return _selected_species_class_ids(detector, selected_species_names)
 
 
 def _normalize_species_key(value: str) -> str:
@@ -1200,13 +1742,18 @@ def _load_detection_index(
     search_roots: list[Path],
     *,
     recursive: bool = True,
+    filenames: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for db_path in _candidate_detection_dbs_for_roots(search_roots, recursive=recursive):
         try:
             with sqlite3.connect(str(db_path)) as conn:
-                rows = conn.execute("SELECT base_name, detection_json FROM detections").fetchall()
-            for base_name, detection_json in rows:
+                rows = conn.execute(
+                    "SELECT base_name, image_filename, detection_json FROM detections"
+                ).fetchall()
+            for base_name, image_filename, detection_json in rows:
+                if filenames is not None and str(image_filename) not in filenames:
+                    continue
                 if base_name in index:
                     continue
                 data = json.loads(detection_json)
@@ -1241,9 +1788,17 @@ def _load_detection_data_for_path(
     base_name = path.stem
     for db_path in _candidate_detection_dbs(path, search_roots, recursive=recursive):
         try:
-            from system.detection_db import get_detection
-
-            data = get_detection(str(db_path), base_name)
+            with sqlite3.connect(str(db_path)) as conn:
+                row = conn.execute(
+                    (
+                        "SELECT image_filename, detection_json "
+                        "FROM detections WHERE base_name = ?"
+                    ),
+                    (base_name,),
+                ).fetchone()
+            if row is None or str(row[0]) != path.name:
+                continue
+            data = json.loads(row[1])
             if isinstance(data, dict):
                 return data
         except Exception:
@@ -1436,6 +1991,12 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
 
         names = getattr(result, "names", {}) or {}
         candidates_data = getattr(result, "candidates_data", {}) or {}
+        selected_candidates_data = (
+            getattr(result, "selected_candidates_data", {}) or {}
+        )
+        classification_filtered_boxes = (
+            getattr(result, "classification_filtered_boxes", set()) or set()
+        )
         translation_dict = getattr(detector, "translation_dict", {}) or {}
         names_map = {
             class_id: translation_dict.get(english_name, english_name)
@@ -1448,6 +2009,8 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
             pass
 
         for index, box in enumerate(result_boxes):
+            if index in classification_filtered_boxes:
+                continue
             try:
                 cls_id = int(box.cls.item())
                 raw_name = names.get(cls_id, str(cls_id))
@@ -1459,7 +2022,10 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
 
             candidates = candidates_data.get(index, [])
             if candidates:
-                best_candidate = candidates[0]
+                best_candidate = selected_candidates_data.get(
+                    index,
+                    candidates[0],
+                )
                 translated_name = str(best_candidate.get("name", translated_name))
                 box_confidence = _coerce_float(best_candidate.get("conf")) or box_confidence
 
@@ -1478,6 +2044,9 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
         "最低置信度": confidence_raw,
         "检测时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "检测框": boxes,
+        "分类候选项": detection.get("分类候选项", []),
+        "confidence_priority": detection.get("confidence_priority"),
+        "confidence_weights": detection.get("confidence_weights"),
         "all_confidences": all_confidences,
         "all_classes": all_classes,
         "names_map": names_map,
@@ -1492,6 +2061,9 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
     validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
     for path, detection_data in detections:
+        if not path.is_file():
+            logger.info("Not saving detection data for deleted file: %s", path)
+            continue
         roots = [path.parent]
         if input_path.is_dir():
             roots.append(input_path)
@@ -1520,7 +2092,8 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             upsert_detections_bulk,
             upsert_validation_bulk,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Detection DB bulk helpers unavailable: %s", exc)
         return
 
     for root, payloads in payloads_by_root.items():
@@ -1529,7 +2102,8 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             init_db(db_path)
             upsert_detections_bulk(db_path, payloads)
             upsert_validation_bulk(db_path, validations_by_root.get(root, []))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to save detection batch to SQLite at %s: %s", root, exc)
             continue
 
 
@@ -1541,8 +2115,19 @@ def _detect_image_batch(
     input_path: Path,
     preloaded_data: Any = None,
 ) -> list[DetectionItem]:
+    surviving_pairs = [
+        (path, item)
+        for path, item in zip(paths, items)
+        if path.is_file()
+    ]
+    if not surviving_pairs:
+        return []
+    if len(surviving_pairs) != len(paths):
+        paths = [path for path, _ in surviving_pairs]
+        items = [item for _, item in surviving_pairs]
+        preloaded_data = None
     try:
-        selected_class_ids = _selected_species_class_ids(
+        selected_class_ids = _selected_inference_class_ids(
             detector,
             request.options.selected_species_names,
         )
@@ -1556,6 +2141,8 @@ def _detect_image_batch(
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
             imgsz=request.options.imgsz,
+            confidence_priority=request.options.confidence_priority,
+            selected_species_names=request.options.selected_species_names,
             preloaded_data=preloaded_data,
         )
         detect_elapsed = time.perf_counter() - detect_started
@@ -1590,7 +2177,7 @@ def _detect_image_batch(
 
 def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobRequest, input_path: Path) -> DetectionItem:
     try:
-        selected_class_ids = _selected_species_class_ids(
+        selected_class_ids = _selected_inference_class_ids(
             detector,
             request.options.selected_species_names,
         )
@@ -1603,6 +2190,8 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             agnostic_nms=request.options.use_agnostic_nms,
             classes=selected_class_ids,
             imgsz=request.options.imgsz,
+            confidence_priority=request.options.confidence_priority,
+            selected_species_names=request.options.selected_species_names,
         )
         detection = detections[0] if detections else {}
         detection_data = _serialize_detector_output(detector, detection)
@@ -1620,7 +2209,11 @@ def _detect_video(
     input_path: Path,
     cancelled=None,
 ) -> DetectionItem:
-    if request.options.video_mode == "fast":
+    classification_only = (
+        getattr(detector, "model", None) is None
+        and getattr(detector, "cls_model", None) is not None
+    )
+    if request.options.video_mode == "fast" or classification_only:
         return _detect_video_fast(detector, path, item, request, input_path, cancelled=cancelled)
     return _detect_video_track(detector, path, item, request, input_path, cancelled=cancelled)
 
@@ -1716,83 +2309,193 @@ def _detect_video_fast_batch(
     input_path: Path,
     cancelled=None,
 ) -> list[DetectionItem]:
-    import shutil
     import tempfile
 
     temp_dir = Path(tempfile.mkdtemp(prefix="neri_video_frames_"))
     result_items: list[DetectionItem | None] = [None for _ in items]
     video_infos: list[dict[str, Any] | None] = [None for _ in items]
-    frame_records: list[dict[str, Any]] = []
 
     try:
         batch_started = time.perf_counter()
         sample_started = time.perf_counter()
         sample_count = max(1, int(request.options.vid_stride or 1))
-        for video_index, (path, item) in enumerate(zip(paths, items)):
-            try:
-                _raise_if_cancelled(cancelled)
-                info = _sample_fast_video_frames(
-                    path,
-                    temp_dir / f"video_{video_index}",
-                    sample_count,
-                    cancelled=cancelled,
-                )
-                video_infos[video_index] = info
-                for frame_order, (frame_path, frame_index) in enumerate(
-                    zip(info["frame_paths"], info["frame_points"])
-                ):
-                    frame_records.append(
-                        {
-                            "video_index": video_index,
-                            "frame_order": frame_order,
-                            "frame_index": frame_index,
-                            "path": frame_path,
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001 - keep the rest of the video batch alive
-                if cancelled is not None and cancelled():
-                    raise
-                result_items[video_index] = item.model_copy(
-                    update={"error": f"视频快速检测失败: {exc}"}
-                )
-
-        sample_elapsed = time.perf_counter() - sample_started
+        classification_only = (
+            getattr(detector, "model", None) is None
+            and getattr(detector, "cls_model", None) is not None
+        )
+        frame_stride = (
+            max(1, int(request.options.vid_stride or 1))
+            if classification_only and request.options.video_mode == "all"
+            else None
+        )
+        detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
+            [] for _ in items
+        ]
+        pending_frame_records: list[dict[str, Any]] = []
+        frame_count = 0
         inference_elapsed = 0.0
-        if frame_records:
-            selected_class_ids = _selected_species_class_ids(
-                detector,
-                request.options.selected_species_names,
+        preload_elapsed = 0.0
+        frame_serialize_elapsed = 0.0
+        sample_worker_elapsed = 0.0
+        latest_sample_finished_at = sample_started
+        frame_batch_size = max(1, int(request.options.batch_size or 1))
+        selected_class_ids = _selected_inference_class_ids(
+            detector,
+            request.options.selected_species_names,
+        )
+
+        def sample_video(
+            video_index: int,
+        ) -> tuple[int, dict[str, Any], float, float]:
+            _raise_if_cancelled(cancelled)
+            started = time.perf_counter()
+            info = _sample_fast_video_frames(
+                paths[video_index],
+                temp_dir / f"video_{video_index}",
+                sample_count,
+                frame_stride=frame_stride,
+                cancelled=cancelled,
             )
-            detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
-                [] for _ in items
-            ]
-            frame_batch_size = max(1, int(request.options.batch_size or 1))
+            finished_at = time.perf_counter()
+            return (
+                video_index,
+                info,
+                finished_at - started,
+                finished_at,
+            )
+
+        def infer_frame_batch(frame_batch: list[dict[str, Any]]) -> None:
+            nonlocal inference_elapsed, preload_elapsed, frame_serialize_elapsed
+            if not frame_batch:
+                return
+
+            _raise_if_cancelled(cancelled)
+            frame_paths = [str(record["path"]) for record in frame_batch]
+            preload_started = time.perf_counter()
+            preloaded_data = (
+                detector.preload_batch_data(frame_paths)
+                if hasattr(detector, "preload_batch_data")
+                else None
+            )
+            preload_elapsed += time.perf_counter() - preload_started
             inference_started = time.perf_counter()
-            for frame_batch in _chunked(frame_records, frame_batch_size):
-                _raise_if_cancelled(cancelled)
-                detections = detector.detect_batch_species(
-                    [str(record["path"]) for record in frame_batch],
-                    conf=request.options.confidence,
-                    iou=request.options.iou,
-                    use_fp16=request.options.use_fp16,
-                    augment=request.options.use_augment,
-                    agnostic_nms=request.options.use_agnostic_nms,
-                    classes=selected_class_ids,
-                    imgsz=request.options.imgsz,
-                )
-                _raise_if_cancelled(cancelled)
-                for index, record in enumerate(frame_batch):
-                    detection = detections[index] if index < len(detections) else {}
-                    if not isinstance(detection, dict):
-                        detection = {}
-                    detections_by_video[record["video_index"]].append(
-                        (record["frame_order"], record["frame_index"], detection)
+            detections = detector.detect_batch_species(
+                frame_paths,
+                conf=request.options.confidence,
+                iou=request.options.iou,
+                use_fp16=request.options.use_fp16,
+                augment=request.options.use_augment,
+                agnostic_nms=request.options.use_agnostic_nms,
+                classes=selected_class_ids,
+                imgsz=request.options.imgsz,
+                confidence_priority=request.options.confidence_priority,
+                selected_species_names=request.options.selected_species_names,
+                preloaded_data=preloaded_data,
+            )
+            inference_elapsed += time.perf_counter() - inference_started
+            _raise_if_cancelled(cancelled)
+            frame_serialize_started = time.perf_counter()
+            for index, record in enumerate(frame_batch):
+                detection = detections[index] if index < len(detections) else {}
+                if not isinstance(detection, dict):
+                    detection = {}
+                detections_by_video[record["video_index"]].append(
+                    (
+                        record["frame_order"],
+                        record["frame_index"],
+                        _serialize_detector_output(detector, detection),
                     )
-            inference_elapsed = time.perf_counter() - inference_started
-        else:
-            detections_by_video = [[] for _ in items]
+                )
+            frame_serialize_elapsed += (
+                time.perf_counter() - frame_serialize_started
+            )
+
+        def flush_full_frame_batches() -> None:
+            while len(pending_frame_records) >= frame_batch_size:
+                frame_batch = pending_frame_records[:frame_batch_size]
+                del pending_frame_records[:frame_batch_size]
+                infer_frame_batch(frame_batch)
+
+        def accept_sample_result(
+            video_index: int,
+            info: dict[str, Any],
+        ) -> None:
+            nonlocal frame_count
+            video_infos[video_index] = info
+            frame_paths = info.pop("frame_paths", [])
+            for frame_order, (frame_path, frame_index) in enumerate(
+                zip(frame_paths, info["frame_points"])
+            ):
+                pending_frame_records.append(
+                    {
+                        "video_index": video_index,
+                        "frame_order": frame_order,
+                        "frame_index": frame_index,
+                        "path": frame_path,
+                    }
+                )
+                frame_count += 1
+            flush_full_frame_batches()
+
+        sample_workers = _fast_video_sample_worker_count(
+            len(paths),
+            request.options.thread_count,
+        )
+        if paths:
+            with ThreadPoolExecutor(
+                max_workers=sample_workers,
+                thread_name_prefix="neri-video-sample",
+            ) as sample_executor:
+                future_to_index: dict[Any, int] = {}
+                next_video_index = 0
+
+                def submit_next_video() -> None:
+                    nonlocal next_video_index
+                    if next_video_index >= len(paths):
+                        return
+                    video_index = next_video_index
+                    next_video_index += 1
+                    future_to_index[
+                        sample_executor.submit(sample_video, video_index)
+                    ] = video_index
+
+                for _ in range(min(sample_workers, len(paths))):
+                    submit_next_video()
+
+                while future_to_index:
+                    future = next(as_completed(tuple(future_to_index)))
+                    video_index = future_to_index.pop(future)
+                    # Refill the worker slot before GPU inference so decoding
+                    # of the next video can overlap with the current batch.
+                    submit_next_video()
+                    try:
+                        (
+                            completed_index,
+                            info,
+                            worker_elapsed,
+                            worker_finished_at,
+                        ) = future.result()
+                    except Exception as exc:  # noqa: BLE001 - isolate per-video failures
+                        if cancelled is not None and cancelled():
+                            raise
+                        result_items[video_index] = items[video_index].model_copy(
+                            update={"error": f"视频快速检测失败: {exc}"}
+                        )
+                    else:
+                        sample_worker_elapsed += worker_elapsed
+                        latest_sample_finished_at = max(
+                            latest_sample_finished_at,
+                            worker_finished_at,
+                        )
+                        accept_sample_result(completed_index, info)
+
+        _raise_if_cancelled(cancelled)
+        sample_elapsed = max(0.0, latest_sample_finished_at - sample_started)
+        infer_frame_batch(pending_frame_records)
+        pending_frame_records.clear()
 
         detection_payloads: list[tuple[Path, dict[str, Any]]] = []
+        serialize_started = time.perf_counter()
         for video_index, (path, item) in enumerate(zip(paths, items)):
             if result_items[video_index] is not None:
                 continue
@@ -1811,10 +2514,15 @@ def _detect_video_fast_batch(
                 path,
                 info,
                 frame_detections,
+                video_mode=request.options.video_mode,
             )
             detection_payloads.append((path, detection_data))
             result_items[video_index] = _apply_detection_data(item, detection_data)
-        serialize_elapsed = time.perf_counter() - serialize_started
+        serialize_elapsed = (
+            frame_serialize_elapsed
+            + time.perf_counter()
+            - serialize_started
+        )
 
         save_elapsed = 0.0
         if detection_payloads:
@@ -1824,12 +2532,16 @@ def _detect_video_fast_batch(
 
         logger.info(
             (
-                "Fast video batch timing: videos=%d frames=%d sample=%.3fs "
+                "Fast video batch timing: videos=%d sample_workers=%d "
+                "frames=%d sample=%.3fs sample_worker=%.3fs preload=%.3fs "
                 "infer=%.3fs serialize=%.3fs save=%.3fs total=%.3fs"
             ),
             len(paths),
-            len(frame_records),
+            sample_workers,
+            frame_count,
             sample_elapsed,
+            sample_worker_elapsed,
+            preload_elapsed,
             inference_elapsed,
             serialize_elapsed,
             save_elapsed,
@@ -1858,6 +2570,7 @@ def _sample_fast_video_frames(
     path: Path,
     temp_dir: Path,
     sample_count: int,
+    frame_stride: int | None = None,
     cancelled=None,
 ) -> dict[str, Any]:
     import cv2
@@ -1875,24 +2588,75 @@ def _sample_fast_video_frames(
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames > 0:
-            points = [
-                min(total_frames - 1, max(0, round(total_frames * (index + 1) / (sample_count + 1))))
-                for index in range(sample_count)
-            ]
-        else:
-            points = [0]
 
-        for index, point in enumerate(points):
-            _raise_if_cancelled(cancelled)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, point)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            frame_path = temp_dir / f"frame_{index}.jpg"
+        def save_frame(frame, frame_index: int) -> None:
+            frame_path = temp_dir / f"frame_{len(frame_paths)}.jpg"
             if cv2.imwrite(str(frame_path), frame):
                 frame_paths.append(frame_path)
-                frame_points.append(point)
+                frame_points.append(frame_index)
+
+        if frame_stride is not None:
+            stride = max(1, int(frame_stride))
+            frame_index = 0
+            while True:
+                if frame_index % 32 == 0:
+                    _raise_if_cancelled(cancelled)
+                if not cap.grab():
+                    break
+                if frame_index % stride == 0:
+                    ok, frame = cap.retrieve()
+                    if ok:
+                        save_frame(frame, frame_index)
+                frame_index += 1
+        else:
+            points = (
+                sorted(
+                    {
+                        min(
+                            total_frames - 1,
+                            max(
+                                0,
+                                round(
+                                    total_frames
+                                    * (index + 1)
+                                    / (sample_count + 1)
+                                ),
+                            ),
+                        )
+                        for index in range(sample_count)
+                    }
+                )
+                if total_frames > 0
+                else [0]
+            )
+            # For short videos, one forward pass is more predictable than
+            # repeatedly reopening the codec's keyframe chain. Some camera
+            # codecs can block for a long time on random frame seeks.
+            use_sequential_sampling = (
+                len(points) > 1 and points[-1] <= len(points) * 300
+            )
+            if use_sequential_sampling:
+                point_index = 0
+                frame_index = 0
+                while point_index < len(points):
+                    if frame_index % 32 == 0:
+                        _raise_if_cancelled(cancelled)
+                    if not cap.grab():
+                        break
+                    if frame_index == points[point_index]:
+                        ok, frame = cap.retrieve()
+                        if ok:
+                            save_frame(frame, frame_index)
+                        point_index += 1
+                    frame_index += 1
+            else:
+                for point in points:
+                    _raise_if_cancelled(cancelled)
+                    if point > 0:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, point)
+                    ok, frame = cap.read()
+                    if ok:
+                        save_frame(frame, point)
 
         if not frame_paths:
             raise RuntimeError("无法从视频中提取有效帧")
@@ -1914,6 +2678,7 @@ def _build_fast_video_detection_data(
     path: Path,
     video_info: dict[str, Any],
     frame_detections: list[tuple[int, int, dict[str, Any]]],
+    video_mode: str = "fast",
 ) -> dict[str, Any]:
     from collections import Counter
 
@@ -1926,8 +2691,7 @@ def _build_fast_video_detection_data(
     all_classes: list[float] = []
     fps = video_info.get("fps") or 25
 
-    for _frame_order, frame_index, detection in frame_detections:
-        detection_data = _serialize_detector_output(detector, detection)
+    for _frame_order, frame_index, detection_data in frame_detections:
         frame_species = _extract_species_list(detection_data)
         for species in frame_species:
             species_votes[species] += 1
@@ -1958,7 +2722,7 @@ def _build_fast_video_detection_data(
     total_frames = int(video_info.get("total_frames") or 0)
     return {
         "video_source": str(path),
-        "video_mode": "fast",
+        "video_mode": video_mode,
         "sampled_frames": video_info.get("frame_points") or [],
         "width": int(video_info.get("width") or 0),
         "height": int(video_info.get("height") or 0),
@@ -2088,7 +2852,11 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
         for root in _unique_existing_dirs([path.parent, *roots]):
             index = detection_indexes.get(root)
             if index is None:
-                index = _load_detection_index([root], recursive=False)
+                index = _load_detection_index(
+                    [root],
+                    recursive=False,
+                    filenames={path.name},
+                )
                 detection_indexes[root] = index
             data = index.get(path.stem)
             if isinstance(data, dict):
@@ -2240,12 +3008,25 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
             _export_species_by_path(processed_data),
         )
 
+    deleted_empty_photo_count = 0
+    empty_photo_delete_failed_count = 0
+    if request.delete_empty_photos:
+        (
+            deleted_empty_photo_count,
+            empty_photo_delete_failed_count,
+        ) = _delete_empty_photos(
+            files,
+            request.empty_photo_paths,
+        )
+
     return ValidationExportResponse(
         output_path=str(output_path),
         file_format=request.file_format,
         exported_count=len(processed_data),
         favorite_output_dir=str(favorite_output_dir) if favorite_output_dir else None,
         favorite_exported_count=favorite_exported_count,
+        deleted_empty_photo_count=deleted_empty_photo_count,
+        empty_photo_delete_failed_count=empty_photo_delete_failed_count,
     )
 
 
@@ -2376,20 +3157,21 @@ def _export_favorite_photos(
     if not favorite_keys:
         return None, 0
 
-    available_images = {
+    available_media = {
         _path_key(path): path
         for path in files
-        if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        if path.suffix.lower()
+        in SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
     }
     selected_files = [
-        available_images[key]
+        available_media[key]
         for key in favorite_keys
-        if key in available_images and available_images[key].is_file()
+        if key in available_media and available_media[key].is_file()
     ]
     if not selected_files:
         return None, 0
 
-    target_dir = output_path.parent / f"{output_path.stem}_收藏照片"
+    target_dir = output_path.parent / f"{output_path.stem}_收藏媒体"
     target_dir.mkdir(parents=True, exist_ok=True)
 
     copied = 0
@@ -2403,6 +3185,51 @@ def _export_favorite_photos(
         copied += 1
 
     return target_dir, copied
+
+
+def _delete_empty_photos(
+    files: Iterable[Path],
+    empty_photo_paths: Iterable[str],
+) -> tuple[int, int]:
+    requested_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for path in empty_photo_paths:
+        key = _path_key(path)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        requested_keys.append(key)
+    if not requested_keys:
+        return 0, 0
+
+    available_images = {
+        _path_key(path): path
+        for path in files
+        if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+    }
+    selected_files = [
+        available_images[key]
+        for key in requested_keys
+        if key in available_images
+    ]
+
+    deleted = 0
+    failed = 0
+    for source in selected_files:
+        try:
+            source.unlink()
+            deleted += 1
+        except OSError as exc:
+            failed += 1
+            logger.warning("删除空照片失败: %s: %s", source, exc)
+    logger.info(
+        "空照片删除完成: requested=%d matched=%d deleted=%d failed=%d",
+        len(requested_keys),
+        len(selected_files),
+        deleted,
+        failed,
+    )
+    return deleted, failed
 
 
 def _export_species_by_path(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
@@ -2429,7 +3256,7 @@ def _species_export_folder_name(species: str | None) -> str:
 
 def _unique_favorite_export_path(target_dir: Path, filename: str) -> Path:
     source_name = Path(filename)
-    stem = source_name.stem or "photo"
+    stem = source_name.stem or "media"
     suffix = source_name.suffix
     candidate = target_dir / source_name.name
     if not candidate.exists():

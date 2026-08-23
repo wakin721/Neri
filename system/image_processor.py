@@ -11,18 +11,31 @@ from ultralytics import YOLO
 import json
 import torch
 import numpy as np
+from system.config import XPU_ENABLED
+from system.confidence import (
+    candidate_matches_selected_species,
+    combined_confidence_weights,
+)
 from system.utils import resource_path
 import cv2
 
 logger = logging.getLogger(__name__)
 
 
+def _runtime_logs_dir(*parts: str) -> str:
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    path = os.path.join(root, "logs", *parts)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 class ImageProcessor:
     """处理图像、检测物种及视频追踪的核心类"""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: Optional[str]):
         """初始化图像处理器"""
-        self.model = self._load_model(model_path)
+        self.model_path = model_path or None
+        self.model = self._load_model(model_path) if model_path else None
         self.translation_dict = self._load_translation_file()
         self.cls_model = None
 
@@ -65,7 +78,12 @@ class ImageProcessor:
         try:
             if device_name == 'cuda' and torch.cuda.is_available():
                 torch.cuda.synchronize()
-            elif device_name == 'xpu' and hasattr(torch, 'xpu') and torch.xpu.is_available():
+            elif (
+                XPU_ENABLED
+                and device_name == 'xpu'
+                and hasattr(torch, 'xpu')
+                and torch.xpu.is_available()
+            ):
                 torch.xpu.synchronize()
         except Exception:
             pass
@@ -75,7 +93,7 @@ class ImageProcessor:
             gc.collect()
             if clear_cuda_cache and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            xpu = getattr(torch, 'xpu', None)
+            xpu = getattr(torch, 'xpu', None) if XPU_ENABLED else None
             if (
                 clear_cuda_cache
                 and xpu is not None
@@ -126,8 +144,8 @@ class ImageProcessor:
                 device = 'cuda'
                 fp16_enabled = use_fp16
             else:
-                # 2. 检查 Intel XPU
-                if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                # XPU 暂时关闭，保留逻辑以便功能重新开放。
+                if XPU_ENABLED and hasattr(torch, 'xpu') and torch.xpu.is_available():
                     device = 'xpu'
                     fp16_enabled = use_fp16
         except Exception as e:
@@ -319,23 +337,144 @@ class ImageProcessor:
             pass
         return None
 
+    def _classify_batch_species(
+        self,
+        img_paths: List[str],
+        *,
+        use_fp16: bool,
+        conf: float,
+        preloaded_data: Optional[Tuple],
+        classes: Optional[List[int]],
+    ) -> List[Dict[str, Any]]:
+        """在未选择探测模型时，对整张图片直接运行分类模型。"""
+        empty_result = {
+            '物种名称': "",
+            '物种数量': "",
+            'detect_results': None,
+            '最低置信度': None,
+            '分类候选项': [],
+        }
+        batch_results_info = [dict(empty_result) for _ in img_paths]
+        if not self.cls_model:
+            return batch_results_info
+
+        loaded_data = preloaded_data or self.preload_batch_data(img_paths)
+        if not loaded_data:
+            return batch_results_info
+
+        valid_indices, processed_imgs, _original_imgs_rgb = loaded_data
+        if not processed_imgs:
+            return batch_results_info
+
+        device_name, use_fp16 = self._determine_device(use_fp16)
+        temp_run_project = _runtime_logs_dir("yolo")
+        self._sync_device(device_name)
+        classify_start = time.perf_counter()
+        cls_results = self.cls_model(
+            processed_imgs,
+            half=use_fp16,
+            device=device_name,
+            save=False,
+            project=temp_run_project,
+            name="cls_full_image_log",
+            exist_ok=True,
+        )
+        self._sync_device(device_name)
+
+        allowed_class_ids = set(classes) if classes is not None else None
+        for source_index, cls_result in zip(valid_indices, cls_results):
+            probs = getattr(cls_result, "probs", None)
+            probs_data = getattr(probs, "data", None)
+            if probs_data is None:
+                continue
+            try:
+                scores = probs_data.detach().float().cpu().tolist()
+            except Exception:
+                scores = list(probs_data)
+
+            ranked = sorted(
+                (
+                    (class_id, float(score))
+                    for class_id, score in enumerate(scores)
+                    if allowed_class_ids is None or class_id in allowed_class_ids
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            if not ranked:
+                continue
+
+            candidates = []
+            names = getattr(cls_result, "names", {}) or {}
+            for class_id, score in ranked[:3]:
+                raw_name = str(
+                    names.get(class_id, class_id)
+                    if isinstance(names, dict)
+                    else names[class_id]
+                )
+                translated_name = self.translation_dict.get(raw_name, raw_name)
+                candidates.append(
+                    {
+                        "name": translated_name,
+                        "conf": score,
+                        "raw_cls_conf": score,
+                        "class_id": class_id,
+                    }
+                )
+
+            top_candidate = candidates[0]
+            accepted = float(top_candidate["conf"]) >= conf
+            batch_results_info[source_index] = {
+                '物种名称': top_candidate["name"] if accepted else "空",
+                '物种数量': "1" if accepted else "空",
+                'detect_results': None,
+                '最低置信度': (
+                    f"{float(top_candidate['conf']):.3f}" if accepted else None
+                ),
+                '分类候选项': candidates,
+            }
+
+        logger.info(
+            "Full-image classification: requested=%d valid=%d elapsed=%.3fs",
+            len(img_paths),
+            len(processed_imgs),
+            time.perf_counter() - classify_start,
+        )
+        return batch_results_info
+
     def detect_batch_species(self, img_paths: List[str], use_fp16: bool = False, iou: float = 0.3,
-                             conf: float = 0.25, augment: bool = False,
+                             conf: float = 0.25, augment: bool = True,
                              agnostic_nms: bool = True, timeout: float = 60.0,
                              preloaded_data: Optional[Tuple] = None,
                              classes: Optional[List[int]] = None,
                              imgsz: int = 1920,
+                             confidence_priority: str = "classification",
+                             selected_species_names: Optional[List[str]] = None,
                              cleanup_cache: bool = False) -> List[Dict[str, Any]]:
         """
         批量检测图像中的物种
         :param preloaded_data: (可选) 由 preload_batch_data 返回的预处理数据 (valid_indices, processed_imgs, original_imgs_rgb)
         """
         device_name, use_fp16 = self._determine_device(use_fp16)
-        w_det = 0.4
-        w_cls = 0.6
+        w_det, w_cls = combined_confidence_weights(confidence_priority)
         batch_results_info = []
 
         if not self.model:
+            if self.cls_model:
+                classification_results = self._classify_batch_species(
+                    img_paths,
+                    use_fp16=use_fp16,
+                    conf=conf,
+                    preloaded_data=preloaded_data,
+                    classes=classes,
+                )
+                should_clear_cuda_cache = (
+                    cleanup_cache or self._cuda_cache_pressure_high()
+                )
+                self.cleanup_runtime_cache(
+                    clear_cuda_cache=should_clear_cuda_cache
+                )
+                return classification_results
             for _ in img_paths:
                 batch_results_info.append({
                     '物种名称': "", '物种数量': "",
@@ -389,8 +528,7 @@ class ImageProcessor:
                 if not processed_imgs:
                     return
 
-                import tempfile
-                temp_run_project = os.path.join(tempfile.gettempdir(), "yolo_logs")
+                temp_run_project = _runtime_logs_dir("yolo")
 
                 print("\n" + "=" * 50)
                 print("🚀 [ImageProcessor] 开始执行模型推理，参数如下：")
@@ -428,6 +566,7 @@ class ImageProcessor:
                 all_crops = []
                 crop_map_info = []  # 映射: list index -> (result_index_in_batch, box_index)
                 batch_candidates_maps = [{} for _ in det_results]
+                batch_selected_candidate_maps = [{} for _ in det_results]
 
                 if self.cls_model:
                     crop_tasks = []
@@ -480,13 +619,22 @@ class ImageProcessor:
                             # 温度缩放 & TopK
                             original_probs = cls_res.probs.data
                             smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
-                            topk_confs, topk_indices = torch.topk(smoothed_probs, 3)
+                            ranked_indices = torch.argsort(
+                                smoothed_probs,
+                                descending=True,
+                            ).tolist()
 
                             candidates = []
-                            for c_idx, c_conf in zip(topk_indices.tolist(), topk_confs.tolist()):
+                            for c_idx in ranked_indices:
                                 raw_name = cls_res.names[int(c_idx)]
                                 trans_name = self.translation_dict.get(raw_name, raw_name)
-                                cls_conf_val = float(c_conf)
+                                if not candidate_matches_selected_species(
+                                    str(raw_name),
+                                    str(trans_name),
+                                    selected_species_names,
+                                ):
+                                    continue
+                                cls_conf_val = float(smoothed_probs[int(c_idx)].item())
 
                                 # 加权置信度
                                 weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
@@ -497,9 +645,20 @@ class ImageProcessor:
                                     "raw_cls_conf": cls_conf_val,
                                     "raw_det_conf": det_conf
                                 })
+                                if len(candidates) >= 3:
+                                    break
 
                             candidates.sort(key=lambda x: x["conf"], reverse=True)
                             batch_candidates_maps[r_idx][b_idx] = candidates
+                            selected_candidate = next(
+                                (
+                                    candidate
+                                    for candidate in candidates
+                                    if float(candidate["conf"]) >= conf
+                                ),
+                                None,
+                            )
+                            batch_selected_candidate_maps[r_idx][b_idx] = selected_candidate
 
                 # 6. 结果整合与统计
                 # 此时 det_results 的长度等于 processed_imgs 的长度
@@ -507,6 +666,7 @@ class ImageProcessor:
 
                 det_iter = iter(det_results)
                 cand_map_iter = iter(batch_candidates_maps)
+                selected_cand_map_iter = iter(batch_selected_candidate_maps)
 
                 merge_start = time.perf_counter()
                 for idx in range(len(img_paths)):
@@ -525,33 +685,47 @@ class ImageProcessor:
                     except Exception as e:
                         logger.debug(f"Failed to move detection result to CPU: {e}")
                     candidates_map = next(cand_map_iter)
+                    selected_candidates_map = next(selected_cand_map_iter)
 
                     min_conf = None
                     detected_species_counts = {}
+                    final_confidences = []
 
                     if r.boxes:
-                        confs = r.boxes.conf.tolist()
-                        if confs:
-                            current_min = min(confs)
-                            min_conf = "%.3f" % current_min
-
                         for i, box in enumerate(r.boxes):
                             final_name = ""
-                            # 优先使用分类修正结果
-                            if i in candidates_map and candidates_map[i]:
-                                final_name = candidates_map[i][0]['name']
+                            final_confidence = float(box.conf.item())
+                            if self.cls_model is not None:
+                                selected_candidate = selected_candidates_map.get(i)
+                                if not hasattr(r, 'candidates_data'):
+                                    r.candidates_data = {}
+                                r.candidates_data[i] = candidates_map.get(i, [])
+                                if selected_candidate is None:
+                                    if not hasattr(r, 'classification_filtered_boxes'):
+                                        r.classification_filtered_boxes = set()
+                                    r.classification_filtered_boxes.add(i)
+                                    continue
+                                if not hasattr(r, 'selected_candidates_data'):
+                                    r.selected_candidates_data = {}
+                                r.selected_candidates_data[i] = selected_candidate
+                                final_name = selected_candidate['name']
+                                final_confidence = float(selected_candidate['conf'])
                             else:
                                 cls_id = int(box.cls.item())
                                 raw_name = r.names[cls_id]
                                 final_name = self.translation_dict.get(raw_name, raw_name)
 
                             detected_species_counts[final_name] = detected_species_counts.get(final_name, 0) + 1
+                            final_confidences.append(final_confidence)
 
                             # 注入数据用于JSON保存
                             if not hasattr(r, 'candidates_data'):
                                 r.candidates_data = {}
-                            if i in candidates_map:
+                            if i in candidates_map and i not in r.candidates_data:
                                 r.candidates_data[i] = candidates_map[i]
+
+                    if final_confidences:
+                        min_conf = "%.3f" % min(final_confidences)
 
                     species_str = ",".join(list(detected_species_counts.keys()))
                     counts_str = ",".join(list(map(str, detected_species_counts.values())))
@@ -560,7 +734,12 @@ class ImageProcessor:
                         '物种名称': species_str if species_str else "空",
                         '物种数量': counts_str if counts_str else "空",
                         'detect_results': [r],  # 保持列表格式以便兼容 save_detection_info_json
-                        '最低置信度': min_conf
+                        '最低置信度': min_conf,
+                        'confidence_priority': confidence_priority,
+                        'confidence_weights': {
+                            'detection': w_det,
+                            'classification': w_cls,
+                        },
                     })
 
                 merge_elapsed = time.perf_counter() - merge_start
@@ -597,74 +776,18 @@ class ImageProcessor:
 
         return batch_results_info
 
-    def _create_temp_enhanced_video(self, source_path: str, temp_path: str, stride: int) -> int:
-        """
-        [修改] 读取源视频，应用跳帧和LAB增强，保存为临时MP4文件。
-        使用 Batch + ThreadPool 优化处理速度。
-        """
+    @staticmethod
+    def _video_processed_frame_count(source_path: str, stride: int) -> int:
+        """读取视频元数据，估算应用跳帧后的待处理帧数。"""
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
-            raise Exception(f"无法打开源视频: {source_path}")
-
-        # 获取原始信息
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        orig_fps = cap.get(cv2.CAP_PROP_FPS)
-        if orig_fps <= 0: orig_fps = 25
-
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(temp_path, fourcc, orig_fps, (orig_w, orig_h))
-
-        if not writer.isOpened():
-            cap.release()
-            raise Exception("无法创建临时视频写入器")
-
-        idx = 0
-        saved_count = 0
-        batch_size = 32  # 批处理大小，控制内存占用
-        
+            return 0
         try:
-            while True:
-                frames_batch = []
-                # 1. 预读取一批符合 stride 的帧
-                for _ in range(batch_size):
-                    # 循环读取直到找到符合 stride 的帧或视频结束
-                    while True:
-                        success, frame = cap.read()
-                        if not success:
-                            break # 视频结束
-                        
-                        current_idx = idx
-                        idx += 1
-                        
-                        if current_idx % stride == 0:
-                            frames_batch.append(frame)
-                            break # 找到一帧，加入批次
-                    
-                    if not success: # 如果视频读取完毕，跳出批次循环
-                        break
-
-                if not frames_batch:
-                    break
-
-                # 2. 并行预处理 (LAB增强)
-                processed_batch = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(frames_batch), 8)) as executor:
-                    # 使用 map 保证结果顺序与 frames_batch 一致
-                    results = executor.map(self._preprocess_image, frames_batch)
-                    processed_batch = list(results)
-
-                # 3. 顺序写入视频
-                for p_frame in processed_batch:
-                    if p_frame is not None:
-                        writer.write(p_frame)
-                        saved_count += 1
-
+            total_frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
         finally:
             cap.release()
-            writer.release()
-
-        return saved_count
+        stride = max(1, int(stride))
+        return (total_frames + stride - 1) // stride if total_frames else 0
 
     def detect_video_species(self, video_source: str, output_dir: str,
                              use_fp16: bool = False, iou: float = 0.3,
@@ -678,55 +801,40 @@ class ImageProcessor:
                              extra_db_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         对视频进行物种检测和追踪。
-        策略：先生成跳帧+增强后的临时视频(保持原分辨率)，再进行追踪。
+        直接从原视频按 vid_stride 解码并追踪，避免重复转码阻塞 GPU。
         """
-        if hasattr(self, 'model_path') and self.model_path:
-            try:
-                self.model = self._load_model(self.model_path)
-            except Exception as e:
-                logger.warning(f"重置模型状态失败: {e}")
-
         if not self.model: return {'error': 'Model not loaded'}
         device_name, use_fp16 = self._determine_device(use_fp16)
+        vid_stride = max(1, int(vid_stride))
 
         # 准备路径
         output_dir = os.path.normpath(output_dir)
         video_name = os.path.splitext(os.path.basename(video_source))[0]
         if "http" in video_source: video_name = "stream_result"
 
-        # 确定临时文件夹
-        work_temp_dir = temp_video_dir if temp_video_dir else os.path.join(output_dir, "temp")
-        os.makedirs(work_temp_dir, exist_ok=True)
-
-        # 定义临时增强视频路径
-        temp_enhanced_video_path = os.path.join(work_temp_dir, f"{video_name}_enhanced_temp.mp4")
-
         # YOLO 日志路径
-        import tempfile
-        temp_run_project = os.path.join(tempfile.gettempdir(), "neri_yolo_logs")
+        temp_run_project = _runtime_logs_dir("yolo")
 
         # 追踪器配置
         tracker_config = resource_path(os.path.join("res", "model_cls", "tracker.yaml"))
         if not os.path.exists(tracker_config): tracker_config = "botsort.yaml"
 
-        logger.info(f"开始预处理视频 (LAB增强, 保持原分辨率): {video_source}")
+        logger.info(
+            "开始直接追踪视频: source=%s stride=%d device=%s",
+            video_source,
+            vid_stride,
+            device_name,
+        )
 
         try:
-            # === 第一步：生成增强后的临时视频 ===
-            # processed_frame_count 是实际生成的帧数（已包含跳帧逻辑）
-            # 这将作为进度条的“总帧数”
-            processed_frame_count = self._create_temp_enhanced_video(
-                video_source, temp_enhanced_video_path, vid_stride
+            # 只读取容器元数据用于进度估算，不再先解码并重新编码整段视频。
+            processed_frame_count = self._video_processed_frame_count(
+                video_source,
+                vid_stride,
             )
 
-            if processed_frame_count == 0:
-                raise Exception("预处理后未生成有效帧")
-
-            logger.info(f"预处理完成，生成临时视频: {temp_enhanced_video_path} (共 {processed_frame_count} 帧)")
-
-            # === 第二步：运行 YOLO 追踪 ===
             results = self.model.track(
-                source=temp_enhanced_video_path,
+                source=video_source,
                 tracker=tracker_config,
                 augment=augment,
                 agnostic_nms=agnostic_nms,
@@ -736,13 +844,15 @@ class ImageProcessor:
                 iou=iou,
                 conf=conf,
                 classes=classes,
-                persist=True,
+                # 视频调用之间必须重置追踪器，但同一视频内仍会持续追踪。
+                # 这既避免重新加载模型，也防止不同视频之间串用 track ID。
+                persist=False,
                 save=False,
                 project=temp_run_project,
                 name="track_log",
                 exist_ok=True,
                 stream=True,
-                vid_stride=1
+                vid_stride=vid_stride
             )
 
             tracks_data = defaultdict(list)
@@ -776,8 +886,9 @@ class ImageProcessor:
 
                         # 4. [关键] 调用回调函数
                         # current_track_frame: 当前处理到的帧数（分子）
-                        # processed_frame_count: 临时视频的总帧数（分母，由 _create_temp_enhanced_video 返回）
-                        status_callback(current_track_frame, processed_frame_count, w, h, frame_counts, speed_ms)
+                        # 某些流媒体无法提前获得总帧数，此时至少保证分母不小于分子。
+                        progress_total = max(processed_frame_count, current_track_frame)
+                        status_callback(current_track_frame, progress_total, w, h, frame_counts, speed_ms)
 
                     except Exception as e:
                         if "强制停止" in str(e): raise e
@@ -847,15 +958,6 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"视频追踪失败: {e}")
             return {"error": str(e), "status": "failed"}
-
-        finally:
-            # === 第五步：清理临时文件 ===
-            if os.path.exists(temp_enhanced_video_path):
-                try:
-                    os.remove(temp_enhanced_video_path)
-                    logger.info(f"已删除临时增强视频: {temp_enhanced_video_path}")
-                except Exception as e:
-                    logger.warning(f"删除临时视频失败: {e}")
 
     def _get_first_detected_species(self, results: Any) -> str:
         """从检测结果中获取第一个物种的名称"""

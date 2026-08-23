@@ -34,6 +34,11 @@ class CrashReporter {
   static Directory? _logsDirectory;
   static bool _initialized = false;
 
+  static Directory get logsDirectory {
+    initialize();
+    return _logsDirectory ?? Directory.current.absolute;
+  }
+
   static void initialize() {
     if (_initialized) return;
     _logsDirectory = _resolveLogsDirectory();
@@ -172,12 +177,25 @@ class CrashReporter {
   static void _loadPendingStartupReport() {
     final projectRoot = _resolveProjectRoot();
     if (projectRoot == null) return;
-    final file = File(
-      [
-        projectRoot.path,
-        'temp',
-        'crash_startup_report.json',
-      ].join(Platform.pathSeparator),
+    final candidates = <File>[
+      File(
+        [
+          projectRoot.path,
+          'logs',
+          'crash_startup_report.json',
+        ].join(Platform.pathSeparator),
+      ),
+      File(
+        [
+          projectRoot.path,
+          'temp',
+          'crash_startup_report.json',
+        ].join(Platform.pathSeparator),
+      ),
+    ];
+    final file = candidates.firstWhere(
+      (candidate) => candidate.existsSync(),
+      orElse: () => candidates.first,
     );
     if (!file.existsSync()) return;
 
@@ -304,6 +322,7 @@ class CrashReporter {
       for (final entity in directory.listSync()) {
         if (entity is! File) continue;
         final name = entity.path.split(Platform.pathSeparator).last;
+        if (name == 'backend_maintenance.log') continue;
         if (name.startsWith('backend_') && name.endsWith('.log')) {
           _deleteFile(entity);
         }

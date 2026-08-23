@@ -3,24 +3,33 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'api_client.dart';
+import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
+import 'local_maintenance_status.dart';
+import 'models/close_behavior.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
+import 'models/video_processing_mode.dart';
 import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
 import 'screens/start_screen.dart';
+import 'utils/job_result_refresh.dart';
+import 'utils/local_detection_items.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
-enum _CloseDialogPhase { confirming, closing, restoring }
+enum _CloseDialogPhase { choosing, shuttingDown, restoring }
+
+enum _CloseAction { hideToTray, exit }
 
 class MainWindow extends StatefulWidget {
   const MainWindow({
@@ -37,6 +46,25 @@ class MainWindow extends StatefulWidget {
 }
 
 class _MainWindowState extends State<MainWindow> with WindowListener {
+  static const _windowsShellChannel = MethodChannel('neri/windows_shell');
+  static const _supportedMediaExtensions = <String>{
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.bmp',
+    '.gif',
+    '.tiff',
+    '.webp',
+    '.mp4',
+    '.avi',
+    '.mov',
+    '.mkv',
+    '.wmv',
+    '.flv',
+    '.webm',
+    '.m4v',
+    '.ts',
+  };
   static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置'];
   static const _navigationItems = <_NavigationRailEntry>[
     _NavigationRailEntry(
@@ -69,23 +97,33 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       <String, DetectionItem>{};
   final Set<String> _previewMetadataLoading = <String>{};
   final Set<int> _expectedBackendExitPids = <int>{};
+  final _maintenanceStatusStore = LocalMaintenanceStatusStore();
+  final _appUpdater = AppUpdater();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   Timer? _timer;
   Timer? _previewRefreshTimer;
+  Timer? _inputDirectoryChangeTimer;
+  Timer? _modelSelectionSaveTimer;
+  StreamSubscription<FileSystemEvent>? _inputDirectoryWatcher;
   Process? _backendProcess;
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
+  int _previewContentVersion = 0;
+  int _modelSelectionRevision = 0;
   int _closeFlowId = 0;
+  int _closeBehaviorRevision = 0;
+  int _lastCloseActionRevision = 0;
   bool _loading = true;
   bool _backendStarting = false;
   bool _backendReady = false;
   bool _submitting = false;
   bool _previewLoading = false;
   bool _settingsSaving = false;
+  bool _modelSelectionSaveInProgress = false;
   bool _validationBusy = false;
   int _validationBusyRequests = 0;
   final Map<String, int> _pendingStartJobBaselines = <String, int>{};
@@ -96,22 +134,44 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _isMaximized = false;
   bool _closing = false;
   bool _showClosingOverlay = false;
-  bool _closeBackendStopped = false;
-  _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.confirming;
+  bool _closeSelectionSaving = false;
+  bool _closeDontAskAgain = false;
+  bool _checkingForAppUpdate = false;
+  bool _startupUpdateCheckScheduled = false;
+  bool _installingDownloadedAppUpdate = false;
+  bool _softwareUpdateCardDismissed = false;
+  _CloseDialogPhase _closeDialogPhase = _CloseDialogPhase.choosing;
+  _CloseAction _selectedCloseAction = _CloseAction.exit;
+  String _closeBehavior = closeBehaviorAsk;
+  _SoftwareUpdateProgress? _softwareUpdateProgress;
+  _AvailableSoftwareUpdate? _availableSoftwareUpdate;
+  DownloadedAppUpdate? _downloadedAppUpdate;
+  Directory? _downloadedAppUpdateInstallDirectory;
+  DateTime? _lastSoftwareUpdateProgressPaint;
   double _confidence = 0.25;
   double _iou = 0.45;
-  double _previewConfidenceThreshold = 0.25;
+  final Map<String, double> _previewConfidenceSettings = <String, double>{
+    previewAllSpeciesLabel: 0.25,
+  };
   String _previewSpeciesFilter = previewAllSpeciesLabel;
+  double get _previewConfidenceThreshold =>
+      _previewConfidenceSettings[_previewSpeciesFilter] ??
+      _previewConfidenceSettings[previewAllSpeciesLabel] ??
+      0.25;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
+  MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
-  String _videoMode = 'all';
+  String _videoMode = defaultVideoProcessingMode;
   int _imageSize = 1920;
-  int _vidStride = 1;
+  int _vidStride = defaultVideoSampleCount;
   int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
+  String? _watchedInputDirectory;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
+  String? _lastWindowsShellStatusSignature;
+  bool _duplicateLaunchDialogVisible = false;
 
   @override
   void initState() {
@@ -119,14 +179,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     windowManager.addListener(this);
     unawaited(windowManager.setPreventClose(true));
     _initWindowState();
+    if (Platform.isWindows) {
+      _windowsShellChannel.setMethodCallHandler(_handleWindowsShellCall);
+    }
 
     try {
       MediaKit.ensureInitialized();
     } catch (_) {}
 
-    _inputController.addListener(_schedulePreviewRefresh);
+    _inputController.addListener(() {
+      _schedulePreviewRefresh();
+      _updateInputDirectoryWatcher();
+      unawaited(_updateWindowsShellStatus());
+    });
     _loadLastInputPath();
+    _loadCloseBehavior();
+    _loadLastCloseAction();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_updateWindowsShellStatus());
       unawaited(_startBackendAndInitialRefresh());
     });
   }
@@ -134,8 +204,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   void dispose() {
     windowManager.removeListener(this);
+    if (Platform.isWindows) {
+      _windowsShellChannel.setMethodCallHandler(null);
+    }
     _timer?.cancel();
     _previewRefreshTimer?.cancel();
+    _inputDirectoryChangeTimer?.cancel();
+    _modelSelectionSaveTimer?.cancel();
+    final inputDirectoryWatcher = _inputDirectoryWatcher;
+    if (inputDirectoryWatcher != null) {
+      unawaited(inputDirectoryWatcher.cancel());
+    }
+    _appUpdater.close();
     if (_closing) {
       widget.apiClient.close();
     } else {
@@ -149,6 +229,141 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     super.dispose();
   }
 
+  ProcessingJob? get _windowsShellJob {
+    for (final job in _jobs) {
+      if (job.isWorkerActive) return job;
+    }
+    for (final job in _jobs) {
+      if (job.canResume) return job;
+    }
+    return null;
+  }
+
+  Future<dynamic> _handleWindowsShellCall(MethodCall call) async {
+    if (call.method == 'duplicateLaunch') {
+      await _showAndFocusWindow();
+      await _showDuplicateLaunchDialog();
+      return null;
+    }
+    if (call.method != 'trayAction') return null;
+    switch (call.arguments) {
+      case 'toggleProcessing':
+        final job = _windowsShellJob;
+        if (job == null) {
+          if (_canCreateJobFromTray) await _createJob();
+        } else if (job.isWorkerActive) {
+          if (!_pendingStopJobIds.contains(job.id)) {
+            await _cancelJob(job);
+          }
+        } else if (job.canResume &&
+            !_pendingStartJobBaselines.containsKey(job.id)) {
+          await _resumeJob(job);
+        }
+      case 'openSettings':
+        if (mounted) setState(() => _selectedIndex = 3);
+        await _showAndFocusWindow();
+      case 'exit':
+        await _showAndFocusWindow();
+        if (mounted) _requestCloseWindow(forceExit: true);
+    }
+    return null;
+  }
+
+  Future<void> _showDuplicateLaunchDialog() async {
+    if (!mounted || _duplicateLaunchDialogVisible) return;
+    _duplicateLaunchDialogVisible = true;
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          icon: const Icon(Icons.info_outline_rounded),
+          title: const Text('Neri 已经打开'),
+          content: const Text('已切换到正在运行的 Neri 窗口，无需重复启动。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _duplicateLaunchDialogVisible = false;
+    }
+  }
+
+  Future<void> _showAndFocusWindow() async {
+    try {
+      await windowManager.show();
+      if (await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.focus();
+    } catch (_) {}
+  }
+
+  Future<void> _updateWindowsShellStatus() async {
+    if (!Platform.isWindows || !mounted) return;
+    final job = _windowsShellJob;
+    final isRunning = job?.isWorkerActive ?? false;
+    final isFailed = job?.state == 'failed';
+    final hasProgress = job != null && job.total > 0;
+    final progress = hasProgress
+        ? job.progress.clamp(0.0, 1.0).toDouble()
+        : 0.0;
+    final percent = (progress * 100).round();
+
+    String tooltip = 'Neri';
+    if (job != null) {
+      final counts = hasProgress
+          ? ' ($percent% · ${job.processed}/${job.total})'
+          : '';
+      if (isRunning) {
+        tooltip = hasProgress ? 'Neri - 任务进度$counts' : 'Neri - 任务准备中';
+      } else if (isFailed) {
+        tooltip = 'Neri - 任务失败$counts';
+      } else {
+        tooltip = 'Neri - 任务已暂停$counts';
+      }
+    }
+
+    final taskActionEnabled = job == null
+        ? _canCreateJobFromTray
+        : isRunning
+        ? !_pendingStopJobIds.contains(job.id)
+        : job.canResume && !_pendingStartJobBaselines.containsKey(job.id);
+    final progressState = job == null
+        ? 'none'
+        : isRunning
+        ? (hasProgress ? 'normal' : 'indeterminate')
+        : isFailed
+        ? 'error'
+        : 'paused';
+    final status = <String, Object>{
+      'tooltip': tooltip,
+      'taskActionEnabled': taskActionEnabled,
+      'taskIsRunning': isRunning,
+      'progressState': progressState,
+      'progress': progress,
+    };
+    final signature = jsonEncode(status);
+    if (_lastWindowsShellStatusSignature == signature) return;
+    try {
+      await _windowsShellChannel.invokeMethod<void>('updateStatus', status);
+      _lastWindowsShellStatusSignature = signature;
+    } on MissingPluginException {
+      // Non-Windows test runners do not register the native shell channel.
+    } on PlatformException {
+      // A transient native-shell failure should not interrupt processing.
+    }
+  }
+
+  bool get _canCreateJobFromTray =>
+      _backendReady &&
+      _settings != null &&
+      !_submitting &&
+      _inputController.text.trim().isNotEmpty;
+
   @override
   void onWindowClose() {
     _requestCloseWindow();
@@ -157,7 +372,99 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool get _closeFlowBlocksBackendStartup =>
       _closing && _closeDialogPhase != _CloseDialogPhase.restoring;
 
-  void _requestCloseWindow() {
+  String get _configuredCloseBehavior => normalizeCloseBehavior(_closeBehavior);
+
+  void _requestCloseWindow({bool forceExit = false}) {
+    if (_closing || _showClosingOverlay) return;
+    final behavior = forceExit ? closeBehaviorExit : _configuredCloseBehavior;
+    if (behavior == closeBehaviorHideToTray) {
+      unawaited(_hideWindowToTray());
+      return;
+    }
+    if (behavior == closeBehaviorExit) {
+      _beginBackendShutdown();
+      return;
+    }
+
+    ++_closeFlowId;
+    if (!mounted) return;
+    setState(() {
+      _closeDialogPhase = _CloseDialogPhase.choosing;
+      _closeDontAskAgain = false;
+      _closeSelectionSaving = false;
+      _showClosingOverlay = true;
+    });
+  }
+
+  void _dismissCloseWindowPrompt() {
+    if (_closeDialogPhase != _CloseDialogPhase.choosing ||
+        _closeSelectionSaving) {
+      return;
+    }
+    ++_closeFlowId;
+    setState(() {
+      _showClosingOverlay = false;
+      _closeDontAskAgain = false;
+      _closeSelectionSaving = false;
+    });
+  }
+
+  Future<void> _hideWindowToTray() async {
+    try {
+      await windowManager.hide();
+    } catch (error) {
+      if (mounted) _showSnackBar('隐藏到任务托盘失败：$error');
+    }
+  }
+
+  Future<void> _confirmCloseWindow() async {
+    if (_closeDialogPhase != _CloseDialogPhase.choosing ||
+        _closeSelectionSaving) {
+      return;
+    }
+    final flowId = _closeFlowId;
+    final selectedAction = _selectedCloseAction;
+    final dontAskAgain = _closeDontAskAgain;
+    setState(() => _closeSelectionSaving = true);
+    try {
+      await _saveLastCloseAction(selectedAction);
+    } catch (_) {
+      // A preference persistence failure must not block the selected action.
+    }
+    if (!mounted ||
+        flowId != _closeFlowId ||
+        _closeDialogPhase != _CloseDialogPhase.choosing) {
+      return;
+    }
+    if (dontAskAgain) {
+      final behavior = selectedAction == _CloseAction.hideToTray
+          ? closeBehaviorHideToTray
+          : closeBehaviorExit;
+      try {
+        await _updateCloseBehavior(behavior);
+      } catch (_) {
+        // A preference persistence failure must not block the selected action.
+      }
+      if (!mounted ||
+          flowId != _closeFlowId ||
+          _closeDialogPhase != _CloseDialogPhase.choosing) {
+        return;
+      }
+    }
+
+    if (selectedAction == _CloseAction.hideToTray) {
+      setState(() {
+        _showClosingOverlay = false;
+        _closeSelectionSaving = false;
+        _closeDontAskAgain = false;
+      });
+      await _hideWindowToTray();
+      return;
+    }
+    _beginBackendShutdown();
+  }
+
+  void _beginBackendShutdown() {
     if (_closing) return;
     final flowId = ++_closeFlowId;
     _closing = true;
@@ -168,34 +475,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshRequestId++;
     if (mounted) {
       setState(() {
-        _closeBackendStopped = false;
-        _closeDialogPhase = _CloseDialogPhase.confirming;
+        _closeDialogPhase = _CloseDialogPhase.shuttingDown;
+        _closeSelectionSaving = false;
         _showClosingOverlay = true;
       });
     }
     final shutdownTask = _shutdownBackend();
     _closeBackendShutdownTask = shutdownTask;
     unawaited(
-      shutdownTask.catchError((_) {}).whenComplete(() {
-        if (!mounted || !_showClosingOverlay || flowId != _closeFlowId) return;
-        if (_closeDialogPhase == _CloseDialogPhase.confirming) {
-          setState(() => _closeBackendStopped = true);
-        }
-      }),
+      shutdownTask
+          .catchError((_) {})
+          .whenComplete(() => _finishCloseWindow(flowId)),
     );
   }
 
-  void _confirmCloseWindow() {
-    if (!_closing || _closeDialogPhase == _CloseDialogPhase.closing) return;
-    final flowId = _closeFlowId;
-    if (mounted) {
-      setState(() => _closeDialogPhase = _CloseDialogPhase.closing);
-    }
-    unawaited(_finishCloseWindow(flowId));
-  }
-
   void _cancelCloseWindow() {
-    if (!_closing || _closeDialogPhase != _CloseDialogPhase.confirming) return;
+    if (!_closing || _closeDialogPhase != _CloseDialogPhase.shuttingDown) {
+      return;
+    }
     final shutdownTask = _closeBackendShutdownTask;
     final flowId = ++_closeFlowId;
     if (mounted) {
@@ -244,9 +541,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         setState(() {
           _closing = false;
           _showClosingOverlay = false;
-          _closeBackendStopped = false;
+          _closeSelectionSaving = false;
+          _closeDontAskAgain = false;
           _closeBackendShutdownTask = null;
-          _closeDialogPhase = _CloseDialogPhase.confirming;
+          _closeDialogPhase = _CloseDialogPhase.choosing;
         });
       }
     }
@@ -277,12 +575,90 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _schedulePreviewRefresh();
   }
 
+  Future<void> _loadCloseBehavior() async {
+    final revision = _closeBehaviorRevision;
+    final preferences = await SharedPreferences.getInstance();
+    final behavior = normalizeCloseBehavior(
+      preferences.getString(closeBehaviorSettingKey),
+    );
+    if (!mounted || revision != _closeBehaviorRevision) return;
+    setState(() => _closeBehavior = behavior);
+  }
+
+  Future<void> _loadLastCloseAction() async {
+    final revision = _lastCloseActionRevision;
+    final preferences = await SharedPreferences.getInstance();
+    final savedAction = normalizeLastCloseAction(
+      preferences.getString(lastCloseActionSettingKey),
+    );
+    if (!mounted || revision != _lastCloseActionRevision) return;
+    setState(() {
+      _selectedCloseAction = savedAction == closeBehaviorExit
+          ? _CloseAction.exit
+          : _CloseAction.hideToTray;
+    });
+  }
+
+  Future<void> _updateLastCloseAction(_CloseAction action) async {
+    if (_selectedCloseAction == action) return;
+    final previous = _selectedCloseAction;
+    final revision = ++_lastCloseActionRevision;
+    if (mounted) setState(() => _selectedCloseAction = action);
+    try {
+      await _saveLastCloseAction(action);
+      if (mounted && revision != _lastCloseActionRevision) {
+        await _saveLastCloseAction(_selectedCloseAction);
+      }
+    } catch (error) {
+      if (mounted && revision == _lastCloseActionRevision) {
+        setState(() => _selectedCloseAction = previous);
+        _showSnackBar('保存上次关闭选择失败：$error');
+      }
+    }
+  }
+
+  Future<void> _saveLastCloseAction(_CloseAction action) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      lastCloseActionSettingKey,
+      action == _CloseAction.exit ? closeBehaviorExit : closeBehaviorHideToTray,
+    );
+  }
+
+  Future<void> _updateCloseBehavior(String behavior) async {
+    final normalized = normalizeCloseBehavior(behavior);
+    final previous = _closeBehavior;
+    final revision = ++_closeBehaviorRevision;
+    if (mounted && _closeBehavior != normalized) {
+      setState(() => _closeBehavior = normalized);
+    }
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(closeBehaviorSettingKey, normalized);
+    } catch (_) {
+      if (mounted && revision == _closeBehaviorRevision) {
+        setState(() => _closeBehavior = previous);
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _updateCloseBehaviorFromSettings(String behavior) async {
+    try {
+      await _updateCloseBehavior(behavior);
+    } catch (error) {
+      if (mounted) _showSnackBar('保存关闭方式失败：$error');
+    }
+  }
+
   Future<void> _startBackendAndInitialRefresh() async {
     if (_closeFlowBlocksBackendStartup) return;
     if (_backendStarting) return;
     _backendStarting = true;
     if (mounted) setState(() => _loading = true);
     try {
+      await _waitForActiveEnvironmentMaintenance();
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
       await _ensureBackendStarted();
       if (_closeFlowBlocksBackendStartup) {
         if (mounted) setState(() => _loading = false);
@@ -314,9 +690,38 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
+  Future<void> _waitForActiveEnvironmentMaintenance() async {
+    var status = await _maintenanceStatusStore.tryRead();
+    if (status == null || !_maintenanceStatusStore.isActive(status)) return;
+
+    var missingWorkerChecks = 0;
+    while (mounted && !_closeFlowBlocksBackendStartup) {
+      if (!_maintenanceStatusStore.isActive(status!)) break;
+      setState(() => _startupMaintenanceStatus = status);
+
+      if (await _maintenanceStatusStore.isWorkerRunning(status)) {
+        missingWorkerChecks = 0;
+      } else {
+        missingWorkerChecks++;
+        if (missingWorkerChecks >= 3) {
+          await _maintenanceStatusStore.markInterrupted(status);
+          break;
+        }
+      }
+
+      await Future<void>.delayed(const Duration(seconds: 1));
+      status =
+          await _maintenanceStatusStore.tryRead(path: status.statusPath) ??
+          status;
+    }
+
+    if (mounted) setState(() => _startupMaintenanceStatus = null);
+  }
+
   Future<void> _refreshInitialPageData() async {
     await _refresh(includeJobResults: true, finishLoading: false);
     if (!mounted || _closeFlowBlocksBackendStartup) return;
+    _scheduleStartupUpdateCheck();
     if (_inputController.text.trim().isEmpty) {
       _stopGlobalLoading();
       return;
@@ -324,6 +729,296 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshTimer?.cancel();
     _previewRefreshTimer = null;
     await _refreshPreviewItems(force: true, finishGlobalLoading: true);
+  }
+
+  void _scheduleStartupUpdateCheck() {
+    if (_startupUpdateCheckScheduled ||
+        !_appUpdater.isSupported ||
+        _settings == null) {
+      return;
+    }
+    _startupUpdateCheckScheduled = true;
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 700), () async {
+        if (!mounted || _closing) return;
+        await _checkForSoftwareUpdate(manual: false);
+      }),
+    );
+  }
+
+  Future<void> _checkForSoftwareUpdate({
+    required bool manual,
+    String? channel,
+    String? downloadSource,
+  }) async {
+    if (_checkingForAppUpdate || _closing) {
+      if (manual) _showSnackBar('正在检查或安装更新，请稍候。');
+      return;
+    }
+    if (_downloadedAppUpdate != null) {
+      if (manual && mounted) {
+        setState(() => _softwareUpdateCardDismissed = false);
+        _showSnackBar('更新已下载，可从右下角选择重启更新。');
+      }
+      return;
+    }
+    if (_availableSoftwareUpdate != null) {
+      if (manual && mounted) {
+        setState(() => _softwareUpdateCardDismissed = false);
+        _showSnackBar('已发现新版本，请在右下角选择是否下载更新。');
+      }
+      return;
+    }
+    final settings = _settings;
+    if (settings == null) {
+      if (manual) _showSnackBar('版本信息尚未加载，请稍后重试。');
+      return;
+    }
+    final installDirectory = _resolveProjectRoot();
+    if (installDirectory == null) {
+      if (manual) _showSnackBar('未找到程序目录，无法执行自动更新。');
+      return;
+    }
+    final selectedChannel =
+        channel ?? _stringSetting(settings, 'update_channel', 'Preview');
+    final selectedDownloadSource =
+        downloadSource ?? _stringSetting(settings, 'update_source', 'auto');
+    final downloadSourceDetail = switch (selectedDownloadSource) {
+      'domestic' => '将使用 Neri 国内源检查并下载更新。',
+      'github' => '将使用 GitHub 官方源检查并下载更新。',
+      _ => '正在选择最合适的更新源',
+    };
+
+    _checkingForAppUpdate = true;
+    if (manual && mounted) {
+      setState(() {
+        _softwareUpdateCardDismissed = false;
+        _softwareUpdateProgress = _SoftwareUpdateProgress(
+          message: '正在检查最新版本…',
+          detail: downloadSourceDetail,
+        );
+      });
+    }
+
+    try {
+      final useMainlandChinaSource = await widget.apiClient
+          .shouldUseMainlandUpdateSource(selectedDownloadSource);
+      final release = await _appUpdater.checkForUpdate(
+        currentVersion: settings.appVersion,
+        channel: selectedChannel,
+        useMainlandChinaSource: useMainlandChinaSource,
+      );
+      if (!mounted || _closing) return;
+      setState(() => _softwareUpdateProgress = null);
+      if (release == null) {
+        if (manual) _showSnackBar('当前已是所选通道的最新版本。');
+        return;
+      }
+      setState(() {
+        _softwareUpdateCardDismissed = false;
+        _availableSoftwareUpdate = _AvailableSoftwareUpdate(
+          release: release,
+          installDirectory: installDirectory,
+        );
+      });
+    } catch (error) {
+      if (!mounted || _closing) return;
+      setState(() {
+        _softwareUpdateProgress = null;
+      });
+      if (manual) {
+        _showSnackBar('检查更新失败：$error');
+      }
+    } finally {
+      _checkingForAppUpdate = false;
+    }
+  }
+
+  void _dismissAvailableSoftwareUpdate() {
+    if (!mounted) return;
+    setState(() => _availableSoftwareUpdate = null);
+  }
+
+  void _startAvailableSoftwareUpdateDownload() {
+    final available = _availableSoftwareUpdate;
+    if (available == null || _checkingForAppUpdate || _closing) return;
+    _checkingForAppUpdate = true;
+    setState(() {
+      _availableSoftwareUpdate = null;
+      _softwareUpdateCardDismissed = false;
+    });
+    _showSnackBar('更新下载已开始，完成后会显示“重启并更新”。');
+    unawaited(
+      _downloadAppUpdate(
+            available.release,
+            installDirectory: available.installDirectory,
+          )
+          .catchError((Object error, StackTrace stackTrace) {
+            if (mounted && !_closing) {
+              setState(() => _softwareUpdateProgress = null);
+              _showSnackBar('下载更新失败：$error');
+            }
+          })
+          .whenComplete(() => _checkingForAppUpdate = false),
+    );
+  }
+
+  Future<void> _downloadAppUpdate(
+    AppUpdateRelease release, {
+    required Directory installDirectory,
+  }) async {
+    _lastSoftwareUpdateProgressPaint = null;
+    if (mounted) {
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在准备下载更新…',
+          detail: '更新包将保存到系统临时文件夹。',
+          isDownloading: true,
+        );
+      });
+    }
+
+    try {
+      final downloaded = await _appUpdater.downloadUpdate(
+        release,
+        onProgress: _handleSoftwareUpdateDownloadProgress,
+      );
+      if (!mounted || _closing) {
+        return;
+      }
+      setState(() {
+        _downloadedAppUpdate = downloaded;
+        _downloadedAppUpdateInstallDirectory = installDirectory;
+        _softwareUpdateProgress = null;
+        _softwareUpdateCardDismissed = false;
+      });
+      _showSnackBar('更新下载完成，可从右下角选择“重启并更新”。');
+    } catch (error) {
+      // Keep completed and partial files so a later attempt can reuse them.
+      if (mounted && !_closing) {
+        setState(() {
+          _softwareUpdateProgress = null;
+        });
+        _showSnackBar('下载更新失败：$error');
+      }
+    }
+  }
+
+  void _dismissSoftwareUpdateCard() {
+    if (!mounted) return;
+    setState(() => _softwareUpdateCardDismissed = true);
+  }
+
+  Future<void> _installDownloadedAppUpdate() async {
+    final downloaded = _downloadedAppUpdate;
+    final installDirectory = _downloadedAppUpdateInstallDirectory;
+    if (downloaded == null ||
+        installDirectory == null ||
+        _installingDownloadedAppUpdate ||
+        _closing) {
+      return;
+    }
+    _installingDownloadedAppUpdate = true;
+    if (mounted) {
+      setState(() {
+        _softwareUpdateCardDismissed = false;
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在启动更新脚本…',
+          detail: '确认安装程序已启动后，Neri 将自动关闭。',
+          fraction: 1,
+        );
+      });
+    }
+    try {
+      await _appUpdater.launchInstaller(
+        update: downloaded,
+        installDirectory: installDirectory,
+        restartExecutable: _restartExecutable(installDirectory),
+      );
+      if (!mounted) return;
+      setState(() {
+        _softwareUpdateProgress = const _SoftwareUpdateProgress(
+          message: '正在关闭程序并安装更新…',
+          detail: '请勿手动关闭更新脚本。安装完成后 Neri 会自动重新启动。',
+          fraction: 1,
+        );
+      });
+      await _exitForSoftwareUpdate();
+    } catch (error) {
+      if (mounted && !_closing) {
+        setState(() => _softwareUpdateProgress = null);
+        _showSnackBar('启动更新安装失败：$error');
+      }
+    } finally {
+      _installingDownloadedAppUpdate = false;
+    }
+  }
+
+  void _handleSoftwareUpdateDownloadProgress(UpdateDownloadProgress progress) {
+    if (!mounted || _closing) return;
+    final now = DateTime.now();
+    final isComplete =
+        progress.totalBytes != null &&
+        progress.receivedBytes >= progress.totalBytes!;
+    if (!isComplete &&
+        _lastSoftwareUpdateProgressPaint != null &&
+        now.difference(_lastSoftwareUpdateProgressPaint!).inMilliseconds < 80) {
+      return;
+    }
+    _lastSoftwareUpdateProgressPaint = now;
+    final total = progress.totalBytes;
+    final detail = total == null
+        ? '已下载 ${_formatByteCount(progress.receivedBytes)}'
+        : '${_formatByteCount(progress.receivedBytes)} / ${_formatByteCount(total)}';
+    setState(() {
+      _softwareUpdateProgress = _SoftwareUpdateProgress(
+        message: '正在从${progress.sourceLabel}下载更新…',
+        detail: detail,
+        fraction: progress.fraction,
+        isDownloading: true,
+      );
+    });
+  }
+
+  File _restartExecutable(Directory installDirectory) {
+    final launcher = _fileUnder(installDirectory, ['Neri.exe']);
+    return launcher.existsSync()
+        ? launcher
+        : File(Platform.resolvedExecutable).absolute;
+  }
+
+  Future<void> _exitForSoftwareUpdate() async {
+    _closing = true;
+    _timer?.cancel();
+    _timer = null;
+    _previewRefreshTimer?.cancel();
+    _previewRefreshTimer = null;
+    _backendReady = false;
+    try {
+      await _shutdownBackend().timeout(const Duration(seconds: 10));
+    } catch (_) {}
+    try {
+      await windowManager
+          .setPreventClose(false)
+          .timeout(const Duration(milliseconds: 300));
+    } catch (_) {}
+    CrashWatchdog.markNormalExit();
+    try {
+      await windowManager.destroy().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    exit(0);
+  }
+
+  String _formatByteCount(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    const units = <String>['KB', 'MB', 'GB', 'TB'];
+    var value = bytes / 1024;
+    var unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    return '${value.toStringAsFixed(value >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
 
   Future<void> _restartBackendAndRefresh() async {
@@ -831,6 +1526,73 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
+  Future<void> _refreshVisibleResultsPage() async {
+    await _refresh(silent: true);
+    if (!mounted || (_selectedIndex != 1 && _selectedIndex != 2)) return;
+    // Re-scan the input directory whenever a results page is opened. Reusing
+    // the list cached for the same path would keep files that were deleted
+    // outside Neri visible in both preview and validation.
+    await _refreshPreviewItems(force: true);
+  }
+
+  void _updateInputDirectoryWatcher() {
+    final inputPath = _inputController.text.trim();
+    if (_watchedInputDirectory == inputPath && _inputDirectoryWatcher != null) {
+      return;
+    }
+
+    _inputDirectoryChangeTimer?.cancel();
+    _inputDirectoryChangeTimer = null;
+    final previousWatcher = _inputDirectoryWatcher;
+    _inputDirectoryWatcher = null;
+    _watchedInputDirectory = null;
+    if (previousWatcher != null) {
+      unawaited(previousWatcher.cancel());
+    }
+
+    if (inputPath.isEmpty) return;
+    final directory = Directory(inputPath);
+    if (!directory.existsSync()) return;
+
+    try {
+      _inputDirectoryWatcher = directory
+          .watch(
+            events:
+                FileSystemEvent.create |
+                FileSystemEvent.delete |
+                FileSystemEvent.move,
+            recursive: true,
+          )
+          .listen(_handleInputDirectoryEvent, onError: (_) {});
+      _watchedInputDirectory = inputPath;
+    } on FileSystemException {
+      // Re-scanning when a results page is opened remains the fallback for
+      // file systems that do not support recursive directory watching.
+    }
+  }
+
+  void _handleInputDirectoryEvent(FileSystemEvent event) {
+    final destination = event is FileSystemMoveEvent ? event.destination : null;
+    final affectsMedia =
+        event.isDirectory ||
+        _isSupportedMediaPath(event.path) ||
+        (destination != null && _isSupportedMediaPath(destination));
+    if (!affectsMedia) return;
+
+    _inputDirectoryChangeTimer?.cancel();
+    _inputDirectoryChangeTimer = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted || _inputController.text.trim() != _watchedInputDirectory) {
+        return;
+      }
+      unawaited(_refreshPreviewItems(force: true));
+    });
+  }
+
+  bool _isSupportedMediaPath(String path) {
+    final normalizedPath = path.toLowerCase();
+    return _supportedMediaExtensions.any(normalizedPath.endsWith);
+  }
+
   Future<void> _refreshPreviewItems({
     bool force = false,
     bool finishGlobalLoading = false,
@@ -857,7 +1619,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted) return;
     setState(() {
       _previewLoading = true;
-      if (_previewLoadedPath != inputPath || force) {
+      if (shouldClearPreviewItemsBeforeRefresh(
+        loadedPath: _previewLoadedPath,
+        inputPath: inputPath,
+      )) {
         _previewItems = const <DetectionItem>[];
         _previewMetadataCache.clear();
         _previewMetadataLoading.clear();
@@ -882,6 +1647,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _previewItems = sortedItems;
         _previewLoadedPath = inputPath;
         _previewLoading = false;
+        _previewContentVersion++;
         if (finishGlobalLoading) {
           _loading = false;
         }
@@ -1119,16 +1885,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings()
           : _settings;
-      final summariesOnly =
-          !includeJobResults || (silent && _jobProcessingBusy);
-      var jobs = await widget.apiClient.listJobs(
-        includeResults: !summariesOnly,
+      var fetchedCompleteJobResults = shouldFetchCompleteJobResults(
+        includeJobResults: includeJobResults,
+        silent: silent,
+        jobProcessingBusy: _jobProcessingBusy,
+        resultsPageVisible: _selectedIndex == 1 || _selectedIndex == 2,
       );
-      if (summariesOnly &&
+      var jobs = await widget.apiClient.listJobs(
+        includeResults: fetchedCompleteJobResults,
+      );
+      final jobFinishedSinceLastRefresh = _hasJobFinishedSinceLastRefresh(jobs);
+      if (!fetchedCompleteJobResults &&
           includeJobResults &&
-          jobs.every((job) => !job.isWorkerActive)) {
+          (jobFinishedSinceLastRefresh ||
+              jobs.every((job) => !job.isWorkerActive))) {
         jobs = await widget.apiClient.listJobs();
-      } else if (summariesOnly) {
+        fetchedCompleteJobResults = true;
+      } else if (!fetchedCompleteJobResults) {
         jobs = _mergeJobSummariesWithCachedResults(jobs);
       }
       if (!mounted || _closeFlowBlocksBackendStartup || settings == null) {
@@ -1157,9 +1930,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         }
       }
 
-      final previewJobUpdates = jobsChanged && !summariesOnly
+      var previewJobUpdates = jobsChanged && fetchedCompleteJobResults
           ? _jobResultsForInputPath(jobs, _inputController.text.trim())
           : const <DetectionItem>[];
+      if (previewJobUpdates.isNotEmpty) {
+        previewJobUpdates = await existingLocalDetectionItems(
+          previewJobUpdates,
+        );
+        if (!mounted || _closeFlowBlocksBackendStartup) return;
+      }
 
       if (settingsChanged || jobsChanged) {
         setState(() {
@@ -1170,12 +1949,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               .map((model) => model.path)
               .toSet();
           if (_selectedModelPath == null ||
-              !modelPaths.contains(_selectedModelPath)) {
-            _selectedModelPath =
-                settings.selectedModel ??
-                (settings.availableModels.isEmpty
-                    ? null
-                    : settings.availableModels.first.path);
+              (_selectedModelPath!.isNotEmpty &&
+                  !modelPaths.contains(_selectedModelPath))) {
+            _selectedModelPath = _savedModelSelection(
+              settings,
+              'selected_model',
+              settings.selectedModel ?? '',
+              modelPaths,
+            );
           }
           final classificationModelPaths = settings
               .availableClassificationModels
@@ -1186,8 +1967,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   !classificationModelPaths.contains(
                     _selectedClassificationModelPath,
                   ))) {
-            _selectedClassificationModelPath =
-                settings.selectedClassificationModel ?? '';
+            _selectedClassificationModelPath = _savedModelSelection(
+              settings,
+              'selected_classification_model',
+              settings.selectedClassificationModel ?? '',
+              classificationModelPaths,
+            );
           }
           if (firstLoad) {
             _confidence = _doubleSetting(settings, 'confidence', _confidence);
@@ -1200,10 +1985,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             _useFp16 =
                 settings.gpuAvailable &&
                 _boolSetting(settings, 'use_fp16', _useFp16);
-            _videoMode =
-                _stringSetting(settings, 'video_mode', _videoMode) == 'fast'
-                ? 'fast'
-                : 'all';
+            _videoMode = normalizeVideoProcessingMode(
+              _stringSetting(settings, 'video_mode', _videoMode),
+            );
             _vidStride = _intSetting(
               settings,
               'vid_stride',
@@ -1222,6 +2006,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             _selectedPreviewIndex = _safePreviewIndex(_previewItems);
           }
         });
+      }
+      if (settingsChanged || jobsChanged) {
+        unawaited(_updateWindowsShellStatus());
       }
 
       // 清理加载状态
@@ -1267,6 +2054,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     ];
   }
 
+  bool _hasJobFinishedSinceLastRefresh(List<ProcessingJob> jobs) {
+    final previousById = {for (final job in _jobs) job.id: job};
+    return jobs.any((job) {
+      final previous = previousById[job.id];
+      return previous != null && previous.isWorkerActive && !job.isWorkerActive;
+    });
+  }
+
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
     if (mounted) setState(() => _settingsSaving = true);
     try {
@@ -1274,10 +2069,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted) return;
       setState(() {
         _settings = saved;
-        _selectedModelPath = saved.selectedModel ?? _selectedModelPath;
-        _selectedClassificationModelPath =
-            saved.selectedClassificationModel ??
-            _selectedClassificationModelPath;
+        _selectedModelPath = _savedModelSelection(
+          saved,
+          'selected_model',
+          saved.selectedModel ?? '',
+          saved.availableModels.map((model) => model.path).toSet(),
+        );
+        _selectedClassificationModelPath = _savedModelSelection(
+          saved,
+          'selected_classification_model',
+          saved.selectedClassificationModel ?? '',
+          saved.availableClassificationModels
+              .map((model) => model.path)
+              .toSet(),
+        );
         _confidence = _doubleSetting(saved, 'confidence', _confidence);
         _iou = _doubleSetting(saved, 'iou', _iou);
         _imageSize = _intSetting(
@@ -1287,9 +2092,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ).clamp(320, 4096).toInt();
         _useFp16 =
             saved.gpuAvailable && _boolSetting(saved, 'use_fp16', _useFp16);
-        _videoMode = _stringSetting(saved, 'video_mode', _videoMode) == 'fast'
-            ? 'fast'
-            : 'all';
+        _videoMode = normalizeVideoProcessingMode(
+          _stringSetting(saved, 'video_mode', _videoMode),
+        );
         _vidStride = _intSetting(
           saved,
           'vid_stride',
@@ -1332,12 +2137,32 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return fallback;
   }
 
+  String _savedModelSelection(
+    NeriSettings settings,
+    String key,
+    String fallback,
+    Set<String> availablePaths,
+  ) {
+    final value = settings.settings[key];
+    if (value is String) {
+      final cleaned = value.trim();
+      if (cleaned.isEmpty || availablePaths.contains(cleaned)) return cleaned;
+    }
+    return availablePaths.contains(fallback) ? fallback : '';
+  }
+
   int _processingBatchSize({bool singleFile = false}) {
     if (singleFile) return 1;
     final settings = _settingsOrEmpty();
     final savedBatchSize = _intSetting(settings, 'batch_size', 16);
     final gpuAvailable = _settings?.gpuAvailable == true;
     return gpuAvailable ? savedBatchSize.clamp(1, 64).toInt() : 1;
+  }
+
+  int _processingThreadCount({bool singleFile = false}) {
+    if (singleFile || _settings?.gpuAvailable != true) return 1;
+    final settings = _settingsOrEmpty();
+    return _intSetting(settings, 'thread_count', 4).clamp(1, 8).toInt();
   }
 
   int _imageSizeSetting() {
@@ -1357,19 +2182,30 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   String _effectiveVideoMode() {
-    return _videoMode == 'fast' ? 'fast' : 'all';
+    return normalizeVideoProcessingMode(_videoMode);
   }
 
   bool _useAugment() {
-    return _boolSetting(_settingsOrEmpty(), 'use_augment', false);
+    return _boolSetting(_settingsOrEmpty(), 'use_augment', true);
   }
 
   bool _useAgnosticNms() {
     return _boolSetting(_settingsOrEmpty(), 'use_agnostic_nms', true);
   }
 
+  String _confidencePriority() {
+    return _stringSetting(
+              _settingsOrEmpty(),
+              'confidence_priority',
+              'classification',
+            ) ==
+            'detection'
+        ? 'detection'
+        : 'classification';
+  }
+
   String _packageSource() {
-    return _stringSetting(_settingsOrEmpty(), 'package_source', 'official');
+    return _stringSetting(_settingsOrEmpty(), 'package_source', 'auto');
   }
 
   String _pytorchVersion() {
@@ -1491,14 +2327,39 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
+  Future<bool> _ensureDetectionModelSelected() async {
+    final hasDetectionModel = _selectedModelPath?.trim().isNotEmpty == true;
+    final hasClassificationModel =
+        _selectedClassificationModelPath?.trim().isNotEmpty == true;
+    if (hasDetectionModel || hasClassificationModel) return true;
+    if (!mounted) return false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('请选择检测模型'),
+        content: const Text('探测模型和分类模型不能同时设为“不使用”。请至少选择一个模型后再开始检测。'),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+    return false;
+  }
+
   Future<void> _createJob() async {
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
       _showSnackBar('请输入红外相机媒体文件夹路径');
       return;
     }
+    if (!await _ensureDetectionModelSelected()) return;
 
     setState(() => _submitting = true);
+    unawaited(_updateWindowsShellStatus());
     try {
       await _saveLastInputPath(inputPath);
       final createdJob = await widget.apiClient.createJob(
@@ -1510,7 +2371,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(),
+        threadCount: _processingThreadCount(),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -1530,13 +2393,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (await _handleYoloDependencyError(error)) return;
       _showSnackBar('创建任务失败：$error');
     } finally {
-      if (mounted) setState(() => _submitting = false);
+      if (mounted) {
+        setState(() => _submitting = false);
+        unawaited(_updateWindowsShellStatus());
+      }
     }
   }
 
   Future<void> _cancelJob(ProcessingJob job) async {
     if (mounted && job.id.isNotEmpty) {
       setState(() => _pendingStopJobIds.add(job.id));
+      unawaited(_updateWindowsShellStatus());
     }
     try {
       await widget.apiClient.cancelJob(job.id);
@@ -1545,6 +2412,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted) return;
       setState(() => _pendingStopJobIds.remove(job.id));
+      unawaited(_updateWindowsShellStatus());
       _showSnackBar('停止任务失败：$error');
     }
   }
@@ -1554,6 +2422,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() {
         _pendingStartJobBaselines[job.id] = job.processed;
       });
+      unawaited(_updateWindowsShellStatus());
     }
     try {
       await widget.apiClient.resumeJob(job.id);
@@ -1562,6 +2431,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted) return;
       setState(() => _pendingStartJobBaselines.remove(job.id));
+      unawaited(_updateWindowsShellStatus());
       _showSnackBar('继续任务失败：$error');
     }
   }
@@ -1600,14 +2470,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final sourceLabel = switch (packageSource) {
       'aliyun' => '阿里源',
       'tsinghua' => '清华源',
+      'nju' => '南京大学源',
       _ => '官方源',
     };
     final installIntelDriver = await _resolveIntelDriverInstall(envChoice);
     if (installIntelDriver == null || !mounted) return true;
 
     final driverStep = installIntelDriver
-        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
-        : '安装时会先自动安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
+        ? '安装时会先从 Intel 官网下载并运行显卡驱动安装程序，再使用$sourceLabel及对应硬件版本的 PyTorch wheel 源安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。'
+        : '安装时会使用$sourceLabel及对应硬件版本的 PyTorch wheel 源安装适用于“$envChoice”的 PyTorch，然后从$sourceLabel安装 ultralytics。';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1684,6 +2555,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _detectCurrentPreviewImage(DetectionItem item) async {
+    if (!await _ensureDetectionModelSelected()) return;
     setState(() => _previewDetecting = true);
     try {
       await widget.apiClient.createJob(
@@ -1695,7 +2567,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(singleFile: true),
+        threadCount: _processingThreadCount(singleFile: true),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -1720,6 +2594,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     required double confidence,
   }) async {
     if (items.isEmpty) return;
+    if (!await _ensureDetectionModelSelected()) return;
     setState(() => _submitting = true);
     try {
       final inputPaths = items
@@ -1737,7 +2612,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
+        confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
+        threadCount: _processingThreadCount(singleFile: inputPaths.length == 1),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -1894,6 +2771,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     };
   }
 
+  String _emptyPhotoDeleteMode(NeriSettings settings) {
+    final value = _stringSetting(
+      settings,
+      'empty_photo_delete_mode',
+      emptyPhotoDeleteAsk,
+    );
+    return switch (value) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
+    };
+  }
+
   Future<void> _saveSilentSettingsPatch(Map<String, dynamic> patch) async {
     final current = _settings;
     if (current == null) {
@@ -1922,6 +2812,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     };
     return _saveSilentSettingsPatch({
       'favorite_photo_export_mode': normalizedMode,
+    });
+  }
+
+  Future<void> _updateEmptyPhotoDeleteMode(String mode) {
+    final normalizedMode = switch (mode) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
+    };
+    return _saveSilentSettingsPatch({
+      'empty_photo_delete_mode': normalizedMode,
     });
   }
 
@@ -2087,7 +2988,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                           onDestinationSelected: (index) {
                             setState(() => _selectedIndex = index);
                             if (index == 1 || index == 2) {
-                              unawaited(_refreshPreviewItems());
+                              unawaited(_refreshVisibleResultsPage());
                             }
                           },
                         ),
@@ -2111,12 +3012,43 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             ],
           ),
         ),
+        if (_startupMaintenanceStatus case final status?)
+          _StartupMaintenanceOverlay(status: status),
+        if (_softwareUpdateProgress case final progress?)
+          if (!_softwareUpdateCardDismissed)
+            _SoftwareUpdateProgressCard(
+              progress: progress,
+              onClose: _dismissSoftwareUpdateCard,
+            ),
+        if (_availableSoftwareUpdate case final availableUpdate?)
+          if (!_softwareUpdateCardDismissed &&
+              _softwareUpdateProgress == null &&
+              _downloadedAppUpdate == null)
+            _AvailableSoftwareUpdateCard(
+              release: availableUpdate.release,
+              onLater: _dismissAvailableSoftwareUpdate,
+              onDownload: _startAvailableSoftwareUpdateDownload,
+            ),
+        if (_downloadedAppUpdate case final downloadedUpdate?)
+          if (!_softwareUpdateCardDismissed && _softwareUpdateProgress == null)
+            _DownloadedSoftwareUpdateCard(
+              release: downloadedUpdate.release,
+              onClose: _dismissSoftwareUpdateCard,
+              onInstall: () => unawaited(_installDownloadedAppUpdate()),
+            ),
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,
-            backendStopped: _closeBackendStopped,
+            selectedAction: _selectedCloseAction,
+            dontAskAgain: _closeDontAskAgain,
+            selectionSaving: _closeSelectionSaving,
+            onActionChanged: (action) =>
+                unawaited(_updateLastCloseAction(action)),
+            onDontAskAgainChanged: (value) =>
+                setState(() => _closeDontAskAgain = value),
+            onDismiss: _dismissCloseWindowPrompt,
             onCancel: _cancelCloseWindow,
-            onConfirm: _confirmCloseWindow,
+            onConfirm: () => unawaited(_confirmCloseWindow()),
           ),
       ],
     );
@@ -2162,15 +3094,96 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
+  void _updateStartModelSelection(
+    String? value, {
+    required bool classification,
+  }) {
+    final normalizedValue = value ?? '';
+    setState(() {
+      if (classification) {
+        _selectedClassificationModelPath = normalizedValue;
+      } else {
+        _selectedModelPath = normalizedValue;
+      }
+      final current = _settings;
+      if (current != null) {
+        final nextSettings = Map<String, dynamic>.from(current.settings)
+          ..['selected_model'] = _selectedModelPath ?? ''
+          ..['selected_classification_model'] =
+              _selectedClassificationModelPath ?? '';
+        _settings = current.copyWith(
+          settings: nextSettings,
+          selectedModel: _selectedModelPath ?? '',
+          selectedClassificationModel: _selectedClassificationModelPath ?? '',
+        );
+      }
+      _modelSelectionRevision += 1;
+    });
+    _scheduleModelSelectionSave();
+  }
+
+  void _scheduleModelSelectionSave() {
+    _modelSelectionSaveTimer?.cancel();
+    _modelSelectionSaveTimer = Timer(
+      const Duration(milliseconds: 300),
+      () => unawaited(_persistModelSelections()),
+    );
+  }
+
+  Future<void> _persistModelSelections() async {
+    _modelSelectionSaveTimer?.cancel();
+    _modelSelectionSaveTimer = null;
+    if (_modelSelectionSaveInProgress) return;
+    final current = _settings;
+    if (current == null) return;
+
+    final saveRevision = _modelSelectionRevision;
+    final detectionModel = _selectedModelPath ?? '';
+    final classificationModel = _selectedClassificationModelPath ?? '';
+    final nextSettings = Map<String, dynamic>.from(current.settings)
+      ..['selected_model'] = detectionModel
+      ..['selected_classification_model'] = classificationModel;
+    _modelSelectionSaveInProgress = true;
+    try {
+      final saved = await widget.apiClient.saveSettings(nextSettings);
+      if (!mounted) return;
+      setState(() {
+        if (saveRevision == _modelSelectionRevision) {
+          _settings = saved;
+          return;
+        }
+        final latestSettings = Map<String, dynamic>.from(saved.settings)
+          ..['selected_model'] = _selectedModelPath ?? ''
+          ..['selected_classification_model'] =
+              _selectedClassificationModelPath ?? '';
+        _settings = saved.copyWith(
+          settings: latestSettings,
+          selectedModel: _selectedModelPath ?? '',
+          selectedClassificationModel: _selectedClassificationModelPath ?? '',
+        );
+      });
+    } catch (error) {
+      if (mounted && saveRevision == _modelSelectionRevision) {
+        _showSnackBar('保存模型选择失败：$error');
+      }
+    } finally {
+      _modelSelectionSaveInProgress = false;
+      if (mounted && saveRevision != _modelSelectionRevision) {
+        _scheduleModelSelectionSave();
+      }
+    }
+  }
+
   Widget _buildStartScreen() {
     return StartScreen(
       settings: _settings,
       inputController: _inputController,
       selectedModelPath: _selectedModelPath,
-      onModelChanged: (value) => setState(() => _selectedModelPath = value),
+      onModelChanged: (value) =>
+          _updateStartModelSelection(value, classification: false),
       selectedClassificationModelPath: _selectedClassificationModelPath,
       onClassificationModelChanged: (value) =>
-          setState(() => _selectedClassificationModelPath = value ?? ''),
+          _updateStartModelSelection(value, classification: true),
       videoMode: _videoMode,
       onVideoModeChanged: (value) => setState(() => _videoMode = value),
       vidStride: _vidStride,
@@ -2200,7 +3213,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       apiClient: widget.apiClient,
       themeNotifier: widget.themeNotifier,
       onUpdateTheme: _updateTheme,
+      closeBehavior: _closeBehavior,
+      onCloseBehaviorChanged: (behavior) =>
+          unawaited(_updateCloseBehaviorFromSettings(behavior)),
       onSaveSettings: _saveAdvancedSettings,
+      onCheckForUpdates:
+          ({required String channel, required String downloadSource}) =>
+              _checkForSoftwareUpdate(
+                manual: true,
+                channel: channel,
+                downloadSource: downloadSource,
+              ),
       onShowMessage: _showSnackBar,
     );
   }
@@ -2219,6 +3242,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       selectedIndex: selectedIndex,
       selectedItem: selectedItem,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      useCombinedConfidence:
+          _selectedModelPath?.trim().isNotEmpty == true &&
+          _selectedClassificationModelPath?.trim().isNotEmpty == true,
       showDetections: _previewShowDetections,
       onShowDetectionsChanged: (value) =>
           setState(() => _previewShowDetections = value),
@@ -2226,8 +3252,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onSpeciesFilterChanged: (value) =>
           setState(() => _previewSpeciesFilter = value),
       confidenceThreshold: _previewConfidenceThreshold,
-      onConfidenceThresholdChanged: (value) =>
-          setState(() => _previewConfidenceThreshold = value),
+      onConfidenceThresholdChanged: (value) => setState(
+        () => _previewConfidenceSettings[_previewSpeciesFilter] = value,
+      ),
       detecting: _previewDetecting,
       loading: _previewLoading,
       onDetectCurrentImage: _detectCurrentPreviewImage,
@@ -2258,24 +3285,31 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       inputPath: inputPath,
       items: items,
       loading: _previewLoading,
-      refreshVersion: _previewRefreshRequestId,
+      refreshVersion: _previewContentVersion,
       speciesTypes: _settings?.speciesTypes ?? const <String, String>{},
+      useCombinedConfidence:
+          _selectedModelPath?.trim().isNotEmpty == true &&
+          _selectedClassificationModelPath?.trim().isNotEmpty == true,
       minFrameRatio: _doubleSetting(
         settings,
         'min_frame_ratio',
         0.0,
       ).clamp(0.0, 1.0).toDouble(),
       autoGroup: _boolSetting(settings, 'auto_group', true),
-      collapseGroups: _boolSetting(settings, 'collapse_groups', false),
+      collapseGroups: _boolSetting(settings, 'collapse_groups', true),
       autoGroupDetectBurst: _boolSetting(
         settings,
         'auto_group_detect_burst',
-        false,
+        true,
       ),
       autoGroupBurstSize: _intSetting(settings, 'auto_group_burst_size', 3),
       autoGroupGapSeconds: _intSetting(settings, 'auto_group_gap_seconds', 30),
       autoSortQuickMarks: _boolSetting(settings, 'auto_sort', false),
-      undoSteps: _intSetting(settings, 'undo_steps', 10).clamp(10, 200).toInt(),
+      undoSteps: _intSetting(
+        settings,
+        'undo_steps',
+        200,
+      ).clamp(10, 200).toInt(),
       quickMarkSpecies: quickMarkSpecies,
       quickMarkRecentHistory: _stringListSetting(
         settings,
@@ -2299,6 +3333,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         const <String>[],
       ),
       favoritePhotoExportMode: _favoritePhotoExportMode(settings),
+      emptyPhotoDeleteMode: _emptyPhotoDeleteMode(settings),
       onRefresh: () => _refreshPreviewItems(force: true),
       onLoadMetadata: _loadPreviewMetadata,
       onOpenExternal: _openFileWithSystem,
@@ -2309,6 +3344,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onRedetectItems: _redetectValidationItems,
       onFavoritePhotoPathsChanged: _updateFavoritePhotoPaths,
       onFavoritePhotoExportModeChanged: _updateFavoritePhotoExportMode,
+      onEmptyPhotoDeleteModeChanged: _updateEmptyPhotoDeleteMode,
       onAutoGroupInferredBurstSizeChanged:
           _handleAutoGroupInferredBurstSizeChanged,
     );
@@ -2351,36 +3387,381 @@ class _NavigationRailEntry {
   final IconData selectedIcon;
 }
 
+class _StartupMaintenanceOverlay extends StatelessWidget {
+  const _StartupMaintenanceOverlay({required this.status});
+
+  final MaintenanceStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: kToolbarHeight + 4,
+      bottom: 0,
+      child: ColoredBox(
+        color: scheme.scrim.withValues(alpha: 0.36),
+        child: Center(
+          child: Card(
+            elevation: 6,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox.square(
+                      dimension: 24,
+                      child: CircularProgressIndicator(
+                        value: status.progress / 100,
+                        strokeWidth: 2.8,
+                        color: scheme.primary,
+                        backgroundColor: scheme.surfaceContainerHighest,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '环境维护中',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            status.message.isEmpty
+                                ? '正在继续之前的依赖安装，请稍候。'
+                                : status.message,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: scheme.onSurfaceVariant),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AvailableSoftwareUpdate {
+  const _AvailableSoftwareUpdate({
+    required this.release,
+    required this.installDirectory,
+  });
+
+  final AppUpdateRelease release;
+  final Directory installDirectory;
+}
+
+class _SoftwareUpdateProgress {
+  const _SoftwareUpdateProgress({
+    required this.message,
+    required this.detail,
+    this.fraction,
+    this.isDownloading = false,
+  });
+
+  final String message;
+  final String detail;
+  final double? fraction;
+  final bool isDownloading;
+}
+
+class _SoftwareUpdateProgressCard extends StatelessWidget {
+  const _SoftwareUpdateProgressCard({
+    required this.progress,
+    required this.onClose,
+  });
+
+  final _SoftwareUpdateProgress progress;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 6,
+        child: SizedBox(
+          width: 360,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 14, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.download_rounded, color: scheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        progress.isDownloading ? '下载更新' : '软件更新',
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onClose,
+                      tooltip: '关闭进度卡',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(value: progress.fraction),
+                const SizedBox(height: 10),
+                Text(
+                  progress.message,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  progress.detail,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AvailableSoftwareUpdateCard extends StatelessWidget {
+  const _AvailableSoftwareUpdateCard({
+    required this.release,
+    required this.onLater,
+    required this.onDownload,
+  });
+
+  final AppUpdateRelease release;
+  final VoidCallback onLater;
+  final VoidCallback onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final notes = release.notes.trim();
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 7,
+        child: SizedBox(
+          width: 400,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.system_update_alt_rounded,
+                      color: scheme.primary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '发现新版本 ${release.tag}',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            release.prerelease ? '预览版更新' : '稳定版更新',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onLater,
+                      tooltip: '关闭',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                if (notes.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    notes,
+                    maxLines: 5,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(onPressed: onLater, child: const Text('稍后')),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: onDownload,
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('下载更新'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DownloadedSoftwareUpdateCard extends StatelessWidget {
+  const _DownloadedSoftwareUpdateCard({
+    required this.release,
+    required this.onClose,
+    required this.onInstall,
+  });
+
+  final AppUpdateRelease release;
+  final VoidCallback onClose;
+  final VoidCallback onInstall;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Positioned(
+      right: 20,
+      bottom: 20,
+      child: Card(
+        elevation: 7,
+        child: SizedBox(
+          width: 400,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.download_done_rounded, color: scheme.primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '更新已下载 ${release.tag}',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            release.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onClose,
+                      tooltip: '关闭',
+                      icon: const Icon(Icons.close_rounded, size: 19),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '更新包已下载完成，可以稍后安装或立即重启 Neri 完成更新。',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(onPressed: onClose, child: const Text('稍后')),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: onInstall,
+                      icon: const Icon(Icons.restart_alt_rounded),
+                      label: const Text('重启并更新'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ClosingOverlay extends StatelessWidget {
   const _ClosingOverlay({
     required this.phase,
-    required this.backendStopped,
+    required this.selectedAction,
+    required this.dontAskAgain,
+    required this.selectionSaving,
+    required this.onActionChanged,
+    required this.onDontAskAgainChanged,
+    required this.onDismiss,
     required this.onCancel,
     required this.onConfirm,
   });
 
   final _CloseDialogPhase phase;
-  final bool backendStopped;
+  final _CloseAction selectedAction;
+  final bool dontAskAgain;
+  final bool selectionSaving;
+  final ValueChanged<_CloseAction> onActionChanged;
+  final ValueChanged<bool> onDontAskAgainChanged;
+  final VoidCallback onDismiss;
   final VoidCallback onCancel;
   final VoidCallback onConfirm;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final showActions = phase == _CloseDialogPhase.confirming;
-    final showProgress =
-        phase != _CloseDialogPhase.confirming || !backendStopped;
     final title = switch (phase) {
-      _CloseDialogPhase.confirming => '关闭程序？',
-      _CloseDialogPhase.closing => '正在关闭',
+      _CloseDialogPhase.choosing => '关闭主窗口？',
+      _CloseDialogPhase.shuttingDown => '正在退出主程序',
       _CloseDialogPhase.restoring => '正在恢复',
     };
     final message = switch (phase) {
-      _CloseDialogPhase.confirming =>
-        backendStopped
-            ? 'Python 后端已关闭。确认后将退出程序，取消会重新启动后端。'
-            : '正在先关闭 Python 后端。确认后将立即退出程序，取消会重新启动后端。',
-      _CloseDialogPhase.closing => '正在退出程序。若后端仍在收尾，会随主程序退出自动结束。',
+      _CloseDialogPhase.choosing => '请选择关闭主窗口后的操作。',
+      _CloseDialogPhase.shuttingDown => '正在关闭 Python 后端，关闭完成后将自动退出主程序。',
       _CloseDialogPhase.restoring => '正在重新启动 Python 后端，请稍候。',
     };
 
@@ -2388,7 +3769,11 @@ class _ClosingOverlay extends StatelessWidget {
       child: Stack(
         children: [
           ModalBarrier(
-            dismissible: false,
+            dismissible:
+                phase == _CloseDialogPhase.choosing && !selectionSaving,
+            onDismiss: phase == _CloseDialogPhase.choosing && !selectionSaving
+                ? onDismiss
+                : null,
             color: scheme.scrim.withValues(alpha: 0.36),
           ),
           Center(
@@ -2405,7 +3790,7 @@ class _ClosingOverlay extends StatelessWidget {
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (showProgress) ...[
+                          if (phase != _CloseDialogPhase.choosing) ...[
                             SizedBox(
                               width: 22,
                               height: 22,
@@ -2422,6 +3807,13 @@ class _ClosingOverlay extends StatelessWidget {
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ),
+                          if (phase == _CloseDialogPhase.choosing)
+                            IconButton(
+                              tooltip: '关闭',
+                              onPressed: selectionSaving ? null : onDismiss,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(Icons.close_rounded, size: 20),
+                            ),
                         ],
                       ),
                       const SizedBox(height: 10),
@@ -2431,7 +3823,68 @@ class _ClosingOverlay extends StatelessWidget {
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
-                      if (showActions) ...[
+                      if (phase == _CloseDialogPhase.choosing) ...[
+                        const SizedBox(height: 12),
+                        RadioGroup<_CloseAction>(
+                          groupValue: selectedAction,
+                          onChanged: (value) {
+                            if (!selectionSaving && value != null) {
+                              onActionChanged(value);
+                            }
+                          },
+                          child: Column(
+                            children: [
+                              RadioListTile<_CloseAction>(
+                                contentPadding: EdgeInsets.zero,
+                                value: _CloseAction.hideToTray,
+                                enabled: !selectionSaving,
+                                title: const Text('隐藏到任务托盘'),
+                                subtitle: const Text('主程序和 Python 后端继续在后台运行'),
+                              ),
+                              RadioListTile<_CloseAction>(
+                                contentPadding: EdgeInsets.zero,
+                                value: _CloseAction.exit,
+                                enabled: !selectionSaving,
+                                title: const Text('退出主程序'),
+                                subtitle: const Text('关闭 Python 后端并退出 Neri'),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: CheckboxListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
+                                value: dontAskAgain,
+                                onChanged: selectionSaving
+                                    ? null
+                                    : (value) =>
+                                          onDontAskAgainChanged(value ?? false),
+                                title: const Text('不再提醒'),
+                                subtitle: const Text('以后自动执行本次选择'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            FilledButton(
+                              onPressed: selectionSaving ? null : onConfirm,
+                              child: selectionSaving
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('确认'),
+                            ),
+                          ],
+                        ),
+                      ] else if (phase == _CloseDialogPhase.shuttingDown) ...[
                         const SizedBox(height: 18),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
@@ -2439,11 +3892,6 @@ class _ClosingOverlay extends StatelessWidget {
                             TextButton(
                               onPressed: onCancel,
                               child: const Text('取消'),
-                            ),
-                            const SizedBox(width: 8),
-                            FilledButton(
-                              onPressed: onConfirm,
-                              child: const Text('关闭'),
                             ),
                           ],
                         ),

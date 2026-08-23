@@ -63,10 +63,20 @@ def upsert_detection(db_path: str, base_name: str,
               json.dumps(detection_data, ensure_ascii=False)))
 
 
-def upsert_detections_bulk(db_path: str, items: list[tuple[str, str, dict]]):
-    """批量写入/更新检测记录，所有操作在同一事务内完成。"""
-    if not items:
+def upsert_detections_bulk(db_path: str, payloads: list[tuple[str, str, dict]]):
+    """Write or update detection records in one transaction."""
+    rows = [
+        (
+            str(base_name),
+            str(image_filename),
+            json.dumps(detection_data or {}, ensure_ascii=False),
+        )
+        for base_name, image_filename, detection_data in payloads
+        if base_name and image_filename
+    ]
+    if not rows:
         return
+
     with _get_conn(db_path) as conn:
         conn.executemany("""
             INSERT INTO detections (base_name, image_filename, detection_json, updated_at)
@@ -75,14 +85,7 @@ def upsert_detections_bulk(db_path: str, items: list[tuple[str, str, dict]]):
                 image_filename = excluded.image_filename,
                 detection_json = excluded.detection_json,
                 updated_at     = excluded.updated_at
-        """, [
-            (
-                base_name,
-                image_filename,
-                json.dumps(detection_data, ensure_ascii=False),
-            )
-            for base_name, image_filename, detection_data in items
-        ])
+        """, rows)
 
 
 def get_detection(db_path: str, base_name: str) -> dict | None:
@@ -147,6 +150,22 @@ def upsert_validation(db_path: str, image_filename: str, is_validated: bool):
             INSERT INTO validation (image_filename, is_validated) VALUES (?,?)
             ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
         """, (image_filename, 1 if is_validated else 0))
+
+
+def upsert_validation_bulk(db_path: str, validations: list[tuple[str, bool]]):
+    rows = [
+        (str(image_filename), 1 if is_validated else 0)
+        for image_filename, is_validated in validations
+        if image_filename
+    ]
+    if not rows:
+        return
+
+    with _get_conn(db_path) as conn:
+        conn.executemany("""
+            INSERT INTO validation (image_filename, is_validated) VALUES (?,?)
+            ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
+        """, rows)
 
 
 def delete_validation(db_path: str, image_filename: str):
@@ -232,15 +251,3 @@ def migrate_from_json(db_path: str, photo_dir: str,
 
     logger.info(f"[迁移] 共迁移 {migrated} 条检测记录到 SQLite")
     return migrated
-
-def upsert_validation_bulk(db_path: str, items: list[tuple[str, bool]]):
-    """批量写入/更新校验状态，所有操作在同一事务内完成。
-    items: [(image_filename, is_validated), ...]
-    """
-    if not items:
-        return
-    with _get_conn(db_path) as conn:
-        conn.executemany("""
-            INSERT INTO validation (image_filename, is_validated) VALUES (?,?)
-            ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
-        """, [(fn, 1 if v else 0) for fn, v in items])

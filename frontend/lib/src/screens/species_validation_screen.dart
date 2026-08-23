@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../api_client.dart';
 import '../models/job.dart';
+import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
@@ -41,6 +42,9 @@ typedef RedetectValidationItems =
 const favoritePhotoExportAsk = 'ask';
 const favoritePhotoExportAlways = 'export';
 const favoritePhotoExportNever = 'skip';
+const emptyPhotoDeleteAsk = 'ask';
+const emptyPhotoDeleteAlways = 'delete';
+const emptyPhotoDeleteNever = 'keep';
 
 const validationExportColumns = <String>[
   '文件名',
@@ -79,6 +83,26 @@ const validationQuantityButtons = <String>[
 ];
 
 const double _validationButtonHeight = 40;
+const _validationImageTypes = {
+  'png',
+  'jpg',
+  'jpeg',
+  'bmp',
+  'gif',
+  'tiff',
+  'webp',
+};
+const _validationVideoTypes = {
+  'mp4',
+  'avi',
+  'mov',
+  'mkv',
+  'wmv',
+  'flv',
+  'webm',
+  'm4v',
+  'ts',
+};
 
 class SpeciesValidationScreen extends StatefulWidget {
   const SpeciesValidationScreen({
@@ -88,6 +112,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.loading,
     required this.refreshVersion,
     required this.speciesTypes,
+    required this.useCombinedConfidence,
     required this.minFrameRatio,
     required this.autoGroup,
     required this.collapseGroups,
@@ -103,6 +128,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.exportColumns,
     required this.favoritePhotoPaths,
     required this.favoritePhotoExportMode,
+    required this.emptyPhotoDeleteMode,
     required this.onRefresh,
     required this.onLoadMetadata,
     required this.onOpenExternal,
@@ -113,6 +139,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onRedetectItems,
     required this.onFavoritePhotoPathsChanged,
     required this.onFavoritePhotoExportModeChanged,
+    required this.onEmptyPhotoDeleteModeChanged,
     required this.onAutoGroupInferredBurstSizeChanged,
     super.key,
   });
@@ -123,6 +150,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final bool loading;
   final int refreshVersion;
   final Map<String, String> speciesTypes;
+  final bool useCombinedConfidence;
   final double minFrameRatio;
   final bool autoGroup;
   final bool collapseGroups;
@@ -138,6 +166,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final List<String> exportColumns;
   final List<String> favoritePhotoPaths;
   final String favoritePhotoExportMode;
+  final String emptyPhotoDeleteMode;
   final Future<void> Function() onRefresh;
   final Future<void> Function(DetectionItem item) onLoadMetadata;
   final void Function(String path) onOpenExternal;
@@ -148,6 +177,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final RedetectValidationItems onRedetectItems;
   final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
   final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
+  final Future<void> Function(String mode) onEmptyPhotoDeleteModeChanged;
   final ValueChanged<int?> onAutoGroupInferredBurstSizeChanged;
 
   @override
@@ -189,7 +219,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   static String _savedSelectedQuantity = '1';
   static String _savedSelectedSpeciesFilter = _globalSpecies;
   static String _savedExportFormat = 'csv';
-  static double _savedConfidence = 0.25;
+  static final Map<String, double> _savedConfidenceSettings = <String, double>{
+    _globalSpecies: 0.25,
+  };
   static bool _savedShowDetections = true;
   static _ValidationListFocus? _savedActiveList;
 
@@ -209,8 +241,21 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String get _exportFormat => _savedExportFormat;
   set _exportFormat(String value) => _savedExportFormat = value;
 
-  double get _confidence => _savedConfidence;
-  set _confidence(double value) => _savedConfidence = value;
+  double _confidenceFor(String species) {
+    return _savedConfidenceSettings[species] ??
+        _savedConfidenceSettings[_globalSpecies] ??
+        0.25;
+  }
+
+  double get _confidence => _confidenceFor(_selectedSpeciesFilter);
+
+  String get _confidenceSettingsSignature {
+    final entries = _savedConfidenceSettings.entries.toList()
+      ..sort((left, right) => left.key.compareTo(right.key));
+    return entries
+        .map((entry) => '${entry.key}:${entry.value.toStringAsFixed(6)}')
+        .join('|');
+  }
 
   bool get _showDetections => _savedShowDetections;
   set _showDetections(bool value) => _savedShowDetections = value;
@@ -233,7 +278,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool? _bucketCacheAutoGroupDetectBurst;
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
-  double? _bucketCacheConfidence;
+  String? _bucketCacheConfidenceSignature;
   double? _bucketCacheMinFrameRatio;
   String? _bucketCachePathSignature;
   String? _bucketCacheGroupingSignature;
@@ -280,6 +325,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     };
   }
 
+  String get _emptyPhotoDeleteMode {
+    return switch (widget.emptyPhotoDeleteMode) {
+      emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
+      emptyPhotoDeleteNever => emptyPhotoDeleteNever,
+      _ => emptyPhotoDeleteAsk,
+    };
+  }
+
   String get _undoTooltip => '撤回上一步校验';
 
   @override
@@ -308,7 +361,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheAutoGroupDetectBurst = null;
       _bucketCacheBurstSize = null;
       _bucketCacheGapSeconds = null;
-      _bucketCacheConfidence = null;
+      _bucketCacheConfidenceSignature = null;
       _bucketCacheMinFrameRatio = null;
       _bucketCachePathSignature = null;
       _bucketCacheGroupingSignature = null;
@@ -774,7 +827,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
         isFavorite: _isFavoritePhoto(item),
-        onToggleFavorite: _isImage(item)
+        onToggleFavorite: _isImage(item) || _isVideo(item)
             ? () => unawaited(_toggleFavoritePhoto(item))
             : null,
       ),
@@ -907,6 +960,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   ) {
     final summary = _summaryFor(item, visibleBoxes);
     final colorScheme = Theme.of(context).colorScheme;
+    final confidenceLabel = widget.useCombinedConfidence ? '综合置信度' : '置信度';
 
     return _ValidationPanel(
       child: Padding(
@@ -928,7 +982,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  置信度: ${summary.confidence}',
+                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
@@ -948,15 +1002,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
-    final speciesOptions = <String>{
-      _globalSpecies,
-      ...item.species,
-      ...item.detectionBoxes.map((box) => box.species),
-    }.where((value) => value.isNotEmpty).toList();
+    final speciesOptions = detectionSpeciesOptions(
+      item,
+      globalOption: _globalSpecies,
+    );
 
     final selectedSpecies = speciesOptions.contains(_selectedSpeciesFilter)
         ? _selectedSpeciesFilter
         : _globalSpecies;
+    final selectedConfidence = _confidenceFor(selectedSpecies);
 
     return _ValidationPanel(
       child: Padding(
@@ -986,15 +1040,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(width: 16),
             Expanded(
               child: Slider(
-                value: _confidence,
+                value: selectedConfidence,
                 min: 0.05,
                 max: 0.95,
                 divisions: 90,
-                label: _confidence.toStringAsFixed(2),
-                onChanged: (value) => setState(() => _confidence = value),
+                label: selectedConfidence.toStringAsFixed(2),
+                onChanged: (value) => setState(
+                  () => _savedConfidenceSettings[selectedSpecies] = value,
+                ),
               ),
             ),
-            SizedBox(width: 36, child: Text(_confidence.toStringAsFixed(2))),
+            SizedBox(
+              width: 36,
+              child: Text(selectedConfidence.toStringAsFixed(2)),
+            ),
           ],
         ),
       ),
@@ -1284,17 +1343,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isImage(DetectionItem item) {
-    const imageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
-    return imageTypes.contains(item.fileType.toLowerCase());
+    return _validationImageTypes.contains(item.fileType.toLowerCase());
   }
 
   bool _isFavoritePhoto(DetectionItem item) {
-    return _isImage(item) &&
+    return (_isImage(item) || _isVideo(item)) &&
         widget.favoritePhotoPaths.any((path) => path.trim() == item.path);
   }
 
   Future<void> _toggleFavoritePhoto(DetectionItem item) async {
-    if (!_isImage(item)) return;
+    if (!_isImage(item) && !_isVideo(item)) return;
 
     final favorites = <String>[];
     final seen = <String>{};
@@ -1312,7 +1370,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     try {
       await widget.onFavoritePhotoPathsChanged(favorites);
       if (!mounted) return;
-      _showSnackBar(isFavorite ? '已取消收藏照片' : '已收藏照片');
+      final mediaLabel = _isVideo(item) ? '视频' : '照片';
+      _showSnackBar(isFavorite ? '已取消收藏$mediaLabel' : '已收藏$mediaLabel');
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('更新收藏失败：$error');
@@ -1566,7 +1625,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
         _bucketCacheBurstSize == widget.autoGroupBurstSize &&
         _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
-        _bucketCacheConfidence == _confidence &&
+        _bucketCacheConfidenceSignature == _confidenceSettingsSignature &&
         _bucketCacheMinFrameRatio == _minFrameRatio &&
         _bucketCacheRefreshVersion == widget.refreshVersion;
 
@@ -1614,7 +1673,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
-    _bucketCacheConfidence = _confidence;
+    _bucketCacheConfidenceSignature = _confidenceSettingsSignature;
     _bucketCacheMinFrameRatio = _minFrameRatio;
     _bucketCachePathSignature = pathSignature;
     _bucketCacheGroupingSignature = groupingSignature;
@@ -1796,9 +1855,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         flushCurrent();
       }
       current.add(item);
-      if (_isVideo(item)) {
-        flushCurrent();
-      }
     }
 
     flushCurrent();
@@ -1835,15 +1891,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final previousItem = previous;
       final startsNewRun =
           previousItem != null &&
-          (_isVideo(previousItem) ||
-              _isVideo(item) ||
-              ((_mediaGap(previousItem, item) ?? Duration.zero) >=
-                  gapThreshold));
+          ((_mediaGap(previousItem, item) ?? Duration.zero) >= gapThreshold);
       if (startsNewRun) finishRun();
       if (_isImage(item)) {
         runLength += 1;
-      } else {
-        finishRun();
       }
       previous = item;
     }
@@ -1866,19 +1917,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     required Duration gapThreshold,
   }) {
     if (current.isEmpty) return false;
-    if (_isVideo(current.last)) return true;
 
-    final nextIsVideo = _isVideo(next);
-    if (nextIsVideo) {
-      final gap = _mediaGap(current.last, next);
-      return gap != null && gap >= gapThreshold;
-    }
+    final photoCount = current.where(_isImage).length;
+    if (photoCount >= burstSize && _isImage(next)) return true;
 
     final gap = _mediaGap(current.last, next);
     if (gap != null) return gap >= gapThreshold;
 
-    final photoCount = current.where(_isImage).length;
-    return photoCount >= burstSize && _isImage(next);
+    return false;
   }
 
   Duration? _mediaGap(DetectionItem previous, DetectionItem next) {
@@ -2004,6 +2050,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_useCollapsedGroups && row.group.items.length > 1) {
       final state = row.groupExpanded ? '已展开' : '已折叠';
       final groupSize = row.group.items.length;
+      if (row.groupExpanded) {
+        return '${_groupOrdinalLabel(row)} · $state · $label';
+      }
       return '${_groupOrdinalLabel(row)} · $state $groupSize 个文件 · $label';
     }
     return '${_groupOrdinalLabel(row)} · $label';
@@ -2095,35 +2144,95 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         .toList();
   }
 
+  double _thresholdForSpecies(String species) {
+    return _savedConfidenceSettings[species] ??
+        _savedConfidenceSettings[_globalSpecies] ??
+        0.25;
+  }
+
+  String _speciesFilterFor(DetectionItem item) {
+    return detectionSpeciesOptions(
+          item,
+          globalOption: _globalSpecies,
+        ).contains(_selectedSpeciesFilter)
+        ? _selectedSpeciesFilter
+        : _globalSpecies;
+  }
+
+  DetectionBox? _boxAfterConfidenceFilter(DetectionBox box) {
+    if (box.candidates.isNotEmpty) {
+      for (final candidate in box.candidates) {
+        final species = candidate['name']?.toString().trim() ?? '';
+        if (species.isEmpty) continue;
+        final confidence = candidateConfidence(candidate);
+        if (confidence < _thresholdForSpecies(species)) continue;
+        return DetectionBox(
+          species: species,
+          confidence: confidence,
+          bbox: box.bbox,
+          frameIndex: box.frameIndex,
+          timestamp: box.timestamp,
+          trackId: box.trackId,
+          candidates: box.candidates,
+        );
+      }
+      return null;
+    }
+
+    final confidence = box.confidence;
+    if (confidence != null && confidence < _thresholdForSpecies(box.species)) {
+      return null;
+    }
+    return box;
+  }
+
+  Map<dynamic, dynamic>? _classificationCandidateAfterConfidence(
+    DetectionItem item,
+  ) {
+    final rawCandidates = item.detectionData['分类候选项'];
+    if (rawCandidates is! List) return null;
+    for (final candidate in rawCandidates) {
+      if (candidate is! Map) continue;
+      final species = candidate['name']?.toString().trim() ?? '';
+      if (species.isEmpty) continue;
+      if (candidateConfidence(candidate) >= _thresholdForSpecies(species)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
   List<DetectionBox> _filteredBoxes(DetectionItem item) {
     final trackFrameCounts = _trackFrameCountsForFilter(item);
-    return item.detectionBoxes.where((box) {
+    final selectedSpeciesFilter = _speciesFilterFor(item);
+    final filtered = <DetectionBox>[];
+    for (final originalBox in item.detectionBoxes) {
+      final box = _boxAfterConfidenceFilter(originalBox);
+      if (box == null) continue;
       final matchesSpecies =
-          _selectedSpeciesFilter == _globalSpecies ||
-          box.species == _selectedSpeciesFilter;
-      final confidence = box.confidence;
-      final matchesConfidence = _passesConfidenceFilter(confidence);
-      return matchesSpecies &&
-          matchesConfidence &&
+          selectedSpeciesFilter == _globalSpecies ||
+          box.species == selectedSpeciesFilter;
+      if (matchesSpecies &&
           _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
-          box.bbox.length >= 4;
-    }).toList();
+          box.bbox.length >= 4) {
+        filtered.add(box);
+      }
+    }
+    return filtered;
   }
 
   List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
     final trackFrameCounts = _trackFrameCountsForFilter(item);
-    return item.detectionBoxes
-        .where(
-          (box) =>
-              _passesConfidenceFilter(box.confidence) &&
-              _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
-              box.bbox.length >= 4,
-        )
-        .toList();
-  }
-
-  bool _passesConfidenceFilter(double? confidence) {
-    return confidence == null || confidence >= _confidence;
+    final filtered = <DetectionBox>[];
+    for (final originalBox in item.detectionBoxes) {
+      final box = _boxAfterConfidenceFilter(originalBox);
+      if (box != null &&
+          _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
+          box.bbox.length >= 4) {
+        filtered.add(box);
+      }
+    }
+    return filtered;
   }
 
   double get _minFrameRatio => widget.minFrameRatio.clamp(0.0, 1.0).toDouble();
@@ -2179,8 +2288,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (_isManualDetection(item)) return false;
     if (_confidenceFilteredBoxes(item).isNotEmpty) return false;
     if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      return _classificationCandidateAfterConfidence(item) == null;
+    }
     final confidence = _itemConfidence(item);
-    return confidence != null && confidence < _confidence;
+    return confidence != null &&
+        confidence < _thresholdForSpecies(_primarySpecies(item));
   }
 
   bool _isFilteredOutByVisibleFilters(
@@ -2189,8 +2304,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   ) {
     if (_isManualDetection(item) || visibleBoxes.isNotEmpty) return false;
     if (item.detectionBoxes.any((box) => box.bbox.length >= 4)) return true;
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      return _classificationCandidateAfterConfidence(item) == null;
+    }
     final confidence = _itemConfidence(item);
-    return confidence != null && confidence < _confidence;
+    return confidence != null &&
+        confidence < _thresholdForSpecies(_primarySpecies(item));
   }
 
   String _primarySpeciesAfterConfidenceFilter(DetectionItem item) {
@@ -2206,6 +2327,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           .where((name) => name.isNotEmpty)
           .toList();
       if (species.isNotEmpty) return species.join(',');
+    }
+
+    final classificationCandidates = item.detectionData['分类候选项'];
+    if (classificationCandidates is List &&
+        classificationCandidates.isNotEmpty) {
+      final candidate = _classificationCandidateAfterConfidence(item);
+      return candidate?['name']?.toString().trim().isNotEmpty == true
+          ? candidate!['name'].toString().trim()
+          : '空';
     }
 
     if (_isFilteredOutByConfidence(item)) return '空';
@@ -2337,9 +2467,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
-    var species = _primarySpecies(item);
+    var species = _primarySpeciesAfterConfidenceFilter(item);
     var count = item.detectionData['物种数量']?.toString() ?? '';
     var confidence = item.detectionData['最低置信度']?.toString() ?? '';
+    final classificationCandidate = _classificationCandidateAfterConfidence(
+      item,
+    );
+    if (classificationCandidate != null && item.detectionBoxes.isEmpty) {
+      confidence = candidateConfidence(
+        classificationCandidate,
+      ).toStringAsFixed(2);
+      count = '1';
+    }
 
     if (visibleBoxes.isNotEmpty && item.detectionData['最低置信度'] != '人工校验') {
       final counts = _isVideo(item)
@@ -2432,8 +2571,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   bool _isVideo(DetectionItem item) {
-    const videoTypes = {'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'};
-    return videoTypes.contains(item.fileType.toLowerCase());
+    return _validationVideoTypes.contains(item.fileType.toLowerCase());
   }
 
   Map<String, int> _boxCountsBySpecies(List<DetectionBox> boxes) {
@@ -2953,7 +3091,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     Future.delayed(const Duration(seconds: 4), controller.close);
   }
 
-  List<DetectionItem> _favoriteImageItemsForExport() {
+  List<DetectionItem> _favoriteMediaItemsForExport() {
     final favoritePaths = widget.favoritePhotoPaths
         .map((path) => path.trim())
         .where((path) => path.isNotEmpty)
@@ -2963,7 +3101,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final seen = <String>{};
     return [
       for (final item in widget.items)
-        if (_isImage(item) &&
+        if ((_isImage(item) || _isVideo(item)) &&
             favoritePaths.contains(item.path) &&
             seen.add(item.path))
           item,
@@ -2971,14 +3109,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   Future<bool?> _resolveFavoritePhotoExport() async {
-    final favoriteItems = _favoriteImageItemsForExport();
+    final favoriteItems = _favoriteMediaItemsForExport();
     if (favoriteItems.isEmpty) return false;
 
     final mode = _favoritePhotoExportMode;
     if (mode == favoritePhotoExportAlways) return true;
     if (mode == favoritePhotoExportNever) return false;
 
-    final choice = await _showFavoritePhotoExportDialog(favoriteItems.length);
+    final choice = await _showFavoritePhotoExportDialog(favoriteItems);
     if (choice == null) return null;
     if (choice.remember) {
       final nextMode = choice.exportPhotos
@@ -2994,8 +3132,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   Future<_FavoritePhotoExportChoice?> _showFavoritePhotoExportDialog(
-    int favoriteCount,
+    List<DetectionItem> favoriteItems,
   ) {
+    final photoCount = favoriteItems.where(_isImage).length;
+    final videoCount = favoriteItems.where(_isVideo).length;
+    final countParts = <String>[
+      if (photoCount > 0) '$photoCount 张照片',
+      if (videoCount > 0) '$videoCount 个视频',
+    ];
+    final countLabel = countParts.join('、');
     var remember = false;
     return showDialog<_FavoritePhotoExportChoice>(
       context: context,
@@ -3003,14 +3148,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: const Text('导出收藏照片？'),
+              title: const Text('导出收藏媒体？'),
               content: SizedBox(
                 width: 420,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('当前有 $favoriteCount 张收藏照片。是否在导出表格时同步复制到单独文件夹？'),
+                    Text('当前收藏了 $countLabel。是否在导出表格时同步复制到单独文件夹？'),
                     const SizedBox(height: 12),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
@@ -3054,17 +3199,169 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
   }
 
+  List<DetectionItem> _emptyImageItemsForExport() {
+    final seen = <String>{};
+    return [
+      for (final item in widget.items)
+        if (_isImage(item) &&
+            _isEmptySpeciesLabel(_primarySpeciesAfterConfidenceFilter(item)) &&
+            seen.add(item.path))
+          item,
+    ];
+  }
+
+  bool _isEmptySpeciesLabel(String value) {
+    final normalized = value.trim();
+    return normalized == '空' || normalized.toLowerCase() == 'empty';
+  }
+
+  Future<bool?> _resolveEmptyPhotoDelete() async {
+    final emptyItems = _emptyImageItemsForExport();
+    if (emptyItems.isEmpty) return false;
+
+    final mode = _emptyPhotoDeleteMode;
+    if (mode == emptyPhotoDeleteNever) return false;
+
+    var deletePhotos = mode == emptyPhotoDeleteAlways;
+    if (!deletePhotos) {
+      final choice = await _showEmptyPhotoDeleteDialog(emptyItems.length);
+      if (choice == null) return null;
+      deletePhotos = choice.deletePhotos;
+      if (choice.remember) {
+        final nextMode = choice.deletePhotos
+            ? emptyPhotoDeleteAlways
+            : emptyPhotoDeleteNever;
+        try {
+          await widget.onEmptyPhotoDeleteModeChanged(nextMode);
+        } catch (error) {
+          if (mounted) _showSnackBar('保存删除偏好失败：$error');
+        }
+      }
+    }
+    if (!deletePhotos) return false;
+
+    final unvalidatedEmptyPhotoCount = emptyItems
+        .where((item) => !_isItemValidated(item))
+        .length;
+    if (unvalidatedEmptyPhotoCount == 0) return true;
+    if (!mounted) return null;
+    return _showUnvalidatedEmptyPhotoDeleteDialog(unvalidatedEmptyPhotoCount);
+  }
+
+  Future<_EmptyPhotoDeleteChoice?> _showEmptyPhotoDeleteDialog(
+    int emptyPhotoCount,
+  ) {
+    var remember = false;
+    return showDialog<_EmptyPhotoDeleteChoice>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('删除空照片？'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '当前有 $emptyPhotoCount 张空照片。是否在导出表格成功后删除这些源照片？此操作无法撤销。',
+                    ),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: remember,
+                      onChanged: (value) =>
+                          setDialogState(() => remember = value ?? false),
+                      title: const Text('不再询问'),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _EmptyPhotoDeleteChoice(
+                      deletePhotos: false,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('不删除'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _EmptyPhotoDeleteChoice(
+                      deletePhotos: true,
+                      remember: remember,
+                    ),
+                  ),
+                  child: const Text('删除'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<bool?> _showUnvalidatedEmptyPhotoDeleteDialog(
+    int unvalidatedEmptyPhotoCount,
+  ) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('删除未校验的空照片？'),
+          content: SizedBox(
+            width: 420,
+            child: Text(
+              '其中有 $unvalidatedEmptyPhotoCount 张空照片尚未人工校验。'
+              '是否仍在导出表格成功后删除这些源照片？此操作无法撤销。',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('不删除'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('删除'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _exportData() async {
+    final deleteEmptyPhotos = await _resolveEmptyPhotoDelete();
+    if (deleteEmptyPhotos == null) return;
     final exportFavoritePhotos = await _resolveFavoritePhotoExport();
     if (exportFavoritePhotos == null) return;
 
     setState(() => _exporting = true);
     try {
-      final confidenceSettings = _selectedSpeciesFilter == _globalSpecies
-          ? {'global': _confidence}
-          : {'global': 0.25, _selectedSpeciesFilter: _confidence};
+      final confidenceSettings = Map<String, double>.from(
+        _savedConfidenceSettings,
+      );
+      confidenceSettings.putIfAbsent(_globalSpecies, () => 0.25);
       final favoritePhotoPaths = exportFavoritePhotos
-          ? _favoriteImageItemsForExport().map((item) => item.path).toList()
+          ? _favoriteMediaItemsForExport().map((item) => item.path).toList()
+          : const <String>[];
+      final emptyPhotoPaths = deleteEmptyPhotos
+          ? _emptyImageItemsForExport().map((item) => item.path).toList()
           : const <String>[];
       final result = await widget.apiClient.exportValidationData(
         inputPath: widget.inputPath,
@@ -3076,15 +3373,32 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         minFrameRatio: _minFrameRatio,
         exportFavoritePhotos: exportFavoritePhotos,
         favoritePhotoPaths: favoritePhotoPaths,
+        deleteEmptyPhotos: deleteEmptyPhotos,
+        emptyPhotoPaths: emptyPhotoPaths,
       );
       if (!mounted) return;
       final favoriteMessage =
           result.favoriteExportedCount > 0 &&
               (result.favoriteOutputDir?.isNotEmpty ?? false)
-          ? '\n已同步导出 ${result.favoriteExportedCount} 张收藏照片到 ${result.favoriteOutputDir}'
+          ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
           : '';
+      final deleteMessage = result.deletedEmptyPhotoCount > 0
+          ? '\n已删除 ${result.deletedEmptyPhotoCount} 张空照片'
+          : '';
+      final deleteFailedMessage = result.emptyPhotoDeleteFailedCount > 0
+          ? '\n${result.emptyPhotoDeleteFailedCount} 张空照片删除失败'
+          : '';
+      if (result.deletedEmptyPhotoCount > 0) {
+        try {
+          await widget.onRefresh();
+        } catch (_) {
+          // 目录监听和下次进入页面仍会重新扫描，导出结果不受刷新失败影响。
+        }
+      }
+      if (!mounted) return;
       _showSnackBar(
-        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}$favoriteMessage',
+        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}'
+        '$favoriteMessage$deleteMessage$deleteFailedMessage',
         actionLabel: '打开',
         onAction: () => widget.onOpenExternal(result.outputPath),
       );
@@ -3570,6 +3884,16 @@ class _FavoritePhotoExportChoice {
   });
 
   final bool exportPhotos;
+  final bool remember;
+}
+
+class _EmptyPhotoDeleteChoice {
+  const _EmptyPhotoDeleteChoice({
+    required this.deletePhotos,
+    required this.remember,
+  });
+
+  final bool deletePhotos;
   final bool remember;
 }
 

@@ -65,11 +65,24 @@ class SettingsUpdateRequest(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+class PackageSourceResponse(BaseModel):
+    """Resolved Python package source used by environment maintenance."""
+
+    source: str
+    label: str
+
+
+class UpdateSourceResponse(BaseModel):
+    """Automatic desktop update source selected by the shared region detector."""
+
+    mainland_china: bool
+
+
 class InstallPytorchRequest(BaseModel):
     """Request to reinstall PyTorch for a selected runtime target."""
 
     env_choice: str = Field(default="自动检测", min_length=1)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
     install_intel_driver: bool = False
 
 
@@ -77,7 +90,7 @@ class InstallYoloDependenciesRequest(BaseModel):
     """Request to install runtime dependencies required by YOLO processing."""
 
     env_choice: str = Field(default="自动检测", min_length=1)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
     install_intel_driver: bool = False
 
 
@@ -85,7 +98,7 @@ class ReinstallPackageRequest(BaseModel):
     """Request to force-reinstall one Python package."""
 
     package: str = Field(..., min_length=1, max_length=160)
-    package_source: str = Field(default="official", min_length=1)
+    package_source: str = Field(default="auto", min_length=1)
 
 
 class MaintenanceStartResponse(BaseModel):
@@ -94,6 +107,9 @@ class MaintenanceStartResponse(BaseModel):
     accepted: bool = True
     operation: str
     message: str
+    progress: int = Field(default=0, ge=0, le=100)
+    status_path: str | None = None
+    maintenance_pid: int | None = None
 
 
 class PytorchInstallPlanResponse(BaseModel):
@@ -115,10 +131,13 @@ class MaintenanceStatusResponse(BaseModel):
     operation: str | None = None
     state: str = "idle"
     message: str = ""
+    progress: int = Field(default=0, ge=0, le=100)
     started_at: str | None = None
     updated_at: str | None = None
     return_code: int | None = None
     log_path: str | None = None
+    status_path: str | None = None
+    maintenance_pid: int | None = None
     error: str | None = None
 
 
@@ -183,17 +202,31 @@ class ClearCacheResponse(BaseModel):
 class ProcessingOptions(BaseModel):
     """Options that mirror the current desktop advanced processing controls."""
 
-    model_path: str | None = Field(default=None, description="YOLO .pt model path. Uses the project default when empty.")
-    classification_model_path: str | None = Field(default=None, description="Optional second-stage classification model path.")
+    model_path: str | None = Field(
+        default=None,
+        description="Optional YOLO detection model path.",
+    )
+    classification_model_path: str | None = Field(
+        default=None,
+        description="Optional classification model path; it can also run on full images without a detection model.",
+    )
     confidence: float = Field(default=0.25, ge=0.0, le=1.0)
     iou: float = Field(default=0.45, ge=0.0, le=1.0)
     use_fp16: bool = False
-    use_augment: bool = False
+    use_augment: bool = True
     use_agnostic_nms: bool = True
+    confidence_priority: Literal["detection", "classification"] = Field(
+        default="classification",
+        description=(
+            "How detection and classification confidence are weighted when "
+            "both models are enabled."
+        ),
+    )
     batch_size: int = Field(default=16, ge=1, le=64)
+    thread_count: int = Field(default=4, ge=1, le=8)
     imgsz: int = Field(default=1920, ge=320, le=4096)
-    vid_stride: int = Field(default=1, ge=1, le=120)
-    video_mode: Literal["all", "fast"] = "all"
+    vid_stride: int = Field(default=3, ge=1, le=120)
+    video_mode: Literal["all", "fast", "skip"] = "fast"
     enable_detection: bool = Field(
         default=False,
         description="When false, the job indexes supported files and EXIF metadata without loading YOLO.",
@@ -202,6 +235,22 @@ class ProcessingOptions(BaseModel):
         default_factory=list,
         description="Optional translated or raw class names to limit YOLO inference.",
     )
+
+    @model_validator(mode="after")
+    def validate_detection_models(self) -> "ProcessingOptions":
+        self.model_path = self.model_path.strip() if self.model_path else None
+        self.classification_model_path = (
+            self.classification_model_path.strip()
+            if self.classification_model_path
+            else None
+        )
+        if (
+            self.enable_detection
+            and not self.model_path
+            and not self.classification_model_path
+        ):
+            raise ValueError("启用检测时，探测模型和分类模型至少需要选择一个。")
+        return self
 
 
 class CreateJobRequest(BaseModel):
@@ -285,6 +334,8 @@ class ValidationExportRequest(BaseModel):
     columns_to_export: list[str] | None = None
     export_favorite_photos: bool = False
     favorite_photo_paths: list[str] = Field(default_factory=list)
+    delete_empty_photos: bool = False
+    empty_photo_paths: list[str] = Field(default_factory=list)
     min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -296,6 +347,8 @@ class ValidationExportResponse(BaseModel):
     exported_count: int
     favorite_output_dir: str | None = None
     favorite_exported_count: int = 0
+    deleted_empty_photo_count: int = 0
+    empty_photo_delete_failed_count: int = 0
 
 
 class JobSummary(BaseModel):

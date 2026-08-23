@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
+import 'models/video_processing_mode.dart';
 
 class NeriApiClient {
   NeriApiClient({
@@ -47,6 +48,37 @@ class NeriApiClient {
     );
   }
 
+  Future<PackageSourceResolution> resolvePackageSource([
+    String source = 'auto',
+  ]) async {
+    final uri = _uri(
+      '/api/environment/package-source',
+    ).replace(queryParameters: {'source': source});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return PackageSourceResolution.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<bool> shouldUseMainlandUpdateSource([String source = 'auto']) async {
+    switch (source.trim().toLowerCase()) {
+      case 'domestic':
+        return true;
+      case 'github':
+        return false;
+    }
+    final response = await _httpClient.get(
+      _uri('/api/environment/update-source'),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('更新源地区响应格式无效');
+    }
+    return decoded['mainland_china'] == true;
+  }
+
   Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
     final uri = Uri.parse(
       '$baseUrl/api/models/classes',
@@ -61,7 +93,7 @@ class NeriApiClient {
 
   Future<MaintenanceStartResponse> installPytorch(
     String envChoice, {
-    String packageSource = 'official',
+    String packageSource = 'auto',
     bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
@@ -81,7 +113,7 @@ class NeriApiClient {
 
   Future<MaintenanceStartResponse> installYoloDependencies({
     required String envChoice,
-    String packageSource = 'official',
+    String packageSource = 'auto',
     bool installIntelDriver = false,
   }) async {
     final response = await _httpClient.post(
@@ -210,12 +242,14 @@ class NeriApiClient {
     required double confidence,
     required double iou,
     required bool useFp16,
-    bool useAugment = false,
+    bool useAugment = true,
     bool useAgnosticNms = true,
+    String confidencePriority = 'classification',
     int batchSize = 16,
+    int threadCount = 4,
     int imageSize = 1920,
-    int vidStride = 1,
-    String videoMode = 'all',
+    int vidStride = defaultVideoSampleCount,
+    String videoMode = defaultVideoProcessingMode,
     required bool enableDetection,
     List<String> selectedSpeciesNames = const <String>[],
   }) async {
@@ -248,7 +282,9 @@ class NeriApiClient {
           'use_fp16': useFp16,
           'use_augment': useAugment,
           'use_agnostic_nms': useAgnosticNms,
+          'confidence_priority': confidencePriority,
           'batch_size': batchSize,
+          'thread_count': threadCount,
           'imgsz': imageSize,
           'vid_stride': vidStride,
           'video_mode': videoMode,
@@ -387,6 +423,8 @@ class NeriApiClient {
     Map<String, double>? confidenceSettings,
     bool exportFavoritePhotos = false,
     List<String>? favoritePhotoPaths,
+    bool deleteEmptyPhotos = false,
+    List<String>? emptyPhotoPaths,
     double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
@@ -401,6 +439,8 @@ class NeriApiClient {
         'export_favorite_photos': exportFavoritePhotos,
         if (favoritePhotoPaths != null)
           'favorite_photo_paths': favoritePhotoPaths,
+        'delete_empty_photos': deleteEmptyPhotos,
+        if (emptyPhotoPaths != null) 'empty_photo_paths': emptyPhotoPaths,
         'confidence_settings': confidenceSettings ?? {'global': 0.25},
         'min_frame_ratio': minFrameRatio,
       }),
@@ -523,6 +563,9 @@ class MaintenanceStartResponse {
     required this.accepted,
     required this.operation,
     required this.message,
+    required this.progress,
+    this.statusPath,
+    this.maintenancePid,
   });
 
   factory MaintenanceStartResponse.fromJson(Map<String, dynamic> json) {
@@ -530,12 +573,45 @@ class MaintenanceStartResponse {
       accepted: json['accepted'] as bool? ?? false,
       operation: json['operation'] as String? ?? '',
       message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
     );
   }
 
   final bool accepted;
   final String operation;
   final String message;
+  final int progress;
+  final String? statusPath;
+  final int? maintenancePid;
+}
+
+class PackageSourceResolution {
+  const PackageSourceResolution({required this.source, required this.label});
+
+  factory PackageSourceResolution.fromJson(Map<String, dynamic> json) {
+    final source = json['source'] as String? ?? 'official';
+    final label = json['label'] as String?;
+    return PackageSourceResolution(
+      source: source,
+      label: label == null || label.isEmpty ? _fallbackLabel(source) : label,
+    );
+  }
+
+  final String source;
+  final String label;
+
+  static String _fallbackLabel(String source) {
+    return switch (source) {
+      'aliyun' => '阿里源',
+      'tsinghua' => '清华源',
+      'nju' => '南京大学源',
+      _ => '官方源',
+    };
+  }
 }
 
 class PytorchInstallPlan {
@@ -585,8 +661,11 @@ class MaintenanceStatus {
   const MaintenanceStatus({
     required this.state,
     required this.message,
+    required this.progress,
     this.operation,
     this.logPath,
+    this.statusPath,
+    this.maintenancePid,
     this.error,
   });
 
@@ -595,7 +674,12 @@ class MaintenanceStatus {
       operation: json['operation'] as String?,
       state: json['state'] as String? ?? 'idle',
       message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
       logPath: json['log_path'] as String?,
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
       error: json['error'] as String?,
     );
   }
@@ -603,7 +687,10 @@ class MaintenanceStatus {
   final String? operation;
   final String state;
   final String message;
+  final int progress;
   final String? logPath;
+  final String? statusPath;
+  final int? maintenancePid;
   final String? error;
 }
 
