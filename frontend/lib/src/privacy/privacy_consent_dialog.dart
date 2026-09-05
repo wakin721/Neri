@@ -12,6 +12,7 @@ const privacyDeclineOptionKey = Key('privacy-decline-option');
 const privacyAgreementCheckboxKey = Key('privacy-agreement-checkbox');
 const privacySaveButtonKey = Key('privacy-save-button');
 const privacyConsentCancelButtonKey = Key('privacy-consent-cancel-button');
+const privacyAgreementMenuKey = Key('privacy-agreement-menu');
 
 typedef PrivacySaveCallback =
     Future<PrivacyStatus> Function(bool trainingEnabled);
@@ -166,7 +167,7 @@ class _PrivacyConsentDialogState extends State<PrivacyConsentDialog> {
                             const SizedBox(height: 14),
                             if (_agreementLoading)
                               const SizedBox(
-                                height: 140,
+                                height: 64,
                                 child: Center(
                                   child: CircularProgressIndicator(),
                                 ),
@@ -189,7 +190,34 @@ class _PrivacyConsentDialogState extends State<PrivacyConsentDialog> {
                                 ),
                               )
                             else
-                              PrivacyAgreementDocument(text: _agreementText),
+                              Material(
+                                color: scheme.surfaceContainerLowest,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  side: BorderSide(
+                                    color: scheme.outlineVariant,
+                                  ),
+                                ),
+                                clipBehavior: Clip.antiAlias,
+                                child: ListTile(
+                                  key: privacyAgreementMenuKey,
+                                  leading: Icon(
+                                    Icons.description_outlined,
+                                    color: scheme.primary,
+                                  ),
+                                  title: const Text('用户协议与隐私政策'),
+                                  subtitle: const Text('查看完整协议'),
+                                  trailing: const Icon(
+                                    Icons.chevron_right_rounded,
+                                  ),
+                                  onTap: _saving
+                                      ? null
+                                      : () => showPrivacyAgreementDialog(
+                                          context,
+                                          text: _agreementText,
+                                        ),
+                                ),
+                              ),
                             const SizedBox(height: 12),
                             CheckboxListTile(
                               key: privacyAgreementCheckboxKey,
@@ -306,6 +334,45 @@ class _PrivacyConsentDialogState extends State<PrivacyConsentDialog> {
   }
 }
 
+Future<void> showPrivacyAgreementDialog(BuildContext context, {String? text}) {
+  return showDialog<void>(
+    context: context,
+    builder: (dialogContext) => Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860, maxHeight: 720),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: '返回',
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    icon: const Icon(Icons.arrow_back_rounded),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Neri 用户协议与隐私政策',
+                      style: Theme.of(dialogContext).textTheme.titleLarge,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: PrivacyAgreementDocument(text: text, maxHeight: 640),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class PrivacyAgreementDocument extends StatefulWidget {
   const PrivacyAgreementDocument({this.text, this.maxHeight = 300, super.key});
 
@@ -378,12 +445,10 @@ class _DisclosureSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const points = <String>[
-      '仅处理您之后人工确认的照片；不上传视频，也不扫描照片库。',
-      '照片重新编码为 JPEG（长边不超过 2048 像素、质量 82），移除路径、GPS、EXIF 与备注。',
-      '每个物理文件夹最多提交前 3 张确认的空照片；多物种照片会在每个物种目录各存一份。',
-      '已明确标记为人或车辆的照片会排除，但画面身份、文字和水印无法保证自动去除；请勿提交第三方敏感照片。',
-      '后台压缩、去除照片元数据后上传至运营者的 OneDrive；服务器用于授权、上传状态与记录管理。微软全球基础设施可能跨境处理；您可联系 wakin721@outlook.com 申请删除。',
-      '远程未完成上传创建满 20 分钟后进入清理（约每 5 分钟检查）；已完成照片和配套 JSON 自修订创建起最长保存 365 天，到期清理失败会在服务恢复后重试，也可申请提前删除。',
+      '仅提交之后人工确认的照片与标注，不上传视频、不扫描照片库；每个物理文件夹最多提交 3 张确认的空照片。',
+      '上传前压缩照片并移除 GPS、EXIF 等元数据；已标记为人或车辆的照片会排除，但画面身份、文字和水印仍可能保留，请勿提交敏感照片。',
+      '照片与标注存储在运营者的 OneDrive，可能跨境处理；已完成样本自修订创建起最长保存 365 天。',
+      '您可随时停止参加，或联系 wakin721@outlook.com 申请删除。详细范围和清理规则见完整协议。',
     ];
     return Container(
       padding: const EdgeInsets.all(14),

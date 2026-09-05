@@ -115,41 +115,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
     }
   }
 
-  Future<void> _showAgreement() {
-    return showDialog<void>(
-      context: context,
-      builder: (dialogContext) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 860, maxHeight: 720),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Neri 用户协议与隐私政策',
-                        style: TextStyle(fontSize: 20),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '关闭',
-                      onPressed: () => Navigator.of(dialogContext).pop(),
-                      icon: const Icon(Icons.close_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                const Expanded(child: PrivacyAgreementDocument(maxHeight: 640)),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  Future<void> _showAgreement() => showPrivacyAgreementDialog(context);
 
   @override
   Widget build(BuildContext context) {

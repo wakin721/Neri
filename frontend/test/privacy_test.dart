@@ -64,6 +64,46 @@ void main() {
     expect(save.onPressed, isNull);
   });
 
+  testWidgets('agreement opens separately and returning preserves choices', (
+    tester,
+  ) async {
+    var saves = 0;
+    await pumpConsent(
+      tester,
+      onSave: (_) async {
+        saves++;
+        return undecidedStatus;
+      },
+    );
+
+    expect(find.byType(PrivacyAgreementDocument), findsNothing);
+    await tapVisible(tester, privacyAgreementCheckboxKey);
+    await tapVisible(tester, privacyDeclineOptionKey);
+    await tapVisible(tester, const Key('privacy-agreement-menu'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PrivacyAgreementDocument), findsOneWidget);
+    expect(find.text('# Neri 用户协议\n\n测试协议正文。'), findsOneWidget);
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PrivacyAgreementDocument), findsNothing);
+    expect(find.byKey(privacyConsentDialogKey), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(privacyAgreementCheckboxKey))
+          .value,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<RadioGroup<bool>>(find.byKey(privacyParticipationGroupKey))
+          .groupValue,
+      isFalse,
+    );
+    expect(saves, 0);
+  });
+
   testWidgets('save requires agreement acceptance and a participation choice', (
     tester,
   ) async {
@@ -163,6 +203,30 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.byKey(privacySaveButtonKey), findsOneWidget);
+    await tapVisible(tester, const Key('privacy-agreement-menu'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    final document = find.byType(PrivacyAgreementDocument);
+    expect(document, findsOneWidget);
+    await tester.drag(document, const Offset(0, -300));
+    await tester.pumpAndSettle();
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: document, matching: find.byType(Scrollable)).first,
+    );
+    expect(scrollable.position.pixels, greaterThan(0));
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(privacyConsentDialogKey), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(privacyAgreementCheckboxKey))
+          .value,
+      isFalse,
+    );
+    expect(
+      tester.widget<FilledButton>(find.byKey(privacySaveButtonKey)).onPressed,
+      isNull,
+    );
   });
 
   testWidgets('agreement load failure cannot be accepted', (tester) async {
@@ -276,6 +340,12 @@ void main() {
     );
     expect(group.groupValue, isNull);
     expect(find.byKey(privacyAgreementCheckboxKey), findsOneWidget);
+    await tapVisible(tester, privacyAgreementMenuKey);
+    await tester.pumpAndSettle();
+    expect(find.byType(PrivacyAgreementDocument), findsOneWidget);
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(privacyConsentDialogKey), findsOneWidget);
     await tester.tap(find.byKey(privacyConsentCancelButtonKey));
     await tester.pumpAndSettle();
     expect(find.byKey(privacyConsentDialogKey), findsNothing);
