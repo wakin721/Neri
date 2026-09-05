@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+DEFAULT_CHUNK_BYTES = 5 * 1024 * 1024
+
 
 class UploadCancelled(Exception):
     pass
@@ -85,7 +87,7 @@ class HttpTransport:
         try:
             for target in targets:
                 content = photo if target["kind"] == "image" else annotation
-                chunk_size = int(target.get("chunk_size", 5 * 1024 * 1024))
+                chunk_size = int(target.get("chunk_size", DEFAULT_CHUNK_BYTES))
                 if chunk_size <= 0 or chunk_size > 10 * 1024 * 1024 or chunk_size % 327680:
                     raise UploadError("invalid_chunk_size")
                 for offset in range(0, len(content), chunk_size):

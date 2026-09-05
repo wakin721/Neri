@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -351,7 +352,9 @@ void main() {
     expect(find.byKey(privacyConsentDialogKey), findsNothing);
   });
 
-  testWidgets('settings privacy load error can be retried', (tester) async {
+  testWidgets('settings privacy load error recovers automatically', (
+    tester,
+  ) async {
     var requests = 0;
     final client = NeriApiClient(
       httpClient: MockClient((_) async {
@@ -384,11 +387,74 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('503'), findsOneWidget);
-    await tester.tap(find.byKey(privacySettingsRetryButtonKey));
+    await tester.pump(const Duration(seconds: 2));
     await tester.pumpAndSettle();
     expect(find.text('模型改进计划未启用'), findsOneWidget);
     expect(requests, 2);
   });
+
+  testWidgets(
+    'settings polls without overlap and ignores a stale consent response',
+    (tester) async {
+      var reads = 0;
+      var enabled = true;
+      final stale = Completer<http.Response>();
+      http.Response response(bool value, int uploaded) => http.Response(
+        jsonEncode({
+          'agreement_version': privacyAgreementVersion,
+          'agreement_accepted': true,
+          'participation_decided': true,
+          'training_enabled': value,
+          'stats': {
+            'pending': 0,
+            'uploading': 0,
+            'uploaded': uploaded,
+            'failed': 0,
+            'skipped': 0,
+          },
+        }),
+        200,
+      );
+      final client = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.method == 'PUT') {
+            enabled = false;
+            return response(false, 8);
+          }
+          reads++;
+          if (reads == 2) return stale.future;
+          return response(enabled, reads == 1 ? 4 : 9);
+        }),
+      );
+      addTearDown(client.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: PrivacySettingsCard(apiClient: client)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('刷新'), findsNothing);
+      expect(find.text('已上传 4'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 4));
+      expect(reads, 2);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await tester.tap(find.byKey(privacyDisableButtonKey));
+      await tester.pumpAndSettle();
+      stale.complete(response(true, 4));
+      await tester.pumpAndSettle();
+      expect(find.text('模型改进计划未启用'), findsOneWidget);
+      expect(find.text('已上传 8'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      expect(find.text('已上传 9'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      final readsAfterDispose = reads;
+      await tester.pump(const Duration(seconds: 6));
+      expect(reads, readsAfterDispose);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('settings shows agreement status and disables immediately', (
     tester,
@@ -436,6 +502,54 @@ void main() {
     expect(methods, ['GET', 'PUT']);
     expect(find.text('模型改进计划未启用'), findsOneWidget);
   });
+
+  testWidgets(
+    'hidden settings pause polling and refresh immediately on return',
+    (tester) async {
+      var reads = 0;
+      final client = NeriApiClient(
+        httpClient: MockClient((_) async {
+          reads++;
+          return http.Response(
+            jsonEncode({
+              'agreement_version': privacyAgreementVersion,
+              'agreement_accepted': true,
+              'participation_decided': true,
+              'training_enabled': false,
+              'stats': {
+                'pending': 0,
+                'uploading': 0,
+                'uploaded': reads,
+                'failed': 0,
+                'skipped': 0,
+              },
+            }),
+            200,
+          );
+        }),
+      );
+      addTearDown(client.close);
+      Future<void> show(bool active) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: PrivacySettingsCard(apiClient: client, isActive: active),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await show(true);
+      expect(find.text('已上传 1'), findsOneWidget);
+      await show(false);
+      await tester.pump(const Duration(seconds: 6));
+      expect(reads, 1);
+      await show(true);
+      expect(find.text('已上传 2'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 
   test(
     'privacy API uses the dedicated status and mutation endpoints',

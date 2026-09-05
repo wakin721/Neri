@@ -57,6 +57,34 @@ class PrivacyApiTests(unittest.TestCase):
         self.assertTrue(status['participation_decided'])
         self.assertFalse(status['training_enabled'])
 
+    def test_upload_diagnostics_read_current_settings_without_exposing_addresses(self):
+        self.queue.debounce_seconds = 17
+        self.queue.transport.timeout = 91
+        self.queue.transport.base_url = 'https://private.example/secret-destination'
+        self.queue.set_consent(AGREEMENT_VERSION, True)
+        photo = Path(self.temp.name) / 'private-photo.jpg'
+        Image.new('RGB', (40, 30), 'green').save(photo)
+        self.queue.enqueue(photo, {'物种名称': '赤狐', '物种数量': 1})
+        before = self.queue.status()
+        with patch.object(self.queue.transport, '_request', side_effect=AssertionError('network called')), \
+                patch('system.training.queue.prepare_sample', side_effect=AssertionError('image decoded')):
+            code, details = asyncio.run(asgi_request(self.app, 'GET', '/api/debug/training-upload'))
+        self.assertEqual(code, 200)
+        self.assertEqual(details['status'], before)
+        self.assertEqual(details['debounce_seconds'], 17)
+        self.assertEqual(details['request_timeout_seconds'], 91)
+        self.assertEqual(details['max_image_edge'], 2048)
+        self.assertEqual(details['jpeg_quality'], 82)
+        self.assertFalse(details['worker_running'])
+        serialized = json.dumps(details)
+        for private_value in ('private.example', 'secret-destination', str(photo), 'secret', 'url', 'source_path'):
+            self.assertNotIn(private_value, serialized)
+        self.assertEqual(self.queue.status(), before)
+        self.queue.set_consent(AGREEMENT_VERSION, False)
+        _, updated = asyncio.run(asgi_request(self.app, 'GET', '/api/debug/training-upload'))
+        self.assertFalse(updated['status']['training_enabled'])
+        self.assertEqual(updated['status']['stats']['pending'], 0)
+
     def test_cannot_grant_consent_from_a_website_or_ambiguous_value(self):
         code, _ = self.request('PUT', {'agreement_version': AGREEMENT_VERSION, 'training_enabled': True}, 'https://untrusted.example')
         self.assertEqual(code, 403)

@@ -21,6 +21,10 @@ def privacy_router(queue_provider):
     def status():
         return queue_provider().status()
 
+    @router.get("/api/debug/training-upload")
+    def upload_settings():
+        return queue_provider().debug_settings()
+
     @router.put("/api/privacy")
     def choose(choice: PrivacyChoice, request: Request):
         ensure_native_client(request)

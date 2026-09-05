@@ -1,5 +1,6 @@
 const privacyAgreementVersion = '2026-09-05';
 const privacyAgreementAsset = 'assets/legal/user_agreement.md';
+const privacyStatusRefreshInterval = Duration(seconds: 2);
 
 class PrivacyStatus {
   const PrivacyStatus({

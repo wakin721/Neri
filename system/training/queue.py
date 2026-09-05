@@ -13,8 +13,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .media import prepare_sample
-from .policy import AGREEMENT_VERSION, IMAGE_SUFFIXES, MAX_EMPTY_PER_FOLDER, contribution_payload
-from .transport import HttpTransport, UploadCancelled
+from .policy import (AGREEMENT_VERSION, IMAGE_SUFFIXES, JPEG_QUALITY, MAX_EMPTY_PER_FOLDER,
+                     MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, contribution_payload)
+from .transport import DEFAULT_CHUNK_BYTES, HttpTransport, UploadCancelled
+
+RETRY_INITIAL_SECONDS = 30
+RETRY_MAX_SECONDS = 3600
+RETRY_EXPONENT_CAP = 7
+WORKER_POLL_SECONDS = 2
 
 
 class TrainingQueue:
@@ -108,6 +114,24 @@ class TrainingQueue:
                 db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE state IN ('pending','failed','uploading')")
         self._wake.set()
         return self.status()
+
+    def debug_settings(self):
+        """Read-only allowlist: no service addresses, capabilities or source records."""
+        return {
+            "status": self.status(),
+            "worker_running": bool(self._thread and self._thread.is_alive()),
+            "debounce_seconds": self.debounce_seconds,
+            "poll_seconds": WORKER_POLL_SECONDS,
+            "request_timeout_seconds": getattr(self.transport, "timeout", None),
+            "retry_initial_seconds": RETRY_INITIAL_SECONDS,
+            "retry_max_seconds": RETRY_MAX_SECONDS,
+            "default_chunk_bytes": DEFAULT_CHUNK_BYTES,
+            "max_empty_per_folder": MAX_EMPTY_PER_FOLDER,
+            "max_image_edge": MAX_IMAGE_EDGE,
+            "jpeg_quality": JPEG_QUALITY,
+            "max_image_bytes": MAX_IMAGE_BYTES,
+            "image_suffixes": sorted(IMAGE_SUFFIXES),
+        }
 
     def clear_pending(self):
         with self._lock, self._connect() as db:
@@ -251,7 +275,7 @@ class TrainingQueue:
         except Exception as error:
             # Persist only error type, never exception strings containing URLs, paths or tokens.
             with self._lock, self._connect() as db:
-                delay = min(3600, 30 * 2 ** min(job["attempts"], 7))
+                delay = min(RETRY_MAX_SECONDS, RETRY_INITIAL_SECONDS * 2 ** min(job["attempts"], RETRY_EXPONENT_CAP))
                 db.execute("UPDATE jobs SET state='failed',attempts=attempts+1,next_attempt=?,error=? WHERE source_key=? AND revision=? AND state='uploading'",
                            (self.clock() + delay, type(error).__name__, job["source_key"], job["revision"]))
         return True
@@ -270,7 +294,7 @@ class TrainingQueue:
                     continue
             except Exception:
                 pass  # This optional worker must never crash local annotation/inference.
-            self._wake.wait(2)
+            self._wake.wait(WORKER_POLL_SECONDS)
             self._wake.clear()
 
     def stop(self):

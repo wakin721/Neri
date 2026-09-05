@@ -15,6 +15,7 @@ import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../models/video_processing_mode.dart';
 import '../privacy/privacy_settings_card.dart';
+import '../privacy/training_upload_debug_dialog.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
@@ -75,7 +76,7 @@ const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.6-alpha1(fbfb98)',
+  defaultValue: '3.0.6-alpha2(0f6ac7)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -109,6 +110,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onSaveSettings,
     required this.onCheckForUpdates,
     required this.onShowMessage,
+    this.isActive = true,
     super.key,
   });
 
@@ -122,6 +124,7 @@ class SettingsScreen extends StatefulWidget {
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
   final SoftwareUpdateCheckCallback onCheckForUpdates;
   final ValueChanged<String> onShowMessage;
+  final bool isActive;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -1037,7 +1040,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       2 => _buildBasicSettings(),
       3 => _buildAppearanceSettings(),
       4 => _buildUpdateSettingsSection(),
-      5 => PrivacySettingsCard(apiClient: widget.apiClient),
+      5 => PrivacySettingsCard(
+        apiClient: widget.apiClient,
+        isActive: widget.isActive,
+      ),
       _ => _buildProjectSettings(),
     };
   }
@@ -2106,7 +2112,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildDebugSettings() {
     return SectionCard(
       title: '调试模式',
-      subtitle: '当前环境、依赖、已安装库和软件日志',
+      subtitle: '当前环境、依赖、上传设置、已安装库和软件日志',
       icon: Icons.bug_report_rounded,
       child: _DebugInfoPanel(
         settings: widget.settings,
@@ -3687,6 +3693,17 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
               onPressed: () => _showSoftwareLogs(context),
               icon: const Icon(Icons.receipt_long_outlined),
               label: const Text('软件日志'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => TrainingUploadDebugDialog(
+                  apiClient: widget.apiClient,
+                  onShowMessage: widget.onShowMessage,
+                ),
+              ),
+              icon: const Icon(Icons.cloud_upload_outlined),
+              label: const Text('上传详细设置'),
             ),
           ],
         ),

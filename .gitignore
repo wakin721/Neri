@@ -71,6 +71,7 @@ frontend/test/*
 !frontend/test/model_selection_test.dart
 !frontend/test/package_source_resolution_test.dart
 !frontend/test/privacy_test.dart
+!frontend/test/training_upload_debug_test.dart
 !frontend/pubspec.yaml
 !frontend/assets/
 !frontend/assets/**

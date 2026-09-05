@@ -8,17 +8,18 @@ import 'privacy_status.dart';
 
 const privacyEnableButtonKey = Key('privacy-enable-button');
 const privacyDisableButtonKey = Key('privacy-disable-button');
-const privacySettingsRetryButtonKey = Key('privacy-settings-retry-button');
 
 class PrivacySettingsCard extends StatefulWidget {
   const PrivacySettingsCard({
     required this.apiClient,
     this.onStatusChanged,
+    this.isActive = true,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final ValueChanged<PrivacyStatus>? onStatusChanged;
+  final bool isActive;
 
   @override
   State<PrivacySettingsCard> createState() => _PrivacySettingsCardState();
@@ -28,32 +29,61 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
   PrivacyStatus? _status;
   bool _loading = true;
   bool _mutating = false;
+  bool _refreshing = false;
+  int _requestGeneration = 0;
+  Timer? _refreshTimer;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _startRefreshing();
+  }
+
+  void _startRefreshing() {
+    if (!widget.isActive) return;
     unawaited(_refresh());
+    _refreshTimer = Timer.periodic(
+      privacyStatusRefreshInterval,
+      (_) => unawaited(_refresh()),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant PrivacySettingsCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive == widget.isActive) return;
+    _refreshTimer?.cancel();
+    _requestGeneration++;
+    _startRefreshing();
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _refresh() async {
-    if (mounted) {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-    }
+    if (!mounted || !widget.isActive || _refreshing || _mutating) return;
+    _refreshing = true;
+    final generation = ++_requestGeneration;
     try {
-      _setStatus(await widget.apiClient.fetchPrivacyStatus());
+      final status = await widget.apiClient.fetchPrivacyStatus();
+      if (generation == _requestGeneration) _setStatus(status);
     } catch (error) {
-      if (mounted) setState(() => _error = '读取隐私状态失败：$error');
+      if (mounted && generation == _requestGeneration) {
+        setState(() => _error = '读取隐私状态失败，将自动重试：$error');
+      }
     } finally {
+      _refreshing = false;
       if (mounted) setState(() => _loading = false);
     }
   }
 
   void _setStatus(PrivacyStatus status) {
     if (!mounted) return;
+    _requestGeneration++;
     setState(() {
       _status = status;
       _error = null;
@@ -63,6 +93,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
 
   Future<void> _mutate(Future<PrivacyStatus> Function() operation) async {
     if (_mutating) return;
+    _requestGeneration++;
     setState(() {
       _mutating = true;
       _error = null;
@@ -144,11 +175,6 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
                     ],
                   ),
                 ),
-                IconButton(
-                  tooltip: '刷新',
-                  onPressed: _loading || _mutating ? null : _refresh,
-                  icon: const Icon(Icons.refresh_rounded),
-                ),
               ],
             ),
             const SizedBox(height: 14),
@@ -160,7 +186,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
                 ),
               )
             else if (status == null)
-              _PrivacyError(message: _error ?? '隐私状态不可用', onRetry: _refresh)
+              _PrivacyError(message: _error ?? '隐私状态不可用，将自动重试')
             else ...[
               Container(
                 padding: const EdgeInsets.all(14),
@@ -211,7 +237,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
               ),
               if (_error case final error?) ...[
                 const SizedBox(height: 12),
-                _PrivacyError(message: error, onRetry: _refresh),
+                _PrivacyError(message: error),
               ],
               const SizedBox(height: 16),
               Wrap(
@@ -268,10 +294,9 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
 }
 
 class _PrivacyError extends StatelessWidget {
-  const _PrivacyError({required this.message, required this.onRetry});
+  const _PrivacyError({required this.message});
 
   final String message;
-  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -287,11 +312,6 @@ class _PrivacyError extends StatelessWidget {
           Icon(Icons.error_outline_rounded, color: scheme.onErrorContainer),
           const SizedBox(width: 10),
           Expanded(child: Text(message)),
-          TextButton(
-            key: privacySettingsRetryButtonKey,
-            onPressed: onRetry,
-            child: const Text('重试'),
-          ),
         ],
       ),
     );

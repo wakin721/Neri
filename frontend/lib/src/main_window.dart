@@ -3301,6 +3301,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildSettingsScreen() {
     return SettingsScreen(
+      isActive: _selectedIndex == 3,
       settings: _settings,
       autoGroupInferredBurstSize: _autoGroupInferredBurstSize,
       apiClient: widget.apiClient,

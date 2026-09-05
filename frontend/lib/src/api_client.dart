@@ -7,6 +7,7 @@ import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/video_processing_mode.dart';
 import 'privacy/privacy_status.dart';
+import 'privacy/training_upload_diagnostics.dart';
 
 class NeriApiClient {
   NeriApiClient({
@@ -50,7 +51,9 @@ class NeriApiClient {
   }
 
   Future<PrivacyStatus> fetchPrivacyStatus() async {
-    final response = await _httpClient.get(_uri('/api/privacy'));
+    final response = await _httpClient
+        .get(_uri('/api/privacy'))
+        .timeout(const Duration(seconds: 10));
     _ensureSuccess(response);
     return PrivacyStatus.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
@@ -206,6 +209,16 @@ class NeriApiClient {
     final response = await _httpClient.get(_uri('/api/debug/runtime'));
     _ensureSuccess(response);
     return RuntimeDiagnostics.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<TrainingUploadDiagnostics> fetchTrainingUploadDiagnostics() async {
+    final response = await _httpClient
+        .get(_uri('/api/debug/training-upload'))
+        .timeout(const Duration(seconds: 10));
+    _ensureSuccess(response);
+    return TrainingUploadDiagnostics.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
