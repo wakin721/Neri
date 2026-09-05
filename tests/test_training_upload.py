@@ -18,6 +18,16 @@ from system.training.queue import TrainingQueue
 from system.training.transport import UploadCancelled
 
 
+def save_mpo(path, *, orientation=1):
+    exif = Image.Exif()
+    exif[270] = 'private camera location'
+    exif[274] = orientation
+    with Image.new('RGB', (80, 40), 'red') as primary:
+        with Image.new('RGB', (30, 50), 'blue') as secondary:
+            primary.save(path, format='MPO', save_all=True,
+                         append_images=[secondary], exif=exif)
+
+
 class MemoryCloud:
     def __init__(self):
         self.files = {}
@@ -319,8 +329,70 @@ class TrainingQueueTests(unittest.TestCase):
         self.drain()
         self.assertFalse(self.cloud.files)
 
+    def test_previously_skipped_mpo_can_be_reconfirmed_after_restart(self):
+        self.enable()
+        photo = self.photo()
+        save_mpo(photo)
+        self.queue.enqueue(photo, {'物种名称': '赤狐'})
+        # Simulate the persisted result from the old multi-frame exclusion.
+        with self.queue._connect() as db:
+            db.execute("UPDATE jobs SET state='skipped',error='ValueError',empty_reserved=0")
+            sample_id = db.execute('SELECT sample_id FROM jobs').fetchone()[0]
+        self.queue.stop()
+        self.queue = self.make_queue()
+        self.assertTrue(self.queue.enqueue(photo, {'物种名称': '赤狐'}))
+        self.drain()
+        self.assertEqual(self.queue.status()['stats']['skipped'], 0)
+        self.assertEqual(self.queue.status()['stats']['uploaded'], 1)
+        self.assertEqual(list(self.cloud.files), [sample_id])
+        self.assertEqual(self.cloud.files[sample_id]['image'],
+                         {'format': 'jpeg', 'width': 80, 'height': 40})
+
 
 class TrainingMediaTests(unittest.TestCase):
+    def test_mpo_uses_only_primary_image_and_strips_metadata(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'camera.jpg'
+            for orientation, size in [(1, (80, 40)), (6, (40, 80))]:
+                with self.subTest(orientation=orientation):
+                    save_mpo(path, orientation=orientation)
+                    original = path.read_bytes()
+                    photo, annotation = prepare_sample(path, {
+                        'sample_id': 'c' * 32, 'revision': 1,
+                        'payload': {'species': ['赤狐'], 'model_boxes': [
+                            {'species': '赤狐', 'bbox': [8, 4, 40, 20], 'confidence': 0.9}
+                        ]},
+                    })
+                    with Image.open(io.BytesIO(photo)) as image:
+                        self.assertEqual(image.format, 'JPEG')
+                        self.assertEqual(getattr(image, 'n_frames', 1), 1)
+                        self.assertEqual(image.size, size)
+                        red, green, blue = image.getpixel((10, 10))
+                        self.assertGreater(red, 240)
+                        self.assertLess(green, 15)
+                        self.assertLess(blue, 15)
+                        self.assertFalse(image.getexif())
+                        self.assertNotIn('mp', image.info)
+                    data = json.loads(annotation)
+                    if orientation == 1:
+                        self.assertEqual(data['model_predictions'][0]['bbox_xyxy_normalized'],
+                                         [0.1, 0.1, 0.5, 0.5])
+                    else:
+                        self.assertEqual(data['model_predictions'], [])
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertNotIn('private camera location', annotation.decode())
+
+    def test_animated_png_is_excluded_even_with_jpg_extension(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'animation.jpg'
+            with Image.new('RGB', (40, 30), 'red') as first:
+                with Image.new('RGB', (40, 30), 'blue') as second:
+                    first.save(path, format='PNG', save_all=True,
+                               append_images=[second], duration=100, loop=0)
+            with self.assertRaisesRegex(ValueError, 'animated_image_excluded'):
+                prepare_sample(path, {'sample_id': 'd' * 32, 'revision': 1,
+                                      'payload': {'species': ['赤狐']}})
+
     def test_reencoding_strips_exif_limits_dimensions_and_preserves_source(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / 'personal-camera.jpg'

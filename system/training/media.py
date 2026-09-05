@@ -13,7 +13,11 @@ from .policy import MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, JPEG_QUALITY, AGREEMENT_VER
 
 def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
     with Image.open(path) as source:
-        if getattr(source, "n_frames", 1) != 1:
+        if source.format == "MPO":
+            # Camera JPEGs can contain additional still images (MPO). Use only
+            # the primary image, matching the photo shown during annotation.
+            source.seek(0)
+        elif getattr(source, "n_frames", 1) != 1:
             raise ValueError("animated_image_excluded")
         # Loading enforces Pillow's decompression bomb protection before allocating copies.
         source.load()
