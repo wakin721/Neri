@@ -7,6 +7,7 @@ import sqlite3
 import json
 import os
 import logging
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,17 @@ def get_db_path(temp_photo_dir: str) -> str:
     return os.path.join(temp_photo_dir, DB_FILENAME)
 
 
-def _get_conn(db_path: str) -> sqlite3.Connection:
+@contextmanager
+def _get_conn(db_path: str):
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")   # 允许并发读写
     conn.execute("PRAGMA synchronous=NORMAL") # 平衡性能与安全
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db(db_path: str):

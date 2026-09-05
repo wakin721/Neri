@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -1747,7 +1748,7 @@ def _load_detection_index(
     index: dict[str, dict[str, Any]] = {}
     for db_path in _candidate_detection_dbs_for_roots(search_roots, recursive=recursive):
         try:
-            with sqlite3.connect(str(db_path)) as conn:
+            with closing(sqlite3.connect(str(db_path))) as conn:
                 rows = conn.execute(
                     "SELECT base_name, image_filename, detection_json FROM detections"
                 ).fetchall()
@@ -1768,7 +1769,7 @@ def _load_validation_index(search_roots: list[Path], *, recursive: bool = True) 
     index: dict[str, bool] = {}
     for db_path in _candidate_detection_dbs_for_roots(search_roots, recursive=recursive):
         try:
-            with sqlite3.connect(str(db_path)) as conn:
+            with closing(sqlite3.connect(str(db_path))) as conn:
                 rows = conn.execute("SELECT image_filename, is_validated FROM validation").fetchall()
             for image_filename, is_validated in rows:
                 key = str(image_filename)
@@ -1788,7 +1789,7 @@ def _load_detection_data_for_path(
     base_name = path.stem
     for db_path in _candidate_detection_dbs(path, search_roots, recursive=recursive):
         try:
-            with sqlite3.connect(str(db_path)) as conn:
+            with closing(sqlite3.connect(str(db_path))) as conn:
                 row = conn.execute(
                     (
                         "SELECT image_filename, detection_json "
@@ -2889,6 +2890,16 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
     _persist_validation_updates(updates, input_path)
     for species_name, species_type in species_database_updates:
         _update_species_database(species_name, species_type)
+
+    # Only journal after the user's local decision is saved. Compression/network run
+    # on an independent worker; this optional feature must never break annotation.
+    try:
+        from system.training import get_queue
+        contribution_queue = get_queue()
+        for path, detection_data, validated in updates:
+            contribution_queue.enqueue(path, detection_data, validated=validated is True)
+    except Exception as error:
+        logger.warning("Training queue unavailable (%s)", type(error).__name__)
 
     return updated_items
 

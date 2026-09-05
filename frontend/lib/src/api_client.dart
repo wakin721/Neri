@@ -6,6 +6,7 @@ import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/video_processing_mode.dart';
+import 'privacy/privacy_status.dart';
 
 class NeriApiClient {
   NeriApiClient({
@@ -44,6 +45,39 @@ class NeriApiClient {
     );
     _ensureSuccess(response);
     return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> fetchPrivacyStatus() async {
+    final response = await _httpClient.get(_uri('/api/privacy'));
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> savePrivacyStatus({
+    required bool trainingEnabled,
+  }) async {
+    final response = await _httpClient.put(
+      _uri('/api/privacy'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'agreement_version': privacyAgreementVersion,
+        'training_enabled': trainingEnabled,
+      }),
+    );
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> clearPrivacyQueue() async {
+    final response = await _httpClient.delete(_uri('/api/privacy/queue'));
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }

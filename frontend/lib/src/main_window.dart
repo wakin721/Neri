@@ -18,6 +18,8 @@ import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
 import 'models/video_processing_mode.dart';
+import 'privacy/privacy_gate_overlay.dart';
+import 'privacy/privacy_status.dart';
 import 'screens/preview_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
@@ -172,6 +174,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _selectedPreviewIndex = 0;
   String? _lastWindowsShellStatusSignature;
   bool _duplicateLaunchDialogVisible = false;
+  PrivacyStatus? _privacyStatus;
+  bool _privacyLoading = true;
+  String? _privacyLoadError;
 
   @override
   void initState() {
@@ -248,6 +253,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (call.method != 'trayAction') return null;
     switch (call.arguments) {
       case 'toggleProcessing':
+        if (_privacyStatus?.isConsentComplete != true) {
+          await _showAndFocusWindow();
+          return null;
+        }
         final job = _windowsShellJob;
         if (job == null) {
           if (_canCreateJobFromTray) await _createJob();
@@ -327,11 +336,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
     }
 
-    final taskActionEnabled = job == null
-        ? _canCreateJobFromTray
-        : isRunning
-        ? !_pendingStopJobIds.contains(job.id)
-        : job.canResume && !_pendingStartJobBaselines.containsKey(job.id);
+    final privacyReady = _privacyStatus?.isConsentComplete == true;
+    final taskActionEnabled =
+        privacyReady &&
+        (job == null
+            ? _canCreateJobFromTray
+            : isRunning
+            ? !_pendingStopJobIds.contains(job.id)
+            : job.canResume && !_pendingStartJobBaselines.containsKey(job.id));
     final progressState = job == null
         ? 'none'
         : isRunning
@@ -359,6 +371,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   bool get _canCreateJobFromTray =>
+      _privacyStatus?.isConsentComplete == true &&
       _backendReady &&
       _settings != null &&
       !_submitting &&
@@ -655,7 +668,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (_closeFlowBlocksBackendStartup) return;
     if (_backendStarting) return;
     _backendStarting = true;
-    if (mounted) setState(() => _loading = true);
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        if (_privacyStatus?.isConsentComplete != true) {
+          _privacyLoading = true;
+          _privacyLoadError = null;
+        }
+      });
+    }
     try {
       await _waitForActiveEnvironmentMaintenance();
       if (!mounted || _closeFlowBlocksBackendStartup) return;
@@ -671,11 +692,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         return;
       }
       if (!ready) {
-        setState(() => _loading = false);
-        _showSnackBar('Python 后端启动超时，请检查 toolkit\\python.exe 和端口 721。');
+        setState(() {
+          _loading = false;
+          _privacyLoading = false;
+          _privacyLoadError = 'Python 后端启动超时，请检查 toolkit\\python.exe 和端口 721。';
+        });
         return;
       }
       _backendReady = true;
+      final privacyReady = await _loadPrivacyStatus();
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
+      if (!privacyReady) {
+        setState(() => _loading = false);
+        return;
+      }
       await _refreshInitialPageData();
       _timer ??= Timer.periodic(
         const Duration(seconds: 2),
@@ -683,11 +713,62 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       );
     } catch (error) {
       if (!mounted) return;
-      setState(() => _loading = false);
-      _showSnackBar('启动 Python 后端失败：$error');
+      setState(() {
+        _loading = false;
+        _privacyLoading = false;
+        if (_privacyStatus?.isConsentComplete != true) {
+          _privacyStatus = null;
+          _privacyLoadError = '启动或连接本地服务失败：$error';
+        }
+      });
+      if (_privacyStatus?.isConsentComplete == true) {
+        _showSnackBar('启动 Python 后端失败：$error');
+      }
     } finally {
       _backendStarting = false;
     }
+  }
+
+  Future<bool> _loadPrivacyStatus() async {
+    if (mounted) {
+      setState(() {
+        _privacyLoading = true;
+        _privacyLoadError = null;
+      });
+    }
+    try {
+      final status = await widget.apiClient.fetchPrivacyStatus();
+      if (!mounted) return false;
+      setState(() {
+        _privacyStatus = status;
+        _privacyLoading = false;
+      });
+      return status.isConsentComplete;
+    } catch (error) {
+      if (!mounted) return false;
+      setState(() {
+        _privacyStatus = null;
+        _privacyLoading = false;
+        _privacyLoadError = error.toString();
+      });
+      return false;
+    }
+  }
+
+  Future<void> _completePrivacyConsent(PrivacyStatus status) async {
+    if (!status.isConsentComplete || !mounted) return;
+    setState(() {
+      _privacyStatus = status;
+      _privacyLoading = false;
+      _privacyLoadError = null;
+      _loading = true;
+    });
+    await _refreshInitialPageData();
+    if (!mounted || _closeFlowBlocksBackendStartup) return;
+    _timer ??= Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _refresh(silent: true),
+    );
   }
 
   Future<void> _waitForActiveEnvironmentMaintenance() async {
@@ -3036,6 +3117,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
               onClose: _dismissSoftwareUpdateCard,
               onInstall: () => unawaited(_installDownloadedAppUpdate()),
             ),
+        if (_privacyStatus?.isConsentComplete != true)
+          PrivacyGateOverlay(
+            status: _privacyStatus,
+            loading: _privacyLoading,
+            loadError: _privacyLoadError,
+            onRetry: () => unawaited(_startBackendAndInitialRefresh()),
+            onSave: (trainingEnabled) => widget.apiClient.savePrivacyStatus(
+              trainingEnabled: trainingEnabled,
+            ),
+            onSaved: (status) => unawaited(_completePrivacyConsent(status)),
+            onCloseApp: () => _requestCloseWindow(forceExit: true),
+          ),
         if (_showClosingOverlay)
           _ClosingOverlay(
             phase: _closeDialogPhase,

@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,8 @@ from fastapi.responses import JSONResponse
 
 from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.settings_manager import SettingsManager
+from system.training import get_queue
+from system.training.api import privacy_router
 
 from . import __version__
 from .crash_logging import configure_backend_crash_logging
@@ -75,11 +78,28 @@ from .services import (
 configure_backend_crash_logging()
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def app_lifespan(_app):
+    queue = None
+    try:
+        queue = get_queue()
+        queue.start()
+    except Exception as error:
+        logger.warning("Training worker unavailable (%s)", type(error).__name__)
+    try:
+        yield
+    finally:
+        if queue is not None:
+            queue.stop()
+
+
 app = FastAPI(
     title="Neri API",
     version=__version__,
     description="Python backend that exposes Neri infrared-camera processing capabilities to a Flutter Material 3 UI.",
+    lifespan=app_lifespan,
 )
+app.include_router(privacy_router(get_queue))
 
 app.add_middleware(
     CORSMiddleware,

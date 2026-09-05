@@ -14,6 +14,7 @@ import '../models/close_behavior.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../models/video_processing_mode.dart';
+import '../privacy/privacy_settings_card.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
@@ -943,7 +944,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final debugModeEnabled = _bool(_debugModeKey);
     final selectedIndex = _sectionIndex
-        .clamp(0, debugModeEnabled ? 6 : 5)
+        .clamp(0, debugModeEnabled ? 7 : 6)
         .toInt();
 
     return LayoutBuilder(
@@ -991,6 +992,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     selectedIcon: Icon(Icons.system_update_alt_rounded),
                     label: Text('软件更新'),
                   ),
+                  const NavigationDrawerDestination(
+                    icon: Icon(Icons.privacy_tip_outlined),
+                    selectedIcon: Icon(Icons.privacy_tip_rounded),
+                    label: Text('隐私与数据'),
+                  ),
                   if (debugModeEnabled)
                     const NavigationDrawerDestination(
                       icon: Icon(Icons.bug_report_outlined),
@@ -1021,7 +1027,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildSelectedSection() {
     final debugModeEnabled = _bool(_debugModeKey);
-    if (_sectionIndex == 5 && debugModeEnabled) {
+    if (_sectionIndex == 6 && debugModeEnabled) {
       return _buildDebugSettings();
     }
 
@@ -1031,6 +1037,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       2 => _buildBasicSettings(),
       3 => _buildAppearanceSettings(),
       4 => _buildUpdateSettingsSection(),
+      5 => PrivacySettingsCard(apiClient: widget.apiClient),
       _ => _buildProjectSettings(),
     };
   }

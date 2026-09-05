@@ -1,0 +1,25 @@
+[Unit]
+Description=Neri OneDrive training upload authorization
+After=network-online.target openlist.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neri-training
+Group=neri-training
+WorkingDirectory=/opt/neri-training
+EnvironmentFile=/etc/neri-training.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/neri-training/venv/bin/uvicorn training_broker.app:create_app --factory --host 127.0.0.1 --port 8001 --workers 1 --no-access-log --no-proxy-headers
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/neri-training
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
