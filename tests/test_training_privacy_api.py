@@ -72,6 +72,30 @@ class PrivacyApiTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertFalse(status['training_enabled'])
 
+    def test_batch_confirmation_preserves_each_photos_detection_data(self):
+        self.queue.set_consent(AGREEMENT_VERSION, True)
+        root = Path(self.temp.name)
+        originals = []
+        for name, species in [('a.jpg', '赤狐'), ('b.jpg', '野猪')]:
+            photo = root / name
+            Image.new('RGB', (40, 30), 'green').save(photo)
+            data = {'物种名称': species, '物种数量': 1,
+                    '检测框': [{'species': species, 'confidence': 0.9,
+                                'bbox': [1, 2, 20, 25]}]}
+            originals.append((photo, data, False))
+        services._persist_validation_updates(originals, root)
+        request = ValidationBatchMarkRequest(
+            input_path=str(root), file_paths=[str(p) for p, _, _ in originals],
+            action='correct')
+        with patch('system.training.get_queue', return_value=self.queue):
+            results = services.mark_validation_items(request)
+        self.assertTrue(all(item.validated for item in results))
+        for photo, original, _ in originals:
+            saved = services._load_detection_data_for_path(photo, [root])
+            self.assertEqual(saved['物种名称'], original['物种名称'])
+            self.assertEqual(saved['检测框'], original['检测框'])
+        self.assertEqual(self.queue.status()['stats']['pending'], 2)
+
     def test_saved_annotation_is_enqueued_and_failed_local_save_is_not(self):
         self.queue.set_consent(AGREEMENT_VERSION, True)
         photo = Path(self.temp.name) / 'animal.jpg'

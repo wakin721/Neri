@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 
 from PIL import Image
 
@@ -19,6 +22,7 @@ class MemoryCloud:
     def __init__(self):
         self.files = {}
         self.failures = 0
+        self.lost_responses = 0
         self.on_upload = None
 
     def upload(self, job, photo, annotation, is_current):
@@ -30,6 +34,9 @@ class MemoryCloud:
             self.failures -= 1
             raise OSError('offline')
         self.files[job['sample_id']] = json.loads(annotation)
+        if self.lost_responses:
+            self.lost_responses -= 1
+            raise OSError('completion_response_lost')
 
     def delete(self, job, is_current):
         if not is_current():
@@ -66,6 +73,58 @@ class TrainingQueueTests(unittest.TestCase):
         for _ in range(30):
             if not self.queue.process_once():
                 break
+
+    def restore_legacy_schema(self):
+        self.queue.stop()
+        with closing(sqlite3.connect(self.queue.db_path)) as db:
+            with db:
+                db.execute('ALTER TABLE jobs DROP COLUMN remote_possible')
+
+    def test_legacy_schema_concurrent_initialization_preserves_jobs_and_quota(self):
+        self.enable()
+        for i in range(3):
+            self.queue.enqueue(self.photo(f'camera/empty{i}.jpg'), {'物种名称': '空'})
+        self.drain()
+        self.queue.enqueue(self.photo('camera/pending.jpg'), {'物种名称': '赤狐'})
+        before = self.queue.status()
+        self.assertEqual(before['stats']['uploaded'], 3)
+        self.assertEqual(before['stats']['pending'], 1)
+        empty_samples = set(self.cloud.files)
+        self.restore_legacy_schema()
+        start = Barrier(8)
+
+        def initialize(_):
+            start.wait(timeout=10)
+            return self.make_queue()
+
+        with ThreadPoolExecutor(8) as pool:
+            queues = list(pool.map(initialize, range(8)))
+        for queue in queues:
+            self.assertEqual(queue.status(), before)
+        self.queue = queues[0]
+        self.assertFalse(self.queue.enqueue(self.photo('camera/extra.jpg'), {'物种名称': '空'}))
+        self.drain()
+        self.assertEqual(len(self.cloud.files), 4)
+        self.assertTrue(empty_samples.issubset(self.cloud.files))
+        self.assertEqual(self.queue.status()['stats']['uploaded'], 4)
+
+    def test_legacy_schema_migration_preserves_lost_response_retraction(self):
+        self.enable()
+        photo = self.photo()
+        self.cloud.lost_responses = 1
+        self.queue.enqueue(photo, {'物种名称': '赤狐'})
+        self.queue.process_once()
+        self.assertEqual(len(self.cloud.files), 1)
+        self.assertEqual(self.queue.status()['stats']['failed'], 1)
+        self.restore_legacy_schema()
+        self.queue = self.make_queue()
+        self.queue.enqueue(photo, {}, validated=False)
+        self.drain()
+        self.assertFalse(self.cloud.files)
+        self.assertEqual(self.queue.status()['stats']['failed'], 0)
+        self.queue.stop()
+        self.queue = self.make_queue()
+        self.assertFalse(self.queue.process_once())
 
     def test_default_off_never_accesses_nonexistent_photo(self):
         self.assertFalse(self.queue.enqueue(self.root / 'missing.jpg', {'物种名称': '赤狐'}))
@@ -186,6 +245,50 @@ class TrainingQueueTests(unittest.TestCase):
         self.assertFalse(self.cloud.files)
         self.assertEqual(self.queue.status()['stats']['pending'], 0)
         self.assertFalse(self.queue.process_once())
+
+    def test_lost_completion_response_can_be_unverified_after_restart(self):
+        self.enable()
+        photo = self.photo()
+        self.cloud.lost_responses = 1
+        self.queue.enqueue(photo, {'物种名称': '赤狐'})
+        self.queue.process_once()
+        self.assertEqual(len(self.cloud.files), 1)
+        self.assertEqual(self.queue.status()['stats']['failed'], 1)
+        self.queue.stop()
+        self.queue = self.make_queue()
+        self.queue.enqueue(photo, {}, validated=False)
+        self.drain()
+        self.assertFalse(self.cloud.files)
+
+    def test_lost_completion_response_relabel_then_sensitive_removes_sample(self):
+        self.enable()
+        photo = self.photo()
+        self.cloud.lost_responses = 1
+        self.queue.enqueue(photo, {'物种名称': '赤狐'})
+        self.queue.process_once()
+        self.assertEqual(len(self.cloud.files), 1)
+        self.assertEqual(self.queue.status()['stats']['failed'], 1)
+        self.queue.enqueue(photo, {'物种名称': '狼'})
+        self.queue.enqueue(photo, {'物种名称': '人'})
+        self.drain()
+        self.assertFalse(self.cloud.files)
+
+    def test_lost_completion_response_relabel_over_empty_quota_removes_sample(self):
+        self.enable()
+        for i in range(3):
+            self.queue.enqueue(self.photo(f'camera/empty{i}.jpg'), {'物种名称': '空'})
+        self.drain()
+        empty_samples = set(self.cloud.files)
+        self.assertEqual(len(empty_samples), 3)
+        photo = self.photo()
+        self.cloud.lost_responses = 1
+        self.queue.enqueue(photo, {'物种名称': '赤狐'})
+        self.queue.process_once()
+        self.assertEqual(len(self.cloud.files), 4)
+        self.assertEqual(self.queue.status()['stats']['failed'], 1)
+        self.queue.enqueue(photo, {'物种名称': '空'})
+        self.drain()
+        self.assertEqual(set(self.cloud.files), empty_samples)
 
     def test_relabel_replaces_old_sample_and_unverify_removes_it(self):
         self.enable()

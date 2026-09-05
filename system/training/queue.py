@@ -42,10 +42,18 @@ class TrainingQueue:
                     operation TEXT NOT NULL DEFAULT 'upload', attempts INTEGER NOT NULL DEFAULT 0,
                     next_attempt REAL NOT NULL, ever_empty INTEGER NOT NULL DEFAULT 0,
                     empty_reserved INTEGER NOT NULL DEFAULT 0, uploaded_revision INTEGER NOT NULL DEFAULT 0,
+                    remote_possible INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS jobs_folder ON jobs(folder_key);
                 CREATE INDEX IF NOT EXISTS jobs_waiting ON jobs(state,next_attempt);
             ''')
+        # executescript commits its transaction. Start a fresh BEGIN IMMEDIATE
+        # through _connect so schema inspection and migration serialize across instances.
+        with self._connect() as db:
+            if 'remote_possible' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN remote_possible INTEGER NOT NULL DEFAULT 0')
+                # Older journals may have lost a completion response before upgrading.
+                db.execute("UPDATE jobs SET remote_possible=1 WHERE uploaded_revision>0 OR attempts>0 OR state='uploading'")
         if os.name != "nt":
             self.db_path.chmod(0o600)
 
@@ -125,7 +133,7 @@ class TrainingQueue:
             payload = contribution_payload(data) if validated and path.suffix.lower() in IMAGE_SUFFIXES else None
             if payload is None:
                 if old:
-                    if old["uploaded_revision"] or old["state"] == "uploading":
+                    if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading":
                         db.execute("UPDATE jobs SET revision=revision+1,state='pending',operation='delete',next_attempt=?,empty_reserved=0 WHERE source_key=?", (self.clock(), key))
                     else:
                         db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE source_key=?", (key,))
@@ -145,7 +153,7 @@ class TrainingQueue:
                 if count >= MAX_EMPTY_PER_FOLDER:
                     # A changed label invalidates any pending previous species submission too.
                     if old:
-                        operation = "delete" if old["uploaded_revision"] or old["state"] == "uploading" else "upload"
+                        operation = "delete" if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading" else "upload"
                         state = "pending" if operation == "delete" else "skipped"
                         db.execute("UPDATE jobs SET revision=revision+1,state=?,operation=?,empty_reserved=0,next_attempt=? WHERE source_key=?", (state, operation, self.clock(), key))
                     self._wake.set()
@@ -221,14 +229,19 @@ class TrainingQueue:
                 if job["payload"]["empty"]:
                     with self._lock, self._connect() as db:
                         db.execute("UPDATE jobs SET ever_empty=1 WHERE source_key=? AND revision=?", (job["source_key"], job["revision"]))
+                # Persist before sending: an exception/crash does not prove that the
+                # server rejected the upload. Keep this across retries and relabels.
+                with self._lock, self._connect() as db:
+                    db.execute("UPDATE jobs SET remote_possible=1 WHERE source_key=? AND revision=? AND state='uploading'", (job["source_key"], job["revision"]))
                 self.transport.upload(job, photo, annotation, lambda: self._current(job))
             with self._lock, self._connect() as db:
                 if job["operation"] == "upload":
                     # Retain receipt even if a concurrent edit has queued a newer revision.
                     db.execute("UPDATE jobs SET uploaded_revision=MAX(uploaded_revision,?) WHERE source_key=?", (job["revision"], job["source_key"]))
-                db.execute("UPDATE jobs SET state=?,uploaded_revision=?,empty_reserved=0,error='' WHERE source_key=? AND revision=? AND state='uploading'",
+                db.execute("UPDATE jobs SET state=?,uploaded_revision=?,remote_possible=?,empty_reserved=0,error='' WHERE source_key=? AND revision=? AND state='uploading'",
                            ("deleted" if job["operation"] == "delete" else "uploaded",
-                            0 if job["operation"] == "delete" else job["revision"], job["source_key"], job["revision"]))
+                            0 if job["operation"] == "delete" else job["revision"],
+                            int(job["operation"] == "upload"), job["source_key"], job["revision"]))
         except UploadCancelled:
             with self._lock, self._connect() as db:
                 db.execute("UPDATE jobs SET state='pending' WHERE source_key=? AND revision=? AND state='uploading'", (job["source_key"], job["revision"]))

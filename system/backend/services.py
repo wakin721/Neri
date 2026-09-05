@@ -2848,6 +2848,7 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
 
     roots = _preview_detection_db_roots(input_path, None, paths)
     detection_indexes: dict[Path, dict[str, dict[str, Any]]] = {}
+    filenames = {path.name for path in paths}
 
     def detection_data_for(path: Path) -> dict[str, Any]:
         for root in _unique_existing_dirs([path.parent, *roots]):
@@ -2856,7 +2857,7 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
                 index = _load_detection_index(
                     [root],
                     recursive=False,
-                    filenames={path.name},
+                    filenames=filenames,
                 )
                 detection_indexes[root] = index
             data = index.get(path.stem)
