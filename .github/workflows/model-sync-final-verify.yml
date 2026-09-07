@@ -24,12 +24,17 @@ jobs:
         shell: pwsh
         run: |
           $matches = git grep -n -E 'res/model_cls|res/model' -- system frontend/lib README.md
-          if ($LASTEXITCODE -eq 0) {
+          $grepExitCode = $LASTEXITCODE
+          if ($grepExitCode -eq 0) {
             $matches | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             $matches
             throw 'Runtime-facing legacy model path references remain.'
           }
+          if ($grepExitCode -ne 1) {
+            throw "git grep failed with exit code $grepExitCode"
+          }
           'No runtime-facing legacy model path references found.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit 0
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v6
