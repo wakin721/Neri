@@ -152,6 +152,24 @@ jobs:
           Copy-Item "res" $package -Recurse -Force
           Copy-Item "requirements.txt" $package -Force
 
+          $requiredModelPaths = @(
+            "res\Model\detect\user",
+            "res\Model\detect\sync",
+            "res\Model\cls\user",
+            "res\Model\cls\sync"
+          )
+          foreach ($relativePath in $requiredModelPaths) {
+            if (-not (Test-Path (Join-Path $package $relativePath))) {
+              throw "Missing canonical model path: $relativePath"
+            }
+          }
+          if (Test-Path (Join-Path $package "res\model")) {
+            throw "Legacy res/model directory is still packaged."
+          }
+          if (Test-Path (Join-Path $package "res\model_cls")) {
+            throw "Legacy res/model_cls directory is still packaged."
+          }
+
           $toolkit = Join-Path $package "toolkit"
           New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
           Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
@@ -168,7 +186,7 @@ jobs:
             throw "The legacy neri_flutter.exe name is still present in the package."
           }
 
-          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn"
+          & "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager"
 
       - name: Upload Windows x64 application
         uses: actions/upload-artifact@v6
