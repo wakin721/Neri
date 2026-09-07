@@ -125,6 +125,7 @@ void main() {
       ],
       availableClassificationModels: <ModelInfo>[],
       speciesTypes: <String, String>{},
+      settings: <String, dynamic>{},
       gpuAvailable: false,
       missingYoloDependencies: <String>[],
     );
