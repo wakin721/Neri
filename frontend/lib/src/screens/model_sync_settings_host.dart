@@ -33,7 +33,6 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
   String? _dismissedStatusKey;
   String? _retryError;
   bool _retrying = false;
-  bool _observedActiveSync = false;
 
   @override
   void initState() {
@@ -55,7 +54,6 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
       _dismissedStatusKey = null;
       _retryError = null;
       _retrying = false;
-      _observedActiveSync = false;
       _createController();
       return;
     }
@@ -73,10 +71,6 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
   }
 
   void _handleStatusChanged() {
-    final status = _controller.status;
-    if (status?.isActive == true) {
-      _observedActiveSync = true;
-    }
     _retryError = null;
     _syncMessageEntry();
   }
@@ -94,9 +88,9 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
 
   bool _shouldShow(ModelSyncStatus status) {
     if (!widget.enabled) return false;
-    if (status.isActive || status.state == 'failed') return true;
-    if (status.state == 'completed') return _observedActiveSync;
-    return false;
+    return status.isActive ||
+        status.state == 'completed' ||
+        status.state == 'failed';
   }
 
   void _syncMessageEntry() {
@@ -239,7 +233,12 @@ class _ModelSyncMessageCard extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('模型同步', style: theme.textTheme.titleSmall),
+                          Text(
+                            status.state == 'completed'
+                                ? '模型同步完成'
+                                : '模型同步',
+                            style: theme.textTheme.titleSmall,
+                          ),
                           const SizedBox(height: 3),
                           Text(
                             _statusLabel(),
