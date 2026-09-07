@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - dev
+      - codex/model-sync
     tags:
       - "v*"
 
@@ -163,10 +164,15 @@ jobs:
               throw "Missing canonical model path: $relativePath"
             }
           }
-          if (Test-Path (Join-Path $package "res\model")) {
+
+          $resDirectories = @(
+            Get-ChildItem (Join-Path $package "res") -Directory |
+              ForEach-Object { $_.Name }
+          )
+          if ($resDirectories -ccontains "model") {
             throw "Legacy res/model directory is still packaged."
           }
-          if (Test-Path (Join-Path $package "res\model_cls")) {
+          if ($resDirectories -ccontains "model_cls") {
             throw "Legacy res/model_cls directory is still packaged."
           }
 
