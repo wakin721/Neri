@@ -1,0 +1,57 @@
+name: Model Sync PR Checks
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-sync-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        shell: pwsh
+        run: python -m unittest discover -s tests
+
+      - name: Install Flutter 3.44.6
+        shell: pwsh
+        run: |
+          git clone --branch 3.44.6 --depth 1 https://github.com/flutter/flutter.git C:\flutter
+          "C:\flutter\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Get Flutter dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: C:\flutter\bin\flutter.bat pub get
+
+      - name: Run Flutter tests
+        shell: pwsh
+        working-directory: frontend
+        run: C:\flutter\bin\flutter.bat test
+
+      - name: Analyze Flutter frontend
+        shell: pwsh
+        working-directory: frontend
+        run: C:\flutter\bin\flutter.bat analyze
