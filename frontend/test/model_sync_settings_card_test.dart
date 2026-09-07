@@ -18,6 +18,7 @@ void main() {
           '"current_file":"detect/bird.pt","received_bytes":25,'
           '"total_bytes":100,"cloud_detect_count":4,"cloud_cls_count":2}',
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
@@ -59,12 +60,14 @@ void main() {
           return http.Response(
             '{"state":"checking","run_id":"run-2"}',
             202,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
           );
         }
         return http.Response(
           '{"state":"failed","error":"网络不可用",'
           '"last_successful_sync":"2026-09-07T01:00:00+00:00"}',
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
@@ -86,15 +89,7 @@ void main() {
 
     expect(find.textContaining('同步失败'), findsOneWidget);
     expect(find.textContaining('网络不可用'), findsOneWidget);
-    final renderedTexts = tester
-        .widgetList<Text>(find.byType(Text, skipOffstage: false))
-        .map((widget) => widget.data ?? widget.textSpan?.toPlainText() ?? '')
-        .toList();
-    expect(
-      find.text('重试'),
-      findsOneWidget,
-      reason: 'rendered texts: $renderedTexts',
-    );
+    expect(find.text('重试'), findsOneWidget);
     expect(find.textContaining('不会影响已安装的本地模型'), findsOneWidget);
 
     await tester.tap(find.text('重试'));
