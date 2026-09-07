@@ -26,6 +26,7 @@ ENV/
 !/tests/test_training_transport.py
 !/tests/test_training_broker.py
 !/tests/test_model_sync_layout.py
+!/tests/test_model_catalog.py
 
 # Build outputs
 build/
