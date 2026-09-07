@@ -221,6 +221,7 @@ void main() {
         home: Scaffold(
           body: ModelSyncSettingsHost(
             apiClient: client,
+            enabled: true,
             pollInterval: const Duration(hours: 1),
             onCatalogChanged: () async {},
             child: const SizedBox.expand(),
@@ -282,6 +283,7 @@ void main() {
         home: Scaffold(
           body: ModelSyncSettingsHost(
             apiClient: client,
+            enabled: true,
             pollInterval: const Duration(hours: 1),
             onCatalogChanged: () async {},
             child: const SizedBox.expand(),
