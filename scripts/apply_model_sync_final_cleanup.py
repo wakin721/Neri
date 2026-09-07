@@ -120,24 +120,11 @@ def patch_readme() -> None:
     )
 
 
-def patch_final_verify_workflow() -> None:
-    path = Path(".github/workflows/model-sync-final-verify.yml")
-    replace_once(
-        path,
-        "      - name: Analyze Flutter frontend\n"
-        "        shell: pwsh\n"
-        "        working-directory: frontend\n"
-        "        run: flutter analyze\n\n",
-        "",
-    )
-
-
 def main() -> None:
     patch_main_core()
     patch_services()
     patch_frontend_fixtures()
     patch_readme()
-    patch_final_verify_workflow()
 
 
 if __name__ == "__main__":
