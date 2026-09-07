@@ -157,9 +157,11 @@ void main() {
     final modelMenu = tester
         .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
         .first;
-    final labels = modelMenu.dropdownMenuEntries.map((entry) => entry.label);
-    expect(labels, contains('用户模型 / bird.pt'));
-    expect(labels, contains('NeriCloud / bird.pt'));
+    final entries = modelMenu.dropdownMenuEntries;
+    final labels = entries.map((entry) => entry.label);
+    expect(labels, containsAllInOrder(<String>['用户模型', 'bird.pt', 'NeriCloud', 'bird.pt']));
+    expect(entries.singleWhere((entry) => entry.label == '用户模型').enabled, isFalse);
+    expect(entries.singleWhere((entry) => entry.label == 'NeriCloud').enabled, isFalse);
   });
 
   testWidgets('sync controller refreshes catalog once when active run finishes', (
