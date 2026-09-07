@@ -1,0 +1,74 @@
+name: Update alpha3 release notes
+
+on:
+  push:
+    branches:
+      - codex/model-sync
+
+permissions:
+  contents: write
+
+jobs:
+  update-release-notes:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: codex/model-sync
+
+      - name: Prepend alpha3 release notes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("res/demo/README_Update.md")
+          text = path.read_text(encoding="utf-8")
+          marker = "## ✨ Neri 3.0.6-alpha3 更新日志 (2026.09.07)"
+          if marker not in text:
+              prefix = """# 📜 Neri 更新日志
+
+---
+
+## ✨ Neri 3.0.6-alpha3 更新日志 (2026.09.07)
+
+1. ☁️ **NeriCloud 模型同步**：新增后台模型同步能力，程序启动后可自动检查 NeriCloud 模型更新，也可在设置中手动立即同步；同步过程不会阻塞主界面。
+
+2. 🧠 **模型来源分离**：探测与分类模型区分为“用户模型”和“NeriCloud”两类来源，用户自行放入的模型不会被云端模型覆盖，同名模型也可同时保留。
+
+3. 📂 **模型目录规范化**：软件本地模型目录统一由 `res/Model` 调整为小写 `res/model`，并细分为 `detect/user`、`detect/sync`、`cls/user`、`cls/sync`；升级时会兼容迁移旧目录和已有模型选择。
+
+4. 🔄 **模型同步状态与热刷新**：新增同步状态、当前文件、下载进度、云端模型数量和最近成功同步时间显示；同步完成后自动刷新模型列表，正在执行的识别任务不会被中途切换模型。
+
+5. 🔐 **模型下载完整性与安全性**：下载使用临时 `.part` 文件，完成后校验文件大小和 SHA-256，再原子替换正式模型；直链失败或校验失败时可回退代理下载，且不会覆盖已有可用模型。
+
+6. 🛠️ **启动数据库兼容修复**：修复旧版训练上传数据库缺少 `event_key` 字段时，程序启动阶段提前创建索引而触发 `no such column: event_key` 后端内部错误的问题；现在会先完成字段迁移再创建索引，并保留现有队列数据。
+
+7. 📦 **Windows 打包调整**：Windows x64 构建继续校验仅打包小写 `res/model` 目录，并将本文件 `README_Update.md` 作为统一更新日志随程序发布。
+
+> **⚠️ Warning：** `3.0.6-alpha3` 为预览版本，建议正式科研批处理前先验证模型同步和识别结果；自动下载安装目前仅支持 Windows；部分 avi 格式视频可能无法识别，暂不支持 Windows 7 系统；Intel XPU 安装与自动启用目前已暂时关闭。
+
+---
+
+"""
+              header = "# 📜 Neri 更新日志\n\n---\n\n"
+              if text.startswith(header):
+                  text = prefix + text[len(header):]
+              else:
+                  text = prefix + text
+              path.write_text(text, encoding="utf-8")
+
+      - name: Remove one-shot workflow
+        shell: bash
+        run: rm -f .github/workflows/update-alpha3-readme.yml
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add res/demo/README_Update.md .github/workflows/update-alpha3-readme.yml
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: add alpha3 release notes"
+          git push origin HEAD:codex/model-sync
