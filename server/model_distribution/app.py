@@ -24,7 +24,10 @@ class DirectRequest(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-def create_app(config: DistributionConfig | None = None, service: DistributionService | None = None) -> FastAPI:
+def create_app(
+    config: DistributionConfig | None = None,
+    service: DistributionService | None = None,
+) -> FastAPI:
     config = config or DistributionConfig.from_env()
     service = service or DistributionService(
         config.state_dir,
@@ -69,7 +72,9 @@ def create_app(config: DistributionConfig | None = None, service: DistributionSe
         link = service.store.resolve_link(remote)
         headers = {
             "Accept-Ranges": "bytes",
-            "Content-Disposition": f'attachment; filename="{bound.path.rsplit("/", 1)[-1]}"',
+            "Content-Disposition": (
+                f'attachment; filename="{bound.path.rsplit("/", 1)[-1]}"'
+            ),
         }
         status_code = 206 if range_header else 200
         return StreamingResponse(
@@ -80,6 +85,3 @@ def create_app(config: DistributionConfig | None = None, service: DistributionSe
         )
 
     return app
-
-
-app = create_app()
