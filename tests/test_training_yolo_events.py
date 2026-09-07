@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,12 +25,13 @@ def save_camera_photo(path: Path, taken: datetime) -> None:
 
 
 def create_species_db(path: Path) -> None:
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         db.execute('CREATE TABLE species (中文名 TEXT PRIMARY KEY, 学名 TEXT, 物种类型 TEXT)')
         db.execute(
             'INSERT INTO species(中文名, 学名, 物种类型) VALUES (?,?,?)',
             ('棕脸鹟莺', 'Abroscopus albogularis', '鸟类'),
         )
+        db.commit()
 
 
 class MemoryCloud:
