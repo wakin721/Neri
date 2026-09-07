@@ -21,10 +21,17 @@ def valid_upload_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlsplit(url)
         host = (parsed.hostname or "").lower()
-        return (parsed.scheme == "https" and not parsed.username and not parsed.password
-                and parsed.port in (None, 443)
-                and (host == "my.microsoftpersonalcontent.com" or host.endswith(".1drv.com")
-                     or host.endswith(".sharepoint.com")))
+        return (
+            parsed.scheme == "https"
+            and not parsed.username
+            and not parsed.password
+            and parsed.port in (None, 443)
+            and (
+                host == "my.microsoftpersonalcontent.com"
+                or host.endswith(".1drv.com")
+                or host.endswith(".sharepoint.com")
+            )
+        )
     except (TypeError, ValueError):
         return False
 
@@ -54,8 +61,12 @@ class HttpTransport:
             raise UploadError("network_or_response_error") from None
 
     def _broker(self, path, method, body):
-        return self._request(self.base_url + path, method, json.dumps(body).encode(),
-                             {"Content-Type": "application/json"})
+        return self._request(
+            self.base_url + path,
+            method,
+            json.dumps(body).encode(),
+            {"Content-Type": "application/json"},
+        )
 
     def _valid_cancel(self, url):
         prefix = self.base_url + '/v1/uploads/'
@@ -67,41 +78,87 @@ class HttpTransport:
     def upload(self, job, photo, annotation, is_current):
         if not is_current():
             raise UploadCancelled()
+        try:
+            package = json.loads(annotation)
+            labels = {
+                species: str(package["yolo_labels"][species]).encode("utf-8")
+                for species in job["payload"]["species"]
+            }
+            classes = {
+                species: str(package["yolo_classes"][species]).encode("utf-8")
+                for species in job["payload"]["species"]
+            }
+        except (TypeError, ValueError, KeyError):
+            raise UploadError("invalid_yolo_package") from None
+
         response = self._broker("/v1/submissions", "POST", {
-            "sample_id": job["sample_id"], "revision": job["revision"], "secret": job["secret"],
-            "species": job["payload"]["species"], "image_bytes": len(photo),
-            "annotation_bytes": len(annotation),
+            "sample_id": job["sample_id"],
+            "revision": job["revision"],
+            "secret": job["secret"],
+            "species": job["payload"]["species"],
+            "image_bytes": len(photo),
+            "annotation_bytes": {name: len(content) for name, content in labels.items()},
+            "classes_bytes": {name: len(content) for name, content in classes.items()},
         })
-        if not isinstance(response, dict) or response.get('sample_id') != job['sample_id'] or response.get('revision') != job['revision']:
+        if (
+            not isinstance(response, dict)
+            or response.get('sample_id') != job['sample_id']
+            or response.get('revision') != job['revision']
+        ):
             raise UploadError('invalid_submission_receipt')
         if response.get('already_complete') is True and response.get('targets') == []:
             return
         targets = response.get("targets", [])
-        expected = {(kind, species) for kind in ("image", "annotation") for species in job["payload"]["species"]}
+        expected = {
+            (kind, species)
+            for kind in ("image", "annotation", "classes")
+            for species in job["payload"]["species"]
+        }
         actual = {(t.get("kind"), t.get("species")) for t in targets if isinstance(t, dict)}
         if actual != expected or len(targets) != len(expected):
             raise UploadError("invalid_upload_targets")
-        if any(not valid_upload_url(t.get("upload_url", "")) or not self._valid_cancel(t.get('cancel_url', '')) for t in targets):
+        if any(
+            not valid_upload_url(t.get("upload_url", ""))
+            or not self._valid_cancel(t.get('cancel_url', ''))
+            for t in targets
+        ):
             raise UploadError("invalid_upload_host")
         complete = False
         try:
             for target in targets:
-                content = photo if target["kind"] == "image" else annotation
+                if target["kind"] == "image":
+                    content = photo
+                elif target["kind"] == "annotation":
+                    content = labels[target["species"]]
+                else:
+                    content = classes[target["species"]]
                 chunk_size = int(target.get("chunk_size", DEFAULT_CHUNK_BYTES))
                 if chunk_size <= 0 or chunk_size > 10 * 1024 * 1024 or chunk_size % 327680:
                     raise UploadError("invalid_chunk_size")
+                if not content:
+                    if not is_current():
+                        raise UploadCancelled()
+                    self._request(target["upload_url"], "PUT", b"", {
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": "0",
+                    })
+                    continue
                 for offset in range(0, len(content), chunk_size):
                     if not is_current():
                         raise UploadCancelled()
                     chunk = content[offset:offset + chunk_size]
                     self._request(target["upload_url"], "PUT", chunk, {
-                        "Content-Type": "application/octet-stream", "Content-Length": str(len(chunk)),
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(len(chunk)),
                         "Content-Range": f"bytes {offset}-{offset + len(chunk) - 1}/{len(content)}",
                     })
             if not is_current():
                 raise UploadCancelled()
-            self._broker(f'/v1/submissions/{job["sample_id"]}/complete', "POST",
-                         {"revision": job["revision"], "secret": job["secret"]})
+            self._broker(
+                f'/v1/submissions/{job["sample_id"]}/complete',
+                "POST",
+                {"revision": job["revision"], "secret": job["secret"]},
+            )
             complete = True
         finally:
             if not complete:
@@ -114,4 +171,8 @@ class HttpTransport:
     def delete(self, job, is_current):
         if not is_current():
             raise UploadCancelled()
-        self._broker(f'/v1/submissions/{job["sample_id"]}', "DELETE", {"secret": job["secret"]})
+        self._broker(
+            f'/v1/submissions/{job["sample_id"]}',
+            "DELETE",
+            {"secret": job["secret"]},
+        )
