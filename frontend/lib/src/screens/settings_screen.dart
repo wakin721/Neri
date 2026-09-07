@@ -1500,26 +1500,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Widget _buildVideoSettings() {
-    final videoMode = normalizeVideoProcessingMode(
-      _string('video_mode', defaultVideoProcessingMode),
-    );
-    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
-
-    return SectionCard(
-      title: '视频检测设置',
-      subtitle: '视频处理模式、跳帧和检测过滤',
-      icon: Icons.movie_filter_rounded,
-      child: Column(
-        children: _buildVideoSettingPanels(
-          videoMode,
-          strideLabel,
-          enabled: _detectionDependenciesReady,
-        ),
-      ),
-    );
-  }
-
   List<Widget> _buildVideoSettingPanels(
     String videoMode,
     String strideLabel, {
@@ -2059,30 +2039,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       parts.add('${result.skipped.length} 项未能清理');
     }
     return parts.join(' · ');
-  }
-
-  Widget _buildQuickMarkSettings() {
-    return SectionCard(
-      title: '快速标记设置',
-      subtitle: '物种按钮、数量按钮和自动排序',
-      icon: Icons.bookmark_add_rounded,
-      child: _buildQuickMarkEditor(),
-    );
-  }
-
-  Widget _buildExportSettings() {
-    return SectionCard(
-      title: '导出设置',
-      subtitle: '自定义导出表格、收藏媒体同步和空照片删除策略',
-      icon: Icons.table_chart_rounded,
-      child: Column(
-        children: [
-          _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(showDivider: true),
-          _buildEmptyPhotoDeleteMode(),
-        ],
-      ),
-    );
   }
 
   Widget _buildAppearanceSettings() {
