@@ -152,12 +152,13 @@ jobs:
           Copy-Item "system" $package -Recurse -Force
           Copy-Item "res" $package -Recurse -Force
           Copy-Item "requirements.txt" $package -Force
+          Copy-Item "CHANGELOG.md" $package -Force
 
           $requiredModelPaths = @(
-            "res\Model\detect\user",
-            "res\Model\detect\sync",
-            "res\Model\cls\user",
-            "res\Model\cls\sync"
+            "res\model\detect\user",
+            "res\model\detect\sync",
+            "res\model\cls\user",
+            "res\model\cls\sync"
           )
           foreach ($relativePath in $requiredModelPaths) {
             if (-not (Test-Path (Join-Path $package $relativePath))) {
@@ -169,8 +170,11 @@ jobs:
             Get-ChildItem (Join-Path $package "res") -Directory |
               ForEach-Object { $_.Name }
           )
-          if ($resDirectories -ccontains "model") {
-            throw "Legacy res/model directory is still packaged."
+          if (-not ($resDirectories -ccontains "model")) {
+            throw "Canonical lowercase res/model directory is missing."
+          }
+          if ($resDirectories -ccontains "Model") {
+            throw "Uppercase res/Model directory is still packaged."
           }
           if ($resDirectories -ccontains "model_cls") {
             throw "Legacy res/model_cls directory is still packaged."
