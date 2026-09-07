@@ -1,162 +1,151 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from system.model_sync.layout import (
-    get_model_layout,
-    migrate_legacy_layout,
-    resolve_tracker_config,
-)
+from system.model_sync.layout import get_model_layout, migrate_legacy_layout
 
 
-class ModelLayoutMigrationTests(unittest.TestCase):
-    def test_migrates_legacy_models_and_tracker(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            (resource_root / "model").mkdir(parents=True)
-            (resource_root / "model_cls").mkdir(parents=True)
-            (resource_root / "model" / "detect.pt").write_bytes(b"det")
-            (resource_root / "model_cls" / "classify.onnx").write_bytes(b"cls")
-            (resource_root / "model_cls" / "tracker.yaml").write_text(
-                "tracker_type: botsort\n", encoding="utf-8"
-            )
+class ModelLayoutTests(unittest.TestCase):
+    def test_canonical_model_root_is_lowercase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = get_model_layout(Path(tmp))
+            self.assertEqual(layout.root, Path(tmp) / "model")
+            self.assertEqual(layout.detect_user, Path(tmp) / "model" / "detect" / "user")
+            self.assertEqual(layout.detect_sync, Path(tmp) / "model" / "detect" / "sync")
+            self.assertEqual(layout.cls_user, Path(tmp) / "model" / "cls" / "user")
+            self.assertEqual(layout.cls_sync, Path(tmp) / "model" / "cls" / "sync")
+            self.assertEqual(layout.tracker, Path(tmp) / "model" / "tracker.yaml")
 
-            report = migrate_legacy_layout(resource_root)
+    def test_flat_lowercase_legacy_models_migrate_into_user_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_detect = root / "model"
+            legacy_cls = root / "model_cls"
+            legacy_detect.mkdir()
+            legacy_cls.mkdir()
+            (legacy_detect / "detect.pt").write_bytes(b"detect")
+            (legacy_cls / "classify.pt").write_bytes(b"classify")
+            (legacy_cls / "tracker.yaml").write_text("tracker", encoding="utf-8")
 
-            self.assertTrue((resource_root / "Model/detect/user/detect.pt").is_file())
-            self.assertTrue((resource_root / "Model/cls/user/classify.onnx").is_file())
-            self.assertTrue((resource_root / "Model/tracker.yaml").is_file())
+            report = migrate_legacy_layout(root)
+            layout = get_model_layout(root)
+
             self.assertEqual(report.moved, 3)
+            self.assertEqual((layout.detect_user / "detect.pt").read_bytes(), b"detect")
+            self.assertEqual((layout.cls_user / "classify.pt").read_bytes(), b"classify")
+            self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "tracker")
 
-    def test_case_insensitive_legacy_model_root_is_staged_before_canonical_layout(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            legacy_detect = resource_root / "model"
-            legacy_cls = resource_root / "model_cls"
-            legacy_detect.mkdir(parents=True)
-            legacy_cls.mkdir(parents=True)
-            (legacy_detect / "bird.pt").write_bytes(b"det")
-            (legacy_detect / "tracker.yaml").write_text("detect\n", encoding="utf-8")
-            (legacy_cls / "tracker.yaml").write_text("cls\n", encoding="utf-8")
+    def test_existing_canonical_subdirectories_do_not_block_flat_file_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_detect = root / "model"
+            (legacy_detect / "detect" / "user").mkdir(parents=True)
+            (legacy_detect / "detect" / "sync").mkdir(parents=True)
+            (legacy_detect / "cls" / "user").mkdir(parents=True)
+            (legacy_detect / "cls" / "sync").mkdir(parents=True)
+            (legacy_detect / "legacy.pt").write_bytes(b"legacy")
 
-            with patch("system.model_sync.layout._case_insensitive_paths", return_value=True):
-                migrate_legacy_layout(resource_root)
+            report = migrate_legacy_layout(root)
 
+            self.assertEqual(report.moved, 1)
+            self.assertFalse((legacy_detect / "legacy.pt").exists())
             self.assertEqual(
-                (resource_root / "Model/tracker.yaml").read_text(encoding="utf-8"),
-                "cls\n",
+                (legacy_detect / "detect" / "user" / "legacy.pt").read_bytes(),
+                b"legacy",
             )
-            self.assertEqual(
-                (resource_root / "Model/detect/user/bird.pt").read_bytes(),
-                b"det",
-            )
-            self.assertTrue((resource_root / ".neri-legacy-model/tracker.yaml").exists())
 
-    def test_migration_is_idempotent_and_preserves_collisions(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            legacy = resource_root / "model"
-            target = resource_root / "Model/detect/user"
-            legacy.mkdir(parents=True)
-            target.mkdir(parents=True)
-            (legacy / "same.pt").write_bytes(b"legacy")
-            (target / "same.pt").write_bytes(b"user")
-
-            first = migrate_legacy_layout(resource_root)
-            second = migrate_legacy_layout(resource_root)
-
-            self.assertEqual((target / "same.pt").read_bytes(), b"user")
-            retained = sorted(target.glob("same.legacy-*.pt"))
-            self.assertEqual(len(retained), 1)
-            self.assertEqual(retained[0].read_bytes(), b"legacy")
+    def test_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "model").mkdir()
+            (root / "model" / "a.pt").write_bytes(b"a")
+            first = migrate_legacy_layout(root)
+            second = migrate_legacy_layout(root)
             self.assertEqual(first.moved, 1)
             self.assertEqual(second.moved, 0)
 
-    def test_only_approved_extensions_migrate(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            detect = resource_root / "model"
-            cls = resource_root / "model_cls"
-            detect.mkdir(parents=True)
-            cls.mkdir(parents=True)
-            (detect / "keep.pt").write_bytes(b"pt")
-            (detect / "ignore.onnx").write_bytes(b"onnx")
-            (detect / "readme.txt").write_text("x", encoding="utf-8")
-            (cls / "keep.pt").write_bytes(b"pt")
-            (cls / "keep.onnx").write_bytes(b"onnx")
-            (cls / "keep.engine").write_bytes(b"engine")
-            (cls / "ignore.txt").write_text("x", encoding="utf-8")
+    def test_collision_uses_deterministic_legacy_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            layout = get_model_layout(root)
+            layout.detect_user.mkdir(parents=True)
+            (layout.detect_user / "same.pt").write_bytes(b"new")
+            (root / "model" / "same.pt").write_bytes(b"old")
 
-            migrate_legacy_layout(resource_root)
+            report = migrate_legacy_layout(root)
 
-            layout = get_model_layout(resource_root)
-            self.assertTrue((layout.detect_user / "keep.pt").exists())
-            self.assertFalse((layout.detect_user / "ignore.onnx").exists())
-            self.assertTrue((layout.cls_user / "keep.pt").exists())
-            self.assertTrue((layout.cls_user / "keep.onnx").exists())
-            self.assertTrue((layout.cls_user / "keep.engine").exists())
-            legacy_detect_root = (
-                resource_root / ".neri-legacy-model"
-                if os.path.normcase("Model") == os.path.normcase("model")
-                else detect
-            )
-            self.assertTrue((legacy_detect_root / "ignore.onnx").exists())
-            self.assertTrue((legacy_detect_root / "readme.txt").exists())
-            self.assertTrue((cls / "ignore.txt").exists())
+            self.assertEqual(report.moved, 1)
+            self.assertEqual(report.collisions, ("same.legacy-1.pt",))
+            self.assertEqual((layout.detect_user / "same.pt").read_bytes(), b"new")
+            self.assertEqual((layout.detect_user / "same.legacy-1.pt").read_bytes(), b"old")
 
-    def test_tracker_preference_is_canonical_then_cls_then_detect(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            cls_tracker = resource_root / "model_cls/tracker.yaml"
-            detect_tracker = resource_root / "model/tracker.yaml"
-            cls_tracker.parent.mkdir(parents=True)
-            detect_tracker.parent.mkdir(parents=True)
-            cls_tracker.write_text("cls\n", encoding="utf-8")
-            detect_tracker.write_text("detect\n", encoding="utf-8")
+    def test_only_allowed_model_extensions_are_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "model").mkdir()
+            (root / "model_cls").mkdir()
+            (root / "model" / "keep.txt").write_text("x", encoding="utf-8")
+            (root / "model" / "ignore.onnx").write_bytes(b"x")
+            (root / "model_cls" / "classify.onnx").write_bytes(b"onnx")
+            (root / "model_cls" / "classify.engine").write_bytes(b"engine")
 
-            migrate_legacy_layout(resource_root)
+            migrate_legacy_layout(root)
+            layout = get_model_layout(root)
 
-            canonical = resource_root / "Model/tracker.yaml"
-            self.assertEqual(canonical.read_text(encoding="utf-8"), "cls\n")
-            self.assertTrue(detect_tracker.exists())
+            self.assertTrue((root / "model" / "keep.txt").exists())
+            self.assertTrue((root / "model" / "ignore.onnx").exists())
+            self.assertTrue((layout.cls_user / "classify.onnx").exists())
+            self.assertTrue((layout.cls_user / "classify.engine").exists())
 
-            canonical.write_text("canonical\n", encoding="utf-8")
-            cls_tracker.write_text("new-cls\n", encoding="utf-8")
-            migrate_legacy_layout(resource_root)
-            self.assertEqual(canonical.read_text(encoding="utf-8"), "canonical\n")
-            self.assertTrue(cls_tracker.exists())
+    def test_model_cls_tracker_is_preferred_over_flat_model_tracker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "model").mkdir()
+            (root / "model_cls").mkdir()
+            (root / "model" / "tracker.yaml").write_text("detect", encoding="utf-8")
+            (root / "model_cls" / "tracker.yaml").write_text("cls", encoding="utf-8")
 
-    def test_detect_tracker_is_fallback_when_cls_tracker_missing(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            detect_tracker = resource_root / "model/tracker.yaml"
-            detect_tracker.parent.mkdir(parents=True)
-            detect_tracker.write_text("detect\n", encoding="utf-8")
+            migrate_legacy_layout(root)
+            layout = get_model_layout(root)
 
-            migrate_legacy_layout(resource_root)
+            self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "cls")
 
-            self.assertEqual(
-                (resource_root / "Model/tracker.yaml").read_text(encoding="utf-8"),
-                "detect\n",
-            )
+    def test_flat_model_tracker_is_fallback_when_model_cls_tracker_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "model").mkdir()
+            (root / "model" / "tracker.yaml").write_text("detect", encoding="utf-8")
 
-    def test_creates_all_canonical_directories_and_tracker_fallback(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            resource_root = Path(temp_dir) / "res"
-            layout = get_model_layout(resource_root)
+            migrate_legacy_layout(root)
+            layout = get_model_layout(root)
 
+            self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "detect")
+
+    def test_existing_canonical_tracker_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            layout = get_model_layout(root)
+            layout.root.mkdir(parents=True)
+            layout.tracker.write_text("canonical", encoding="utf-8")
+            (root / "model_cls").mkdir()
+            (root / "model_cls" / "tracker.yaml").write_text("legacy", encoding="utf-8")
+
+            migrate_legacy_layout(root)
+
+            self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "canonical")
+
+    def test_migration_creates_all_canonical_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = get_model_layout(Path(tmp))
+            migrate_legacy_layout(Path(tmp))
             for path in (
+                layout.root,
                 layout.detect_user,
                 layout.detect_sync,
                 layout.cls_user,
                 layout.cls_sync,
             ):
                 self.assertTrue(path.is_dir())
-            self.assertEqual(resolve_tracker_config(resource_root), "botsort.yaml")
-            layout.tracker.write_text("tracker_type: botsort\n", encoding="utf-8")
-            self.assertEqual(resolve_tracker_config(resource_root), str(layout.tracker))
 
 
 if __name__ == "__main__":
