@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -11,9 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from .capabilities import BudgetError, BudgetStore
 from .config import DistributionConfig
 from .service import DistributionError, DistributionService
-from .storage import OpenListModelStore
+from .storage import OpenListModelStore, StorageError
 
 _RANGE_RE = re.compile(r"^bytes=\d+-\d*$")
+
+
+def bounded_proxy_stream(chunks, expected_size: int):
+    received = 0
+    for chunk in chunks:
+        received += len(chunk)
+        if received > expected_size:
+            raise StorageError("drive_stream_size_mismatch")
+        yield chunk
+    if received != expected_size:
+        raise StorageError("drive_stream_size_mismatch")
 
 
 def valid_range_header(value: str | None) -> bool:
@@ -148,13 +160,15 @@ def create_app(
         link = service.store.resolve_link(remote)
         headers = {
             "Accept-Ranges": "bytes",
-            "Content-Disposition": (
-                f'attachment; filename="{bound.path.rsplit("/", 1)[-1]}"'
-            ),
+            "Content-Length": str(reserved_bytes),
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(bound.path.rsplit("/", 1)[-1], safe=""),
         }
+        if range_header:
+            start = int(range_header[6:].split("-", 1)[0])
+            headers["Content-Range"] = f"bytes {start}-{start + reserved_bytes - 1}/{bound.size}"
         status_code = 206 if range_header else 200
         return StreamingResponse(
-            service.store.iter_bytes(link, range_header=range_header),
+            bounded_proxy_stream(service.store.iter_bytes(link, range_header=range_header), reserved_bytes),
             media_type="application/octet-stream",
             status_code=status_code,
             headers=headers,

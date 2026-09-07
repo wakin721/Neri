@@ -67,8 +67,14 @@ class ManifestBuilder:
 
         digest = hashlib.sha256()
         link = self.store.resolve_link(remote)
+        received = 0
         for chunk in self.store.iter_bytes(link):
+            received += len(chunk)
+            if received > entry.size:
+                raise ManifestError("drive_stream_size_mismatch")
             digest.update(chunk)
+        if received != entry.size:
+            raise ManifestError("drive_stream_size_mismatch")
         value = digest.hexdigest()
         if entry.modified:
             with closing(sqlite3.connect(self.db_path)) as db, db:

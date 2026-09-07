@@ -50,6 +50,18 @@ class FakeStore:
 
 
 class ManifestBuilderTests(unittest.TestCase):
+    def test_short_or_oversized_stream_is_not_cached(self):
+        from unittest.mock import patch
+        store = FakeStore({'/Neri_Data/Model/detect/a.pt': {'data': b'abc', 'modified': '1'}})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            builder = ManifestBuilder(Path(temp_dir), store)
+            for body in [b'a', b'abcde']:
+                with self.subTest(body=body), patch.object(store, 'iter_bytes', return_value=iter([body])):
+                    with self.assertRaisesRegex(ManifestError, 'drive_stream_size_mismatch'):
+                        builder.build()
+            snapshot = builder.build()
+            self.assertEqual(snapshot.files[0].sha256, hashlib.sha256(b'abc').hexdigest())
+
     def test_builds_allowlisted_sorted_manifest(self):
         files = {
             '/Neri_Data/Model/detect/z.pt': {'data': b'z', 'modified': '1'},
@@ -104,6 +116,59 @@ class ManifestBuilderTests(unittest.TestCase):
 
 
 class OpenListPathTests(unittest.TestCase):
+    def test_list_rejects_malformed_or_incomplete_listing(self):
+        from unittest.mock import patch
+        from server.model_distribution.config import DistributionConfig
+        from server.model_distribution.storage import OpenListModelStore, StorageError
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = OpenListModelStore(DistributionConfig(Path(temp_dir), openlist_token='secret'))
+            for data in [None, {}, {'content': None}, {'content': [], 'total': 2},
+                         {'content': [{'name': 'a.pt'}], 'total': 1}]:
+                with self.subTest(data=data), patch.object(store, '_call', return_value=data):
+                    with self.assertRaises(StorageError):
+                        store.list_dir('/Neri_Data/Model/detect')
+            for content in [None, []]:
+                with patch.object(store, '_call', return_value={'content': content, 'total': 0}):
+                    self.assertEqual(store.list_dir('/Neri_Data/Model/cls'), [])
+
+    def test_range_proxy_rejects_upstream_ignoring_range(self):
+        from unittest.mock import patch
+        from server.model_distribution.config import DistributionConfig
+        from server.model_distribution.storage import OpenListModelStore, StorageError
+        from tests.test_model_sync_client import _FakeResponse
+
+        response = _FakeResponse(b'0123456789')
+        response.status = 200
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = OpenListModelStore(DistributionConfig(Path(temp_dir), openlist_token='secret'))
+            with patch('urllib.request.urlopen', return_value=response):
+                with self.assertRaisesRegex(StorageError, 'drive_range_not_honored'):
+                    list(store.iter_bytes(UpstreamLink('https://foo.1drv.com/model', {}), 'bytes=2-3'))
+
+    def test_range_proxy_checks_content_range_and_limits_stream(self):
+        from unittest.mock import patch
+        from server.model_distribution.config import DistributionConfig
+        from server.model_distribution.storage import OpenListModelStore, StorageError
+        from tests.test_model_sync_client import _FakeResponse
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = OpenListModelStore(DistributionConfig(Path(temp_dir), openlist_token='secret'))
+            for content_range, body, valid in [('bytes 2-3/10', b'23', True),
+                                             ('bytes 0-1/10', b'01', False),
+                                             ('bytes 2-3/10', b'234', False),
+                                             ('bytes 2-3/10', b'2', False)]:
+                with self.subTest(content_range=content_range, body=body):
+                    response = _FakeResponse(body)
+                    response.status = 206
+                    response.headers['Content-Range'] = content_range
+                    with patch('urllib.request.urlopen', return_value=response):
+                        chunks = store.iter_bytes(UpstreamLink('https://foo.1drv.com/model', {}), 'bytes=2-3')
+                        if valid:
+                            self.assertEqual(b''.join(chunks), b'23')
+                        else:
+                            with self.assertRaises(StorageError):
+                                list(chunks)
+
     def test_store_rejects_paths_outside_fixed_root(self):
         from server.model_distribution.config import DistributionConfig
         from server.model_distribution.storage import OpenListModelStore, StorageError
@@ -191,6 +256,55 @@ class CapabilityTests(unittest.TestCase):
 
 
 class DistributionServiceTests(unittest.TestCase):
+    def test_anonymous_client_uses_server_auth_and_receives_onedrive_link(self):
+        import json
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from server.model_distribution.app import create_app
+        from server.model_distribution.config import DistributionConfig
+        from tests.test_model_sync_client import _FakeResponse
+
+        api_calls = []
+        def openlist(request, timeout):
+            if request.full_url.startswith('https://foo.1drv.com/'):
+                self.assertIsNone(request.get_header('Authorization'))
+                return _FakeResponse(b'abc')
+            api_calls.append(request)
+            self.assertEqual(request.get_header('Authorization'), 'server-only-secret')
+            body = json.loads(request.data)
+            endpoint = request.full_url.rsplit('/', 1)[-1]
+            if endpoint == 'list':
+                content = ([{'name': 'a.pt', 'size': 3, 'modified': '1', 'is_dir': False}]
+                           if body['path'].endswith('/detect') else [])
+                data = {'content': content, 'total': len(content)}
+            elif endpoint == 'get':
+                return _FakeResponse(json.dumps({'code': 404, 'message': 'not found'}).encode())
+            else:
+                self.assertEqual(endpoint, 'link')
+                data = {'url': 'https://foo.1drv.com/a', 'header': None}
+            return _FakeResponse(json.dumps({'code': 200, 'data': data}).encode())
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch('urllib.request.urlopen', side_effect=openlist):
+            app = create_app(DistributionConfig(Path(temp_dir), openlist_token='server-only-secret'))
+            with TestClient(app) as client:
+                response = client.get('/v1/manifest')
+                self.assertEqual(response.status_code, 200)
+                manifest = response.json()
+                entry = manifest['files'][0]
+                direct = client.post('/v1/direct', json={
+                    'manifest_id': manifest['manifest_id'], 'path': entry['path'], 'sha256': entry['sha256'],
+                })
+                self.assertEqual(direct.status_code, 200)
+                capability = direct.json()
+                self.assertEqual(capability['direct_url'], 'https://foo.1drv.com/a')
+                self.assertEqual(capability['direct_headers'], {})
+                self.assertNotIn('server-only-secret', response.text + direct.text)
+                proxy = client.get('/v1/proxy/' + capability['proxy_token'])
+                self.assertEqual(proxy.content, b'abc')
+                self.assertEqual(proxy.headers['content-length'], '3')
+                self.assertEqual(hashlib.sha256(proxy.content).hexdigest(), entry['sha256'])
+                self.assertTrue(api_calls)
+
     def test_direct_requires_current_manifest_identity(self):
         from server.model_distribution.service import DistributionService, DistributionError
         store = FakeStore({'/Neri_Data/Model/detect/a.pt': {'data': b'aaa', 'modified': '1'}})
@@ -307,8 +421,18 @@ class DistributionRouteTests(unittest.TestCase):
             )
             response = routes['/v1/proxy/{token}'].endpoint('token-value-for-test-123456', proxy_request)
             self.assertEqual(response.status_code, 206)
+            self.assertEqual(response.headers['content-range'], 'bytes 10-19/100')
+            self.assertEqual(response.headers['content-length'], '10')
             self.assertEqual(budget.requests, ['203.0.113.10'] * 3)
             self.assertEqual(budget.proxy_reservations, [('203.0.113.10', 10)])
+
+    def test_proxy_stream_rejects_bytes_beyond_reserved_budget(self):
+        from server.model_distribution.app import bounded_proxy_stream
+        from server.model_distribution.storage import StorageError
+        self.assertEqual(list(bounded_proxy_stream(iter([b'12', b'34']), 4)), [b'12', b'34'])
+        for chunks in [[b'12345'], [b'1']]:
+            with self.subTest(chunks=chunks), self.assertRaises(StorageError):
+                list(bounded_proxy_stream(iter(chunks), 4))
 
 
 class ProxyRangeTests(unittest.TestCase):

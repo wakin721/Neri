@@ -72,6 +72,27 @@ class _FakeResponse:
 
 
 class ClientTests(unittest.TestCase):
+    def test_manifest_allows_server_to_hash_new_openlist_models(self):
+        from system.model_sync.client import ModelDistributionClient
+        timeouts = []
+        def opener(request, timeout):
+            timeouts.append(timeout)
+            return _FakeResponse(json.dumps({
+                'schema_version': 1, 'manifest_id': 'a' * 64, 'files': [],
+            }).encode())
+        ModelDistributionClient(opener=opener).fetch_manifest()
+        self.assertEqual(timeouts, [900])
+
+    def test_html_response_explains_missing_server_route(self):
+        from system.model_sync.client import ModelDistributionClient, ModelDistributionError
+        client = ModelDistributionClient(
+            opener=lambda request, timeout=0: _FakeResponse(
+                b'<!DOCTYPE html><html><title>Neri</title></html>'
+            ),
+        )
+        with self.assertRaisesRegex(ModelDistributionError, '模型同步服务尚未正确配置'):
+            client.fetch_manifest()
+
     def test_fetches_manifest_and_builds_proxy_url(self):
         from system.model_sync.client import ModelDistributionClient
         payload = json.dumps({'schema_version': 1, 'manifest_id': 'a' * 64, 'files': []}).encode()

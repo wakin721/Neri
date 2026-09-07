@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from system.model_sync.layout import get_model_layout, migrate_legacy_layout
 
@@ -35,6 +36,47 @@ class ModelLayoutTests(unittest.TestCase):
             self.assertEqual((layout.detect_user / "detect.pt").read_bytes(), b"detect")
             self.assertEqual((layout.cls_user / "classify.pt").read_bytes(), b"classify")
             self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "tracker")
+            self.assertFalse(legacy_cls.exists())
+
+    def test_empty_legacy_classification_directory_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            legacy_cls = root / "model_cls"
+            legacy_cls.mkdir()
+
+            first = migrate_legacy_layout(root)
+            second = migrate_legacy_layout(root)
+
+            self.assertFalse(legacy_cls.exists())
+            self.assertEqual(first.moved, 0)
+            self.assertEqual(second.moved, 0)
+
+    def test_unmigrated_files_keep_the_legacy_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            legacy_cls = root / "model_cls"
+            legacy_cls.mkdir()
+            (legacy_cls / "classify.pt").write_bytes(b"model")
+            (legacy_cls / "notes.txt").write_text("keep", encoding="utf-8")
+
+            report = migrate_legacy_layout(root)
+
+            self.assertEqual(report.moved, 1)
+            self.assertEqual((legacy_cls / "notes.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_failed_migration_keeps_legacy_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            legacy_cls = root / "model_cls"
+            legacy_cls.mkdir()
+            source = legacy_cls / "classify.pt"
+            source.write_bytes(b"model")
+
+            with patch("system.model_sync.layout.shutil.move", side_effect=PermissionError):
+                with self.assertRaises(PermissionError):
+                    migrate_legacy_layout(root)
+
+            self.assertEqual(source.read_bytes(), b"model")
 
     def test_alpha2_uppercase_canonical_root_is_normalized_to_lowercase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +188,7 @@ class ModelLayoutTests(unittest.TestCase):
             canonical = root / "model"
             (canonical / "detect" / "user").mkdir(parents=True)
             (canonical / "tracker.yaml").write_text("canonical", encoding="utf-8")
+            (canonical / "tracker.legacy-1.yaml").write_text("backup", encoding="utf-8")
             (root / "model_cls").mkdir()
             (root / "model_cls" / "tracker.yaml").write_text("legacy", encoding="utf-8")
 
@@ -153,6 +196,14 @@ class ModelLayoutTests(unittest.TestCase):
             layout = get_model_layout(root)
 
             self.assertEqual(layout.tracker.read_text(encoding="utf-8"), "canonical")
+            self.assertEqual(
+                (canonical / "tracker.legacy-1.yaml").read_text(encoding="utf-8"), "backup"
+            )
+            self.assertEqual(
+                (canonical / "tracker.legacy-2.yaml").read_text(encoding="utf-8"), "legacy"
+            )
+            self.assertFalse((root / "model_cls").exists())
+            self.assertEqual(migrate_legacy_layout(root).moved, 0)
 
     def test_migration_creates_all_canonical_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Iterator
@@ -53,6 +54,8 @@ class OpenListModelStore:
             payload = json.loads(raw)
         except ValueError as exc:
             raise StorageError("invalid_drive_response") from exc
+        if not isinstance(payload, dict):
+            raise StorageError("invalid_drive_response")
         if payload.get("code") != 200:
             raise StorageError("drive_operation_failed")
         return payload.get("data")
@@ -74,15 +77,31 @@ class OpenListModelStore:
             "page": 1,
             "per_page": 0,
             "refresh": True,
-        }) or {}
-        content = data.get("content") or []
+        })
+        if not isinstance(data, dict) or "content" not in data:
+            raise StorageError("invalid_drive_listing")
+        content = data["content"]
+        total = data.get("total")
+        if type(total) is not int or total < 0:
+            raise StorageError("invalid_drive_listing")
+        if content is None and total == 0:
+            content = []
+        if not isinstance(content, list) or len(content) != total:
+            raise StorageError("incomplete_drive_listing")
         result = []
         for item in content:
+            if not isinstance(item, dict):
+                raise StorageError("invalid_drive_listing")
+            name, size, is_dir = item.get("name"), item.get("size"), item.get("is_dir")
+            if (not isinstance(name, str) or not name or name in {".", ".."}
+                    or any(char in name for char in "/\\\x00")
+                    or type(size) is not int or size < 0 or type(is_dir) is not bool):
+                raise StorageError("invalid_drive_listing")
             result.append(RemoteEntry(
-                name=str(item.get("name", "")),
-                size=int(item.get("size") or 0),
+                name=name,
+                size=size,
                 modified=(str(item.get("modified")) if item.get("modified") else None),
-                is_dir=bool(item.get("is_dir")),
+                is_dir=is_dir,
             ))
         return result
 
@@ -117,10 +136,31 @@ class OpenListModelStore:
         request = urllib.request.Request(link.url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
+                expected = None
+                if range_header:
+                    requested = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
+                    actual = re.fullmatch(
+                        r"bytes (\d+)-(\d+)/(\d+)",
+                        response.headers.get("Content-Range", ""),
+                    )
+                    if response.status != 206 or requested is None or actual is None:
+                        raise StorageError("drive_range_not_honored")
+                    start, end, total = map(int, actual.groups())
+                    requested_end = int(requested[2]) if requested[2] else total - 1
+                    if (start != int(requested[1]) or end != min(requested_end, total - 1)
+                            or not 0 <= start <= end < total):
+                        raise StorageError("drive_range_not_honored")
+                    expected = end - start + 1
+                received = 0
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
+                    received += len(chunk)
+                    if expected is not None and received > expected:
+                        raise StorageError("drive_stream_size_mismatch")
                     yield chunk
+                if expected is not None and received != expected:
+                    raise StorageError("drive_stream_size_mismatch")
         except OSError as exc:
             raise StorageError("drive_stream_failed") from exc

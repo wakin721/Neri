@@ -45,9 +45,9 @@ class ModelDistributionClient:
             else urllib.request.build_opener(SafeDirectRedirectHandler()).open
         )
 
-    def _read_json(self, request: urllib.request.Request):
+    def _read_json(self, request: urllib.request.Request, *, timeout: int = 20):
         try:
-            with self.opener(request, timeout=20) as response:
+            with self.opener(request, timeout=timeout) as response:
                 raw = response.read(1024 * 1024 + 1)
         except Exception as exc:
             raise ModelDistributionError('model_service_unavailable') from exc
@@ -56,11 +56,17 @@ class ModelDistributionClient:
         try:
             return json.loads(raw)
         except ValueError as exc:
+            if raw.lstrip().lower().startswith((b'<!doctype html', b'<html')):
+                raise ModelDistributionError(
+                    '模型同步服务尚未正确配置，服务器返回了网页，请联系维护者。'
+                ) from exc
             raise ModelDistributionError('invalid_model_service_response') from exc
 
     def fetch_manifest(self) -> ModelManifest:
         request = urllib.request.Request(self.base_url + '/manifest', method='GET')
-        return parse_manifest(self._read_json(request))
+        # Uncached OpenList models must be hashed by the server before publishing.
+        # Match the model service's nginx read timeout for this operation only.
+        return parse_manifest(self._read_json(request, timeout=900))
 
     def request_download(self, manifest_id: str, entry: ModelManifestEntry) -> DownloadCapability:
         body = json.dumps({'manifest_id': manifest_id, 'path': entry.path, 'sha256': entry.sha256}).encode('utf-8')

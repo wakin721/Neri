@@ -234,7 +234,9 @@ class _ModelSyncScope extends InheritedWidget {
 }
 
 class ModelSyncSettingsRow extends StatelessWidget {
-  const ModelSyncSettingsRow({super.key});
+  const ModelSyncSettingsRow({this.noticeOnly = false, super.key});
+
+  final bool noticeOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -242,6 +244,9 @@ class ModelSyncSettingsRow extends StatelessWidget {
     final status = sync.status;
     final busy = sync.loading || sync.retrying || status?.isActive == true;
     final failed = sync.error != null || status?.state == 'failed';
+    final unsynced =
+        sync.enabled && !busy && (failed || status?.state != 'completed');
+    if (noticeOnly != unsynced) return const SizedBox.shrink();
     final label = !sync.enabled
         ? '等待本地服务'
         : busy
@@ -251,37 +256,64 @@ class ModelSyncSettingsRow extends StatelessWidget {
         : status?.state == 'completed'
         ? '模型已同步'
         : '模型未同步';
-    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final color = unsynced ? scheme.error : scheme.onSurfaceVariant;
+    final actionLabel = busy
+        ? '同步中…'
+        : failed
+        ? '重试'
+        : '立即同步';
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Icon(
-            failed ? Icons.cloud_off_rounded : Icons.cloud_sync_rounded,
-            size: 20,
-            color: color,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Tooltip(
-              message: sync.error ?? status?.error ?? label,
-              child: Text(label, style: TextStyle(color: color)),
+    final row = Row(
+      children: [
+        Icon(
+          failed ? Icons.cloud_off_rounded : Icons.cloud_sync_rounded,
+          size: 20,
+          color: color,
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Tooltip(
+            message: sync.error ?? status?.error ?? label,
+            child: Text(
+              label,
+              style: unsynced
+                  ? theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onErrorContainer,
+                      fontWeight: FontWeight.w600,
+                    )
+                  : TextStyle(color: color),
             ),
           ),
+        ),
+        const SizedBox(width: 12),
+        if (unsynced)
+          FilledButton(onPressed: sync.onSync, child: Text(actionLabel))
+        else
           TextButton.icon(
             onPressed: sync.enabled && !busy ? sync.onSync : null,
             icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: Text(
-              busy
-                  ? '同步中…'
-                  : failed
-                  ? '重试'
-                  : '立即同步',
-            ),
+            label: Text(actionLabel),
           ),
-        ],
-      ),
+      ],
+    );
+    if (unsynced) {
+      return Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: scheme.errorContainer.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: scheme.error.withValues(alpha: 0.35)),
+        ),
+        child: row,
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: row,
     );
   }
 }

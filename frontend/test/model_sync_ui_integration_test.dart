@@ -210,77 +210,109 @@ void main() {
     },
   );
 
-  testWidgets(
-    'failed sync stays below classification and can retry after dismissing notification',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(1200, 900));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      final client = NeriApiClient(
-        httpClient: MockClient((request) async {
-          final body = request.method == 'POST'
-              ? '{"state":"completed","run_id":"retried"}'
-              : request.url.path == '/api/model-sync/status'
-              ? '{"state":"failed","run_id":"failed","error":"offline"}'
-              : '{}';
-          return http.Response(
-            body,
-            200,
-            headers: const {'content-type': 'application/json; charset=utf-8'},
+  for (final missingDependencies in [false, true]) {
+    for (final syncState in ['idle', 'failed']) {
+      testWidgets(
+        '$syncState sync shows above detection with missing dependencies: $missingDependencies',
+        (tester) async {
+          await tester.binding.setSurfaceSize(const Size(1200, 900));
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final client = NeriApiClient(
+            httpClient: MockClient((request) async {
+              final body = request.method == 'POST'
+                  ? '{"state":"completed","run_id":"retried"}'
+                  : request.url.path == '/api/model-sync/status'
+                  ? '{"state":"$syncState","run_id":"initial"}'
+                  : '{}';
+              return http.Response(
+                body,
+                200,
+                headers: const {
+                  'content-type': 'application/json; charset=utf-8',
+                },
+              );
+            }),
           );
-        }),
-      );
-      final themeNotifier = ValueNotifier(const ThemeSettings());
-      addTearDown(client.close);
-      addTearDown(themeNotifier.dispose);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SettingsScreen(
-              settings: _settings(),
-              autoGroupInferredBurstSize: null,
-              apiClient: client,
-              themeNotifier: themeNotifier,
-              onUpdateTheme: (_) {},
-              closeBehavior: 'ask',
-              onCloseBehaviorChanged: (_) {},
-              onSaveSettings: (_) async {},
-              onCheckForUpdates:
-                  ({required channel, required downloadSource}) async {},
-              onShowMessage: (_) {},
+          final themeNotifier = ValueNotifier(const ThemeSettings());
+          addTearDown(client.close);
+          addTearDown(themeNotifier.dispose);
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SettingsScreen(
+                  settings: _settings().copyWith(
+                    missingYoloDependencies: missingDependencies
+                        ? const ['torch', 'torchvision', 'ultralytics']
+                        : const [],
+                  ),
+                  autoGroupInferredBurstSize: null,
+                  apiClient: client,
+                  themeNotifier: themeNotifier,
+                  onUpdateTheme: (_) {},
+                  closeBehavior: 'ask',
+                  onCloseBehaviorChanged: (_) {},
+                  onSaveSettings: (_) async {},
+                  onCheckForUpdates:
+                      ({required channel, required downloadSource}) async {},
+                  onShowMessage: (_) {},
+                ),
+              ),
             ),
-          ),
-        ),
-      );
-      await tester.pump();
-      await tester.pump();
+          );
+          await tester.pump();
+          await tester.pump();
 
-      final notification = find.byKey(const Key('model-sync-message-card'));
-      final bounds = tester.getRect(notification);
-      expect(bounds.bottom, greaterThan(860));
-      expect(bounds.right, greaterThan(1160));
-      await tester.tap(
-        find.descendant(of: notification, matching: find.byTooltip('关闭')),
-      );
-      await tester.pumpAndSettle();
+          final notification = find.byKey(const Key('model-sync-message-card'));
+          if (syncState == 'failed') {
+            final bounds = tester.getRect(notification);
+            expect(bounds.bottom, greaterThan(860));
+            expect(bounds.right, greaterThan(1160));
+            await tester.tap(
+              find.descendant(of: notification, matching: find.byTooltip('关闭')),
+            );
+            await tester.pumpAndSettle();
+          }
 
-      expect(notification, findsNothing);
-      expect(find.text('同步失败'), findsNothing);
-      final status = find.text('模型未同步');
-      expect(status, findsOneWidget);
-      expect(
-        tester.getTopLeft(status).dy,
-        greaterThan(tester.getBottomLeft(find.text('分类模型')).dy),
+          expect(notification, findsNothing);
+          expect(find.text('同步失败'), findsNothing);
+          final status = find.text('模型未同步');
+          expect(status, findsOneWidget);
+          expect(
+            tester.getBottomLeft(status).dy,
+            lessThan(tester.getTopLeft(find.text('探测模型')).dy),
+          );
+          final notice = find
+              .ancestor(of: status, matching: find.byType(Container))
+              .first;
+          final decoration =
+              tester.widget<Container>(notice).decoration! as BoxDecoration;
+          final scheme = Theme.of(tester.element(status)).colorScheme;
+          expect(
+            decoration.color,
+            scheme.errorContainer.withValues(alpha: 0.55),
+          );
+          expect(
+            find.text('安装依赖'),
+            missingDependencies ? findsOneWidget : findsNothing,
+          );
+          if (missingDependencies) {
+            expect(
+              tester.getBottomLeft(find.text('安装依赖')).dy,
+              lessThan(tester.getTopLeft(find.text('探测模型')).dy),
+            );
+          }
+          await tester.tap(find.text(syncState == 'failed' ? '重试' : '立即同步'));
+          await tester.pumpAndSettle();
+          expect(find.text('模型未同步'), findsNothing);
+          expect(find.text('模型已同步'), findsOneWidget);
+          expect(
+            find.text('安装依赖'),
+            missingDependencies ? findsOneWidget : findsNothing,
+          );
+        },
       );
-      expect(
-        tester.getBottomLeft(status).dy,
-        lessThan(tester.getTopLeft(find.text('识别物种设置')).dy),
-      );
-      await tester.tap(find.text('重试'));
-      await tester.pumpAndSettle();
-      expect(find.text('模型未同步'), findsNothing);
-      expect(find.text('模型已同步'), findsOneWidget);
-    },
-  );
+    }
+  }
 
   testWidgets('terminal startup sync refreshes the parent catalog once', (
     tester,

@@ -192,6 +192,10 @@ def _migrate_tracker(
     flat_tracker = layout.tracker
 
     if had_canonical_structure and flat_tracker.is_file():
+        if cls_tracker.is_file():
+            backup = _collision_target(flat_tracker)
+            shutil.move(str(cls_tracker), str(backup))
+            return 1
         return 0
 
     if cls_tracker.is_file():
@@ -239,6 +243,13 @@ def migrate_legacy_layout(resource_root: Path | None = None) -> MigrationReport:
         legacy_cls,
         had_canonical_structure=had_canonical_structure,
     )
+
+    # Only remove the obsolete directory when every entry has been moved.
+    # Unknown files, nested directories, or a failed cleanup must remain intact.
+    try:
+        legacy_cls.rmdir()
+    except OSError:
+        pass
 
     return MigrationReport(moved=moved, collisions=tuple(collisions))
 

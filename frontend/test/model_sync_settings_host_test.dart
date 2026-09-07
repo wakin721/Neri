@@ -27,7 +27,12 @@ void main() {
               apiClient: client,
               enabled: true,
               onCatalogChanged: () async {},
-              child: const ModelSyncSettingsRow(),
+              child: const Column(
+                children: [
+                  ModelSyncSettingsRow(noticeOnly: true),
+                  ModelSyncSettingsRow(),
+                ],
+              ),
             ),
           ),
         ),

@@ -1094,6 +1094,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           if (!detectionEnabled) _buildDetectionDependencyNotice(),
+          const ModelSyncSettingsRow(noticeOnly: true),
           if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
