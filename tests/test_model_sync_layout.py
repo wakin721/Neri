@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from system.model_sync.layout import (
     get_model_layout,
@@ -27,6 +28,30 @@ class ModelLayoutMigrationTests(unittest.TestCase):
             self.assertTrue((resource_root / "Model/cls/user/classify.onnx").is_file())
             self.assertTrue((resource_root / "Model/tracker.yaml").is_file())
             self.assertEqual(report.moved, 3)
+
+    def test_case_insensitive_legacy_model_root_is_staged_before_canonical_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            resource_root = Path(temp_dir) / "res"
+            legacy_detect = resource_root / "model"
+            legacy_cls = resource_root / "model_cls"
+            legacy_detect.mkdir(parents=True)
+            legacy_cls.mkdir(parents=True)
+            (legacy_detect / "bird.pt").write_bytes(b"det")
+            (legacy_detect / "tracker.yaml").write_text("detect\n", encoding="utf-8")
+            (legacy_cls / "tracker.yaml").write_text("cls\n", encoding="utf-8")
+
+            with patch("system.model_sync.layout._case_insensitive_paths", return_value=True):
+                migrate_legacy_layout(resource_root)
+
+            self.assertEqual(
+                (resource_root / "Model/tracker.yaml").read_text(encoding="utf-8"),
+                "cls\n",
+            )
+            self.assertEqual(
+                (resource_root / "Model/detect/user/bird.pt").read_bytes(),
+                b"det",
+            )
+            self.assertTrue((resource_root / ".neri-legacy-model/tracker.yaml").exists())
 
     def test_migration_is_idempotent_and_preserves_collisions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
