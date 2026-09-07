@@ -83,7 +83,7 @@
 
 **模型管理**
 
-- 模型目录位于 `res/Model/detect` 与 `res/Model/cls`；用户模型放入各自的 `user` 子目录，NeriCloud 同步模型位于 `sync` 子目录
+- 模型目录位于 `res/model/detect` 与 `res/model/cls`；用户模型放入各自的 `user` 子目录，NeriCloud 同步模型位于 `sync` 子目录
 - 目前仅支持 `.pt` 结尾的模型文件，可自行更换
 
 **检测阈值设置**

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Canonical remote tree is exactly `NeriCloud/Neri_Data/Model/{detect,cls}` plus `tracker.yaml`; server-side OpenList root is fixed to `/Neri_Data/Model`.
-- Canonical local tree is exactly `res/Model/detect/{user,sync}`, `res/Model/cls/{user,sync}`, and `res/Model/tracker.yaml`.
+- Canonical local tree is exactly `res/model/detect/{user,sync}`, `res/model/cls/{user,sync}`, and `res/model/tracker.yaml`.
 - Synchronization may write/delete only `detect/sync`, `cls/sync`, and the managed `tracker.yaml`; it must never alter files under `detect/user` or `cls/user`.
 - Legacy files are migrated non-destructively. A collision never overwrites user data.
 - Detection sync accepts only `.pt`; classification sync accepts only `.pt`, `.onnx`, `.engine`; tracker is exactly `tracker.yaml`.
@@ -39,15 +39,15 @@
 - Create: `tests/test_model_sync_layout.py`
 - Modify: `.gitignore`
 - Modify: `.gitattributes`
-- Move: `res/model/11s_p2_0319.pt` -> `res/Model/detect/user/11s_p2_0319.pt`
-- Move: `res/model/26m_p2_0224.pt` -> `res/Model/detect/user/26m_p2_0224.pt`
-- Move: `res/model/md_v1000.0.0-larch.pt` -> `res/Model/detect/user/md_v1000.0.0-larch.pt`
-- Move: `res/model/md_v1000.0.0-sorrel.pt` -> `res/Model/detect/user/md_v1000.0.0-sorrel.pt`
-- Move: `res/model_cls/26s-cls_0115.pt` -> `res/Model/cls/user/26s-cls_0115.pt`
-- Move: `res/model_cls/tracker.yaml` -> `res/Model/tracker.yaml`
+- Move: `res/model/11s_p2_0319.pt` -> `res/model/detect/user/11s_p2_0319.pt`
+- Move: `res/model/26m_p2_0224.pt` -> `res/model/detect/user/26m_p2_0224.pt`
+- Move: `res/model/md_v1000.0.0-larch.pt` -> `res/model/detect/user/md_v1000.0.0-larch.pt`
+- Move: `res/model/md_v1000.0.0-sorrel.pt` -> `res/model/detect/user/md_v1000.0.0-sorrel.pt`
+- Move: `res/model_cls/26s-cls_0115.pt` -> `res/model/cls/user/26s-cls_0115.pt`
+- Move: `res/model_cls/tracker.yaml` -> `res/model/tracker.yaml`
 - Delete from repository resources: `res/model/tracker.yaml`
-- Create: `res/Model/detect/sync/.gitkeep`
-- Create: `res/Model/cls/sync/.gitkeep`
+- Create: `res/model/detect/sync/.gitkeep`
+- Create: `res/model/cls/sync/.gitkeep`
 
 ### Step 1: Write failing migration tests
 
@@ -153,7 +153,7 @@ Implementation rules:
 - [ ] Change `.gitattributes` to:
 
 ```text
-res/Model/cls/user/26s-cls_0115.pt filter=lfs diff=lfs merge=lfs -text
+res/model/cls/user/26s-cls_0115.pt filter=lfs diff=lfs merge=lfs -text
 ```
 
 Do not add `.sync-state.json` to source control; it is created only at runtime.
@@ -179,7 +179,7 @@ Expected: no model/tracker files from those legacy roots.
 - [ ] Commit with:
 
 ```bash
-git add .gitignore .gitattributes system/model_sync tests/test_model_sync_layout.py res/Model
+git add .gitignore .gitattributes system/model_sync tests/test_model_sync_layout.py res/model
 git commit -m "refactor: establish managed model layout"
 ```
 
@@ -264,7 +264,7 @@ class ModelInfo(BaseModel):
     kind: Literal["detect", "cls"]
 ```
 
-- [ ] Change `model_directory()` to return `res/Model/detect` and `classification_model_directory()` to return `res/Model/cls`.
+- [ ] Change `model_directory()` to return `res/model/detect` and `classification_model_directory()` to return `res/model/cls`.
 - [ ] Make `list_available_models()` and `list_available_classification_models()` translate `DiscoveredModel` objects to `ModelInfo`; do not recursively scan arbitrary directories.
 - [ ] Replace filename-or-path selection logic in `/api/settings` with `resolve_saved_model_path` so full paths are canonical and old filename settings remain compatible.
 - [ ] Preserve current first-detection-model default only when there is no saved `selected_model` key at all. Never silently replace a saved-but-missing synchronized model.
@@ -912,7 +912,7 @@ git commit -m "feat: expose local model sync status"
 
 ### Step 1: Update tests first
 
-- [ ] Change existing hardcoded model roots in fixtures from `res/model` / `res/model_cls` to `res/Model/detect` / `res/Model/cls`.
+- [ ] Change existing hardcoded model roots in fixtures from `res/model` / `res/model_cls` to `res/model/detect` / `res/model/cls`.
 - [ ] Add `source` and `kind` to `ModelInfo` test fixtures.
 - [ ] Add widget tests with duplicate filenames:
 
@@ -954,9 +954,9 @@ Expected red: `ModelInfo` lacks new fields and group labels do not exist.
 - [ ] Change defaults in `NeriSettings.fromJson` to:
 
 ```dart
-modelDirectory: json['model_directory'] as String? ?? 'res/Model/detect',
+modelDirectory: json['model_directory'] as String? ?? 'res/model/detect',
 classificationModelDirectory:
-    json['classification_model_directory'] as String? ?? 'res/Model/cls',
+    json['classification_model_directory'] as String? ?? 'res/model/cls',
 ```
 
 - [ ] Extend `ModelInfo`:
@@ -1271,9 +1271,9 @@ git commit -m "build: package and serve synchronized models"
 Before reporting the feature complete, invoke `superpowers:verification-before-completion` and collect fresh evidence for every item below:
 
 - [ ] An upgraded installation migrates legacy detection/classification models to `user` without overwriting collisions.
-- [ ] New installations contain only the canonical `res/Model` model tree.
+- [ ] New installations contain only the canonical `res/model` model tree.
 - [ ] Both `user` and `sync` models are returned with source/kind metadata and same-named files remain distinct by full path.
-- [ ] Runtime tracking reads `res/Model/tracker.yaml` and retains `botsort.yaml` fallback.
+- [ ] Runtime tracking reads `res/model/tracker.yaml` and retains `botsort.yaml` fallback.
 - [ ] Manifest exposes only allow-listed model files, size, SHA-256, and stable manifest ID.
 - [ ] Server never accepts arbitrary OpenList paths and never exposes OpenList credentials.
 - [ ] Direct OneDrive URL is attempted before proxy and is revalidated for Microsoft HTTPS hosts.

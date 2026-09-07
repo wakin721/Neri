@@ -7,8 +7,8 @@ import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
-const _defaultModelDirectory = 'res/Model/detect';
-const _defaultClassificationModelDirectory = 'res/Model/cls';
+const _defaultModelDirectory = 'res/model/detect';
+const _defaultClassificationModelDirectory = 'res/model/cls';
 
 String _modelSelectorHelperText({
   required bool enabled,

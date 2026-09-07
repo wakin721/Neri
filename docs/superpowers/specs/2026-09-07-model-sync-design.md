@@ -16,7 +16,7 @@ NeriCloud/Neri_Data/Model/
 Canonical local layout:
 
 ```text
-res/Model/
+res/model/
 ├─ detect/
 │  ├─ user/
 │  └─ sync/
@@ -28,9 +28,9 @@ res/Model/
 
 Mappings:
 
-- `NeriCloud/Neri_Data/Model/detect/*` -> `res/Model/detect/sync/*`
-- `NeriCloud/Neri_Data/Model/cls/*` -> `res/Model/cls/sync/*`
-- `NeriCloud/Neri_Data/Model/tracker.yaml` -> `res/Model/tracker.yaml`
+- `NeriCloud/Neri_Data/Model/detect/*` -> `res/model/detect/sync/*`
+- `NeriCloud/Neri_Data/Model/cls/*` -> `res/model/cls/sync/*`
+- `NeriCloud/Neri_Data/Model/tracker.yaml` -> `res/model/tracker.yaml`
 
 `user` directories are never modified by model synchronization. `sync` directories are fully managed by NeriCloud synchronization. `tracker.yaml` is a separately managed synchronized file and does not appear in the model selector.
 
@@ -46,26 +46,26 @@ Other remote files are ignored/rejected by the model distribution service rather
 
 On first run after this layout is introduced, Neri performs an idempotent migration before normal model enumeration:
 
-- model files directly under legacy `res/model/` move to `res/Model/detect/user/`;
-- classification model files directly under legacy `res/model_cls/` move to `res/Model/cls/user/`;
-- legacy `res/model_cls/tracker.yaml` moves to `res/Model/tracker.yaml` when the canonical target does not already contain a file;
+- model files directly under legacy `res/model/` move to `res/model/detect/user/`;
+- classification model files directly under legacy `res/model_cls/` move to `res/model/cls/user/`;
+- legacy `res/model_cls/tracker.yaml` moves to `res/model/tracker.yaml` when the canonical target does not already contain a file;
 - non-model auxiliary files are not blindly migrated into model directories;
 - pre-existing files in the canonical `user` directories are preserved; filename collisions must not overwrite user data. The migration should retain both files using a deterministic non-destructive rename or leave the legacy file in place and report the conflict;
 - the migration is safe to run repeatedly and never moves anything out of `sync` into `user`.
 
-After migration, all application model paths, defaults, inference paths, model enumeration, tests, and UI helper text use `res/Model/...` rather than `res/model` or `res/model_cls`.
+After migration, all application model paths, defaults, inference paths, model enumeration, tests, and UI helper text use `res/model/...` rather than `res/model` or `res/model_cls`.
 
 ## 3. Local model enumeration and selection
 
 Detection model enumeration scans both:
 
-- `res/Model/detect/user`
-- `res/Model/detect/sync`
+- `res/model/detect/user`
+- `res/model/detect/sync`
 
 Classification model enumeration scans both:
 
-- `res/Model/cls/user`
-- `res/Model/cls/sync`
+- `res/model/cls/user`
+- `res/model/cls/sync`
 
 The backend returns a unified list while preserving source metadata. `ModelInfo` is extended with at least:
 
@@ -76,7 +76,7 @@ The model selector groups entries by source, displaying user models separately f
 
 Persisted model settings use the full resolved/normalized path rather than relying only on a filename. Backward compatibility should resolve legacy saved filenames against migrated user models where possible. If a previously selected synchronized model disappears from the cloud, the selection becomes unavailable gracefully and Neri chooses no replacement silently unless the existing application behavior already defines a safe default.
 
-`tracker.yaml` is resolved from `res/Model/tracker.yaml`, with the existing built-in/default tracker fallback retained if that file does not exist.
+`tracker.yaml` is resolved from `res/model/tracker.yaml`, with the existing built-in/default tracker fallback retained if that file does not exist.
 
 ## 4. Synchronization lifecycle
 
@@ -118,7 +118,7 @@ Client change detection uses file size and SHA-256. SHA-256 is authoritative. Th
 State is stored under:
 
 ```text
-res/Model/.sync-state.json
+res/model/.sync-state.json
 ```
 
 The state records at least:
@@ -298,7 +298,7 @@ Backend/local tests:
 - enumeration of `user + sync` detect/cls models;
 - duplicate filenames remain independently selectable by full path;
 - old saved filename resolves after migration when unambiguous;
-- tracker resolves from `res/Model/tracker.yaml` with fallback when absent;
+- tracker resolves from `res/model/tracker.yaml` with fallback when absent;
 - valid manifest diff produces create/update/delete plan only inside managed paths;
 - invalid/incomplete manifest produces no deletion plan;
 - checksum mismatch never replaces a valid old model;
