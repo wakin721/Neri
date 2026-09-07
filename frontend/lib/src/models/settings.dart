@@ -123,16 +123,18 @@ class ModelInfo {
     required String name,
     required this.path,
     this.sizeBytes,
-    this.source = 'user',
+    String? source,
     this.kind = 'detect',
-  }) : rawName = name;
+  }) : rawName = name,
+       source = source ?? 'user',
+       hasExplicitSource = source != null;
 
   factory ModelInfo.fromJson(Map<String, dynamic> json) {
     return ModelInfo(
       name: json['name'] as String? ?? '',
       path: json['path'] as String? ?? '',
       sizeBytes: json['size_bytes'] as int?,
-      source: json['source'] as String? ?? 'user',
+      source: json['source'] as String?,
       kind: json['kind'] as String? ?? 'detect',
     );
   }
@@ -142,10 +144,11 @@ class ModelInfo {
   final int? sizeBytes;
   final String source;
   final String kind;
+  final bool hasExplicitSource;
 
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
   String get displayName => '$sourceLabel / $rawName';
-  String get name => displayName;
+  String get name => hasExplicitSource ? displayName : rawName;
 }
 
 class ModelClassInfo {
