@@ -131,7 +131,7 @@ class CapabilityTests(unittest.TestCase):
             {'User-Agent': 'ua', 'Accept': '*/*'},
         )
 
-    def test_proxy_capability_is_bound_and_expires(self):
+    def test_proxy_capability_is_bound_expires_and_has_bounded_uses(self):
         from server.model_distribution.capabilities import CapabilityStore, CapabilityError
         from server.model_distribution.manifest import ManifestEntry
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -139,11 +139,54 @@ class CapabilityTests(unittest.TestCase):
             store = CapabilityStore(Path(temp_dir), ttl_seconds=10, clock=lambda: now[0])
             token, expires = store.issue(ManifestEntry('detect/a.pt', 3, 'a' * 64))
             self.assertEqual(expires, 1010.0)
-            bound = store.consume(token)
-            self.assertEqual(bound.path, 'detect/a.pt')
+            for _ in range(4):
+                bound = store.consume(token)
+                self.assertEqual(bound.path, 'detect/a.pt')
+            with self.assertRaises(CapabilityError):
+                store.consume(token)
+
+            token, _ = store.issue(ManifestEntry('detect/b.pt', 3, 'b' * 64))
             now[0] = 1011.0
             with self.assertRaises(CapabilityError):
                 store.consume(token)
+
+    def test_request_budget_is_per_ip_and_resets_each_minute(self):
+        from server.model_distribution.capabilities import BudgetError, BudgetStore
+        with tempfile.TemporaryDirectory() as temp_dir:
+            now = [120.0]
+            budget = BudgetStore(
+                Path(temp_dir),
+                secret=b'test-secret',
+                requests_per_minute=2,
+                daily_ip_bytes=100,
+                daily_total_bytes=1000,
+                clock=lambda: now[0],
+            )
+            budget.check_request('203.0.113.10')
+            budget.check_request('203.0.113.10')
+            budget.check_request('203.0.113.11')
+            with self.assertRaises(BudgetError):
+                budget.check_request('203.0.113.10')
+            now[0] = 180.0
+            budget.check_request('203.0.113.10')
+
+    def test_proxy_budget_enforces_per_ip_and_total_daily_bytes(self):
+        from server.model_distribution.capabilities import BudgetError, BudgetStore
+        with tempfile.TemporaryDirectory() as temp_dir:
+            budget = BudgetStore(
+                Path(temp_dir),
+                secret=b'test-secret',
+                requests_per_minute=100,
+                daily_ip_bytes=10,
+                daily_total_bytes=15,
+                clock=lambda: 86400.0,
+            )
+            budget.reserve_proxy_bytes('203.0.113.10', 6)
+            budget.reserve_proxy_bytes('203.0.113.11', 5)
+            with self.assertRaises(BudgetError):
+                budget.reserve_proxy_bytes('203.0.113.10', 5)
+            with self.assertRaises(BudgetError):
+                budget.reserve_proxy_bytes('203.0.113.11', 5)
 
 
 class DistributionServiceTests(unittest.TestCase):
