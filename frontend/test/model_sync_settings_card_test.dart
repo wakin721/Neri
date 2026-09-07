@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/screens/model_sync_settings_card.dart';
+import 'package:neri_flutter/src/screens/model_sync_settings_host.dart';
 
 void main() {
   testWidgets('model sync settings card renders progress and cloud counts', (
@@ -136,5 +137,66 @@ void main() {
     await tester.pump();
     expect(requestCount, 1);
     expect(find.textContaining('正在同步'), findsOneWidget);
+  });
+
+  testWidgets('offstage settings host observes startup sync and refreshes catalog', (
+    tester,
+  ) async {
+    var statusReads = 0;
+    var catalogRefreshes = 0;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        statusReads++;
+        if (statusReads == 1) {
+          return http.Response(
+            '{"state":"downloading","run_id":"startup-run",'
+            '"current_file":"detect/cloud.pt","received_bytes":1,'
+            '"total_bytes":2}',
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }
+        return http.Response(
+          '{"state":"completed","run_id":"startup-run",'
+          '"received_bytes":2,"total_bytes":2}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    Widget buildHost(bool backendReady) {
+      return MaterialApp(
+        home: Scaffold(
+          body: IndexedStack(
+            index: 0,
+            children: [
+              const SizedBox.expand(),
+              ModelSyncSettingsHost(
+                apiClient: client,
+                enabled: backendReady,
+                pollInterval: const Duration(milliseconds: 10),
+                onCatalogChanged: () async => catalogRefreshes++,
+                child: const SizedBox.expand(),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildHost(false));
+    await tester.pump();
+    expect(statusReads, 0);
+
+    await tester.pumpWidget(buildHost(true));
+    await tester.pump();
+    expect(statusReads, 1);
+    await tester.pump(const Duration(milliseconds: 15));
+    await tester.pump(const Duration(milliseconds: 15));
+
+    expect(statusReads, greaterThanOrEqualTo(2));
+    expect(catalogRefreshes, 1);
   });
 }
