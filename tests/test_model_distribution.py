@@ -1,4 +1,7 @@
 import hashlib
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -168,8 +171,24 @@ class DistributionServiceTests(unittest.TestCase):
 
 
 class ProxyRangeTests(unittest.TestCase):
+    def test_app_helpers_import_without_openlist_token(self):
+        env = dict(os.environ)
+        env.pop('NERI_OPENLIST_TOKEN', None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                'from server.model_distribution.app import valid_range_header; '
+                'assert valid_range_header("bytes=0-1")',
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_accepts_only_single_byte_range(self):
-        import os
         os.environ.setdefault('NERI_OPENLIST_TOKEN', 'test')
         from server.model_distribution.app import valid_range_header
         self.assertTrue(valid_range_header(None))
