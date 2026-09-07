@@ -86,7 +86,15 @@ void main() {
 
     expect(find.textContaining('同步失败'), findsOneWidget);
     expect(find.textContaining('网络不可用'), findsOneWidget);
-    expect(find.text('重试'), findsOneWidget);
+    final renderedTexts = tester
+        .widgetList<Text>(find.byType(Text, skipOffstage: false))
+        .map((widget) => widget.data ?? widget.textSpan?.toPlainText() ?? '')
+        .toList();
+    expect(
+      find.text('重试'),
+      findsOneWidget,
+      reason: 'rendered texts: $renderedTexts',
+    );
     expect(find.textContaining('不会影响已安装的本地模型'), findsOneWidget);
 
     await tester.tap(find.text('重试'));
