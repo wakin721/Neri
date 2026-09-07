@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 
 from system.utils import resource_path
@@ -52,7 +53,7 @@ class SpeciesNameResolver:
         scientific = ""
         if self.db_path.exists():
             try:
-                with sqlite3.connect(str(self.db_path)) as db:
+                with closing(sqlite3.connect(str(self.db_path))) as db:
                     row = db.execute(
                         "SELECT 学名 FROM species WHERE 中文名=? LIMIT 1",
                         (name,),
