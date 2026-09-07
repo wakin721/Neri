@@ -106,9 +106,13 @@ jobs:
             if (-not (Test-Path $directory -PathType Container)) { throw "Missing model directory: $directory" }
           }
           if (-not (Test-Path 'res\Model\tracker.yaml' -PathType Leaf)) { throw 'Missing res\Model\tracker.yaml' }
-          if (Test-Path 'res\model') { throw 'Legacy res\model directory still exists.' }
-          if (Test-Path 'res\model_cls') { throw 'Legacy res\model_cls directory still exists.' }
+          $legacyTracked = git ls-files 'res/model/*' 'res/model_cls/*'
+          if ($LASTEXITCODE -ne 0) { throw "git ls-files failed with exit code $LASTEXITCODE" }
+          if ($legacyTracked) {
+            $legacyTracked
+            throw 'Legacy tracked model resources still exist.'
+          }
           python -c "import system.model_sync.manager, system.backend.main"
-          if (-not (Test-Path 'frontend\build\windows\x64\runner\Release\neri_flutter.exe')) {
+          if (-not (Test-Path 'frontend\build\windows\x64\runner\Release\Neri.exe' -PathType Leaf)) {
             throw 'Windows release executable was not produced.'
           }
