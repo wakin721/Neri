@@ -16,7 +16,7 @@
 
 <div align="center">
 
-[中文](README.md) &nbsp;·&nbsp; [English](res/demo/README_en.md) &nbsp;·&nbsp; [更新日志](res/demo/README_Update.md) &nbsp;·&nbsp; [🌐 官网](https://myneri.top/)
+[中文](README.md) &nbsp;·&nbsp; [English](res/demo/README_en.md) &nbsp;·&nbsp; [更新日志](CHANGELOG.md) &nbsp;·&nbsp; [🌐 官网](https://myneri.top/)
 
 </div>
 

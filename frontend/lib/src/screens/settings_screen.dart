@@ -71,7 +71,7 @@ const _defaultQuantityButtons = <String>[
 ];
 
 const _releaseNotesUrl =
-    'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
+    'https://github.com/wakin721/Neri/blob/main/CHANGELOG.md';
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
