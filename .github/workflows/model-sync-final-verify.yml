@@ -20,17 +20,16 @@ jobs:
         with:
           ref: codex/model-sync
 
-      - name: Inventory legacy model path references
+      - name: Inventory runtime legacy model path references
         shell: pwsh
         run: |
-          $matches = git grep -n -E 'res/model_cls|res/model' -- .
+          $matches = git grep -n -E 'res/model_cls|res/model' -- system frontend/lib README.md
           if ($LASTEXITCODE -eq 0) {
             $matches | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             $matches
-          } else {
-            'No legacy model path references found.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw 'Runtime-facing legacy model path references remain.'
           }
-          exit 0
+          'No runtime-facing legacy model path references found.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v6
@@ -53,6 +52,21 @@ jobs:
           git clone --branch 3.44.6 --depth 1 https://github.com/flutter/flutter.git C:\flutter
           'C:\flutter\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Get Flutter dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run Flutter tests
+        shell: pwsh
+        working-directory: frontend
+        run: flutter test
+
+      - name: Analyze Flutter frontend
+        shell: pwsh
+        working-directory: frontend
+        run: flutter analyze
+
       - name: Generate Windows project files
         shell: pwsh
         working-directory: frontend
@@ -68,21 +82,6 @@ jobs:
           & (Join-Path $env:GITHUB_WORKSPACE 'scripts\configure_windows_product.ps1')
           foreach ($file in $customFiles) { Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force }
           Copy-Item '..\res\ico.ico' 'windows\runner\resources\app_icon.ico' -Force
-
-      - name: Get Flutter dependencies
-        shell: pwsh
-        working-directory: frontend
-        run: flutter pub get
-
-      - name: Run Flutter tests
-        shell: pwsh
-        working-directory: frontend
-        run: flutter test
-
-      - name: Analyze Flutter frontend
-        shell: pwsh
-        working-directory: frontend
-        run: flutter analyze
 
       - name: Build Flutter Windows release
         shell: pwsh
