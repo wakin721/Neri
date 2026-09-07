@@ -152,7 +152,7 @@ jobs:
           Copy-Item "system" $package -Recurse -Force
           Copy-Item "res" $package -Recurse -Force
           Copy-Item "requirements.txt" $package -Force
-          Copy-Item "CHANGELOG.md" $package -Force
+          Copy-Item "res\demo\README_Update.md" (Join-Path $package "README_Update.md") -Force
 
           $requiredModelPaths = @(
             "res\model\detect\user",
