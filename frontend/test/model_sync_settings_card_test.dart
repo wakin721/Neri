@@ -96,4 +96,45 @@ void main() {
     await tester.pump();
     expect(postCount, 1);
   });
+
+  testWidgets('disabled card waits for backend readiness before status read', (
+    tester,
+  ) async {
+    var requestCount = 0;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        requestCount++;
+        return http.Response(
+          '{"state":"checking","run_id":"run-ready"}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    Widget buildCard(bool enabled) {
+      return MaterialApp(
+        home: Scaffold(
+          body: ModelSyncSettingsCard(
+            apiClient: client,
+            enabled: enabled,
+            pollInterval: const Duration(hours: 1),
+            onCatalogChanged: () async {},
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildCard(false));
+    await tester.pump();
+    expect(requestCount, 0);
+    expect(find.text('等待本地服务'), findsOneWidget);
+
+    await tester.pumpWidget(buildCard(true));
+    await tester.pump();
+    await tester.pump();
+    expect(requestCount, 1);
+    expect(find.textContaining('正在同步'), findsOneWidget);
+  });
 }
