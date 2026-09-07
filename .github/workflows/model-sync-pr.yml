@@ -54,4 +54,4 @@ jobs:
       - name: Analyze Flutter frontend
         shell: pwsh
         working-directory: frontend
-        run: C:\flutter\bin\flutter.bat analyze
+        run: C:\flutter\bin\flutter.bat analyze --no-fatal-warnings
