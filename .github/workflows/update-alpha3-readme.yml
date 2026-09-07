@@ -19,8 +19,9 @@ jobs:
           ref: codex/model-sync
 
       - name: Prepend alpha3 release notes
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           path = Path("res/demo/README_Update.md")
@@ -58,17 +59,20 @@ jobs:
               else:
                   text = prefix + text
               path.write_text(text, encoding="utf-8")
+          PY
 
-      - name: Remove one-shot workflow
+      - name: Remove one-shot files
         shell: bash
-        run: rm -f .github/workflows/update-alpha3-readme.yml
+        run: |
+          rm -f .github/workflows/update-alpha3-readme.yml
+          rm -f .github/update-alpha3-trigger
 
       - name: Commit changes
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add res/demo/README_Update.md .github/workflows/update-alpha3-readme.yml
+          git add res/demo/README_Update.md .github/workflows/update-alpha3-readme.yml .github/update-alpha3-trigger
           git diff --cached --quiet && exit 0
           git commit -m "docs: add alpha3 release notes"
           git push origin HEAD:codex/model-sync
