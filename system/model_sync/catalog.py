@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Literal, Sequence
 
@@ -61,6 +62,16 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
     return models
 
 
+def _saved_path_matches(saved: str, current: str) -> bool:
+    if saved == current:
+        return True
+    if os.name != "nt":
+        return False
+    return os.path.normcase(os.path.normpath(saved)) == os.path.normcase(
+        os.path.normpath(current)
+    )
+
+
 def resolve_saved_model_path(
     saved: object,
     models: Sequence[DiscoveredModel],
@@ -70,7 +81,7 @@ def resolve_saved_model_path(
     value = saved.strip()
 
     for model in models:
-        if model.path == value:
+        if _saved_path_matches(value, model.path):
             return model.path
 
     named = [model for model in models if model.name == value]
