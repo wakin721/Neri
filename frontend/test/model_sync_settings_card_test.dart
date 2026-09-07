@@ -199,4 +199,110 @@ void main() {
     expect(statusReads, greaterThanOrEqualTo(2));
     expect(catalogRefreshes, 1);
   });
+
+  testWidgets('settings host shows a floating message card while models sync', (
+    tester,
+  ) async {
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        return http.Response(
+          '{"state":"downloading","run_id":"float-run",'
+          '"current_file":"detect/cloud-bird.pt","received_bytes":30,'
+          '"total_bytes":100,"cloud_detect_count":3,"cloud_cls_count":1}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelSyncSettingsHost(
+            apiClient: client,
+            pollInterval: const Duration(hours: 1),
+            onCatalogChanged: () async {},
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final messageCard = find.byKey(const Key('model-sync-message-card'));
+    expect(messageCard, findsOneWidget);
+    expect(
+      find.descendant(of: messageCard, matching: find.text('模型同步')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: messageCard,
+        matching: find.textContaining('cloud-bird.pt'),
+      ),
+      findsOneWidget,
+    );
+    final progress = tester.widget<LinearProgressIndicator>(
+      find.descendant(
+        of: messageCard,
+        matching: find.byType(LinearProgressIndicator),
+      ),
+    );
+    expect(progress.value, 0.30);
+  });
+
+  testWidgets('floating failed sync message retries through the shared controller', (
+    tester,
+  ) async {
+    var postCount = 0;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.method == 'POST') {
+          postCount++;
+          return http.Response(
+            '{"state":"checking","run_id":"retry-run"}',
+            202,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }
+        return http.Response(
+          '{"state":"failed","run_id":"failed-run",'
+          '"error":"NeriCloud 暂时不可用"}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelSyncSettingsHost(
+            apiClient: client,
+            pollInterval: const Duration(hours: 1),
+            onCatalogChanged: () async {},
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final messageCard = find.byKey(const Key('model-sync-message-card'));
+    expect(messageCard, findsOneWidget);
+    expect(
+      find.descendant(of: messageCard, matching: find.text('同步失败')),
+      findsOneWidget,
+    );
+    final retry = find.descendant(of: messageCard, matching: find.text('重试'));
+    expect(retry, findsOneWidget);
+
+    await tester.tap(retry);
+    await tester.pump();
+    expect(postCount, 1);
+  });
 }
