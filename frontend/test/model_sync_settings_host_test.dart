@@ -6,6 +6,67 @@ import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/screens/model_sync_settings_host.dart';
 
 void main() {
+  for (final scenario in [
+    (state: 'idle', ready: true, installing: false, tone: 'red'),
+    (state: 'failed', ready: true, installing: false, tone: 'red'),
+    (state: 'completed', ready: false, installing: false, tone: 'red'),
+    (state: 'downloading', ready: true, installing: false, tone: 'yellow'),
+    (state: 'completed', ready: false, installing: true, tone: 'yellow'),
+    (state: 'idle', ready: false, installing: true, tone: 'yellow'),
+    (state: 'completed', ready: true, installing: false, tone: 'green'),
+  ]) {
+    testWidgets('combined readiness card: $scenario', (tester) async {
+      final client = NeriApiClient(
+        httpClient: MockClient(
+          (_) async => http.Response(
+            '{"state":"${scenario.state}"}',
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          ),
+        ),
+      );
+      addTearDown(client.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ModelSyncSettingsHost(
+              apiClient: client,
+              enabled: true,
+              onCatalogChanged: () async {},
+              child: ModelSyncSettingsRow(
+                dependenciesReady: scenario.ready,
+                installingDependencies: scenario.installing,
+                missingDependencies: 'torch',
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      final finder = find.byKey(const Key('model-readiness-card'));
+      final card = tester.widget<Container>(finder);
+      final scheme = Theme.of(tester.element(finder)).colorScheme;
+      final color = switch (scenario.tone) {
+        'green' => Colors.green.shade700,
+        'yellow' => Colors.amber.shade800,
+        _ => scheme.error,
+      };
+      expect(
+        (card.decoration! as BoxDecoration).color,
+        color.withValues(alpha: 0.10),
+      );
+      expect(
+        find.descendant(
+          of: finder,
+          matching: find.text(scenario.state == 'failed' ? '重试' : '立即同步'),
+        ),
+        scenario.state == 'downloading' ? findsNothing : findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets(
     'inline status can recover when the initial status request fails',
     (tester) async {

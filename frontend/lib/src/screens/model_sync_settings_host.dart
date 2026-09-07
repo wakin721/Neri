@@ -234,9 +234,20 @@ class _ModelSyncScope extends InheritedWidget {
 }
 
 class ModelSyncSettingsRow extends StatelessWidget {
-  const ModelSyncSettingsRow({this.noticeOnly = false, super.key});
+  const ModelSyncSettingsRow({
+    this.noticeOnly = false,
+    this.dependenciesReady,
+    this.installingDependencies = false,
+    this.missingDependencies = '',
+    this.onInstallDependencies,
+    super.key,
+  });
 
   final bool noticeOnly;
+  final bool? dependenciesReady;
+  final bool installingDependencies;
+  final String missingDependencies;
+  final VoidCallback? onInstallDependencies;
 
   @override
   Widget build(BuildContext context) {
@@ -246,7 +257,8 @@ class ModelSyncSettingsRow extends StatelessWidget {
     final failed = sync.error != null || status?.state == 'failed';
     final unsynced =
         sync.enabled && !busy && (failed || status?.state != 'completed');
-    if (noticeOnly != unsynced) return const SizedBox.shrink();
+    final combined = dependenciesReady != null;
+    if (!combined && noticeOnly != unsynced) return const SizedBox.shrink();
     final label = !sync.enabled
         ? '等待本地服务'
         : busy
@@ -258,7 +270,25 @@ class ModelSyncSettingsRow extends StatelessWidget {
         : '模型未同步';
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final color = unsynced ? scheme.error : scheme.onSurfaceVariant;
+    final dependencyFailed =
+        dependenciesReady == false && !installingDependencies;
+    final hasFailure = failed || dependencyFailed;
+    final working = busy || installingDependencies;
+    final ready =
+        sync.enabled &&
+        status?.state == 'completed' &&
+        dependenciesReady == true;
+    final color = combined
+        ? hasFailure
+              ? scheme.error
+              : working
+              ? Colors.amber.shade800
+              : ready
+              ? Colors.green.shade700
+              : scheme.error
+        : unsynced
+        ? scheme.error
+        : scheme.onSurfaceVariant;
     final actionLabel = busy
         ? '同步中…'
         : failed
@@ -278,7 +308,12 @@ class ModelSyncSettingsRow extends StatelessWidget {
             message: sync.error ?? status?.error ?? label,
             child: Text(
               label,
-              style: unsynced
+              style: combined
+                  ? theme.textTheme.bodyMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    )
+                  : unsynced
                   ? theme.textTheme.bodyMedium?.copyWith(
                       color: scheme.onErrorContainer,
                       fontWeight: FontWeight.w600,
@@ -288,7 +323,7 @@ class ModelSyncSettingsRow extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 12),
-        if (unsynced)
+        if (unsynced && !combined)
           FilledButton(onPressed: sync.onSync, child: Text(actionLabel))
         else
           TextButton.icon(
@@ -298,6 +333,59 @@ class ModelSyncSettingsRow extends StatelessWidget {
           ),
       ],
     );
+    if (combined) {
+      return Container(
+        key: const Key('model-readiness-card'),
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.35)),
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Icon(
+                  dependenciesReady == true
+                      ? Icons.check_circle_outline_rounded
+                      : Icons.build_rounded,
+                  size: 20,
+                  color: color,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    installingDependencies
+                        ? '正在安装依赖…'
+                        : dependenciesReady == true
+                        ? '依赖检查完成'
+                        : '依赖检查失败，当前缺少：$missingDependencies。',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (dependenciesReady != true || installingDependencies) ...[
+                  const SizedBox(width: 12),
+                  TextButton(
+                    onPressed: installingDependencies
+                        ? null
+                        : onInstallDependencies,
+                    child: Text(installingDependencies ? '安装中…' : '安装依赖'),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 8),
+            row,
+          ],
+        ),
+      );
+    }
     if (unsynced) {
       return Container(
         width: double.infinity,

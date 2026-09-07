@@ -289,7 +289,7 @@ void main() {
           final scheme = Theme.of(tester.element(status)).colorScheme;
           expect(
             decoration.color,
-            scheme.errorContainer.withValues(alpha: 0.55),
+            scheme.error.withValues(alpha: 0.10),
           );
           expect(
             find.text('安装依赖'),
