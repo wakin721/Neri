@@ -25,6 +25,7 @@ ENV/
 !/tests/test_training_privacy_api.py
 !/tests/test_training_transport.py
 !/tests/test_training_broker.py
+!/tests/test_model_sync_layout.py
 
 # Build outputs
 build/
