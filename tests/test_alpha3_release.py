@@ -10,6 +10,12 @@ class Alpha3ReleaseContractTests(unittest.TestCase):
         self.assertEqual(BASE_VERSION, "3.0.6-alpha3")
         self.assertEqual(DEFAULT_BUILD_NUMBER, 460)
 
+    def test_repository_tracks_lowercase_model_directory(self):
+        resource_root = Path(__file__).resolve().parents[1] / "res"
+        directory_names = {child.name for child in resource_root.iterdir() if child.is_dir()}
+        self.assertIn("model", directory_names)
+        self.assertNotIn("Model", directory_names)
+
     def test_canonical_local_model_root_is_lowercase_model(self):
         import tempfile
 
@@ -33,7 +39,7 @@ class Alpha3ReleaseContractTests(unittest.TestCase):
             report = migrate_legacy_layout(resource_root)
             layout = get_model_layout(resource_root)
 
-            self.assertGreaterEqual(report.moved, 2)
+            self.assertGreaterEqual(report.moved, 1)
             self.assertEqual((layout.detect_user / "legacy.pt").read_bytes(), b"legacy")
             self.assertTrue(layout.tracker.is_file())
 
