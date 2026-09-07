@@ -6,6 +6,44 @@ import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/screens/model_sync_settings_host.dart';
 
 void main() {
+  testWidgets(
+    'theme and callback rebuild keep dismissed sync notification closed',
+    (tester) async {
+      var statusReads = 0;
+      final client = NeriApiClient(
+        httpClient: MockClient((_) async {
+          statusReads++;
+          return http.Response(
+            '{"state":"completed","run_id":"same-run"}',
+            200,
+          );
+        }),
+      );
+      addTearDown(client.close);
+      Widget buildHost(Brightness brightness) => MaterialApp(
+        theme: ThemeData(brightness: brightness),
+        home: Scaffold(
+          body: ModelSyncSettingsHost(
+            apiClient: client,
+            enabled: true,
+            onCatalogChanged: () async {},
+            child: const ModelSyncSettingsRow(dependenciesReady: true),
+          ),
+        ),
+      );
+      await tester.pumpWidget(buildHost(Brightness.light));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('model-sync-message-card')), findsOneWidget);
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(buildHost(Brightness.dark));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('model-sync-message-card')), findsNothing);
+      expect(statusReads, 1);
+      expect(find.text('模型已同步'), findsOneWidget);
+    },
+  );
+
   for (final scenario in [
     (state: 'idle', ready: true, installing: false, tone: 'red'),
     (state: 'failed', ready: true, installing: false, tone: 'red'),

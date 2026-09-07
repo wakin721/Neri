@@ -45,8 +45,7 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
     super.didUpdateWidget(oldWidget);
     final configurationChanged =
         oldWidget.apiClient != widget.apiClient ||
-        oldWidget.pollInterval != widget.pollInterval ||
-        oldWidget.onCatalogChanged != widget.onCatalogChanged;
+        oldWidget.pollInterval != widget.pollInterval;
     if (configurationChanged) {
       _removeMessageEntry();
       _controller.removeListener(_handleStatusChanged);
@@ -67,7 +66,7 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
     _controller = ModelSyncController(
       widget.apiClient,
       pollInterval: widget.pollInterval,
-      onCatalogChanged: widget.onCatalogChanged,
+      onCatalogChanged: () => widget.onCatalogChanged(),
     )..addListener(_handleStatusChanged);
     if (widget.enabled) unawaited(_loadStatus());
   }
