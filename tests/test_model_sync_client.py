@@ -22,7 +22,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_rejects_invalid_or_duplicate_paths(self):
         base = {'schema_version': 1, 'manifest_id': 'a' * 64}
-        for path in ['../a.pt', '/abs.pt', r'detect\a.pt', 'detect/a.onnx', 'cls/readme.txt']:
+        for path in ['../a.pt', '/abs.pt', r'detect\\a.pt', 'detect/a.onnx', 'cls/readme.txt']:
             with self.subTest(path=path), self.assertRaises(ProtocolError):
                 parse_manifest({**base, 'files': [{'path': path, 'size': 1, 'sha256': 'b' * 64}]})
         with self.assertRaises(ProtocolError):
@@ -101,6 +101,23 @@ class ClientTests(unittest.TestCase):
             )
             self.assertEqual(target.read_bytes(), b'abcd')
         self.assertEqual(progress[-1][0], 4)
+
+
+class RedirectSafetyTests(unittest.TestCase):
+    def test_direct_redirect_handler_rejects_non_microsoft_hop(self):
+        import urllib.error
+        from system.model_sync.client import SafeDirectRedirectHandler
+
+        handler = SafeDirectRedirectHandler()
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(
+                request=None,
+                fp=None,
+                code=302,
+                msg='Found',
+                headers={},
+                newurl='https://evil.example/model.pt',
+            )
 
 
 if __name__ == '__main__':

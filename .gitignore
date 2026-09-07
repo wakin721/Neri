@@ -28,6 +28,11 @@ ENV/
 !/tests/test_model_sync_layout.py
 !/tests/test_model_catalog.py
 !/tests/test_model_services_bridge.py
+!/tests/test_model_distribution.py
+!/tests/test_model_sync_client.py
+!/tests/test_model_sync_manager.py
+!/tests/test_model_sync_api.py
+!/tests/test_model_resource_paths.py
 
 # Build outputs
 build/
@@ -75,6 +80,7 @@ frontend/test/*
 !frontend/test/package_source_resolution_test.dart
 !frontend/test/privacy_test.dart
 !frontend/test/training_upload_debug_test.dart
+!frontend/test/model_sync_test.dart
 !frontend/pubspec.yaml
 !frontend/assets/
 !frontend/assets/**

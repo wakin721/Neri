@@ -3,11 +3,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Mapping
 
-from .protocol import DownloadCapability, ModelManifest, ModelManifestEntry, parse_capability, parse_manifest
+from .protocol import (
+    DownloadCapability,
+    ModelManifest,
+    ModelManifestEntry,
+    parse_capability,
+    parse_manifest,
+    valid_direct_url,
+)
 
 _TOKEN = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 
@@ -16,10 +24,26 @@ class ModelDistributionError(RuntimeError):
     pass
 
 
+class SafeDirectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow redirects only while the direct capability stays on Microsoft HTTPS."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        if not valid_direct_url(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, 'unsafe_direct_redirect', headers, fp
+            )
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
 class ModelDistributionClient:
     def __init__(self, base_url: str | None = None, opener=None):
         self.base_url = (base_url or os.environ.get('NERI_MODEL_SERVICE_URL') or 'https://myneri.top/api/models/v1').rstrip('/')
         self.opener = opener or urllib.request.urlopen
+        self.direct_opener = (
+            opener
+            if opener is not None
+            else urllib.request.build_opener(SafeDirectRedirectHandler()).open
+        )
 
     def _read_json(self, request: urllib.request.Request):
         try:
@@ -64,8 +88,9 @@ class ModelDistributionClient:
         on_progress: Callable[[int, int | None], None] | None = None,
     ) -> None:
         request = urllib.request.Request(url, headers=dict(headers), method='GET')
+        opener = self.direct_opener if valid_direct_url(url) else self.opener
         try:
-            with self.opener(request, timeout=20) as response, open(target, 'wb') as handle:
+            with opener(request, timeout=20) as response, open(target, 'wb') as handle:
                 total = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
                 total_bytes = int(total) if total and str(total).isdigit() else None
                 received = 0
