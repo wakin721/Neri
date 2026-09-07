@@ -1,0 +1,110 @@
+name: Model Sync Final Verification
+
+on:
+  push:
+    branches:
+      - codex/model-sync
+    paths:
+      - .github/workflows/model-sync-final-verify.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v6
+        with:
+          ref: codex/model-sync
+
+      - name: Inventory legacy model path references
+        shell: pwsh
+        run: |
+          $matches = git grep -n -E 'res/model_cls|res/model' -- .
+          if ($LASTEXITCODE -eq 0) {
+            $matches | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            $matches
+          } else {
+            'No legacy model path references found.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          exit 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        shell: pwsh
+        run: python -m unittest discover -s tests
+
+      - name: Install Flutter 3.44.6
+        shell: pwsh
+        run: |
+          git clone --branch 3.44.6 --depth 1 https://github.com/flutter/flutter.git C:\flutter
+          'C:\flutter\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate Windows project files
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          $backup = Join-Path $env:RUNNER_TEMP 'neri-windows-runner'
+          New-Item -ItemType Directory -Path $backup -Force | Out-Null
+          $customFiles = @('flutter_window.cpp','flutter_window.h','main.cpp','win32_window.cpp','win32_window.h')
+          foreach ($file in $customFiles) { Copy-Item "windows\runner\$file" $backup -Force }
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name neri_flutter .
+          Remove-Item 'test\widget_test.dart' -Force -ErrorAction SilentlyContinue
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\configure_windows_product.ps1')
+          foreach ($file in $customFiles) { Copy-Item (Join-Path $backup $file) "windows\runner\$file" -Force }
+          Copy-Item '..\res\ico.ico' 'windows\runner\resources\app_icon.ico' -Force
+
+      - name: Get Flutter dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run Flutter tests
+        shell: pwsh
+        working-directory: frontend
+        run: flutter test
+
+      - name: Analyze Flutter frontend
+        shell: pwsh
+        working-directory: frontend
+        run: flutter analyze
+
+      - name: Build Flutter Windows release
+        shell: pwsh
+        working-directory: frontend
+        run: flutter build windows --release
+
+      - name: Verify portable model layout and backend import
+        shell: pwsh
+        run: |
+          $requiredDirectories = @(
+            'res\Model\detect\user',
+            'res\Model\detect\sync',
+            'res\Model\cls\user',
+            'res\Model\cls\sync'
+          )
+          foreach ($directory in $requiredDirectories) {
+            if (-not (Test-Path $directory -PathType Container)) { throw "Missing model directory: $directory" }
+          }
+          if (-not (Test-Path 'res\Model\tracker.yaml' -PathType Leaf)) { throw 'Missing res\Model\tracker.yaml' }
+          if (Test-Path 'res\model') { throw 'Legacy res\model directory still exists.' }
+          if (Test-Path 'res\model_cls') { throw 'Legacy res\model_cls directory still exists.' }
+          python -c "import system.model_sync.manager, system.backend.main"
+          if (-not (Test-Path 'frontend\build\windows\x64\runner\Release\neri_flutter.exe')) {
+            throw 'Windows release executable was not produced.'
+          }
