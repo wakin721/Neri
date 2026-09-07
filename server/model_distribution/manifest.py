@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import unicodedata
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,7 +45,7 @@ class ManifestBuilder:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.store = store
         self.db_path = self.state_dir / "model_distribution.sqlite3"
-        with sqlite3.connect(self.db_path) as db:
+        with closing(sqlite3.connect(self.db_path)) as db, db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS hash_cache(
                     path TEXT PRIMARY KEY,
@@ -56,7 +57,7 @@ class ManifestBuilder:
 
     def _hash_remote(self, logical: str, remote: str, entry: RemoteEntry) -> str:
         if entry.modified:
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 row = db.execute(
                     "SELECT size,modified,sha256 FROM hash_cache WHERE path=?",
                     (logical,),
@@ -70,7 +71,7 @@ class ManifestBuilder:
             digest.update(chunk)
         value = digest.hexdigest()
         if entry.modified:
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 db.execute(
                     "INSERT INTO hash_cache(path,size,modified,sha256) VALUES(?,?,?,?) "
                     "ON CONFLICT(path) DO UPDATE SET size=excluded.size,modified=excluded.modified,sha256=excluded.sha256",
