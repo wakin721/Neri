@@ -30,9 +30,10 @@ class NeriSettings {
                   const <dynamic>[])
               .map((item) => item.toString())
               .toList(),
-      modelDirectory: json['model_directory'] as String? ?? 'res/model',
+      modelDirectory:
+          json['model_directory'] as String? ?? 'res/Model/detect',
       classificationModelDirectory:
-          json['classification_model_directory'] as String? ?? 'res/model_cls',
+          json['classification_model_directory'] as String? ?? 'res/Model/cls',
       availableModels:
           (json['available_models'] as List<dynamic>? ?? const <dynamic>[])
               .whereType<Map<String, dynamic>>()
@@ -118,19 +119,32 @@ class NeriSettings {
 }
 
 class ModelInfo {
-  const ModelInfo({required this.name, required this.path, this.sizeBytes});
+  const ModelInfo({
+    required this.name,
+    required this.path,
+    this.sizeBytes,
+    this.source = 'user',
+    this.kind = 'detect',
+  });
 
   factory ModelInfo.fromJson(Map<String, dynamic> json) {
     return ModelInfo(
       name: json['name'] as String? ?? '',
       path: json['path'] as String? ?? '',
       sizeBytes: json['size_bytes'] as int?,
+      source: json['source'] as String? ?? 'user',
+      kind: json['kind'] as String? ?? 'detect',
     );
   }
 
   final String name;
   final String path;
   final int? sizeBytes;
+  final String source;
+  final String kind;
+
+  String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
+  String get displayName => '$sourceLabel / $name';
 }
 
 class ModelClassInfo {
