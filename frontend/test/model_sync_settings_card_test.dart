@@ -87,7 +87,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.textContaining('同步失败'), findsOneWidget);
+    expect(find.text('同步失败'), findsOneWidget);
     expect(find.textContaining('网络不可用'), findsOneWidget);
     expect(find.text('重试'), findsOneWidget);
     expect(find.textContaining('不会影响已安装的本地模型'), findsOneWidget);
