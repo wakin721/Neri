@@ -10,6 +10,7 @@ class ModelSyncSettingsCard extends StatefulWidget {
   const ModelSyncSettingsCard({
     required this.apiClient,
     required this.onCatalogChanged,
+    this.controller,
     this.enabled = true,
     this.pollInterval = const Duration(milliseconds: 500),
     super.key,
@@ -17,6 +18,7 @@ class ModelSyncSettingsCard extends StatefulWidget {
 
   final NeriApiClient apiClient;
   final Future<void> Function() onCatalogChanged;
+  final ModelSyncController? controller;
   final bool enabled;
   final Duration pollInterval;
 
@@ -33,8 +35,8 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
   @override
   void initState() {
     super.initState();
-    _createController();
-    _loading = widget.enabled;
+    _attachController();
+    _loading = widget.enabled && _controller.status == null;
     if (widget.enabled) {
       unawaited(_loadStatus());
     }
@@ -43,28 +45,45 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
   @override
   void didUpdateWidget(ModelSyncSettingsCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.apiClient != widget.apiClient ||
-        oldWidget.pollInterval != widget.pollInterval ||
-        oldWidget.onCatalogChanged != widget.onCatalogChanged ||
-        oldWidget.enabled != widget.enabled) {
-      _controller.removeListener(_handleStatusChanged);
-      _controller.dispose();
-      _createController();
-      _loading = widget.enabled;
+    final controllerChanged = oldWidget.controller != widget.controller;
+    final internalConfigurationChanged =
+        widget.controller == null &&
+        oldWidget.controller == null &&
+        (oldWidget.apiClient != widget.apiClient ||
+            oldWidget.pollInterval != widget.pollInterval ||
+            oldWidget.onCatalogChanged != widget.onCatalogChanged);
+    final rebindController =
+        controllerChanged || internalConfigurationChanged;
+
+    if (rebindController) {
+      _detachController(dispose: oldWidget.controller == null);
+      _attachController();
       _running = false;
       _requestError = null;
+    }
+
+    if (rebindController || oldWidget.enabled != widget.enabled) {
+      _loading = widget.enabled && _controller.status == null;
       if (widget.enabled) {
         unawaited(_loadStatus());
       }
     }
   }
 
-  void _createController() {
-    _controller = ModelSyncController(
-      widget.apiClient,
-      pollInterval: widget.pollInterval,
-      onCatalogChanged: widget.onCatalogChanged,
-    )..addListener(_handleStatusChanged);
+  void _attachController() {
+    _controller =
+        widget.controller ??
+        ModelSyncController(
+          widget.apiClient,
+          pollInterval: widget.pollInterval,
+          onCatalogChanged: widget.onCatalogChanged,
+        );
+    _controller.addListener(_handleStatusChanged);
+  }
+
+  void _detachController({required bool dispose}) {
+    _controller.removeListener(_handleStatusChanged);
+    if (dispose) _controller.dispose();
   }
 
   void _handleStatusChanged() {
@@ -110,8 +129,7 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
 
   @override
   void dispose() {
-    _controller.removeListener(_handleStatusChanged);
-    _controller.dispose();
+    _detachController(dispose: widget.controller == null);
     super.dispose();
   }
 
