@@ -30,9 +30,10 @@ class NeriSettings {
                   const <dynamic>[])
               .map((item) => item.toString())
               .toList(),
-      modelDirectory: json['model_directory'] as String? ?? 'res/model',
+      modelDirectory:
+          json['model_directory'] as String? ?? 'res/model/detect',
       classificationModelDirectory:
-          json['classification_model_directory'] as String? ?? 'res/model_cls',
+          json['classification_model_directory'] as String? ?? 'res/model/cls',
       availableModels:
           (json['available_models'] as List<dynamic>? ?? const <dynamic>[])
               .whereType<Map<String, dynamic>>()
@@ -118,19 +119,36 @@ class NeriSettings {
 }
 
 class ModelInfo {
-  const ModelInfo({required this.name, required this.path, this.sizeBytes});
+  const ModelInfo({
+    required String name,
+    required this.path,
+    this.sizeBytes,
+    String? source,
+    this.kind = 'detect',
+  }) : rawName = name,
+       source = source ?? 'user',
+       hasExplicitSource = source != null;
 
   factory ModelInfo.fromJson(Map<String, dynamic> json) {
     return ModelInfo(
       name: json['name'] as String? ?? '',
       path: json['path'] as String? ?? '',
       sizeBytes: json['size_bytes'] as int?,
+      source: json['source'] as String?,
+      kind: json['kind'] as String? ?? 'detect',
     );
   }
 
-  final String name;
+  final String rawName;
   final String path;
   final int? sizeBytes;
+  final String source;
+  final String kind;
+  final bool hasExplicitSource;
+
+  String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
+  String get displayName => '$sourceLabel / $rawName';
+  String get name => hasExplicitSource ? displayName : rawName;
 }
 
 class ModelClassInfo {

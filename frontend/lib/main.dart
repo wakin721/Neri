@@ -243,10 +243,18 @@ class _CrashReportOnlyScreenState extends State<_CrashReportOnlyScreen> {
   }
 }
 
-class NeriApp extends StatelessWidget {
+class NeriApp extends StatefulWidget {
   const NeriApp({required this.themeNotifier, super.key});
 
   final ValueNotifier<ThemeSettings> themeNotifier;
+
+  @override
+  State<NeriApp> createState() => _NeriAppState();
+}
+
+class _NeriAppState extends State<NeriApp> {
+  // MainWindow closes this client after shutting down the backend.
+  final _apiClient = NeriApiClient();
 
   @override
   Widget build(BuildContext context) {
@@ -256,7 +264,7 @@ class NeriApp extends StatelessWidget {
     return DynamicColorBuilder(
       builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
         return ValueListenableBuilder<ThemeSettings>(
-          valueListenable: themeNotifier,
+          valueListenable: widget.themeNotifier,
           builder: (context, settings, _) {
             final ColorScheme lightScheme =
                 (settings.useDynamicColor && lightDynamic != null)
@@ -281,8 +289,8 @@ class NeriApp extends StatelessWidget {
               theme: ThemeData(useMaterial3: true, colorScheme: lightScheme),
               darkTheme: ThemeData(useMaterial3: true, colorScheme: darkScheme),
               home: MainWindow(
-                apiClient: NeriApiClient(),
-                themeNotifier: themeNotifier,
+                apiClient: _apiClient,
+                themeNotifier: widget.themeNotifier,
               ),
             );
           },

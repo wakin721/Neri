@@ -5,6 +5,19 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:neri_flutter/src/app_updater.dart';
 
+Future<void> _deleteDirectoryWhenReleased(Directory directory) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (await directory.exists()) {
+    try {
+      await directory.delete(recursive: true);
+      return;
+    } on FileSystemException {
+      if (!DateTime.now().isBefore(deadline)) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+  }
+}
+
 void main() {
   group('compareNeriVersions', () {
     test('orders stable and preview releases', () {
@@ -299,10 +312,7 @@ void main() {
       } finally {
         blocker?.kill();
         updater.close();
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-        if (await root.exists()) {
-          await root.delete(recursive: true);
-        }
+        await _deleteDirectoryWhenReleased(root);
       }
     },
   );

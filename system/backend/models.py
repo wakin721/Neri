@@ -30,6 +30,8 @@ class ModelInfo(BaseModel):
     name: str
     path: str
     size_bytes: int | None = None
+    source: Literal["user", "sync"] = "user"
+    kind: Literal["detect", "cls"] = "detect"
 
 
 class ModelClassInfo(BaseModel):

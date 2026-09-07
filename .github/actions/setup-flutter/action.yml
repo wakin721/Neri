@@ -1,0 +1,38 @@
+name: Set up Flutter
+description: Install the shared Flutter version and cache its SDK and pub packages.
+inputs:
+  version:
+    description: Flutter release tag
+    default: '3.44.6'
+runs:
+  using: composite
+  steps:
+    - name: Cache Flutter SDK
+      id: sdk
+      uses: actions/cache@v5
+      with:
+        path: C:\flutter
+        key: flutter-sdk-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-v1
+
+    - name: Install Flutter SDK
+      if: steps.sdk.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        FLUTTER_VERSION: ${{ inputs.version }}
+      run: |
+        git clone --branch $env:FLUTTER_VERSION --depth 1 https://github.com/flutter/flutter.git C:\flutter
+        if ($LASTEXITCODE -ne 0) { throw "Flutter SDK clone failed." }
+
+    - name: Configure Flutter paths
+      shell: pwsh
+      run: |
+        'C:\flutter\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        "PUB_CACHE=$env:LOCALAPPDATA\Pub\Cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Cache pub packages
+      uses: actions/cache@v5
+      with:
+        path: ~/AppData/Local/Pub/Cache
+        key: flutter-pub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-${{ hashFiles('frontend/pubspec.yaml', 'frontend/pubspec.lock') }}
+        restore-keys: |
+          flutter-pub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-

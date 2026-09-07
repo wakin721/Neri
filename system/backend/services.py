@@ -187,15 +187,21 @@ def _clear_torch_runtime_cache() -> None:
 
 
 def model_directory() -> Path:
-    """Return the project model directory used by the API."""
+    """Return the canonical detection-model root."""
 
-    return Path(resource_path("res/model")).resolve()
+    from .model_services import model_directory as canonical_model_directory
+
+    return canonical_model_directory()
 
 
 def classification_model_directory() -> Path:
-    """Return the optional second-stage classification model directory."""
+    """Return the canonical classification-model root."""
 
-    return Path(resource_path("res/model_cls")).resolve()
+    from .model_services import (
+        classification_model_directory as canonical_classification_model_directory,
+    )
+
+    return canonical_classification_model_directory()
 
 
 def job_state_path() -> Path:
@@ -205,17 +211,21 @@ def job_state_path() -> Path:
 
 
 def list_available_models() -> list[ModelInfo]:
-    """List all .pt files available under res/model."""
+    """List detection models from canonical user and sync directories."""
 
-    directory = model_directory()
-    return _list_model_files(directory, ("*.pt",))
+    from .model_services import list_available_models as canonical_list_available_models
+
+    return canonical_list_available_models()
 
 
 def list_available_classification_models() -> list[ModelInfo]:
-    """List classification model files under res/model_cls."""
+    """List classification models from canonical user and sync directories."""
 
-    directory = classification_model_directory()
-    return _list_model_files(directory, ("*.pt", "*.onnx", "*.engine"))
+    from .model_services import (
+        list_available_classification_models as canonical_list_available_classification_models,
+    )
+
+    return canonical_list_available_classification_models()
 
 
 def list_model_classes(model_path: str | None) -> list[ModelClassInfo]:

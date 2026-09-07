@@ -7,8 +7,8 @@ import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 
-const _defaultModelDirectory = 'res/model';
-const _defaultClassificationModelDirectory = 'res/model_cls';
+const _defaultModelDirectory = 'res/model/detect';
+const _defaultClassificationModelDirectory = 'res/model/cls';
 
 String _modelSelectorHelperText({
   required bool enabled,
@@ -22,6 +22,34 @@ String _modelSelectorHelperText({
     return '未在 $directory 中找到 .pt 模型';
   }
   return '扫描 $directory';
+}
+
+List<DropdownMenuEntry<String>> _modelDropdownEntries(
+  List<ModelInfo> models,
+) {
+  final userModels = models.where((model) => model.source != 'sync').toList();
+  final cloudModels = models.where((model) => model.source == 'sync').toList();
+  return <DropdownMenuEntry<String>>[
+    const DropdownMenuEntry<String>(value: '', label: '不使用'),
+    if (userModels.isNotEmpty) ...[
+      const DropdownMenuEntry<String>(
+        value: '__neri_header_user__',
+        label: '用户模型',
+        enabled: false,
+      ),
+      for (final model in userModels)
+        DropdownMenuEntry<String>(value: model.path, label: model.rawName),
+    ],
+    if (cloudModels.isNotEmpty) ...[
+      const DropdownMenuEntry<String>(
+        value: '__neri_header_sync__',
+        label: 'NeriCloud',
+        enabled: false,
+      ),
+      for (final model in cloudModels)
+        DropdownMenuEntry<String>(value: model.path, label: model.rawName),
+    ],
+  ];
 }
 
 class StartScreen extends StatelessWidget {
@@ -426,11 +454,7 @@ class _ModelSelector extends StatelessWidget {
         directory: modelDirectory,
       ),
       leadingIcon: const Icon(Icons.memory_rounded),
-      dropdownMenuEntries: [
-        const DropdownMenuEntry<String>(value: '', label: '不使用'),
-        for (final model in models)
-          DropdownMenuEntry<String>(value: model.path, label: model.name),
-      ],
+      dropdownMenuEntries: _modelDropdownEntries(models),
       onSelected: enabled ? onChanged : null,
     );
   }
@@ -476,11 +500,7 @@ class _ClassificationModelSelector extends StatelessWidget {
         directory: modelDirectory,
       ),
       leadingIcon: const Icon(Icons.account_tree_rounded),
-      dropdownMenuEntries: [
-        const DropdownMenuEntry<String>(value: '', label: '不使用'),
-        for (final model in models)
-          DropdownMenuEntry<String>(value: model.path, label: model.name),
-      ],
+      dropdownMenuEntries: _modelDropdownEntries(models),
       onSelected: enabled ? onChanged : null,
     );
   }

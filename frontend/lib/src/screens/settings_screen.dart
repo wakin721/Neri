@@ -20,6 +20,7 @@ import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 import '../widgets/workspace_split_metrics.dart';
+import 'model_sync_settings_host.dart';
 
 const _defaultExportColumns = <String>[
   '文件名',
@@ -70,13 +71,13 @@ const _defaultQuantityButtons = <String>[
 ];
 
 const _releaseNotesUrl =
-    'https://github.com/wakin721/Neri/blob/main/res/demo/README_Update.md';
+    'https://github.com/wakin721/Neri/blob/main/CHANGELOG.md';
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
 const _frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.0.6-alpha2(0f6ac7)',
+  defaultValue: '3.0.6-beta1(0f6ac7)',
 );
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
@@ -943,6 +944,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _refreshModelCatalog() async {
+    await widget.onSaveSettings(Map<String, dynamic>.from(_draft));
+  }
+
   @override
   Widget build(BuildContext context) {
     final debugModeEnabled = _bool(_debugModeKey);
@@ -950,81 +955,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .clamp(0, debugModeEnabled ? 7 : 6)
         .toInt();
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final drawerWidth = previewDistanceToLeadingDivider(
-          constraints.maxWidth,
-        );
+    return ModelSyncSettingsHost(
+      apiClient: widget.apiClient,
+      enabled: widget.settings != null,
+      onCatalogChanged: _refreshModelCatalog,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final drawerWidth = previewDistanceToLeadingDivider(
+            constraints.maxWidth,
+          );
 
-        return Row(
-          children: [
-            SizedBox(
-              width: drawerWidth,
-              child: NavigationDrawer(
-                selectedIndex: selectedIndex,
-                onDestinationSelected: (index) {
-                  setState(() => _sectionIndex = index);
-                },
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(28, 20, 16, 12),
-                    child: Text('设置', style: TextStyle(fontSize: 18)),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.tune_outlined),
-                    selectedIcon: Icon(Icons.tune_rounded),
-                    label: Text('检测设置'),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.construction_outlined),
-                    selectedIcon: Icon(Icons.construction_rounded),
-                    label: Text('环境维护'),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.fact_check_outlined),
-                    selectedIcon: Icon(Icons.fact_check_rounded),
-                    label: Text('基础设置'),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.palette_outlined),
-                    selectedIcon: Icon(Icons.palette_rounded),
-                    label: Text('外观主题'),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.system_update_alt_rounded),
-                    selectedIcon: Icon(Icons.system_update_alt_rounded),
-                    label: Text('软件更新'),
-                  ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.privacy_tip_outlined),
-                    selectedIcon: Icon(Icons.privacy_tip_rounded),
-                    label: Text('隐私与数据'),
-                  ),
-                  if (debugModeEnabled)
-                    const NavigationDrawerDestination(
-                      icon: Icon(Icons.bug_report_outlined),
-                      selectedIcon: Icon(Icons.bug_report_rounded),
-                      label: Text('调试模式'),
+          return Row(
+            children: [
+              SizedBox(
+                width: drawerWidth,
+                child: NavigationDrawer(
+                  selectedIndex: selectedIndex,
+                  onDestinationSelected: (index) {
+                    setState(() => _sectionIndex = index);
+                  },
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(28, 20, 16, 12),
+                      child: Text('设置', style: TextStyle(fontSize: 18)),
                     ),
-                  const NavigationDrawerDestination(
-                    icon: Icon(Icons.info_outline_rounded),
-                    selectedIcon: Icon(Icons.info_rounded),
-                    label: Text('关于'),
-                  ),
-                ],
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.tune_outlined),
+                      selectedIcon: Icon(Icons.tune_rounded),
+                      label: Text('检测设置'),
+                    ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.construction_outlined),
+                      selectedIcon: Icon(Icons.construction_rounded),
+                      label: Text('环境维护'),
+                    ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.fact_check_outlined),
+                      selectedIcon: Icon(Icons.fact_check_rounded),
+                      label: Text('基础设置'),
+                    ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.palette_outlined),
+                      selectedIcon: Icon(Icons.palette_rounded),
+                      label: Text('外观主题'),
+                    ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.system_update_alt_rounded),
+                      selectedIcon: Icon(Icons.system_update_alt_rounded),
+                      label: Text('软件更新'),
+                    ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.privacy_tip_outlined),
+                      selectedIcon: Icon(Icons.privacy_tip_rounded),
+                      label: Text('隐私与数据'),
+                    ),
+                    if (debugModeEnabled)
+                      const NavigationDrawerDestination(
+                        icon: Icon(Icons.bug_report_outlined),
+                        selectedIcon: Icon(Icons.bug_report_rounded),
+                        label: Text('调试模式'),
+                      ),
+                    const NavigationDrawerDestination(
+                      icon: Icon(Icons.info_outline_rounded),
+                      selectedIcon: Icon(Icons.info_rounded),
+                      label: Text('关于'),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const VerticalDivider(width: 1),
-            Expanded(
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(16),
-                children: [_buildSelectedSection()],
+              const VerticalDivider(width: 1),
+              Expanded(
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(16),
+                  children: [_buildSelectedSection()],
+                ),
               ),
-            ),
-          ],
-        );
-      },
+            ],
+          );
+        },
+      ),
     );
   }
 
@@ -1083,7 +1093,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       icon: Icons.tune_rounded,
       child: Column(
         children: [
-          if (!detectionEnabled) _buildDetectionDependencyNotice(),
+          ModelSyncSettingsRow(
+            dependenciesReady: detectionEnabled,
+            installingDependencies:
+                _maintenancePreparationOperation ==
+                    'install_yolo_dependencies' ||
+                _installingPytorch,
+            missingDependencies: _missingYoloDependenciesLabel,
+            onInstallDependencies: _maintenanceBusy
+                ? null
+                : _installYoloDependencies,
+          ),
           if (_maintenanceBusy) _buildMaintenanceProgress(),
           _SettingsPanel(
             title: '探测模型',
@@ -1093,15 +1113,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: selectedModel,
               placeholder: '未发现探测模型',
               enabled: detectionEnabled,
-              options: [
-                const _SettingsOption<String>(value: '', label: '不使用'),
-                ...(settings?.availableModels ?? const <ModelInfo>[]).map(
-                  (model) => _SettingsOption<String>(
-                    value: model.path,
-                    label: model.name,
-                  ),
-                ),
-              ],
+              options: _modelSettingsOptions(
+                settings?.availableModels ?? const <ModelInfo>[],
+              ),
               onChanged: (value) {
                 _set('selected_model', value);
                 if (selectedClassificationModel?.isEmpty ?? true) {
@@ -1121,17 +1135,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SettingsMenuButton<String>(
                   value: selectedClassificationModel,
                   enabled: detectionEnabled,
-                  options: [
-                    const _SettingsOption<String>(value: '', label: '不使用'),
-                    ...(settings?.availableClassificationModels ??
-                            const <ModelInfo>[])
-                        .map(
-                          (model) => _SettingsOption<String>(
-                            value: model.path,
-                            label: model.name,
-                          ),
-                        ),
-                  ],
+                  options: _modelSettingsOptions(
+                    settings?.availableClassificationModels ??
+                        const <ModelInfo>[],
+                  ),
                   onChanged: (value) {
                     _set('selected_classification_model', value);
                     _set('selected_species_names', <String>[]);
@@ -1284,50 +1291,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             videoMode,
             strideLabel,
             enabled: detectionEnabled,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDetectionDependencyNotice() {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: scheme.errorContainer.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: scheme.error.withValues(alpha: 0.35)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.report_problem_rounded, color: scheme.error),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              '检测设置需要先安装 PyTorch、torchvision 和 ultralytics。当前缺少：$_missingYoloDependenciesLabel。',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: scheme.onErrorContainer,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          FilledButton(
-            onPressed: _maintenanceBusy ? null : _installYoloDependencies,
-            child:
-                _maintenancePreparationOperation ==
-                        'install_yolo_dependencies' ||
-                    _installingPytorch
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('安装依赖'),
           ),
         ],
       ),
@@ -1501,26 +1464,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (result != null) {
       _set('selected_species_names', result);
     }
-  }
-
-  Widget _buildVideoSettings() {
-    final videoMode = normalizeVideoProcessingMode(
-      _string('video_mode', defaultVideoProcessingMode),
-    );
-    final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
-
-    return SectionCard(
-      title: '视频检测设置',
-      subtitle: '视频处理模式、跳帧和检测过滤',
-      icon: Icons.movie_filter_rounded,
-      child: Column(
-        children: _buildVideoSettingPanels(
-          videoMode,
-          strideLabel,
-          enabled: _detectionDependenciesReady,
-        ),
-      ),
-    );
   }
 
   List<Widget> _buildVideoSettingPanels(
@@ -2062,30 +2005,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       parts.add('${result.skipped.length} 项未能清理');
     }
     return parts.join(' · ');
-  }
-
-  Widget _buildQuickMarkSettings() {
-    return SectionCard(
-      title: '快速标记设置',
-      subtitle: '物种按钮、数量按钮和自动排序',
-      icon: Icons.bookmark_add_rounded,
-      child: _buildQuickMarkEditor(),
-    );
-  }
-
-  Widget _buildExportSettings() {
-    return SectionCard(
-      title: '导出设置',
-      subtitle: '自定义导出表格、收藏媒体同步和空照片删除策略',
-      icon: Icons.table_chart_rounded,
-      child: Column(
-        children: [
-          _buildExportColumns(showDivider: true),
-          _buildFavoritePhotoExportMode(showDivider: true),
-          _buildEmptyPhotoDeleteMode(),
-        ],
-      ),
-    );
   }
 
   Widget _buildAppearanceSettings() {
@@ -3040,11 +2959,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
+  final userModels = models.where((model) => model.source != 'sync').toList();
+  final cloudModels = models.where((model) => model.source == 'sync').toList();
+  return <_SettingsOption<String>>[
+    const _SettingsOption<String>(value: '', label: '不使用'),
+    if (userModels.isNotEmpty) ...[
+      const _SettingsOption<String>(
+        value: '__neri_header_user__',
+        label: '用户模型',
+        enabled: false,
+      ),
+      for (final model in userModels)
+        _SettingsOption<String>(value: model.path, label: model.rawName),
+    ],
+    if (cloudModels.isNotEmpty) ...[
+      const _SettingsOption<String>(
+        value: '__neri_header_sync__',
+        label: 'NeriCloud',
+        enabled: false,
+      ),
+      for (final model in cloudModels)
+        _SettingsOption<String>(value: model.path, label: model.rawName),
+    ],
+  ];
+}
+
 class _SettingsOption<T> {
-  const _SettingsOption({required this.value, required this.label});
+  const _SettingsOption({
+    required this.value,
+    required this.label,
+    this.enabled = true,
+  });
 
   final T value;
   final String label;
+  final bool enabled;
 }
 
 class _SettingsMenuButton<T> extends StatelessWidget {
@@ -3088,7 +3038,7 @@ class _SettingsMenuButton<T> extends StatelessWidget {
               leadingIcon: option.value == value
                   ? const Icon(Icons.check_rounded)
                   : const SizedBox(width: 24),
-              onPressed: () => onChanged(option.value),
+              onPressed: option.enabled ? () => onChanged(option.value) : null,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
                   minWidth: minMenuWidth,

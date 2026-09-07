@@ -16,7 +16,7 @@
 
 <div align="center">
 
-[中文](README.md) &nbsp;·&nbsp; [English](res/demo/README_en.md) &nbsp;·&nbsp; [更新日志](res/demo/README_Update.md) &nbsp;·&nbsp; [🌐 官网](https://myneri.top/)
+[中文](README.md) &nbsp;·&nbsp; [English](res/demo/README_en.md) &nbsp;·&nbsp; [更新日志](CHANGELOG.md) &nbsp;·&nbsp; [🌐 官网](https://myneri.top/)
 
 </div>
 
@@ -83,7 +83,7 @@
 
 **模型管理**
 
-- 模型目录位于 `res/model` 以及 `res/cls_model` 文件夹下
+- 模型目录位于 `res/model/detect` 与 `res/model/cls`；用户模型放入各自的 `user` 子目录，NeriCloud 同步模型位于 `sync` 子目录
 - 目前仅支持 `.pt` 结尾的模型文件，可自行更换
 
 **检测阈值设置**

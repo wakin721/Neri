@@ -71,7 +71,6 @@ class TrainingQueue:
                     remote_possible INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS jobs_folder ON jobs(folder_key);
-                CREATE INDEX IF NOT EXISTS jobs_event ON jobs(event_key);
                 CREATE INDEX IF NOT EXISTS jobs_waiting ON jobs(state,next_attempt);
             ''')
         with self._connect() as db:
