@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
+import 'package:neri_flutter/src/model_sync_controller.dart';
 import 'package:neri_flutter/src/models/model_sync_status.dart';
 import 'package:neri_flutter/src/models/settings.dart';
+import 'package:neri_flutter/src/screens/start_screen.dart';
 
 void main() {
   test('model metadata exposes user and NeriCloud source labels', () {
@@ -81,5 +86,125 @@ void main() {
       requests.map((request) => request.url.path),
       <String>['/api/model-sync/status', '/api/model-sync/run'],
     );
+  });
+
+  testWidgets('duplicate model filenames show user and NeriCloud sources', (
+    tester,
+  ) async {
+    final inputController = TextEditingController();
+    addTearDown(inputController.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StartScreen(
+            settings: const NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: <String>['.jpg'],
+              supportedVideoExtensions: <String>[],
+              modelDirectory: 'res/Model/detect',
+              classificationModelDirectory: 'res/Model/cls',
+              availableModels: <ModelInfo>[
+                ModelInfo(
+                  name: 'bird.pt',
+                  path: r'C:\Neri\res\Model\detect\user\bird.pt',
+                  source: 'user',
+                  kind: 'detect',
+                ),
+                ModelInfo(
+                  name: 'bird.pt',
+                  path: r'C:\Neri\res\Model\detect\sync\bird.pt',
+                  source: 'sync',
+                  kind: 'detect',
+                ),
+              ],
+              availableClassificationModels: <ModelInfo>[],
+              speciesTypes: <String, String>{},
+              settings: <String, dynamic>{},
+              gpuAvailable: false,
+              missingYoloDependencies: <String>[],
+            ),
+            inputController: inputController,
+            selectedModelPath: '',
+            onModelChanged: (_) {},
+            selectedClassificationModelPath: '',
+            onClassificationModelChanged: (_) {},
+            videoMode: 'fast',
+            onVideoModeChanged: (_) {},
+            vidStride: 3,
+            onVidStrideChanged: (_) {},
+            useFp16: false,
+            onUseFp16Changed: (_) {},
+            confidence: 0.25,
+            onConfidenceChanged: (_) {},
+            iou: 0.45,
+            onIouChanged: (_) {},
+            submitting: false,
+            onCreateJob: () {},
+            onCancelJob: (_) {},
+            onResumeJob: (_) {},
+            onDeleteJob: (_) {},
+            onClearJobs: () {},
+            pendingStartJobIds: const <String>{},
+            pendingStopJobIds: const <String>{},
+            jobs: const [],
+          ),
+        ),
+      ),
+    );
+
+    final modelMenu = tester
+        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .first;
+    final labels = modelMenu.dropdownMenuEntries.map((entry) => entry.label);
+    expect(labels, contains('用户模型 / bird.pt'));
+    expect(labels, contains('NeriCloud / bird.pt'));
+  });
+
+  testWidgets('sync controller refreshes catalog once when active run finishes', (
+    tester,
+  ) async {
+    var statusReads = 0;
+    var catalogRefreshes = 0;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.method == 'POST') {
+          return http.Response(
+            '{"state":"checking","run_id":"run-1"}',
+            202,
+          );
+        }
+        statusReads++;
+        if (statusReads == 1) {
+          return http.Response(
+            '{"state":"downloading","run_id":"run-1",'
+            '"current_file":"detect/bird.pt","received_bytes":5,'
+            '"total_bytes":10}',
+            200,
+          );
+        }
+        return http.Response(
+          '{"state":"completed","run_id":"run-1",'
+          '"received_bytes":10,"total_bytes":10}',
+          200,
+        );
+      }),
+    );
+    final controller = ModelSyncController(
+      client,
+      pollInterval: const Duration(milliseconds: 10),
+      onCatalogChanged: () async => catalogRefreshes++,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.runNow();
+    await tester.pump(const Duration(milliseconds: 15));
+    await tester.pump(const Duration(milliseconds: 15));
+    await tester.pump(const Duration(milliseconds: 15));
+
+    expect(controller.status?.state, 'completed');
+    expect(catalogRefreshes, 1);
+    expect(statusReads, greaterThanOrEqualTo(2));
   });
 }
