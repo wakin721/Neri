@@ -1,4 +1,3 @@
-import json
 import io
 import unittest
 from pathlib import Path
@@ -33,11 +32,9 @@ class MemoryDrive:
         self.cancelled.append(url)
 
     def upload_all(self, response):
-        self._upload_all(response)
-
-    def upload(self, target, source, save_capability):
-        save_capability('https://my.microsoftpersonalcontent.com/upload/' + target['token'])
-        self.files[target['path']] = len(source.read_bytes())
+        for target in response['targets']:
+            path, size = self.sessions[target['upload_url']]
+            self.files[path] = size
 
 
 class BrokerTests(unittest.TestCase):
@@ -45,51 +42,61 @@ class BrokerTests(unittest.TestCase):
         self.temp = TemporaryDirectory()
         self.drive = MemoryDrive()
         self.now = 1000.0
-        self.config = BrokerConfig(state_dir=Path(self.temp.name), root_path='/Neri_Data/Training',
-                                   requests_per_minute=100, daily_ip_bytes=1000000, daily_total_bytes=2000000)
+        self.config = BrokerConfig(
+            state_dir=Path(self.temp.name),
+            root_path='/Neri_Data/Training',
+            requests_per_minute=100,
+            daily_ip_bytes=1000000,
+            daily_total_bytes=2000000,
+        )
         self.broker = Broker(self.config, self.drive, clock=lambda: self.now)
         self.secret = 's' * 43
         stream = io.BytesIO()
         Image.new('RGB', (12, 8), 'green').save(stream, format='JPEG')
         self.photo = stream.getvalue()
-        self.annotation = self.annotation_for('a' * 32, 1, ['赤狐'])
-        self.drive._upload_all = self.upload_all
-
-    @staticmethod
-    def annotation_for(sample_id, revision, species):
-        return json.dumps({'schema_version': 1, 'sample_id': sample_id, 'revision': revision,
-                           'species': species}, ensure_ascii=False).encode()
-
-    def upload_all(self, response):
-        for target in response['targets']:
-            path, size = self.drive.sessions[target['upload_url']]
-            self.drive.files[path] = size
 
     def tearDown(self):
         self.temp.cleanup()
 
     def submission(self, **kwargs):
-        values = dict(sample_id='a' * 32, revision=1, secret=self.secret,
-                      species=['赤狐'], image_bytes=len(self.photo))
+        values = dict(
+            sample_id='a' * 32,
+            revision=1,
+            secret=self.secret,
+            species=['赤狐'],
+            image_bytes=len(self.photo),
+        )
         values.update(kwargs)
-        values.setdefault('annotation_bytes', len(self.annotation_for(values['sample_id'], values['revision'], values['species'])))
+        species = values['species']
+        values.setdefault('annotation_bytes', {name: 24 for name in species})
+        values.setdefault('classes_bytes', {name: 16 for name in species})
         return Submission(**values)
 
-    def test_pair_per_species_and_no_arbitrary_paths(self):
+    def test_three_yolo_files_per_species_and_no_arbitrary_paths(self):
         response = self.broker.create(self.submission(species=['赤狐', '狼']), 'client1')
-        self.assertEqual(len(response['targets']), 4)
+        self.assertEqual(len(response['targets']), 6)
         self.drive.upload_all(response)
         paths = list(self.drive.files)
         self.assertTrue(all(path.startswith('/Neri_Data/Training/') for path in paths))
         self.assertTrue(any('/赤狐/' in path for path in paths))
         self.assertTrue(any('/狼/' in path for path in paths))
+        self.assertTrue(any(path.endswith('.txt') for path in paths))
+        self.assertTrue(any(path.endswith('.classes.txt') for path in paths))
         for bad in ['../private', '/root', '..', 'a\\b', '赤狐%2fsecret', 'name.', '空照片/../']:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 self.submission(species=[bad])
         with self.assertRaises(ValueError):
             self.submission(species=['Fox', 'fox'])
 
-    def test_cannot_complete_partial_or_wrong_sized_pair(self):
+    def test_size_maps_must_match_species(self):
+        with self.assertRaises(BrokerError) as error:
+            self.broker.create(
+                self.submission(species=['赤狐', '狼'], annotation_bytes={'赤狐': 1}),
+                'client1',
+            )
+        self.assertEqual(error.exception.status, 422)
+
+    def test_cannot_complete_partial_or_wrong_sized_triplet(self):
         response = self.broker.create(self.submission(), 'client1')
         first = response['targets'][0]
         path, size = self.drive.sessions[first['upload_url']]
@@ -97,20 +104,22 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(BrokerError) as error:
             self.broker.complete('a' * 32, 1, self.secret, 'client1')
         self.assertEqual(error.exception.status, 409)
-        self.upload_all({**response, 'targets': response['targets'][1:]})
+        self.drive.upload_all({**response, 'targets': response['targets'][1:]})
         self.assertEqual(self.broker.complete('a' * 32, 1, self.secret, 'client1')['status'], 'complete')
 
     def test_ownership_is_required_for_reuse_completion_and_delete(self):
         response = self.broker.create(self.submission(), 'client1')
         self.drive.upload_all(response)
-        actions = [lambda: self.broker.create(self.submission(secret='x' * 43), 'client2'),
-                   lambda: self.broker.complete('a' * 32, 1, 'x' * 43, 'client2'),
-                   lambda: self.broker.delete('a' * 32, 'x' * 43, 'client2')]
+        actions = [
+            lambda: self.broker.create(self.submission(secret='x' * 43), 'client2'),
+            lambda: self.broker.complete('a' * 32, 1, 'x' * 43, 'client2'),
+            lambda: self.broker.delete('a' * 32, 'x' * 43, 'client2'),
+        ]
         for action in actions:
             with self.assertRaises(BrokerError) as error:
                 action()
             self.assertEqual(error.exception.status, 403)
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
 
     def test_new_revision_keeps_previous_until_complete_and_removes_old_category(self):
         response = self.broker.create(self.submission(), 'client1')
@@ -122,7 +131,7 @@ class BrokerTests(unittest.TestCase):
             self.broker.complete('a' * 32, 1, self.secret, 'client1')
         self.drive.upload_all(new)
         self.broker.complete('a' * 32, 2, self.secret, 'client1')
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
         self.assertTrue(all('/狼/' in p for p in self.drive.files))
 
     def test_retry_completed_revision_is_idempotent_and_survives_restart(self):
@@ -133,7 +142,7 @@ class BrokerTests(unittest.TestCase):
         again = self.broker.create(self.submission(), 'client1')
         self.assertTrue(again['already_complete'])
         self.assertFalse(again['targets'])
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
 
     def test_retries_cancel_old_capabilities_and_different_payload_same_revision_rejected(self):
         first = self.broker.create(self.submission(), 'client1')
@@ -149,12 +158,13 @@ class BrokerTests(unittest.TestCase):
         self.drive.upload_all(own)
         self.drive.upload_all(other)
         self.broker.delete('a' * 32, self.secret, 'client1')
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
         self.assertTrue(all('b' * 32 in p for p in self.drive.files))
         self.broker.delete('a' * 32, self.secret, 'client1')
 
     def test_daily_byte_budget_and_per_minute_limit_persist(self):
-        self.config.daily_ip_bytes = len(self.photo) + len(self.annotation) + 10
+        one_submission = len(self.photo) + 24 + 16
+        self.config.daily_ip_bytes = one_submission + 10
         self.broker = Broker(self.config, self.drive, clock=lambda: self.now)
         self.broker.create(self.submission(), 'client1')
         with self.assertRaises(BrokerError) as error:
@@ -176,7 +186,7 @@ class BrokerTests(unittest.TestCase):
         self.drive.upload_all(recent)
         self.broker.complete('b' * 32, 1, self.secret, 'client2')
         self.broker.cleanup()
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
         self.assertTrue(all('b' * 32 in p for p in self.drive.files))
 
     def test_completion_rejects_and_removes_mismatched_actual_size(self):
@@ -200,7 +210,7 @@ class BrokerTests(unittest.TestCase):
         self.broker.complete('a' * 32, 1, self.secret, 'client1')
         with self.assertRaises(BrokerError):
             self.broker.cancel_upload(second['targets'][0]['cancel_url'].rsplit('/', 1)[1], 'client1')
-        self.assertEqual(len(self.drive.files), 2)
+        self.assertEqual(len(self.drive.files), 3)
 
     def test_retry_partial_upload_removes_owned_files_and_uses_new_names(self):
         first = self.broker.create(self.submission(), 'client1')
