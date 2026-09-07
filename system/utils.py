@@ -10,18 +10,42 @@ logger = logging.getLogger(__name__)
 
 def _canonical_resource_alias(relative_path: str) -> str:
     normalized = os.path.normpath(relative_path)
-    legacy_tracker = os.path.normpath(os.path.join('res', 'model_cls', 'tracker.yaml'))
-    legacy_detect = os.path.normpath(os.path.join('res', 'model'))
+    canonical_root = os.path.normpath(os.path.join('res', 'model'))
+    alpha2_root = os.path.normpath(os.path.join('res', 'Model'))
     legacy_cls = os.path.normpath(os.path.join('res', 'model_cls'))
+    legacy_tracker = os.path.normpath(os.path.join('res', 'model_cls', 'tracker.yaml'))
 
     if normalized == legacy_tracker:
-        return os.path.join('res', 'Model', 'tracker.yaml')
-    if normalized == legacy_detect or normalized.startswith(legacy_detect + os.sep):
-        suffix = normalized[len(legacy_detect):].lstrip(os.sep)
-        return os.path.join('res', 'Model', 'detect', suffix) if suffix else os.path.join('res', 'Model', 'detect')
-    if normalized == legacy_cls or normalized.startswith(legacy_cls + os.sep):
+        return os.path.join('res', 'model', 'tracker.yaml')
+
+    # Alpha2 used the same canonical tree with an uppercase M. Normalize those
+    # references without changing their detect/cls/user/sync structure.
+    if normalized == alpha2_root:
+        return canonical_root
+    if normalized.startswith(alpha2_root + os.sep):
+        suffix = normalized[len(alpha2_root):].lstrip(os.sep)
+        return os.path.join(canonical_root, suffix)
+
+    if normalized == legacy_cls:
+        return os.path.join('res', 'model', 'cls', 'user')
+    if normalized.startswith(legacy_cls + os.sep):
         suffix = normalized[len(legacy_cls):].lstrip(os.sep)
-        return os.path.join('res', 'Model', 'cls', suffix) if suffix else os.path.join('res', 'Model', 'cls')
+        return os.path.join('res', 'model', 'cls', 'user', suffix)
+
+    if normalized == canonical_root:
+        return canonical_root
+    if normalized.startswith(canonical_root + os.sep):
+        suffix = normalized[len(canonical_root):].lstrip(os.sep)
+        first_component = suffix.split(os.sep, 1)[0] if suffix else ''
+        if (
+            first_component in {'detect', 'cls'}
+            or suffix in {'tracker.yaml', '.sync-state.json'}
+        ):
+            return normalized
+        # Before model synchronization, detection models lived directly under
+        # res/model. Preserve old callers by resolving those files into user/.
+        return os.path.join('res', 'model', 'detect', 'user', suffix)
+
     return relative_path
 
 
