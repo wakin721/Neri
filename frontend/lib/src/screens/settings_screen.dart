@@ -20,6 +20,7 @@ import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
 import '../widgets/workspace_split_metrics.dart';
+import 'model_sync_settings_host.dart';
 
 const _defaultExportColumns = <String>[
   '文件名',
@@ -943,6 +944,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _refreshModelCatalog() async {
+    await widget.onSaveSettings(Map<String, dynamic>.from(_draft));
+  }
+
   @override
   Widget build(BuildContext context) {
     final debugModeEnabled = _bool(_debugModeKey);
@@ -950,8 +955,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .clamp(0, debugModeEnabled ? 7 : 6)
         .toInt();
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
+    return ModelSyncSettingsHost(
+      apiClient: widget.apiClient,
+      enabled: widget.settings != null,
+      onCatalogChanged: _refreshModelCatalog,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
         final drawerWidth = previewDistanceToLeadingDivider(
           constraints.maxWidth,
         );
@@ -1024,7 +1033,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         );
-      },
+        },
+      ),
     );
   }
 
@@ -1093,15 +1103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: selectedModel,
               placeholder: '未发现探测模型',
               enabled: detectionEnabled,
-              options: [
-                const _SettingsOption<String>(value: '', label: '不使用'),
-                ...(settings?.availableModels ?? const <ModelInfo>[]).map(
-                  (model) => _SettingsOption<String>(
-                    value: model.path,
-                    label: model.name,
-                  ),
-                ),
-              ],
+              options: _modelSettingsOptions(
+                settings?.availableModels ?? const <ModelInfo>[],
+              ),
               onChanged: (value) {
                 _set('selected_model', value);
                 if (selectedClassificationModel?.isEmpty ?? true) {
@@ -1121,17 +1125,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SettingsMenuButton<String>(
                   value: selectedClassificationModel,
                   enabled: detectionEnabled,
-                  options: [
-                    const _SettingsOption<String>(value: '', label: '不使用'),
-                    ...(settings?.availableClassificationModels ??
-                            const <ModelInfo>[])
-                        .map(
-                          (model) => _SettingsOption<String>(
-                            value: model.path,
-                            label: model.name,
-                          ),
-                        ),
-                  ],
+                  options: _modelSettingsOptions(
+                    settings?.availableClassificationModels ??
+                        const <ModelInfo>[],
+                  ),
                   onChanged: (value) {
                     _set('selected_classification_model', value);
                     _set('selected_species_names', <String>[]);
@@ -3040,11 +3037,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
+  final userModels = models.where((model) => model.source != 'sync').toList();
+  final cloudModels = models.where((model) => model.source == 'sync').toList();
+  return <_SettingsOption<String>>[
+    const _SettingsOption<String>(value: '', label: '不使用'),
+    if (userModels.isNotEmpty) ...[
+      const _SettingsOption<String>(
+        value: '__neri_header_user__',
+        label: '用户模型',
+        enabled: false,
+      ),
+      for (final model in userModels)
+        _SettingsOption<String>(value: model.path, label: model.rawName),
+    ],
+    if (cloudModels.isNotEmpty) ...[
+      const _SettingsOption<String>(
+        value: '__neri_header_sync__',
+        label: 'NeriCloud',
+        enabled: false,
+      ),
+      for (final model in cloudModels)
+        _SettingsOption<String>(value: model.path, label: model.rawName),
+    ],
+  ];
+}
+
 class _SettingsOption<T> {
-  const _SettingsOption({required this.value, required this.label});
+  const _SettingsOption({
+    required this.value,
+    required this.label,
+    this.enabled = true,
+  });
 
   final T value;
   final String label;
+  final bool enabled;
 }
 
 class _SettingsMenuButton<T> extends StatelessWidget {
@@ -3088,7 +3116,9 @@ class _SettingsMenuButton<T> extends StatelessWidget {
               leadingIcon: option.value == value
                   ? const Icon(Icons.check_rounded)
                   : const SizedBox(width: 24),
-              onPressed: () => onChanged(option.value),
+              onPressed: option.enabled
+                  ? () => onChanged(option.value)
+                  : null,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
                   minWidth: minMenuWidth,
