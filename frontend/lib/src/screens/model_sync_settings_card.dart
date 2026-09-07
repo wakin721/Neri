@@ -10,12 +10,14 @@ class ModelSyncSettingsCard extends StatefulWidget {
   const ModelSyncSettingsCard({
     required this.apiClient,
     required this.onCatalogChanged,
+    this.enabled = true,
     this.pollInterval = const Duration(milliseconds: 500),
     super.key,
   });
 
   final NeriApiClient apiClient;
   final Future<void> Function() onCatalogChanged;
+  final bool enabled;
   final Duration pollInterval;
 
   @override
@@ -32,7 +34,10 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
   void initState() {
     super.initState();
     _createController();
-    unawaited(_loadStatus());
+    _loading = widget.enabled;
+    if (widget.enabled) {
+      unawaited(_loadStatus());
+    }
   }
 
   @override
@@ -40,13 +45,17 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.apiClient != widget.apiClient ||
         oldWidget.pollInterval != widget.pollInterval ||
-        oldWidget.onCatalogChanged != widget.onCatalogChanged) {
+        oldWidget.onCatalogChanged != widget.onCatalogChanged ||
+        oldWidget.enabled != widget.enabled) {
       _controller.removeListener(_handleStatusChanged);
       _controller.dispose();
       _createController();
-      _loading = true;
+      _loading = widget.enabled;
+      _running = false;
       _requestError = null;
-      unawaited(_loadStatus());
+      if (widget.enabled) {
+        unawaited(_loadStatus());
+      }
     }
   }
 
@@ -67,10 +76,11 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
   }
 
   Future<void> _loadStatus() async {
+    if (!widget.enabled) return;
     try {
       await _controller.refreshStatus();
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || !widget.enabled) return;
       setState(() {
         _loading = false;
         _requestError = error.toString();
@@ -79,7 +89,11 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
   }
 
   Future<void> _runNow() async {
-    if (_running || _controller.status?.isActive == true) return;
+    if (!widget.enabled ||
+        _running ||
+        _controller.status?.isActive == true) {
+      return;
+    }
     setState(() {
       _running = true;
       _requestError = null;
@@ -87,7 +101,7 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
     try {
       await _controller.runNow();
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || !widget.enabled) return;
       setState(() => _requestError = error.toString());
     } finally {
       if (mounted) setState(() => _running = false);
@@ -130,14 +144,20 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        _statusLabel(status, loading: _loading),
+                        _statusLabel(
+                          status,
+                          loading: _loading,
+                          enabled: widget.enabled,
+                        ),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
                   ),
                 ),
                 FilledButton.tonalIcon(
-                  onPressed: active || _running ? null : _runNow,
+                  onPressed: widget.enabled && !active && !_running
+                      ? _runNow
+                      : null,
                   icon: active || _running
                       ? const SizedBox(
                           width: 16,
@@ -196,7 +216,12 @@ class _ModelSyncSettingsCardState extends State<ModelSyncSettingsCard> {
     );
   }
 
-  String _statusLabel(ModelSyncStatus? status, {required bool loading}) {
+  String _statusLabel(
+    ModelSyncStatus? status, {
+    required bool loading,
+    required bool enabled,
+  }) {
+    if (!enabled) return '等待本地服务';
     if (loading && status == null) return '正在读取同步状态…';
     return switch (status?.state) {
       'checking' => '正在同步：检查 NeriCloud…',
