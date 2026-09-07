@@ -57,7 +57,7 @@ class PrivacyGateOverlay extends StatelessWidget {
                         const CircularProgressIndicator(),
                         const SizedBox(height: 18),
                         Text(
-                          '正在读取隐私设置…',
+                          '程序启动中',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                       ] else ...[
