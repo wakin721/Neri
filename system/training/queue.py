@@ -12,9 +12,18 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .events import TriggerEventResolver
 from .media import prepare_sample
-from .policy import (AGREEMENT_VERSION, IMAGE_SUFFIXES, JPEG_QUALITY, MAX_EMPTY_PER_FOLDER,
-                     MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, contribution_payload)
+from .policy import (
+    AGREEMENT_VERSION,
+    IMAGE_SUFFIXES,
+    JPEG_QUALITY,
+    MAX_EMPTY_PER_FOLDER,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGE_EDGE,
+    contribution_payload,
+)
+from .species import SpeciesNameResolver
 from .transport import DEFAULT_CHUNK_BYTES, HttpTransport, UploadCancelled
 
 RETRY_INITIAL_SECONDS = 30
@@ -24,7 +33,15 @@ WORKER_POLL_SECONDS = 2
 
 
 class TrainingQueue:
-    def __init__(self, state_dir: Path, transport=None, clock=time.time, debounce_seconds=10):
+    def __init__(
+        self,
+        state_dir: Path,
+        transport=None,
+        clock=time.time,
+        debounce_seconds=10,
+        species_db_path: Path | None = None,
+        event_resolver: TriggerEventResolver | None = None,
+    ):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
@@ -33,6 +50,8 @@ class TrainingQueue:
         self.transport = transport or HttpTransport()
         self.clock = clock
         self.debounce_seconds = debounce_seconds
+        self.species_resolver = SpeciesNameResolver(species_db_path)
+        self.event_resolver = event_resolver or TriggerEventResolver()
         self._lock = threading.RLock()
         self._processing_lock = threading.Lock()
         self._wake = threading.Event()
@@ -43,6 +62,7 @@ class TrainingQueue:
                 CREATE TABLE IF NOT EXISTS consent (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (
                     source_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, folder_key TEXT NOT NULL,
+                    event_key TEXT NOT NULL DEFAULT '',
                     sample_id TEXT NOT NULL, secret TEXT NOT NULL, revision INTEGER NOT NULL,
                     payload TEXT NOT NULL, stamp TEXT NOT NULL, state TEXT NOT NULL,
                     operation TEXT NOT NULL DEFAULT 'upload', attempts INTEGER NOT NULL DEFAULT 0,
@@ -51,15 +71,17 @@ class TrainingQueue:
                     remote_possible INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS jobs_folder ON jobs(folder_key);
+                CREATE INDEX IF NOT EXISTS jobs_event ON jobs(event_key);
                 CREATE INDEX IF NOT EXISTS jobs_waiting ON jobs(state,next_attempt);
             ''')
-        # executescript commits its transaction. Start a fresh BEGIN IMMEDIATE
-        # through _connect so schema inspection and migration serialize across instances.
         with self._connect() as db:
-            if 'remote_possible' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
+            if 'remote_possible' not in columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN remote_possible INTEGER NOT NULL DEFAULT 0')
-                # Older journals may have lost a completion response before upgrading.
                 db.execute("UPDATE jobs SET remote_possible=1 WHERE uploaded_revision>0 OR attempts>0 OR state='uploading'")
+            if 'event_key' not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN event_key TEXT NOT NULL DEFAULT ''")
+            db.execute('CREATE INDEX IF NOT EXISTS jobs_event ON jobs(event_key)')
         if os.name != "nt":
             self.db_path.chmod(0o600)
 
@@ -77,8 +99,6 @@ class TrainingQueue:
     @staticmethod
     def _key(path):
         stat = path.stat()
-        # Device + file ID survive renames. Birth time prevents ID reuse after deletion
-        # on Windows/macOS; filesystems without IDs fall back to the resolved path.
         birth = getattr(stat, 'st_birthtime_ns', 0)
         identity = f'{stat.st_dev}:{stat.st_ino}:{birth}' if stat.st_ino else os.path.normcase(str(path))
         return hashlib.sha256(identity.encode('utf-8')).hexdigest()
@@ -96,18 +116,21 @@ class TrainingQueue:
         with self._lock, self._connect() as db:
             values = dict(db.execute("SELECT key,value FROM consent"))
             counts = dict(db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state"))
-        return {"agreement_version": AGREEMENT_VERSION,
-                "agreement_accepted": values.get("version") == AGREEMENT_VERSION,
-                "participation_decided": values.get("version") == AGREEMENT_VERSION and "enabled" in values,
-                "training_enabled": values.get("version") == AGREEMENT_VERSION and values.get("enabled") == "true",
-                "stats": {key: counts.get(key, 0) for key in ("pending", "uploading", "uploaded", "failed", "skipped")}}
+        return {
+            "agreement_version": AGREEMENT_VERSION,
+            "agreement_accepted": values.get("version") == AGREEMENT_VERSION,
+            "participation_decided": values.get("version") == AGREEMENT_VERSION and "enabled" in values,
+            "training_enabled": values.get("version") == AGREEMENT_VERSION and values.get("enabled") == "true",
+            "stats": {key: counts.get(key, 0) for key in ("pending", "uploading", "uploaded", "failed", "skipped")},
+        }
 
     def set_consent(self, version: str, enabled: bool):
         if version != AGREEMENT_VERSION or not isinstance(enabled, bool):
             raise ValueError("请阅读当前版本协议并明确选择是否参加。")
         with self._lock, self._connect() as db:
             db.executemany("INSERT OR REPLACE INTO consent(key,value) VALUES (?,?)", [
-                ("version", version), ("enabled", "true" if enabled else "false"),
+                ("version", version),
+                ("enabled", "true" if enabled else "false"),
                 ("decided_at", str(self.clock())),
             ])
             if not enabled:
@@ -116,7 +139,6 @@ class TrainingQueue:
         return self.status()
 
     def debug_settings(self):
-        """Read-only allowlist: no service addresses, capabilities or source records."""
         return {
             "status": self.status(),
             "worker_running": bool(self._thread and self._thread.is_alive()),
@@ -139,7 +161,6 @@ class TrainingQueue:
         return self.status()
 
     def enqueue(self, path, data: dict, validated=True):
-        # Consent is checked BEFORE stat, parsing metadata, decoding or any network work.
         with self._lock, self._connect() as db:
             if not self._enabled(db):
                 return False
@@ -154,40 +175,84 @@ class TrainingQueue:
                 key, folder = old['source_key'], old['folder_key']
             if old:
                 db.execute('UPDATE jobs SET source_path=? WHERE source_key=?', (str(path), key))
+
             payload = contribution_payload(data) if validated and path.suffix.lower() in IMAGE_SUFFIXES else None
             if payload is None:
                 if old:
                     if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading":
-                        db.execute("UPDATE jobs SET revision=revision+1,state='pending',operation='delete',next_attempt=?,empty_reserved=0 WHERE source_key=?", (self.clock(), key))
+                        db.execute(
+                            "UPDATE jobs SET revision=revision+1,state='pending',operation='delete',next_attempt=?,empty_reserved=0 WHERE source_key=?",
+                            (self.clock(), key),
+                        )
                     else:
                         db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE source_key=?", (key,))
                 self._wake.set()
                 return False
+
             try:
                 stamp = self._stamp(path)
+                event_key = self.event_resolver.event_key(path, folder_key=folder)
             except OSError:
                 return False
+
+            if not old:
+                representative = db.execute(
+                    "SELECT source_key FROM jobs WHERE event_key=? AND source_key<>? AND state IN ('pending','failed','uploading','uploaded') LIMIT 1",
+                    (event_key, key),
+                ).fetchone()
+                if representative is not None:
+                    return False
+
+            payload["training_names"] = self.species_resolver.resolve_many(payload["species"])
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-            if old and old["payload"] == encoded and old["stamp"] == stamp and old["state"] in ("pending", "failed", "uploading", "uploaded") and old["operation"] == "upload":
+            if (
+                old
+                and old["payload"] == encoded
+                and old["stamp"] == stamp
+                and old["state"] in ("pending", "failed", "uploading", "uploaded")
+                and old["operation"] == "upload"
+            ):
                 return False
+
             empty = payload["empty"]
             owns_slot = old and (old["ever_empty"] or old["empty_reserved"])
             if empty and not owns_slot:
-                count = db.execute("SELECT COUNT(*) FROM jobs WHERE folder_key=? AND (ever_empty=1 OR empty_reserved=1)", (folder,)).fetchone()[0]
+                count = db.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE folder_key=? AND (ever_empty=1 OR empty_reserved=1)",
+                    (folder,),
+                ).fetchone()[0]
                 if count >= MAX_EMPTY_PER_FOLDER:
-                    # A changed label invalidates any pending previous species submission too.
                     if old:
                         operation = "delete" if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading" else "upload"
                         state = "pending" if operation == "delete" else "skipped"
-                        db.execute("UPDATE jobs SET revision=revision+1,state=?,operation=?,empty_reserved=0,next_attempt=? WHERE source_key=?", (state, operation, self.clock(), key))
+                        db.execute(
+                            "UPDATE jobs SET revision=revision+1,state=?,operation=?,empty_reserved=0,next_attempt=? WHERE source_key=?",
+                            (state, operation, self.clock(), key),
+                        )
                     self._wake.set()
                     return False
+
             if old:
-                db.execute("UPDATE jobs SET revision=revision+1,payload=?,stamp=?,state='pending',operation='upload',attempts=0,next_attempt=?,empty_reserved=?,error='' WHERE source_key=?",
-                           (encoded, stamp, self.clock() + self.debounce_seconds, int(empty), key))
+                db.execute(
+                    "UPDATE jobs SET event_key=?,revision=revision+1,payload=?,stamp=?,state='pending',operation='upload',attempts=0,next_attempt=?,empty_reserved=?,error='' WHERE source_key=?",
+                    (event_key, encoded, stamp, self.clock() + self.debounce_seconds, int(empty), key),
+                )
             else:
-                db.execute("INSERT INTO jobs(source_key,source_path,folder_key,sample_id,secret,revision,payload,stamp,state,next_attempt,empty_reserved) VALUES (?,?,?,?,?,1,?,?,'pending',?,?)",
-                           (key, str(path), folder, uuid.uuid4().hex, secrets.token_urlsafe(32), encoded, stamp, self.clock() + self.debounce_seconds, int(empty)))
+                db.execute(
+                    "INSERT INTO jobs(source_key,source_path,folder_key,event_key,sample_id,secret,revision,payload,stamp,state,next_attempt,empty_reserved) VALUES (?,?,?,?,?,?,1,?,?,'pending',?,?)",
+                    (
+                        key,
+                        str(path),
+                        folder,
+                        event_key,
+                        uuid.uuid4().hex,
+                        secrets.token_urlsafe(32),
+                        encoded,
+                        stamp,
+                        self.clock() + self.debounce_seconds,
+                        int(empty),
+                    ),
+                )
         self._wake.set()
         return True
 
@@ -202,8 +267,6 @@ class TrainingQueue:
         if not self._processing_lock.acquire(blocking=False):
             return False
         try:
-            # OS locks are released on crash; one worker owns the shared journal even
-            # when multiple backend processes are open. Enqueuing remains available.
             with open(self.state_dir / 'worker.lock', 'a+b') as handle:
                 handle.seek(0)
                 try:
@@ -230,9 +293,11 @@ class TrainingQueue:
         with self._lock, self._connect() as db:
             if self._stop.is_set() or not self._enabled(db):
                 return False
-            # Only the exclusive worker may recover a claim left behind by a crash.
             db.execute("UPDATE jobs SET state='pending' WHERE state='uploading'")
-            row = db.execute("SELECT * FROM jobs WHERE state IN ('pending','failed') AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT 1", (self.clock(),)).fetchone()
+            row = db.execute(
+                "SELECT * FROM jobs WHERE state IN ('pending','failed') AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT 1",
+                (self.clock(),),
+            ).fetchone()
             if row is None:
                 return False
             job = dict(row)
@@ -252,32 +317,54 @@ class TrainingQueue:
                     raise UploadCancelled()
                 if job["payload"]["empty"]:
                     with self._lock, self._connect() as db:
-                        db.execute("UPDATE jobs SET ever_empty=1 WHERE source_key=? AND revision=?", (job["source_key"], job["revision"]))
-                # Persist before sending: an exception/crash does not prove that the
-                # server rejected the upload. Keep this across retries and relabels.
+                        db.execute(
+                            "UPDATE jobs SET ever_empty=1 WHERE source_key=? AND revision=?",
+                            (job["source_key"], job["revision"]),
+                        )
                 with self._lock, self._connect() as db:
-                    db.execute("UPDATE jobs SET remote_possible=1 WHERE source_key=? AND revision=? AND state='uploading'", (job["source_key"], job["revision"]))
+                    db.execute(
+                        "UPDATE jobs SET remote_possible=1 WHERE source_key=? AND revision=? AND state='uploading'",
+                        (job["source_key"], job["revision"]),
+                    )
                 self.transport.upload(job, photo, annotation, lambda: self._current(job))
             with self._lock, self._connect() as db:
                 if job["operation"] == "upload":
-                    # Retain receipt even if a concurrent edit has queued a newer revision.
-                    db.execute("UPDATE jobs SET uploaded_revision=MAX(uploaded_revision,?) WHERE source_key=?", (job["revision"], job["source_key"]))
-                db.execute("UPDATE jobs SET state=?,uploaded_revision=?,remote_possible=?,empty_reserved=0,error='' WHERE source_key=? AND revision=? AND state='uploading'",
-                           ("deleted" if job["operation"] == "delete" else "uploaded",
-                            0 if job["operation"] == "delete" else job["revision"],
-                            int(job["operation"] == "upload"), job["source_key"], job["revision"]))
+                    db.execute(
+                        "UPDATE jobs SET uploaded_revision=MAX(uploaded_revision,?) WHERE source_key=?",
+                        (job["revision"], job["source_key"]),
+                    )
+                db.execute(
+                    "UPDATE jobs SET state=?,uploaded_revision=?,remote_possible=?,empty_reserved=0,error='' WHERE source_key=? AND revision=? AND state='uploading'",
+                    (
+                        "deleted" if job["operation"] == "delete" else "uploaded",
+                        0 if job["operation"] == "delete" else job["revision"],
+                        int(job["operation"] == "upload"),
+                        job["source_key"],
+                        job["revision"],
+                    ),
+                )
         except UploadCancelled:
             with self._lock, self._connect() as db:
-                db.execute("UPDATE jobs SET state='pending' WHERE source_key=? AND revision=? AND state='uploading'", (job["source_key"], job["revision"]))
+                db.execute(
+                    "UPDATE jobs SET state='pending' WHERE source_key=? AND revision=? AND state='uploading'",
+                    (job["source_key"], job["revision"]),
+                )
         except (ValueError, FileNotFoundError, ImageDecodeError) as error:
             with self._lock, self._connect() as db:
-                db.execute("UPDATE jobs SET state='skipped',empty_reserved=0,error=? WHERE source_key=? AND revision=? AND state='uploading'", (type(error).__name__, job["source_key"], job["revision"]))
+                db.execute(
+                    "UPDATE jobs SET state='skipped',empty_reserved=0,error=? WHERE source_key=? AND revision=? AND state='uploading'",
+                    (type(error).__name__, job["source_key"], job["revision"]),
+                )
         except Exception as error:
-            # Persist only error type, never exception strings containing URLs, paths or tokens.
             with self._lock, self._connect() as db:
-                delay = min(RETRY_MAX_SECONDS, RETRY_INITIAL_SECONDS * 2 ** min(job["attempts"], RETRY_EXPONENT_CAP))
-                db.execute("UPDATE jobs SET state='failed',attempts=attempts+1,next_attempt=?,error=? WHERE source_key=? AND revision=? AND state='uploading'",
-                           (self.clock() + delay, type(error).__name__, job["source_key"], job["revision"]))
+                delay = min(
+                    RETRY_MAX_SECONDS,
+                    RETRY_INITIAL_SECONDS * 2 ** min(job["attempts"], RETRY_EXPONENT_CAP),
+                )
+                db.execute(
+                    "UPDATE jobs SET state='failed',attempts=attempts+1,next_attempt=?,error=? WHERE source_key=? AND revision=? AND state='uploading'",
+                    (self.clock() + delay, type(error).__name__, job["source_key"], job["revision"]),
+                )
         return True
 
     def start(self):
@@ -293,7 +380,7 @@ class TrainingQueue:
                 if self.process_once():
                     continue
             except Exception:
-                pass  # This optional worker must never crash local annotation/inference.
+                pass
             self._wake.wait(WORKER_POLL_SECONDS)
             self._wake.clear()
 
@@ -304,5 +391,4 @@ class TrainingQueue:
             self._thread.join(timeout=2)
 
 
-# Keep PIL imports out of annotation handlers; decoding runs only on the worker.
 from PIL import UnidentifiedImageError as ImageDecodeError
