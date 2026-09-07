@@ -35,6 +35,20 @@ class ModelServicesBridgeTests(unittest.TestCase):
                 self.assertEqual([model.kind for model in models], ["cls", "cls"])
                 self.assertEqual(model_services.classification_model_directory(), layout.root / "cls")
 
+    def test_backend_api_uses_canonical_model_services_bridge(self):
+        from system.backend import main_core, model_services
+
+        self.assertIs(main_core.model_directory, model_services.model_directory)
+        self.assertIs(
+            main_core.classification_model_directory,
+            model_services.classification_model_directory,
+        )
+        self.assertIs(main_core.list_available_models, model_services.list_available_models)
+        self.assertIs(
+            main_core.list_available_classification_models,
+            model_services.list_available_classification_models,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
