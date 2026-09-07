@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,8 +97,13 @@ class ModelLayoutMigrationTests(unittest.TestCase):
             self.assertTrue((layout.cls_user / "keep.pt").exists())
             self.assertTrue((layout.cls_user / "keep.onnx").exists())
             self.assertTrue((layout.cls_user / "keep.engine").exists())
-            self.assertTrue((detect / "ignore.onnx").exists())
-            self.assertTrue((detect / "readme.txt").exists())
+            legacy_detect_root = (
+                resource_root / ".neri-legacy-model"
+                if os.path.normcase("Model") == os.path.normcase("model")
+                else detect
+            )
+            self.assertTrue((legacy_detect_root / "ignore.onnx").exists())
+            self.assertTrue((legacy_detect_root / "readme.txt").exists())
             self.assertTrue((cls / "ignore.txt").exists())
 
     def test_tracker_preference_is_canonical_then_cls_then_detect(self):
