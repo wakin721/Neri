@@ -259,8 +259,9 @@ class DistributionServiceTests(unittest.TestCase):
     def test_anonymous_client_uses_server_auth_and_receives_onedrive_link(self):
         import json
         from unittest.mock import patch
-        from fastapi.testclient import TestClient
-        from server.model_distribution.app import create_app
+        import asyncio
+        from starlette.requests import Request
+        from server.model_distribution.app import DirectRequest, create_app
         from server.model_distribution.config import DistributionConfig
         from tests.test_model_sync_client import _FakeResponse
 
@@ -286,24 +287,30 @@ class DistributionServiceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, patch('urllib.request.urlopen', side_effect=openlist):
             app = create_app(DistributionConfig(Path(temp_dir), openlist_token='server-only-secret'))
-            with TestClient(app) as client:
-                response = client.get('/v1/manifest')
-                self.assertEqual(response.status_code, 200)
-                manifest = response.json()
-                entry = manifest['files'][0]
-                direct = client.post('/v1/direct', json={
-                    'manifest_id': manifest['manifest_id'], 'path': entry['path'], 'sha256': entry['sha256'],
-                })
-                self.assertEqual(direct.status_code, 200)
-                capability = direct.json()
-                self.assertEqual(capability['direct_url'], 'https://foo.1drv.com/a')
-                self.assertEqual(capability['direct_headers'], {})
-                self.assertNotIn('server-only-secret', response.text + direct.text)
-                proxy = client.get('/v1/proxy/' + capability['proxy_token'])
-                self.assertEqual(proxy.content, b'abc')
-                self.assertEqual(proxy.headers['content-length'], '3')
-                self.assertEqual(hashlib.sha256(proxy.content).hexdigest(), entry['sha256'])
-                self.assertTrue(api_calls)
+            # Exercise real handlers without TestClient's optional HTTP dependencies.
+            routes = {getattr(route, 'path', None): route for route in app.routes}
+            request = Request({
+                'type': 'http', 'headers': [], 'client': ('203.0.113.10', 12345),
+            })
+            manifest = routes['/v1/manifest'].endpoint(request)
+            entry = manifest['files'][0]
+            capability = routes['/v1/direct'].endpoint(DirectRequest(
+                manifest_id=manifest['manifest_id'], path=entry['path'], sha256=entry['sha256'],
+            ), request)
+            self.assertEqual(capability['direct_url'], 'https://foo.1drv.com/a')
+            self.assertEqual(capability['direct_headers'], {})
+            self.assertNotIn('server-only-secret', json.dumps(manifest) + json.dumps(capability))
+            proxy = routes['/v1/proxy/{token}'].endpoint(capability['proxy_token'], request)
+
+            async def read_proxy():
+                return b''.join([chunk async for chunk in proxy.body_iterator])
+
+            content = asyncio.run(read_proxy())
+            self.assertEqual(proxy.status_code, 200)
+            self.assertEqual(content, b'abc')
+            self.assertEqual(proxy.headers['content-length'], '3')
+            self.assertEqual(hashlib.sha256(content).hexdigest(), entry['sha256'])
+            self.assertTrue(api_calls)
 
     def test_direct_requires_current_manifest_identity(self):
         from server.model_distribution.service import DistributionService, DistributionError
