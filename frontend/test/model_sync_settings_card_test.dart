@@ -254,6 +254,54 @@ void main() {
     expect(progress.value, 0.30);
   });
 
+  testWidgets('completed sync is still announced when the first read is terminal', (
+    tester,
+  ) async {
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        return http.Response(
+          '{"state":"completed","run_id":"fast-run",'
+          '"cloud_detect_count":5,"cloud_cls_count":2,'
+          '"last_successful_sync":"2026-09-07T06:30:00+00:00"}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelSyncSettingsHost(
+            apiClient: client,
+            enabled: true,
+            pollInterval: const Duration(hours: 1),
+            onCatalogChanged: () async {},
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final messageCard = find.byKey(const Key('model-sync-message-card'));
+    expect(messageCard, findsOneWidget);
+    expect(
+      find.descendant(of: messageCard, matching: find.text('模型同步完成')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: messageCard, matching: find.textContaining('探测 5')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: messageCard, matching: find.textContaining('分类 2')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('floating failed sync message retries through the shared controller', (
     tester,
   ) async {
