@@ -9,13 +9,13 @@ import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 
 const _userDetectionPath =
-    r'C:\Neri\res\Model\detect\user\bird.pt';
+    r'C:\Neri\res\model\detect\user\bird.pt';
 const _cloudDetectionPath =
-    r'C:\Neri\res\Model\detect\sync\bird.pt';
+    r'C:\Neri\res\model\detect\sync\bird.pt';
 const _userClassificationPath =
-    r'C:\Neri\res\Model\cls\user\bird.pt';
+    r'C:\Neri\res\model\cls\user\bird.pt';
 const _cloudClassificationPath =
-    r'C:\Neri\res\Model\cls\sync\bird.pt';
+    r'C:\Neri\res\model\cls\sync\bird.pt';
 
 NeriSettings _settings({Map<String, dynamic> saved = const {}}) {
   return NeriSettings(
@@ -23,8 +23,8 @@ NeriSettings _settings({Map<String, dynamic> saved = const {}}) {
     appVersion: 'test',
     supportedImageExtensions: const <String>['.jpg'],
     supportedVideoExtensions: const <String>['.mp4'],
-    modelDirectory: 'res/Model/detect',
-    classificationModelDirectory: 'res/Model/cls',
+    modelDirectory: 'res/model/detect',
+    classificationModelDirectory: 'res/model/cls',
     availableModels: const <ModelInfo>[
       ModelInfo(
         name: 'bird.pt',
@@ -96,18 +96,18 @@ Widget _startScreen({NeriSettings? settings}) {
 }
 
 void main() {
-  testWidgets('start screen uses canonical model roots when settings are absent', (
+  testWidgets('start screen uses lowercase canonical model roots when settings are absent', (
     tester,
   ) async {
     await tester.pumpWidget(_startScreen());
     await tester.pump();
 
     expect(
-      find.text('未在 res/Model/detect 中找到 .pt 模型'),
+      find.text('未在 res/model/detect 中找到 .pt 模型'),
       findsOneWidget,
     );
     expect(
-      find.text('未在 res/Model/cls 中找到 .pt 模型'),
+      find.text('未在 res/model/cls 中找到 .pt 模型'),
       findsOneWidget,
     );
   });
