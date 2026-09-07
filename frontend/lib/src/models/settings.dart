@@ -120,12 +120,12 @@ class NeriSettings {
 
 class ModelInfo {
   const ModelInfo({
-    required this.name,
+    required String name,
     required this.path,
     this.sizeBytes,
     this.source = 'user',
     this.kind = 'detect',
-  });
+  }) : rawName = name;
 
   factory ModelInfo.fromJson(Map<String, dynamic> json) {
     return ModelInfo(
@@ -137,14 +137,15 @@ class ModelInfo {
     );
   }
 
-  final String name;
+  final String rawName;
   final String path;
   final int? sizeBytes;
   final String source;
   final String kind;
 
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
-  String get displayName => '$sourceLabel / $name';
+  String get displayName => '$sourceLabel / $rawName';
+  String get name => displayName;
 }
 
 class ModelClassInfo {
