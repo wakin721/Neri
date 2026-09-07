@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import sqlite3
 import time
@@ -16,6 +17,10 @@ SAFE_DIRECT_HEADER_NAMES = frozenset({"accept", "referer", "user-agent"})
 
 
 class CapabilityError(RuntimeError):
+    pass
+
+
+class BudgetError(RuntimeError):
     pass
 
 
@@ -105,3 +110,139 @@ class CapabilityStore:
                 (token_hash,),
             )
         return BoundCapability(row[0], row[1], int(row[2]), float(row[3]))
+
+
+class BudgetStore:
+    def __init__(
+        self,
+        state_dir: Path,
+        *,
+        secret: bytes,
+        requests_per_minute: int,
+        daily_ip_bytes: int,
+        daily_total_bytes: int,
+        clock=time.time,
+    ):
+        if not isinstance(secret, (bytes, bytearray)) or not secret:
+            raise ValueError("budget secret must be non-empty bytes")
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.state_dir / "model_distribution.sqlite3"
+        self.secret = bytes(secret)
+        self.requests_per_minute = max(0, int(requests_per_minute))
+        self.daily_ip_bytes = max(0, int(daily_ip_bytes))
+        self.daily_total_bytes = max(0, int(daily_total_bytes))
+        self.clock = clock
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS request_budgets(
+                    ip_hash TEXT NOT NULL,
+                    minute_bucket INTEGER NOT NULL,
+                    request_count INTEGER NOT NULL,
+                    PRIMARY KEY(ip_hash, minute_bucket)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS proxy_ip_budgets(
+                    ip_hash TEXT NOT NULL,
+                    day_bucket INTEGER NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    PRIMARY KEY(ip_hash, day_bucket)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS proxy_total_budgets(
+                    day_bucket INTEGER PRIMARY KEY,
+                    byte_count INTEGER NOT NULL
+                )
+            """)
+
+    def _ip_hash(self, client_ip: str) -> str:
+        normalized = str(client_ip or "unknown").strip().lower().encode("utf-8")
+        return hmac.new(self.secret, normalized, hashlib.sha256).hexdigest()
+
+    def check_request(self, client_ip: str) -> None:
+        now = float(self.clock())
+        minute_bucket = int(now // 60)
+        ip_hash = self._ip_hash(client_ip)
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT request_count FROM request_budgets WHERE ip_hash=? AND minute_bucket=?",
+                    (ip_hash, minute_bucket),
+                ).fetchone()
+                current = int(row[0]) if row else 0
+                if current >= self.requests_per_minute:
+                    raise BudgetError("request_rate_limited")
+                db.execute(
+                    """
+                    INSERT INTO request_budgets(ip_hash,minute_bucket,request_count)
+                    VALUES(?,?,1)
+                    ON CONFLICT(ip_hash,minute_bucket)
+                    DO UPDATE SET request_count=request_count+1
+                    """,
+                    (ip_hash, minute_bucket),
+                )
+                db.execute(
+                    "DELETE FROM request_budgets WHERE minute_bucket < ?",
+                    (minute_bucket - 2,),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+    def reserve_proxy_bytes(self, client_ip: str, byte_count: int) -> None:
+        size = int(byte_count)
+        if size < 0:
+            raise BudgetError("invalid_proxy_size")
+        day_bucket = int(float(self.clock()) // 86400)
+        ip_hash = self._ip_hash(client_ip)
+        with closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                ip_row = db.execute(
+                    "SELECT byte_count FROM proxy_ip_budgets WHERE ip_hash=? AND day_bucket=?",
+                    (ip_hash, day_bucket),
+                ).fetchone()
+                total_row = db.execute(
+                    "SELECT byte_count FROM proxy_total_budgets WHERE day_bucket=?",
+                    (day_bucket,),
+                ).fetchone()
+                current_ip = int(ip_row[0]) if ip_row else 0
+                current_total = int(total_row[0]) if total_row else 0
+                if current_ip + size > self.daily_ip_bytes:
+                    raise BudgetError("proxy_ip_budget_exceeded")
+                if current_total + size > self.daily_total_bytes:
+                    raise BudgetError("proxy_total_budget_exceeded")
+                db.execute(
+                    """
+                    INSERT INTO proxy_ip_budgets(ip_hash,day_bucket,byte_count)
+                    VALUES(?,?,?)
+                    ON CONFLICT(ip_hash,day_bucket)
+                    DO UPDATE SET byte_count=byte_count+excluded.byte_count
+                    """,
+                    (ip_hash, day_bucket, size),
+                )
+                db.execute(
+                    """
+                    INSERT INTO proxy_total_budgets(day_bucket,byte_count)
+                    VALUES(?,?)
+                    ON CONFLICT(day_bucket)
+                    DO UPDATE SET byte_count=byte_count+excluded.byte_count
+                    """,
+                    (day_bucket, size),
+                )
+                db.execute(
+                    "DELETE FROM proxy_ip_budgets WHERE day_bucket < ?",
+                    (day_bucket - 2,),
+                )
+                db.execute(
+                    "DELETE FROM proxy_total_budgets WHERE day_bucket < ?",
+                    (day_bucket - 2,),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
