@@ -43,7 +43,8 @@ class Submission(Completion):
     sample_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     species: list[str] = Field(min_length=1, max_length=8)
     image_bytes: int = Field(ge=1, le=16 * 1024 * 1024)
-    annotation_bytes: int = Field(ge=1, le=1024 * 1024)
+    annotation_bytes: dict[str, int]
+    classes_bytes: dict[str, int]
 
     @field_validator('species')
     @classmethod
@@ -121,8 +122,6 @@ class OpenListDrive:
             self._call('mkdir', {'path': path})
 
     def stat(self, path):
-        # fs/get ignores refresh; refresh the parent listing to invalidate OpenList's
-        # directory cache after direct Graph writes before looking up the exact item.
         self._call('list', {'path': posixpath.dirname(path), 'password': '', 'page': 1,
                            'per_page': 1, 'refresh': True}, missing_ok=True)
         value = self._call('get', {'path': path, 'password': ''}, missing_ok=True)
@@ -151,7 +150,6 @@ class OpenListDrive:
                 raise BrokerError(502, 'cancel_failed') from None
         except OSError:
             raise BrokerError(502, 'cancel_failed') from None
-
 
 
 class Broker:
@@ -190,7 +188,6 @@ class Broker:
 
     @contextmanager
     def operation(self):
-        # Keep the interprocess lock across explicit commits and remote calls.
         with self.lock, open(self.config.state_dir / 'operation.lock', 'a+b') as handle:
             handle.seek(0)
             if os.name == 'nt':
@@ -220,7 +217,6 @@ class Broker:
         return sample
 
     def budget(self, ip, size=0):
-        # Persist counters separately so failed authorization/drive requests still consume rate budget.
         ip_hash = hmac.new(self.salt.encode(), ip.encode(), hashlib.sha256).hexdigest()
         minute, day = int(self.clock() // 60), int(self.clock() // 86400)
         limits = [(f'm:{minute}:{ip_hash}', 1, self.config.requests_per_minute)]
@@ -251,9 +247,33 @@ class Broker:
                  'upload_url': t['remote_url'],
                  'cancel_url': self.config.public_url.rstrip('/') + '/v1/uploads/' + t['token']} for t in targets]
 
+    @staticmethod
+    def _validated_sizes(data):
+        species = set(data.species)
+        if set(data.annotation_bytes) != species or set(data.classes_bytes) != species:
+            raise BrokerError(422, 'species_size_map_mismatch')
+        annotation = {}
+        classes = {}
+        for name in data.species:
+            try:
+                annotation_size = int(data.annotation_bytes[name])
+                classes_size = int(data.classes_bytes[name])
+            except (TypeError, ValueError, KeyError):
+                raise BrokerError(422, 'invalid_yolo_sizes') from None
+            if not 0 <= annotation_size <= 1024 * 1024 or not 1 <= classes_size <= 64 * 1024:
+                raise BrokerError(422, 'invalid_yolo_sizes')
+            annotation[name] = annotation_size
+            classes[name] = classes_size
+        return annotation, classes
+
     def create(self, data, ip):
-        self.budget(ip, (data.image_bytes + data.annotation_bytes) * len(data.species))
-        signature = json.dumps([sorted(data.species), data.image_bytes, data.annotation_bytes])
+        annotation_sizes, classes_sizes = self._validated_sizes(data)
+        total = data.image_bytes * len(data.species) + sum(annotation_sizes.values()) + sum(classes_sizes.values())
+        self.budget(ip, total)
+        signature = json.dumps([
+            sorted(data.species), data.image_bytes,
+            sorted(annotation_sizes.items()), sorted(classes_sizes.items()),
+        ])
         with self.operation() as db:
             sample = db.execute('SELECT * FROM samples WHERE id=?', (data.sample_id,)).fetchone()
             if sample:
@@ -269,7 +289,6 @@ class Broker:
                 raise BrokerError(409, 'revision_payload_changed')
             if old and old['complete']:
                 return {**response, 'already_complete': True}
-            # Remove abandoned attempts, including fully uploaded files. Completed revisions stay until commit.
             for row in db.execute('SELECT targets FROM revisions WHERE id=? AND complete=0', (data.sample_id,)):
                 self._remove(json.loads(row['targets']))
             db.execute('DELETE FROM revisions WHERE id=? AND complete=0', (data.sample_id,))
@@ -277,14 +296,19 @@ class Broker:
             attempt = secrets.token_hex(8)
             for species in data.species:
                 folder = self.config.root_path.rstrip('/') + '/' + species
-                for kind, suffix, size in [('image', '.jpg', data.image_bytes), ('annotation', '.json', data.annotation_bytes)]:
+                files = [
+                    ('image', '.jpg', data.image_bytes),
+                    ('annotation', '.txt', annotation_sizes[species]),
+                    ('classes', '.classes.txt', classes_sizes[species]),
+                ]
+                for kind, suffix, size in files:
                     path = f'{folder}/{data.sample_id}-r{data.revision}-{attempt}{suffix}'
                     targets.append({'kind': kind, 'species': species, 'path': path, 'size': size,
                                     'token': secrets.token_urlsafe(32)})
             db.execute('INSERT OR REPLACE INTO revisions VALUES (?,?,?,?,0,?)',
                        (data.sample_id, data.revision, signature, json.dumps(targets), self.clock()))
             db.execute('UPDATE samples SET latest=?,updated=?,deleted=0 WHERE id=?', (data.revision, self.clock(), data.sample_id))
-            db.commit()  # Track every unique destination before issuing a capability.
+            db.commit()
             for target in targets:
                 self.drive.mkdir(posixpath.dirname(target['path']))
                 capability = self.drive.create_session(target['path'], target['size'])
@@ -293,7 +317,7 @@ class Broker:
                 target['remote_url'] = capability['upload_url']
                 db.execute('UPDATE revisions SET targets=? WHERE id=? AND rev=?',
                            (json.dumps(targets), data.sample_id, data.revision))
-                db.commit()  # A crash can leave only an empty session, never untracked uploaded bytes.
+                db.commit()
             response['targets'] = self._public_targets(targets)
             return response
 
@@ -347,7 +371,6 @@ class Broker:
 
     def cleanup(self):
         with self.operation() as db:
-            # An abandoned revision can already contain a finished JPEG: delete files as well as sessions.
             expired = db.execute('SELECT * FROM revisions WHERE (complete=0 AND created<?) OR created<?',
                                 (self.clock() - 1200, self.clock() - 365 * 86400)).fetchall()
             for row in expired:
@@ -366,7 +389,7 @@ def create_app(config=None, drive=None):
             try:
                 broker.cleanup()
             except Exception:
-                pass  # Retry every five minutes; never log capability URLs or request secrets.
+                pass
             stop.wait(300)
 
     @asynccontextmanager
@@ -395,7 +418,7 @@ def create_app(config=None, drive=None):
 
     @app.get('/health')
     def health():
-        return {'status': 'ok', 'schema_version': 1}
+        return {'status': 'ok', 'schema_version': 2}
 
     @app.post('/v1/submissions')
     def create(data: Submission, request: Request):
