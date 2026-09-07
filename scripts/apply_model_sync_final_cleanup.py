@@ -13,13 +13,26 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def patch_main_core() -> None:
     path = Path("system/backend/main_core.py")
-    replace_once(
-        path,
+    old = (
         "from .services import (\n"
         "    JobNotFoundError,\n"
         "    ProcessingJobManager,\n"
         "    classification_model_directory,\n"
-        "    detect_gpu_available,",
+        "    detect_gpu_available,\n"
+        "    export_validation_data,\n"
+        "    list_available_classification_models,\n"
+        "    list_available_models,\n"
+        "    list_model_classes,\n"
+        "    load_species_types,\n"
+        "    mark_validation_items,\n"
+        "    mark_validation_item,\n"
+        "    missing_yolo_dependencies,\n"
+        "    model_directory,\n"
+        "    preview_media_item,\n"
+        "    preview_media_items,\n"
+        ")"
+    )
+    new = (
         "from .model_services import (\n"
         "    classification_model_directory,\n"
         "    list_available_classification_models,\n"
@@ -29,14 +42,18 @@ def patch_main_core() -> None:
         "from .services import (\n"
         "    JobNotFoundError,\n"
         "    ProcessingJobManager,\n"
-        "    detect_gpu_available,",
+        "    detect_gpu_available,\n"
+        "    export_validation_data,\n"
+        "    list_model_classes,\n"
+        "    load_species_types,\n"
+        "    mark_validation_items,\n"
+        "    mark_validation_item,\n"
+        "    missing_yolo_dependencies,\n"
+        "    preview_media_item,\n"
+        "    preview_media_items,\n"
+        ")"
     )
-    for name in (
-        "list_available_classification_models",
-        "list_available_models",
-        "model_directory",
-    ):
-        replace_once(path, f"    {name},\n", "")
+    replace_once(path, old, new)
 
 
 def patch_services() -> None:
