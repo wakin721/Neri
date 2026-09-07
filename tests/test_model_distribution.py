@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from server.model_distribution.manifest import ManifestBuilder, ManifestError
 from server.model_distribution.storage import RemoteEntry, UpstreamLink
@@ -211,6 +212,103 @@ class DistributionServiceTests(unittest.TestCase):
             self.assertIsNone(result['direct_url'])
             self.assertTrue(result['proxy_token'])
             self.assertEqual(service.consume_proxy(result['proxy_token']).path, entry.path)
+
+
+class RecordingBudget:
+    def __init__(self):
+        self.requests = []
+        self.proxy_reservations = []
+
+    def check_request(self, client_ip):
+        self.requests.append(client_ip)
+
+    def reserve_proxy_bytes(self, client_ip, byte_count):
+        self.proxy_reservations.append((client_ip, byte_count))
+
+
+class DistributionRouteTests(unittest.TestCase):
+    def _request(self, client='203.0.113.10', *, range_header=None, real_ip=None):
+        from starlette.requests import Request
+        headers = []
+        if range_header is not None:
+            headers.append((b'range', range_header.encode('ascii')))
+        if real_ip is not None:
+            headers.append((b'x-real-ip', real_ip.encode('ascii')))
+        return Request({
+            'type': 'http',
+            'method': 'GET',
+            'path': '/',
+            'raw_path': b'/',
+            'query_string': b'',
+            'headers': headers,
+            'client': (client, 12345),
+            'server': ('testserver', 80),
+            'scheme': 'http',
+        })
+
+    def test_proxy_reservation_matches_requested_range(self):
+        from server.model_distribution.app import proxy_reserved_bytes
+        self.assertEqual(proxy_reserved_bytes(100, None), 100)
+        self.assertEqual(proxy_reserved_bytes(100, 'bytes=10-19'), 10)
+        self.assertEqual(proxy_reserved_bytes(100, 'bytes=90-'), 10)
+        with self.assertRaises(ValueError):
+            proxy_reserved_bytes(100, 'bytes=100-')
+        with self.assertRaises(ValueError):
+            proxy_reserved_bytes(100, 'bytes=20-10')
+
+    def test_public_routes_use_real_client_budget_and_proxy_byte_budget(self):
+        from server.model_distribution.app import DirectRequest, create_app
+        from server.model_distribution.capabilities import BoundCapability
+        from server.model_distribution.config import DistributionConfig
+        from server.model_distribution.manifest import ManifestEntry, ManifestSnapshot
+
+        class RouteService:
+            def __init__(self):
+                self.store = FakeStore({
+                    '/Neri_Data/Model/detect/a.pt': {'data': b'x' * 100, 'modified': '1'},
+                })
+
+            def manifest(self):
+                entry = ManifestEntry('detect/a.pt', 100, 'a' * 64)
+                return ManifestSnapshot('b' * 64, (entry,))
+
+            def direct(self, manifest_id, path, sha256):
+                return {'manifest_id': manifest_id, 'path': path, 'sha256': sha256}
+
+            def consume_proxy(self, token):
+                return BoundCapability('detect/a.pt', 'a' * 64, 100, 999999.0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            budget = RecordingBudget()
+            config = DistributionConfig(
+                Path(temp_dir),
+                openlist_token='secret',
+                requests_per_minute=10,
+                daily_proxy_ip_bytes=1000,
+                daily_proxy_total_bytes=5000,
+            )
+            app = create_app(config=config, service=RouteService(), budget=budget)
+            routes = {getattr(route, 'path', None): route for route in app.routes}
+            request = self._request(client='127.0.0.1', real_ip='203.0.113.10')
+
+            manifest_result = routes['/v1/manifest'].endpoint(request)
+            self.assertEqual(manifest_result['manifest_id'], 'b' * 64)
+
+            direct_result = routes['/v1/direct'].endpoint(
+                DirectRequest(manifest_id='b' * 64, path='detect/a.pt', sha256='a' * 64),
+                request,
+            )
+            self.assertEqual(direct_result['path'], 'detect/a.pt')
+
+            proxy_request = self._request(
+                client='127.0.0.1',
+                real_ip='203.0.113.10',
+                range_header='bytes=10-19',
+            )
+            response = routes['/v1/proxy/{token}'].endpoint('token-value-for-test-123456', proxy_request)
+            self.assertEqual(response.status_code, 206)
+            self.assertEqual(budget.requests, ['203.0.113.10'] * 3)
+            self.assertEqual(budget.proxy_reservations, [('203.0.113.10', 10)])
 
 
 class ProxyRangeTests(unittest.TestCase):
