@@ -57,20 +57,22 @@ from .maintenance import (
     start_pytorch_install,
     start_yolo_dependencies_install,
 )
+from .model_services import (
+    classification_model_directory,
+    list_available_classification_models,
+    list_available_models,
+    model_directory,
+)
 from .services import (
     JobNotFoundError,
     ProcessingJobManager,
-    classification_model_directory,
     detect_gpu_available,
     export_validation_data,
-    list_available_classification_models,
-    list_available_models,
     list_model_classes,
     load_species_types,
     mark_validation_items,
     mark_validation_item,
     missing_yolo_dependencies,
-    model_directory,
     preview_media_item,
     preview_media_items,
 )

@@ -51,15 +51,15 @@ void main() {
               appVersion: 'test',
               supportedImageExtensions: <String>['.jpg'],
               supportedVideoExtensions: <String>['.mp4'],
-              modelDirectory: 'res/model',
-              classificationModelDirectory: 'res/model_cls',
+              modelDirectory: 'res/Model/detect',
+              classificationModelDirectory: 'res/Model/cls',
               availableModels: <ModelInfo>[
-                ModelInfo(name: 'detector.pt', path: 'res/model/detector.pt'),
+                ModelInfo(name: 'detector.pt', path: 'res/Model/detect/detector.pt'),
               ],
               availableClassificationModels: <ModelInfo>[
                 ModelInfo(
                   name: 'classifier.pt',
-                  path: 'res/model_cls/classifier.pt',
+                  path: 'res/Model/cls/classifier.pt',
                 ),
               ],
               speciesTypes: <String, String>{},
@@ -70,7 +70,7 @@ void main() {
             inputController: inputController,
             selectedModelPath: '',
             onModelChanged: (value) => selectedModelPath = value,
-            selectedClassificationModelPath: 'res/model_cls/classifier.pt',
+            selectedClassificationModelPath: 'res/Model/cls/classifier.pt',
             onClassificationModelChanged: (_) {},
             videoMode: 'all',
             onVideoModeChanged: (_) {},
@@ -122,8 +122,8 @@ void main() {
               appVersion: 'test',
               supportedImageExtensions: <String>['.jpg'],
               supportedVideoExtensions: <String>['.mp4'],
-              modelDirectory: 'res/model',
-              classificationModelDirectory: 'res/model_cls',
+              modelDirectory: 'res/Model/detect',
+              classificationModelDirectory: 'res/Model/cls',
               availableModels: <ModelInfo>[],
               availableClassificationModels: <ModelInfo>[],
               speciesTypes: <String, String>{},
@@ -201,8 +201,8 @@ void main() {
               appVersion: 'test',
               supportedImageExtensions: <String>['.jpg'],
               supportedVideoExtensions: <String>['.mp4'],
-              modelDirectory: 'res/model',
-              classificationModelDirectory: 'res/model_cls',
+              modelDirectory: 'res/Model/detect',
+              classificationModelDirectory: 'res/Model/cls',
               availableModels: <ModelInfo>[],
               availableClassificationModels: <ModelInfo>[],
               speciesTypes: <String, String>{},
@@ -270,16 +270,16 @@ void main() {
       appVersion: 'test',
       supportedImageExtensions: <String>['.jpg'],
       supportedVideoExtensions: <String>['.mp4'],
-      modelDirectory: 'res/model',
-      classificationModelDirectory: 'res/model_cls',
+      modelDirectory: 'res/Model/detect',
+      classificationModelDirectory: 'res/Model/cls',
       availableModels: <ModelInfo>[
-        ModelInfo(name: 'detector-a.pt', path: 'res/model/detector-a.pt'),
-        ModelInfo(name: 'detector-b.pt', path: 'res/model/detector-b.pt'),
+        ModelInfo(name: 'detector-a.pt', path: 'res/Model/detect/detector-a.pt'),
+        ModelInfo(name: 'detector-b.pt', path: 'res/Model/detect/detector-b.pt'),
       ],
       availableClassificationModels: <ModelInfo>[],
-      selectedModel: 'res/model/detector-a.pt',
+      selectedModel: 'res/Model/detect/detector-a.pt',
       speciesTypes: <String, String>{},
-      settings: <String, dynamic>{'selected_model': 'res/model/detector-a.pt'},
+      settings: <String, dynamic>{'selected_model': 'res/Model/detect/detector-a.pt'},
       gpuAvailable: false,
       missingYoloDependencies: <String>[],
     );
@@ -321,10 +321,10 @@ void main() {
 
     updateHost(() {
       currentSettings = currentSettings.copyWith(
-        selectedModel: 'res/model/detector-b.pt',
+        selectedModel: 'res/Model/detect/detector-b.pt',
         settings: <String, dynamic>{
           ...currentSettings.settings,
-          'selected_model': 'res/model/detector-b.pt',
+          'selected_model': 'res/Model/detect/detector-b.pt',
         },
       );
     });
@@ -334,7 +334,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 900));
     await tester.pump();
     expect(savedDrafts, isNotEmpty);
-    expect(savedDrafts.last['selected_model'], 'res/model/detector-b.pt');
+    expect(savedDrafts.last['selected_model'], 'res/Model/detect/detector-b.pt');
   });
 
   testWidgets('仅双模型启用时显示综合置信度', (tester) async {
