@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,10 +37,11 @@ class ModelResourcePathTests(unittest.TestCase):
             )
 
     def test_model_layout_uses_lowercase_model_directory(self) -> None:
-        root = Path.cwd() / "res-test-root"
-        layout = get_model_layout(root)
-        self.assertEqual(layout.root.name, "model")
-        self.assertEqual(layout.root.parent, root.resolve())
+        with tempfile.TemporaryDirectory() as tmp:
+            resource_root = Path(tmp).resolve()
+            layout = get_model_layout(resource_root)
+            self.assertEqual(layout.root.name, "model")
+            self.assertEqual(layout.root.parent, resource_root)
 
 
 if __name__ == "__main__":
