@@ -81,6 +81,7 @@ frontend/test/*
 !frontend/test/privacy_test.dart
 !frontend/test/training_upload_debug_test.dart
 !frontend/test/model_sync_test.dart
+!frontend/test/model_sync_settings_host_test.dart
 !frontend/pubspec.yaml
 !frontend/assets/
 !frontend/assets/**

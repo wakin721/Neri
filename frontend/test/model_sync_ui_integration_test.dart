@@ -8,14 +8,10 @@ import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 
-const _userDetectionPath =
-    r'C:\Neri\res\model\detect\user\bird.pt';
-const _cloudDetectionPath =
-    r'C:\Neri\res\model\detect\sync\bird.pt';
-const _userClassificationPath =
-    r'C:\Neri\res\model\cls\user\bird.pt';
-const _cloudClassificationPath =
-    r'C:\Neri\res\model\cls\sync\bird.pt';
+const _userDetectionPath = r'C:\Neri\res\model\detect\user\bird.pt';
+const _cloudDetectionPath = r'C:\Neri\res\model\detect\sync\bird.pt';
+const _userClassificationPath = r'C:\Neri\res\model\cls\user\bird.pt';
+const _cloudClassificationPath = r'C:\Neri\res\model\cls\sync\bird.pt';
 
 NeriSettings _settings({Map<String, dynamic> saved = const {}}) {
   return NeriSettings(
@@ -96,21 +92,16 @@ Widget _startScreen({NeriSettings? settings}) {
 }
 
 void main() {
-  testWidgets('start screen uses lowercase canonical model roots when settings are absent', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_startScreen());
-    await tester.pump();
+  testWidgets(
+    'start screen uses lowercase canonical model roots when settings are absent',
+    (tester) async {
+      await tester.pumpWidget(_startScreen());
+      await tester.pump();
 
-    expect(
-      find.text('未在 res/model/detect 中找到 .pt 模型'),
-      findsOneWidget,
-    );
-    expect(
-      find.text('未在 res/model/cls 中找到 .pt 模型'),
-      findsOneWidget,
-    );
-  });
+      expect(find.text('未在 res/model/detect 中找到 .pt 模型'), findsOneWidget);
+      expect(find.text('未在 res/model/cls 中找到 .pt 模型'), findsOneWidget);
+    },
+  );
 
   testWidgets('start screen groups duplicate model names by source', (
     tester,
@@ -122,79 +113,174 @@ void main() {
         .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
         .toList();
     final detection = dropdowns.first;
-    final labels = detection.dropdownMenuEntries.map((entry) => entry.label).toList();
-    final values = detection.dropdownMenuEntries.map((entry) => entry.value).toList();
+    final labels = detection.dropdownMenuEntries
+        .map((entry) => entry.label)
+        .toList();
+    final values = detection.dropdownMenuEntries
+        .map((entry) => entry.value)
+        .toList();
 
-    expect(labels, containsAllInOrder(<String>['不使用', '用户模型', 'bird.pt', 'NeriCloud', 'bird.pt']));
-    expect(values, containsAll(<String>[_userDetectionPath, _cloudDetectionPath]));
     expect(
-      detection.dropdownMenuEntries.singleWhere((entry) => entry.label == '用户模型').enabled,
+      labels,
+      containsAllInOrder(<String>[
+        '不使用',
+        '用户模型',
+        'bird.pt',
+        'NeriCloud',
+        'bird.pt',
+      ]),
+    );
+    expect(
+      values,
+      containsAll(<String>[_userDetectionPath, _cloudDetectionPath]),
+    );
+    expect(
+      detection.dropdownMenuEntries
+          .singleWhere((entry) => entry.label == '用户模型')
+          .enabled,
       isFalse,
     );
     expect(
-      detection.dropdownMenuEntries.singleWhere((entry) => entry.label == 'NeriCloud').enabled,
+      detection.dropdownMenuEntries
+          .singleWhere((entry) => entry.label == 'NeriCloud')
+          .enabled,
       isFalse,
     );
   });
 
-  testWidgets('settings screen shows source-grouped selectors and sync card', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 900));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final client = NeriApiClient(
-      httpClient: MockClient((request) async {
-        if (request.url.path == '/api/model-sync/status') {
+  testWidgets(
+    'settings screen shows source-grouped selectors and inline sync status',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final client = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.url.path == '/api/model-sync/status') {
+            return http.Response(
+              '{"state":"completed","run_id":"startup-run"}',
+              200,
+              headers: const {
+                'content-type': 'application/json; charset=utf-8',
+              },
+            );
+          }
           return http.Response(
-            '{"state":"completed","run_id":"startup-run"}',
+            '{}',
             200,
             headers: const {'content-type': 'application/json; charset=utf-8'},
           );
-        }
-        return http.Response(
-          '{}',
-          200,
-          headers: const {'content-type': 'application/json; charset=utf-8'},
-        );
-      }),
-    );
-    final themeNotifier = ValueNotifier(const ThemeSettings());
-    addTearDown(client.close);
-    addTearDown(themeNotifier.dispose);
+        }),
+      );
+      final themeNotifier = ValueNotifier(const ThemeSettings());
+      addTearDown(client.close);
+      addTearDown(themeNotifier.dispose);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: _settings(),
-            autoGroupInferredBurstSize: null,
-            apiClient: client,
-            themeNotifier: themeNotifier,
-            onUpdateTheme: (_) {},
-            closeBehavior: 'ask',
-            onCloseBehaviorChanged: (_) {},
-            onSaveSettings: (_) async {},
-            onCheckForUpdates:
-                ({required channel, required downloadSource}) async {},
-            onShowMessage: (_) {},
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SettingsScreen(
+              settings: _settings(),
+              autoGroupInferredBurstSize: null,
+              apiClient: client,
+              themeNotifier: themeNotifier,
+              onUpdateTheme: (_) {},
+              closeBehavior: 'ask',
+              onCloseBehaviorChanged: (_) {},
+              onSaveSettings: (_) async {},
+              onCheckForUpdates:
+                  ({required channel, required downloadSource}) async {},
+              onShowMessage: (_) {},
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
+      );
+      await tester.pump();
+      await tester.pump();
 
-    expect(find.text('模型同步'), findsOneWidget);
+      expect(find.text('模型已同步'), findsOneWidget);
 
-    final detectionButton = find.widgetWithText(TextButton, '不使用').first;
-    await tester.ensureVisible(detectionButton);
-    await tester.tap(detectionButton);
-    await tester.pumpAndSettle();
+      final detectionButton = find.widgetWithText(TextButton, '不使用').first;
+      await tester.ensureVisible(detectionButton);
+      await tester.tap(detectionButton);
+      await tester.pumpAndSettle();
 
-    expect(find.text('用户模型'), findsOneWidget);
-    expect(find.text('NeriCloud'), findsOneWidget);
-    expect(find.text('bird.pt'), findsNWidgets(2));
-  });
+      expect(find.text('用户模型'), findsOneWidget);
+      expect(find.text('NeriCloud'), findsOneWidget);
+      expect(find.text('bird.pt'), findsNWidgets(2));
+    },
+  );
+
+  testWidgets(
+    'failed sync stays below classification and can retry after dismissing notification',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final client = NeriApiClient(
+        httpClient: MockClient((request) async {
+          final body = request.method == 'POST'
+              ? '{"state":"completed","run_id":"retried"}'
+              : request.url.path == '/api/model-sync/status'
+              ? '{"state":"failed","run_id":"failed","error":"offline"}'
+              : '{}';
+          return http.Response(
+            body,
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }),
+      );
+      final themeNotifier = ValueNotifier(const ThemeSettings());
+      addTearDown(client.close);
+      addTearDown(themeNotifier.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SettingsScreen(
+              settings: _settings(),
+              autoGroupInferredBurstSize: null,
+              apiClient: client,
+              themeNotifier: themeNotifier,
+              onUpdateTheme: (_) {},
+              closeBehavior: 'ask',
+              onCloseBehaviorChanged: (_) {},
+              onSaveSettings: (_) async {},
+              onCheckForUpdates:
+                  ({required channel, required downloadSource}) async {},
+              onShowMessage: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final notification = find.byKey(const Key('model-sync-message-card'));
+      final bounds = tester.getRect(notification);
+      expect(bounds.bottom, greaterThan(860));
+      expect(bounds.right, greaterThan(1160));
+      await tester.tap(
+        find.descendant(of: notification, matching: find.byTooltip('关闭')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(notification, findsNothing);
+      expect(find.text('同步失败'), findsNothing);
+      final status = find.text('模型未同步');
+      expect(status, findsOneWidget);
+      expect(
+        tester.getTopLeft(status).dy,
+        greaterThan(tester.getBottomLeft(find.text('分类模型')).dy),
+      );
+      expect(
+        tester.getBottomLeft(status).dy,
+        lessThan(tester.getTopLeft(find.text('识别物种设置')).dy),
+      );
+      await tester.tap(find.text('重试'));
+      await tester.pumpAndSettle();
+      expect(find.text('模型未同步'), findsNothing);
+      expect(find.text('模型已同步'), findsOneWidget);
+    },
+  );
 
   testWidgets('terminal startup sync refreshes the parent catalog once', (
     tester,
@@ -233,10 +319,12 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: SettingsScreen(
-            settings: _settings(saved: const <String, dynamic>{
-              'selected_model': _userDetectionPath,
-              'selected_classification_model': '',
-            }),
+            settings: _settings(
+              saved: const <String, dynamic>{
+                'selected_model': _userDetectionPath,
+                'selected_classification_model': '',
+              },
+            ),
             autoGroupInferredBurstSize: null,
             apiClient: client,
             themeNotifier: themeNotifier,

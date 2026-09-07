@@ -1139,6 +1139,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
+          const ModelSyncSettingsRow(),
           if (combinedModelsEnabled)
             _SettingsPanel(
               title: '组合置信度策略',
