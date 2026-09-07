@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,13 +16,14 @@ class TrainingEventKeyMigrationTests(unittest.TestCase):
             queue = TrainingQueue(state_dir, transport=object())
             queue.stop()
 
-            with sqlite3.connect(queue.db_path) as db:
+            with closing(sqlite3.connect(queue.db_path)) as db:
                 db.execute("DROP INDEX IF EXISTS jobs_event")
                 db.execute("ALTER TABLE jobs DROP COLUMN event_key")
+                db.commit()
 
             migrated = TrainingQueue(state_dir, transport=object())
             try:
-                with sqlite3.connect(migrated.db_path) as db:
+                with closing(sqlite3.connect(migrated.db_path)) as db:
                     columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
                     indexes = {row[1] for row in db.execute("PRAGMA index_list(jobs)")}
                 self.assertIn("event_key", columns)
