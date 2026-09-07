@@ -79,7 +79,7 @@ def _looks_like_canonical_root(path: Path) -> bool:
 
 
 def _prepare_legacy_detect_source(resource_root: Path) -> Path | None:
-    """Separate legacy ``res/model`` from ``res/Model`` on Windows."""
+    """Separate legacy top-level detect files from canonical content on Windows."""
 
     resource_root.mkdir(parents=True, exist_ok=True)
     staging = resource_root / _LEGACY_DETECT_STAGING
@@ -93,11 +93,26 @@ def _prepare_legacy_detect_source(resource_root: Path) -> Path | None:
         return legacy_exact
 
     candidate = legacy_exact or canonical_exact
-    if candidate is None or _looks_like_canonical_root(candidate):
+    if candidate is None:
         return None
 
-    candidate.rename(staging)
-    return staging
+    if not _looks_like_canonical_root(candidate):
+        candidate.rename(staging)
+        return staging
+
+    staged_any = False
+    for source in sorted(candidate.iterdir(), key=lambda path: path.name.casefold()):
+        if not source.is_file():
+            continue
+        if source.suffix.lower() not in _DETECT_EXTENSIONS and source.name != "tracker.yaml":
+            continue
+        staging.mkdir(parents=True, exist_ok=True)
+        target = staging / source.name
+        if target.exists():
+            target = _collision_target(target)
+        shutil.move(str(source), str(target))
+        staged_any = True
+    return staging if staged_any else None
 
 
 def _collision_target(target: Path) -> Path:
