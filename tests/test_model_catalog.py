@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,17 @@ class ModelCatalogTests(unittest.TestCase):
             self.assertEqual(resolve_saved_model_path(sync.path, models), sync.path)
             self.assertEqual(resolve_saved_model_path("bird.pt", models), user.path)
             self.assertIsNone(resolve_saved_model_path("missing.pt", models))
+
+    @unittest.skipUnless(os.name == "nt", "case-only path compatibility is Windows-specific")
+    def test_alpha2_uppercase_saved_path_resolves_after_lowercase_rename(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = get_model_layout(Path(temp_dir) / "res")
+            (layout.detect_sync / "bird.pt").write_bytes(b"sync")
+            models = discover_models(layout, "detect")
+            current = models[0].path
+            old = current.replace("\\model\\", "\\Model\\")
+            self.assertNotEqual(old, current)
+            self.assertEqual(resolve_saved_model_path(old, models), current)
 
     def test_unique_legacy_filename_resolves(self):
         with tempfile.TemporaryDirectory() as temp_dir:
