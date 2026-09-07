@@ -66,14 +66,6 @@ class TriggerEventResolver:
                 break
             start -= 1
 
-        end = target_index
-        while end + 1 < len(timed):
-            gap = (timed[end + 1][0] - timed[end][0]).total_seconds()
-            if gap > EVENT_GAP_SECONDS:
-                break
-            end += 1
-
         cluster_start = timed[start][0].isoformat()
-        cluster_end = timed[end][0].isoformat()
-        identity = f"{folder_key}|event|{cluster_start}|{cluster_end}"
+        identity = f"{folder_key}|event|{cluster_start}"
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
