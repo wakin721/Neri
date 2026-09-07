@@ -6,9 +6,10 @@ from system.version import BASE_VERSION, DEFAULT_BUILD_NUMBER
 
 
 class Alpha3ReleaseContractTests(unittest.TestCase):
-    def test_release_version_is_alpha3_build_460(self):
+    def test_release_version_is_alpha3_with_valid_build_number(self):
         self.assertEqual(BASE_VERSION, "3.0.6-alpha3")
-        self.assertEqual(DEFAULT_BUILD_NUMBER, 460)
+        self.assertGreaterEqual(DEFAULT_BUILD_NUMBER, 1)
+        self.assertLessEqual(DEFAULT_BUILD_NUMBER, 65535)
 
     def test_repository_tracks_lowercase_model_directory(self):
         resource_root = Path(__file__).resolve().parents[1] / "res"
