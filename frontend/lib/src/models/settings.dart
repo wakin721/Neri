@@ -31,9 +31,9 @@ class NeriSettings {
               .map((item) => item.toString())
               .toList(),
       modelDirectory:
-          json['model_directory'] as String? ?? 'res/Model/detect',
+          json['model_directory'] as String? ?? 'res/model/detect',
       classificationModelDirectory:
-          json['classification_model_directory'] as String? ?? 'res/Model/cls',
+          json['classification_model_directory'] as String? ?? 'res/model/cls',
       availableModels:
           (json['available_models'] as List<dynamic>? ?? const <dynamic>[])
               .whereType<Map<String, dynamic>>()
