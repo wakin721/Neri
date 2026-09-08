@@ -10,6 +10,15 @@ import '../widgets/section_card.dart';
 const _defaultModelDirectory = 'res/model/detect';
 const _defaultClassificationModelDirectory = 'res/model/cls';
 
+ModelInfo? _classificationModelForPath(NeriSettings? settings, String? path) {
+  if (path == null || path.isEmpty) return null;
+  for (final model in
+      settings?.availableClassificationModels ?? const <ModelInfo>[]) {
+    if (model.path == path || model.checkpointPath == path) return model;
+  }
+  return null;
+}
+
 String _modelSelectorHelperText({
   required bool enabled,
   required List<ModelInfo> models,
@@ -263,6 +272,14 @@ class _CreateJobCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final fp16Enabled =
         detectionSettingsEnabled && settings?.gpuAvailable == true;
+    final classificationInfo = _classificationModelForPath(
+      settings,
+      selectedClassificationModelPath,
+    );
+    final dinoNeedsDetector =
+        classificationInfo?.isDinoV3 == true &&
+        classificationInfo?.requiresDetector == true &&
+        (selectedModelPath == null || selectedModelPath!.isEmpty);
     return SectionCard(
       title: '新建处理任务',
       subtitle: '输入本机路径，由 Python 后端读取和处理文件。',
@@ -295,6 +312,13 @@ class _CreateJobCard extends StatelessWidget {
             vidStride: vidStride,
             onVidStrideChanged: onVidStrideChanged,
           ),
+          if (dinoNeedsDetector) ...[
+            const SizedBox(height: 8),
+            Text(
+              'DINOv3 必须同时选择探测模型后才能开始处理。',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
           const SizedBox(height: 12),
           SwitchListTile(
             value: fp16Enabled && useFp16,
@@ -318,7 +342,7 @@ class _CreateJobCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           FilledButton.icon(
-            onPressed: submitting ? null : onCreateJob,
+            onPressed: submitting || dinoNeedsDetector ? null : onCreateJob,
             icon: submitting
                 ? const SizedBox(
                     width: 18,
@@ -361,6 +385,10 @@ class _StartOptionGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final classificationInfo = _classificationModelForPath(
+      settings,
+      selectedClassificationModelPath,
+    );
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = constraints.maxWidth >= 1040
@@ -399,6 +427,8 @@ class _StartOptionGrid extends StatelessWidget {
               child: _VideoModeSelector(
                 enabled: enabled,
                 videoMode: videoMode,
+                supportsVideoAll: classificationInfo?.supportsVideoAll ?? true,
+                isDinoV3: classificationInfo?.isDinoV3 == true,
                 onChanged: onVideoModeChanged,
               ),
             ),
@@ -510,21 +540,30 @@ class _VideoModeSelector extends StatelessWidget {
   const _VideoModeSelector({
     required this.enabled,
     required this.videoMode,
+    required this.supportsVideoAll,
+    required this.isDinoV3,
     required this.onChanged,
   });
 
   final bool enabled;
   final String videoMode;
+  final bool supportsVideoAll;
+  final bool isDinoV3;
   final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    final selectedValue = normalizeVideoProcessingMode(videoMode);
-    final helperText = switch (selectedValue) {
-      videoProcessingModeFast => '抽帧批量识别',
-      videoProcessingModeSkip => '任务中忽略视频文件',
-      _ => '按帧间隔追踪',
-    };
+    final normalized = normalizeVideoProcessingMode(videoMode);
+    final selectedValue = !supportsVideoAll && normalized == videoProcessingModeAll
+        ? videoProcessingModeFast
+        : normalized;
+    final helperText = isDinoV3
+        ? 'DINOv3 当前仅支持抽帧快速识别或跳过视频'
+        : switch (selectedValue) {
+            videoProcessingModeFast => '抽帧批量识别',
+            videoProcessingModeSkip => '任务中忽略视频文件',
+            _ => '按帧间隔追踪',
+          };
     return DropdownMenu<String>(
       initialSelection: selectedValue,
       expandedInsets: EdgeInsets.zero,
@@ -533,13 +572,17 @@ class _VideoModeSelector extends StatelessWidget {
       label: const Text('视频处理模式'),
       helperText: helperText,
       leadingIcon: const Icon(Icons.video_collection_rounded),
-      dropdownMenuEntries: const [
-        DropdownMenuEntry<String>(value: videoProcessingModeAll, label: '全部识别'),
+      dropdownMenuEntries: [
         DropdownMenuEntry<String>(
+          value: videoProcessingModeAll,
+          label: '全部识别',
+          enabled: supportsVideoAll,
+        ),
+        const DropdownMenuEntry<String>(
           value: videoProcessingModeFast,
           label: '快速识别',
         ),
-        DropdownMenuEntry<String>(
+        const DropdownMenuEntry<String>(
           value: videoProcessingModeSkip,
           label: '跳过视频',
         ),

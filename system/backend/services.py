@@ -696,6 +696,11 @@ class ProcessingJobManager:
                 return
             self._active_job_ids.add(job_id)
         request = _effective_processing_request(request)
+        _validate_dinov3_job_options(
+            request.options.model_path,
+            request.options.classification_model_path,
+            request.options.video_mode,
+        )
         batch_log_session = _start_batch_log_session(job_id)
         detector = None
         try:
@@ -1261,6 +1266,13 @@ class ProcessingJobManager:
             else:
                 self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message="处理失败")
         finally:
+            if detector is not None:
+                runtime = getattr(detector, "dinov3_runtime", None)
+                if runtime is not None and getattr(runtime, "owns_registry", False):
+                    try:
+                        runtime.registry.close()
+                    except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
+                        logger.warning("DINOv3 registry cleanup failed: %s", exc)
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
@@ -1507,7 +1519,14 @@ def _build_metadata_item(path: Path) -> DetectionItem:
             width = width or image.width
             height = height or image.height
             image.close()
-        date_taken = metadata.get("拍摄日期")
+        captured_at = metadata.get("拍摄日期对象")
+        if isinstance(captured_at, datetime):
+            date_taken = captured_at.isoformat()
+        else:
+            date_taken = metadata.get("拍摄日期")
+            capture_time = metadata.get("拍摄时间")
+            if date_taken and capture_time:
+                date_taken = f"{date_taken}T{capture_time}"
         return DetectionItem(
             filename=path.name,
             path=str(path),
@@ -1529,6 +1548,103 @@ def _build_metadata_item(path: Path) -> DetectionItem:
         )
 
 
+
+def _dinov3_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | None:
+    if not model_path:
+        return None
+    path = Path(model_path).expanduser()
+    if not path.is_file() or not path.name.endswith(".neri.json"):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) and payload.get("backend") == "dinov3" else None
+
+
+def _validate_dinov3_job_options(
+    model_path: str | None,
+    classification_model_path: str | None,
+    video_mode: str,
+) -> None:
+    payload = _dinov3_manifest_payload(classification_model_path)
+    if payload is None:
+        return
+    if not model_path:
+        raise ValueError("DINOv3 分类模型必须同时选择探测模型。")
+    if video_mode == "all":
+        raise ValueError("DINOv3 暂不支持视频完整识别，请使用快速识别或跳过视频。")
+
+
+def _parse_dinov3_capture_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    candidates = (text, text.replace("Z", "+00:00"))
+    for candidate in candidates:
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _persist_dinov3_observations(
+    detector,
+    paths: list[Path],
+    items: list[DetectionItem],
+    input_path: Path,
+    *,
+    source_paths: list[Path] | None = None,
+) -> None:
+    registry = getattr(detector, "dinov3_registry", None)
+    drain = getattr(detector, "drain_dinov3_observations", None)
+    if registry is None or not callable(drain):
+        return
+    observations = drain()
+    if not observations:
+        return
+    roots = source_paths or paths
+    from system.dinov3.events import camera_id_for_path
+
+    camera_root = input_path if input_path.is_dir() else input_path.parent
+    for observation in observations:
+        try:
+            index = int(observation.result_index)
+            if index < 0 or index >= len(paths) or index >= len(items) or index >= len(roots):
+                logger.warning("Ignoring out-of-range DINOv3 observation index: %s", index)
+                continue
+            source_path = Path(roots[index])
+            item = items[index]
+            captured_at = _parse_dinov3_capture_time(item.date_taken)
+            camera_id = camera_id_for_path(source_path, camera_root)
+            if observation.source == "checkpoint" and observation.accepted:
+                continue
+            if observation.registry_id is not None:
+                registry.record_observation(
+                    int(observation.registry_id),
+                    observation.embedding,
+                    camera_id=camera_id,
+                    captured_at=captured_at,
+                    source_path=str(source_path),
+                )
+            else:
+                registry.record_unknown(
+                    observation.embedding,
+                    camera_id=camera_id,
+                    captured_at=captured_at,
+                    source_path=str(source_path),
+                )
+        except Exception as exc:  # noqa: BLE001 - registry persistence is non-fatal
+            logger.warning("Failed to persist DINOv3 observation: %s", exc)
+
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
     from system.image_processor import ImageProcessor
 
@@ -1539,12 +1655,28 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
     if resolved_model_path is None and resolved_classification_path is None:
         raise ValueError("探测模型和分类模型至少需要选择一个。")
 
+    dinov3_payload = _dinov3_manifest_payload(resolved_classification_path)
+    if dinov3_payload is not None and resolved_model_path is None:
+        raise ValueError("DINOv3 分类模型必须同时选择探测模型。")
+
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None
     )
     if resolved_classification_path is not None:
-        detector.load_cls_model(str(resolved_classification_path))
-    if detector.model is None and detector.cls_model is None:
+        if dinov3_payload is not None:
+            from system.dinov3.runtime import load_dinov3_model
+
+            runtime = load_dinov3_model(resolved_classification_path)
+            detector.load_dinov3_classifier(runtime.classifier)
+            detector.dinov3_registry = runtime.registry
+            detector.dinov3_runtime = runtime
+        else:
+            detector.load_cls_model(str(resolved_classification_path))
+    if (
+        detector.model is None
+        and detector.cls_model is None
+        and getattr(detector, "dinov3_classifier", None) is None
+    ):
         raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
 
@@ -2168,6 +2300,7 @@ def _detect_image_batch(
             detection_payloads.append((path, detection_data))
             detected_items.append(_apply_detection_data(item, detection_data))
         serialize_elapsed = time.perf_counter() - serialize_started
+        _persist_dinov3_observations(detector, paths, items, input_path)
         save_started = time.perf_counter()
         _save_detection_data_batch(detection_payloads, input_path)
         save_elapsed = time.perf_counter() - save_started
@@ -2205,6 +2338,7 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             selected_species_names=request.options.selected_species_names,
         )
         detection = detections[0] if detections else {}
+        _persist_dinov3_observations(detector, [path], [item], input_path)
         detection_data = _serialize_detector_output(detector, detection)
         _save_detection_data_for_path(path, detection_data, input_path)
         return _apply_detection_data(item, detection_data)
@@ -2404,6 +2538,15 @@ def _detect_video_fast_batch(
                 preloaded_data=preloaded_data,
             )
             inference_elapsed += time.perf_counter() - inference_started
+            frame_items = [items[record["video_index"]] for record in frame_batch]
+            original_video_paths = [paths[record["video_index"]] for record in frame_batch]
+            _persist_dinov3_observations(
+                detector,
+                [Path(record["path"]) for record in frame_batch],
+                frame_items,
+                input_path,
+                source_paths=original_video_paths,
+            )
             _raise_if_cancelled(cancelled)
             frame_serialize_started = time.perf_counter()
             for index, record in enumerate(frame_batch):

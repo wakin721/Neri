@@ -83,6 +83,8 @@ frontend/test/*
 !frontend/test/training_upload_debug_test.dart
 !frontend/test/model_sync_test.dart
 !frontend/test/model_sync_settings_host_test.dart
+!frontend/test/dinov3_registry_test.dart
+!frontend/test/dinov3_video_mode_test.dart
 !frontend/pubspec.yaml
 !frontend/assets/
 !frontend/assets/**

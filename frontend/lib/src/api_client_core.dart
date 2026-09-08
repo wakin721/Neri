@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'models/dinov3_registry.dart';
 import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
@@ -46,6 +47,89 @@ class NeriApiClient {
     );
     _ensureSuccess(response);
     return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DinoV3RegistryEntry>> fetchDinoV3Registry(
+    String classificationModelPath, {
+    String? status,
+  }) async {
+    final uri = _uri('/api/dinov3/registry').replace(
+      queryParameters: {
+        'classification_model_path': classificationModelPath,
+        if (status != null && status.isNotEmpty) 'status': status,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEntry.fromJson)
+        .toList();
+  }
+
+  Future<DinoV3RegistryEntry> fetchDinoV3RegistryEntry(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DinoV3RegistryEvent>> fetchDinoV3RegistryEvents(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId/events').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEvent.fromJson)
+        .toList();
+  }
+
+  Future<DinoV3RegistryEntry> updateDinoV3RegistryIdentity({
+    required String classificationModelPath,
+    required int registrationId,
+    required String commonName,
+    String scientificName = '',
+  }) async {
+    final response = await _httpClient.patch(
+      _uri('/api/dinov3/registry/$registrationId/identity'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'common_name': commonName,
+        'scientific_name': scientificName,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3RegistryEntry> registerDinoV3Species({
+    required String classificationModelPath,
+    required int registrationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/registry/$registrationId/register'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'classification_model_path': classificationModelPath}),
+    );
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }

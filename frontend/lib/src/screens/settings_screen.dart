@@ -18,6 +18,7 @@ import '../privacy/privacy_settings_card.dart';
 import '../privacy/training_upload_debug_dialog.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
+import '../widgets/dinov3_registry_dialog.dart';
 import '../widgets/section_card.dart';
 import '../widgets/workspace_split_metrics.dart';
 import 'model_sync_settings_host.dart';
@@ -93,6 +94,14 @@ const _emptyPhotoDeleteNever = 'keep';
 const _detectionConfidencePriority = 'detection';
 const _classificationConfidencePriority = 'classification';
 
+ModelInfo? _modelInfoForPath(List<ModelInfo> models, String? path) {
+  if (path == null || path.isEmpty) return null;
+  for (final model in models) {
+    if (model.path == path || model.checkpointPath == path) return model;
+  }
+  return null;
+}
+
 typedef SoftwareUpdateCheckCallback =
     Future<void> Function({
       required String channel,
@@ -111,6 +120,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onSaveSettings,
     required this.onCheckForUpdates,
     required this.onShowMessage,
+    this.onOpenDinoCandidateValidation,
     this.isActive = true,
     super.key,
   });
@@ -125,6 +135,7 @@ class SettingsScreen extends StatefulWidget {
   final Future<void> Function(Map<String, dynamic> settings) onSaveSettings;
   final SoftwareUpdateCheckCallback onCheckForUpdates;
   final ValueChanged<String> onShowMessage;
+  final ValueChanged<Set<String>>? onOpenDinoCandidateValidation;
   final bool isActive;
 
   @override
@@ -289,6 +300,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       _debugModeKey: _boolSetting(saved, _debugModeKey, false),
     };
+    final selectedClassificationInfo = _modelInfoForPath(
+      settings?.availableClassificationModels ?? const <ModelInfo>[],
+      _draft['selected_classification_model']?.toString(),
+    );
+    if (selectedClassificationInfo?.supportsVideoAll == false &&
+        _draft['video_mode'] == videoProcessingModeAll) {
+      _draft['video_mode'] = videoProcessingModeFast;
+    }
     _resettingDraft = true;
     _packageController.text = _stringSetting(saved, 'package', '');
     _resettingDraft = false;
@@ -321,6 +340,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     _draft['selected_model'] = detectionModel;
     _draft['selected_classification_model'] = classificationModel;
+    final selectedClassificationInfo = _modelInfoForPath(
+      settings.availableClassificationModels,
+      classificationModel,
+    );
+    if (selectedClassificationInfo?.supportsVideoAll == false &&
+        _draft['video_mode'] == videoProcessingModeAll) {
+      _draft['video_mode'] = videoProcessingModeFast;
+    }
     _markDraftChanged();
     _scheduleAutoSave();
     unawaited(_loadModelClassesForSelection());
@@ -1070,9 +1097,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       settings?.availableClassificationModels ?? const <ModelInfo>[],
       allowEmpty: true,
     );
-    final videoMode = normalizeVideoProcessingMode(
+    final selectedClassificationInfo = _modelInfoForPath(
+      settings?.availableClassificationModels ?? const <ModelInfo>[],
+      selectedClassificationModel,
+    );
+    final requestedVideoMode = normalizeVideoProcessingMode(
       _string('video_mode', defaultVideoProcessingMode),
     );
+    final videoMode = selectedClassificationInfo?.supportsVideoAll == false &&
+            requestedVideoMode == videoProcessingModeAll
+        ? videoProcessingModeFast
+        : requestedVideoMode;
     final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
     final gpuAvailable = settings?.gpuAvailable == true;
@@ -1080,7 +1115,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final threadCount = gpuAvailable ? _int('thread_count', 4) : 1;
     final combinedModelsEnabled =
         selectedModel?.isNotEmpty == true &&
-        selectedClassificationModel?.isNotEmpty == true;
+        selectedClassificationModel?.isNotEmpty == true &&
+        selectedClassificationInfo?.isDinoV3 != true;
     final confidencePriority =
         _string('confidence_priority', _classificationConfidencePriority) ==
             _detectionConfidencePriority
@@ -1141,10 +1177,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   onChanged: (value) {
                     _set('selected_classification_model', value);
+                    final modelInfo = _modelInfoForPath(
+                      settings?.availableClassificationModels ??
+                          const <ModelInfo>[],
+                      value,
+                    );
+                    if (modelInfo?.supportsVideoAll == false &&
+                        _string('video_mode') == videoProcessingModeAll) {
+                      _set('video_mode', videoProcessingModeFast);
+                    }
                     _set('selected_species_names', <String>[]);
                     _loadModelClassesForSelection();
                   },
                 ),
+                if (selectedClassificationInfo?.isDinoV3 == true) ...[
+                  const Divider(height: 20),
+                  if (selectedModel?.isEmpty ?? true)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        'DINOv3 必须同时选择探测模型。',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  DinoV3RegistryButton(
+                    apiClient: widget.apiClient,
+                    modelPath: selectedClassificationModel!,
+                    onContinueValidation:
+                        widget.onOpenDinoCandidateValidation ?? (_) {},
+                    onShowMessage: widget.onShowMessage,
+                  ),
+                ],
                 const SizedBox(height: 8),
               ],
             ),
@@ -1291,6 +1356,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             videoMode,
             strideLabel,
             enabled: detectionEnabled,
+            supportsVideoAll: selectedClassificationInfo?.supportsVideoAll ?? true,
           ),
         ],
       ),
@@ -1470,25 +1536,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
     String videoMode,
     String strideLabel, {
     bool enabled = true,
+    bool supportsVideoAll = true,
   }) {
     return [
       _SettingsPanel(
         title: '视频处理模式',
-        subtitle: '选择完整识别、快速识别，或在任务中忽略视频',
+        subtitle: supportsVideoAll
+            ? '选择完整识别、快速识别，或在任务中忽略视频'
+            : 'DINOv3 当前仅支持快速识别或跳过视频',
         icon: Icons.play_circle_outline_rounded,
         child: _SettingsMenuButton<String>(
           value: videoMode,
           enabled: enabled,
-          options: const [
+          options: [
             _SettingsOption<String>(
               value: videoProcessingModeAll,
               label: '全部识别',
+              enabled: supportsVideoAll,
             ),
-            _SettingsOption<String>(
+            const _SettingsOption<String>(
               value: videoProcessingModeFast,
               label: '快速识别',
             ),
-            _SettingsOption<String>(
+            const _SettingsOption<String>(
               value: videoProcessingModeSkip,
               label: '跳过视频',
             ),

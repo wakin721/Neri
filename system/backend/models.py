@@ -49,6 +49,42 @@ class ModelClassInfo(BaseModel):
     display_name: str
 
 
+class DinoV3RegistryEntryResponse(BaseModel):
+    id: int
+    candidate_number: int
+    status: str
+    common_name: str = ""
+    scientific_name: str = ""
+    event_count: int
+    camera_count: int
+    prototype_count: int
+    cluster_purity: float
+    embedding_consistency: float
+    conditions: dict[str, bool] = Field(default_factory=dict)
+    can_register: bool
+    display_name: str
+
+
+class DinoV3RegistryEventResponse(BaseModel):
+    event_key: str
+    source_path: str
+    camera_id: str
+    started_at: str | None = None
+    ended_at: str | None = None
+    timestamp_missing: bool = False
+    sample_count: int = 1
+
+
+class DinoV3IdentityUpdateRequest(BaseModel):
+    classification_model_path: str = Field(..., min_length=1)
+    common_name: str = Field(..., min_length=1)
+    scientific_name: str = ""
+
+
+class DinoV3RegisterRequest(BaseModel):
+    classification_model_path: str = Field(..., min_length=1)
+
+
 class SettingsResponse(BaseModel):
     """Subset of desktop settings useful to the mobile/desktop frontend."""
 

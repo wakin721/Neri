@@ -1,0 +1,416 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../api_client.dart';
+import '../models/dinov3_registry.dart';
+
+String dinov3RegistrySummary(List<DinoV3RegistryEntry> entries) {
+  int count(String status) => entries.where((entry) => entry.status == status).length;
+  return 'Candidate ${count('candidate')} · '
+      'Provisional ${count('provisional')} · '
+      'Confirmed ${count('confirmed')} · '
+      'Mature ${count('mature')}';
+}
+
+class DinoV3RegistryButton extends StatefulWidget {
+  const DinoV3RegistryButton({
+    required this.apiClient,
+    required this.modelPath,
+    required this.onContinueValidation,
+    this.onShowMessage,
+    super.key,
+  });
+
+  final NeriApiClient apiClient;
+  final String modelPath;
+  final ValueChanged<Set<String>> onContinueValidation;
+  final ValueChanged<String>? onShowMessage;
+
+  @override
+  State<DinoV3RegistryButton> createState() => _DinoV3RegistryButtonState();
+}
+
+class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
+  List<DinoV3RegistryEntry> _entries = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refresh());
+  }
+
+  @override
+  void didUpdateWidget(covariant DinoV3RegistryButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.modelPath != widget.modelPath) {
+      _entries = const [];
+      _loading = true;
+      unawaited(_refresh());
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final entries = await widget.apiClient.fetchDinoV3Registry(widget.modelPath);
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      widget.onShowMessage?.call('读取 DINOv3 物种注册状态失败：$error');
+    }
+  }
+
+  Future<void> _open() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => DinoV3RegistryDialog(
+        apiClient: widget.apiClient,
+        modelPath: widget.modelPath,
+        initialEntries: _entries,
+        onContinueValidation: widget.onContinueValidation,
+      ),
+    );
+    if (mounted) unawaited(_refresh());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: const Icon(Icons.hub_rounded),
+      title: const Text('物种注册状态'),
+      subtitle: Text(
+        _loading ? '读取中…' : dinov3RegistrySummary(_entries),
+      ),
+      trailing: const Icon(Icons.chevron_right_rounded),
+      onTap: _open,
+    );
+  }
+}
+
+class DinoV3RegistryDialog extends StatefulWidget {
+  const DinoV3RegistryDialog({
+    required this.apiClient,
+    required this.modelPath,
+    required this.onContinueValidation,
+    this.initialEntries,
+    super.key,
+  });
+
+  final NeriApiClient apiClient;
+  final String modelPath;
+  final ValueChanged<Set<String>> onContinueValidation;
+  final List<DinoV3RegistryEntry>? initialEntries;
+
+  @override
+  State<DinoV3RegistryDialog> createState() => _DinoV3RegistryDialogState();
+}
+
+class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
+  final _commonNameController = TextEditingController();
+  final _scientificNameController = TextEditingController();
+  List<DinoV3RegistryEntry> _entries = const [];
+  DinoV3RegistryEntry? _selected;
+  bool _loading = false;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _entries = widget.initialEntries ?? const [];
+    if (_entries.isNotEmpty) _select(_entries.first, notify: false);
+    if (widget.initialEntries == null) unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _commonNameController.dispose();
+    _scientificNameController.dispose();
+    super.dispose();
+  }
+
+  void _select(DinoV3RegistryEntry entry, {bool notify = true}) {
+    void update() {
+      _selected = entry;
+      _commonNameController.text = entry.commonName;
+      _scientificNameController.text = entry.scientificName;
+      _error = null;
+    }
+
+    if (notify) {
+      setState(update);
+    } else {
+      update();
+    }
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final entries = await widget.apiClient.fetchDinoV3Registry(widget.modelPath);
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _loading = false;
+      });
+      if (entries.isNotEmpty) _select(entries.first);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '读取注册状态失败：$error';
+      });
+    }
+  }
+
+  void _replaceEntry(DinoV3RegistryEntry entry) {
+    setState(() {
+      _entries = [
+        for (final current in _entries)
+          if (current.id == entry.id) entry else current,
+      ];
+      _selected = entry;
+      _commonNameController.text = entry.commonName;
+      _scientificNameController.text = entry.scientificName;
+      _error = null;
+    });
+  }
+
+  Future<void> _saveIdentity() async {
+    final selected = _selected;
+    final commonName = _commonNameController.text.trim();
+    if (selected == null || commonName.isEmpty) {
+      setState(() => _error = '请填写人工确认物种名称。');
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final updated = await widget.apiClient.updateDinoV3RegistryIdentity(
+        classificationModelPath: widget.modelPath,
+        registrationId: selected.id,
+        commonName: commonName,
+        scientificName: _scientificNameController.text.trim(),
+      );
+      if (mounted) _replaceEntry(updated);
+    } catch (error) {
+      if (mounted) setState(() => _error = '保存物种名称失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _register() async {
+    final selected = _selected;
+    if (selected == null || !selected.canRegister) return;
+    setState(() => _saving = true);
+    try {
+      final updated = await widget.apiClient.registerDinoV3Species(
+        classificationModelPath: widget.modelPath,
+        registrationId: selected.id,
+      );
+      if (mounted) _replaceEntry(updated);
+    } catch (error) {
+      if (mounted) setState(() => _error = '注册新物种失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _continueValidation() async {
+    final selected = _selected;
+    if (selected == null) return;
+    setState(() => _saving = true);
+    try {
+      final events = await widget.apiClient.fetchDinoV3RegistryEvents(
+        widget.modelPath,
+        selected.id,
+      );
+      final paths = events
+          .map((event) => event.sourcePath.trim())
+          .where((path) => path.isNotEmpty)
+          .toSet();
+      if (paths.isEmpty) {
+        if (mounted) setState(() => _error = '该候选物种没有可用于继续验证的事件文件。');
+        return;
+      }
+      if (!mounted) return;
+      Navigator.of(context).maybePop();
+      widget.onContinueValidation(paths);
+    } catch (error) {
+      if (mounted) setState(() => _error = '读取候选事件失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _conditionRow(String label, bool passed) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Icon(
+            passed ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
+            size: 18,
+            color: passed
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).colorScheme.outline,
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label)),
+        ],
+      ),
+    );
+  }
+
+  Widget _detail(DinoV3RegistryEntry entry) {
+    final editable = entry.isCandidate;
+    final conditions = entry.conditions;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(entry.displayName, style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 4),
+        Text('状态：${entry.status}'),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _commonNameController,
+          enabled: editable && !_saving,
+          decoration: const InputDecoration(
+            labelText: '人工确认物种',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _scientificNameController,
+          enabled: editable && !_saving,
+          decoration: const InputDecoration(
+            labelText: '学名',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        if (editable) ...[
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: _saving ? null : _saveIdentity,
+              child: const Text('保存物种名称'),
+            ),
+          ),
+        ],
+        const SizedBox(height: 8),
+        Text('${entry.eventCount} 个独立事件 · ${entry.cameraCount} 台相机'),
+        Text(
+          'cluster purity ${entry.clusterPurity.toStringAsFixed(3)} · '
+          'embedding consistency ${entry.embeddingConsistency.toStringAsFixed(3)}',
+        ),
+        const SizedBox(height: 14),
+        Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
+        _conditionRow('≥5 个独立事件', conditions['events'] == true),
+        _conditionRow('≥2 台相机', conditions['cameras'] == true),
+        _conditionRow('cluster purity ≥ threshold', conditions['cluster_purity'] == true),
+        _conditionRow(
+          'embedding consistency ≥ threshold',
+          conditions['embedding_consistency'] == true,
+        ),
+        _conditionRow('已确认物种名称', conditions['identity'] == true),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+        const Spacer(),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _saving ? null : _continueValidation,
+              icon: const Icon(Icons.fact_check_outlined),
+              label: const Text('继续验证'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: !_saving && entry.canRegister ? _register : null,
+              icon: const Icon(Icons.add_circle_outline_rounded),
+              label: const Text('注册为新物种'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = _selected;
+    return AlertDialog(
+      title: const Text('DINOv3 物种注册状态'),
+      content: SizedBox(
+        width: 860,
+        height: 560,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(
+                    width: 270,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(dinov3RegistrySummary(_entries)),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: _entries.isEmpty
+                              ? const Center(child: Text('暂无候选或已注册物种'))
+                              : ListView.builder(
+                                  itemCount: _entries.length,
+                                  itemBuilder: (context, index) {
+                                    final entry = _entries[index];
+                                    return ListTile(
+                                      selected: selected?.id == entry.id,
+                                      title: Text(entry.displayName),
+                                      subtitle: Text(
+                                        '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机',
+                                      ),
+                                      onTap: () => _select(entry),
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const VerticalDivider(width: 24),
+                  Expanded(
+                    child: selected == null
+                        ? Center(
+                            child: Text(_error ?? '选择一个候选物种查看详情'),
+                          )
+                        : _detail(selected),
+                  ),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).maybePop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}

@@ -162,6 +162,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       0.25;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
+  Set<String> _dinov3ValidationPaths = <String>{};
+  int _dinov3ValidationRequestedCount = 0;
   MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
   String _videoMode = defaultVideoProcessingMode;
@@ -2263,7 +2265,25 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   String _effectiveVideoMode() {
-    return normalizeVideoProcessingMode(_videoMode);
+    final normalized = normalizeVideoProcessingMode(_videoMode);
+    final classification = _selectedClassificationModelInfo();
+    if (classification?.supportsVideoAll == false &&
+        normalized == videoProcessingModeAll) {
+      return videoProcessingModeFast;
+    }
+    return normalized;
+  }
+
+  ModelInfo? _selectedClassificationModelInfo() {
+    final selected = _selectedClassificationModelPath?.trim();
+    if (selected == null || selected.isEmpty) return null;
+    for (final model in _settings?.availableClassificationModels ??
+        const <ModelInfo>[]) {
+      if (model.path == selected || model.checkpointPath == selected) {
+        return model;
+      }
+    }
+    return null;
   }
 
   bool _useAugment() {
@@ -2412,6 +2432,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final hasDetectionModel = _selectedModelPath?.trim().isNotEmpty == true;
     final hasClassificationModel =
         _selectedClassificationModelPath?.trim().isNotEmpty == true;
+    final classification = _selectedClassificationModelInfo();
+    if (classification?.isDinoV3 == true && !hasDetectionModel) {
+      if (!mounted) return false;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('DINOv3 需要探测模型'),
+          content: const Text('DINOv3 是二阶段分类模型。请先选择 YOLO 探测模型，再开始识别。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+      return false;
+    }
     if (hasDetectionModel || hasClassificationModel) return true;
     if (!mounted) return false;
 
@@ -3198,12 +3236,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       } else {
         _selectedModelPath = normalizedValue;
       }
+      if (_selectedClassificationModelInfo()?.supportsVideoAll == false &&
+          normalizeVideoProcessingMode(_videoMode) == videoProcessingModeAll) {
+        _videoMode = videoProcessingModeFast;
+      }
       final current = _settings;
       if (current != null) {
         final nextSettings = Map<String, dynamic>.from(current.settings)
           ..['selected_model'] = _selectedModelPath ?? ''
           ..['selected_classification_model'] =
-              _selectedClassificationModelPath ?? '';
+              _selectedClassificationModelPath ?? ''
+          ..['video_mode'] = _effectiveVideoMode();
         _settings = current.copyWith(
           settings: nextSettings,
           selectedModel: _selectedModelPath ?? '',
@@ -3235,7 +3278,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final classificationModel = _selectedClassificationModelPath ?? '';
     final nextSettings = Map<String, dynamic>.from(current.settings)
       ..['selected_model'] = detectionModel
-      ..['selected_classification_model'] = classificationModel;
+      ..['selected_classification_model'] = classificationModel
+      ..['video_mode'] = _effectiveVideoMode();
     _modelSelectionSaveInProgress = true;
     try {
       final saved = await widget.apiClient.saveSettings(nextSettings);
@@ -3248,7 +3292,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         final latestSettings = Map<String, dynamic>.from(saved.settings)
           ..['selected_model'] = _selectedModelPath ?? ''
           ..['selected_classification_model'] =
-              _selectedClassificationModelPath ?? '';
+              _selectedClassificationModelPath ?? ''
+          ..['video_mode'] = _effectiveVideoMode();
         _settings = saved.copyWith(
           settings: latestSettings,
           selectedModel: _selectedModelPath ?? '',
@@ -3277,8 +3322,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       selectedClassificationModelPath: _selectedClassificationModelPath,
       onClassificationModelChanged: (value) =>
           _updateStartModelSelection(value, classification: true),
-      videoMode: _videoMode,
-      onVideoModeChanged: (value) => setState(() => _videoMode = value),
+      videoMode: _effectiveVideoMode(),
+      onVideoModeChanged: (value) {
+        final classification = _selectedClassificationModelInfo();
+        final normalized = classification?.supportsVideoAll == false &&
+                value == videoProcessingModeAll
+            ? videoProcessingModeFast
+            : value;
+        setState(() => _videoMode = normalized);
+      },
       vidStride: _vidStride,
       onVidStrideChanged: (value) => setState(() => _vidStride = value),
       useFp16: _effectiveUseFp16(),
@@ -3319,7 +3371,34 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                 downloadSource: downloadSource,
               ),
       onShowMessage: _showSnackBar,
+      onOpenDinoCandidateValidation: _openDinoCandidateValidation,
     );
+  }
+
+  String _validationPathKey(String path) {
+    final normalized = path.trim().replaceAll('\\', '/');
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  void _openDinoCandidateValidation(Set<String> sourcePaths) {
+    final normalized = sourcePaths
+        .map(_validationPathKey)
+        .where((path) => path.isNotEmpty)
+        .toSet();
+    if (!mounted) return;
+    setState(() {
+      _dinov3ValidationPaths = normalized;
+      _dinov3ValidationRequestedCount = normalized.length;
+      _selectedIndex = 2;
+    });
+  }
+
+  void _clearDinoCandidateValidation() {
+    if (!mounted) return;
+    setState(() {
+      _dinov3ValidationPaths = <String>{};
+      _dinov3ValidationRequestedCount = 0;
+    });
   }
 
   Widget _buildPreviewPage() {
@@ -3364,9 +3443,18 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildValidationPage() {
     final inputPath = _inputController.text.trim();
-    final items = inputPath.isEmpty
+    final allItems = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
         : _previewItems;
+    final hasDinoFilter = _dinov3ValidationPaths.isNotEmpty;
+    final items = hasDinoFilter
+        ? allItems
+            .where(
+              (item) =>
+                  _dinov3ValidationPaths.contains(_validationPathKey(item.path)),
+            )
+            .toList()
+        : allItems;
     final settings = _settingsOrEmpty();
     final quickMarkSpecies = _stringListSetting(
       settings,
@@ -3374,7 +3462,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       const <String>[],
     );
 
-    return SpeciesValidationScreen(
+    final validationScreen = SpeciesValidationScreen(
       apiClient: widget.apiClient,
       inputPath: inputPath,
       items: items,
@@ -3441,6 +3529,33 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onEmptyPhotoDeleteModeChanged: _updateEmptyPhotoDeleteMode,
       onAutoGroupInferredBurstSizeChanged:
           _handleAutoGroupInferredBurstSizeChanged,
+    );
+    if (!hasDinoFilter) return validationScreen;
+
+    final requested = _dinov3ValidationRequestedCount;
+    final missing = (requested - items.length).clamp(0, requested).toInt();
+    return Column(
+      children: [
+        Material(
+          color: Theme.of(context).colorScheme.secondaryContainer,
+          child: ListTile(
+            dense: true,
+            leading: const Icon(Icons.filter_alt_rounded),
+            title: const Text('DINOv3 Candidate 验证筛选'),
+            subtitle: Text(
+              missing > 0
+                  ? '当前显示 ${items.length}/$requested 个代表事件；$missing 个历史文件不在当前任务中。'
+                  : '当前显示 ${items.length}/$requested 个代表事件。',
+            ),
+            trailing: TextButton.icon(
+              onPressed: _clearDinoCandidateValidation,
+              icon: const Icon(Icons.close_rounded),
+              label: const Text('清除筛选'),
+            ),
+          ),
+        ),
+        Expanded(child: validationScreen),
+      ],
     );
   }
 

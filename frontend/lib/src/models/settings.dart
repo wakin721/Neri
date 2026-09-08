@@ -125,6 +125,13 @@ class ModelInfo {
     this.sizeBytes,
     String? source,
     this.kind = 'detect',
+    this.backend = 'yolo',
+    this.architecture,
+    this.featureDim,
+    this.requiresDetector = false,
+    this.supportsVideoFast = true,
+    this.supportsVideoAll = true,
+    this.checkpointPath,
   }) : rawName = name,
        source = source ?? 'user',
        hasExplicitSource = source != null;
@@ -136,6 +143,13 @@ class ModelInfo {
       sizeBytes: json['size_bytes'] as int?,
       source: json['source'] as String?,
       kind: json['kind'] as String? ?? 'detect',
+      backend: json['backend'] as String? ?? 'yolo',
+      architecture: json['architecture'] as String?,
+      featureDim: (json['feature_dim'] as num?)?.toInt(),
+      requiresDetector: json['requires_detector'] as bool? ?? false,
+      supportsVideoFast: json['supports_video_fast'] as bool? ?? true,
+      supportsVideoAll: json['supports_video_all'] as bool? ?? true,
+      checkpointPath: json['checkpoint_path'] as String?,
     );
   }
 
@@ -145,7 +159,15 @@ class ModelInfo {
   final String source;
   final String kind;
   final bool hasExplicitSource;
+  final String backend;
+  final String? architecture;
+  final int? featureDim;
+  final bool requiresDetector;
+  final bool supportsVideoFast;
+  final bool supportsVideoAll;
+  final String? checkpointPath;
 
+  bool get isDinoV3 => backend == 'dinov3';
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
   String get displayName => '$sourceLabel / $rawName';
   String get name => hasExplicitSource ? displayName : rawName;

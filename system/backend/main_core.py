@@ -16,6 +16,7 @@ from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SU
 from system.settings_manager import SettingsManager
 from system.training import get_queue
 from system.training.api import privacy_router
+from system.dinov3.api import dinov3_registry_router
 
 from . import __version__
 from .crash_logging import configure_backend_crash_logging
@@ -102,6 +103,7 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 app.include_router(privacy_router(get_queue))
+app.include_router(dinov3_registry_router())
 
 app.add_middleware(
     CORSMiddleware,
