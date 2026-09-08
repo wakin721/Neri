@@ -33,7 +33,7 @@ jobs:
           find system/dinov3 -maxdepth 1 -type f | grep -E '/[^/]*(classif|runtime|inference)[^/]*\.py$'
           find system/dinov3 -maxdepth 1 -type f | grep -E '/[^/]*(registr|store)[^/]*\.py$'
           find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' | grep .
-          grep -R '/api/dinov3/registry' system/backend
+          grep -R '/api/dinov3/registry' system
           grep -R '1800' system/dinov3
 
       - name: Set up Python
