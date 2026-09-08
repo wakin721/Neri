@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../widgets/notification_card.dart';
 import '../api_client.dart';
 import '../model_sync_controller.dart';
 import '../models/model_sync_status.dart';
@@ -429,9 +430,7 @@ class _ModelSyncMessageCard extends StatelessWidget {
     final error = status.error?.trim() ?? '';
     final retryFailure = retryError?.trim() ?? '';
 
-    return Positioned(
-      right: 20,
-      bottom: 20,
+    return NotificationCard(
       child: Card(
         key: const Key('model-sync-message-card'),
         elevation: 7,
