@@ -25,13 +25,20 @@ class HealthResponse(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    """A YOLO model discovered under the project model directory."""
+    """A model discovered under the canonical local model directory."""
 
     name: str
     path: str
     size_bytes: int | None = None
     source: Literal["user", "sync"] = "user"
     kind: Literal["detect", "cls"] = "detect"
+    backend: Literal["yolo", "dinov3"] = "yolo"
+    architecture: str | None = None
+    feature_dim: int | None = None
+    requires_detector: bool = False
+    supports_video_fast: bool = True
+    supports_video_all: bool = True
+    checkpoint_path: str | None = None
 
 
 class ModelClassInfo(BaseModel):

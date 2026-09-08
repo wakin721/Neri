@@ -33,6 +33,7 @@ ENV/
 !/tests/test_model_sync_manager.py
 !/tests/test_model_sync_api.py
 !/tests/test_model_resource_paths.py
+!/tests/test_dinov3_*.py
 
 # Build outputs
 build/

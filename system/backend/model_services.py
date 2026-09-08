@@ -24,6 +24,13 @@ def _to_model_info(item) -> ModelInfo:
         size_bytes=item.size_bytes,
         source=item.source,
         kind=item.kind,
+        backend=item.backend,
+        architecture=item.architecture,
+        feature_dim=item.feature_dim,
+        requires_detector=item.requires_detector,
+        supports_video_fast=item.supports_video_fast,
+        supports_video_all=item.supports_video_all,
+        checkpoint_path=item.checkpoint_path,
     )
 
 
