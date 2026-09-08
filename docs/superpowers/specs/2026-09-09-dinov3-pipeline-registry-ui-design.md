@@ -2,116 +2,112 @@
 
 Approved scope: extend the existing DINOv3 core on branch `DINOv3` so the reviewed native DINOv3 ViT-B/16 classifier is used by Neri's real batch inference path, unknown observations are persisted into the fingerprint-scoped registry, registry management is exposed through FastAPI, and Flutter exposes registration state, validation, registration, and DINOv3-specific video restrictions.
 
-This design builds on commit `b5ea3b8d581b326f736c52cafa8131a98e202e31`. The existing model contract remains unchanged: `dinov3_vitb16`, 768-dimensional CLS embeddings, `letterbox224_imagenet`, `mean_l2_normalized_crop_embeddings`, frozen encoder weights verified by SHA-256, reviewed linear head, base prototypes, and checkpoint threshold. The supplied checkpoint is never modified when new species are learned.
+This design builds on commit `b5ea3b8d581b326f736c52cafa8131a98e202e31`. The model contract remains fixed at `dinov3_vitb16`, 768-dimensional CLS embeddings, `letterbox224_imagenet`, `mean_l2_normalized_crop_embeddings`, frozen encoder weights verified by SHA-256, the reviewed 17-class linear head, base prototypes, and the reviewed checkpoint threshold. Dynamic learning never modifies the supplied checkpoint.
 
-## 1. Runtime architecture
+## 1. Runtime boundaries
 
-DINOv3 remains a second-stage classifier. YOLO is always responsible for object detection and crop extraction.
-
-The supported image path is:
+DINOv3 is a second-stage classifier. YOLO always performs detection and the existing `_crop_single_box()` implementation remains the only crop/padding path.
 
 ```text
-input image
--> existing YOLO detector
--> existing 10% expanded square/padded crop
+image
+-> YOLO detection
+-> existing expanded square crop
 -> native DINOv3 ViT-B/16 encoder
--> normalized 768-d crop embedding
--> reviewed linear head + reviewed base prototypes
+-> normalized 768-d embedding
+-> reviewed head + base prototypes
 -> base known / base rejected
--> dynamic registry prototype matching when base rejected
+-> dynamic registry matching for rejected embeddings
 -> normal Neri detection result
 ```
 
-`ImageProcessor` keeps the existing YOLO classification path intact. DINOv3 is represented separately from `cls_model`, for example as `dinov3_classifier`, so existing `.pt/.onnx/.engine` YOLO classification behavior does not change.
+`ImageProcessor` keeps `cls_model` exclusively for Ultralytics classification and gains a separate `dinov3_classifier` attribute. It gains `load_dinov3_model(manifest_path, registry)`; `load_cls_model()` retains its existing YOLO-classification responsibility. A DINOv3 model is never loaded as an Ultralytics `YOLO()` classifier.
 
-`ImageProcessor.load_cls_model()` or a focused companion loader resolves whether the selected classification model is `backend=yolo` or `backend=dinov3` from the model manifest. A DINOv3 manifest must resolve to a valid reviewed checkpoint and encoder assets. A DINOv3 classifier cannot be loaded without an active detector model.
+The backend service owns registry location/lifecycle. `ImageProcessor` performs inference and exposes only in-memory observations to the service.
 
-Backend service code owns persistence and registry lifecycle. `ImageProcessor` performs inference only; it must not decide filesystem locations for SQLite state or write the registry directly.
+## 2. `detect_batch_species()` integration
 
-## 2. Batch crop inference in `detect_batch_species()`
+When `dinov3_classifier` is active, `detect_batch_species()`:
 
-`ImageProcessor.detect_batch_species()` continues to run YOLO detection first and continues to use `_crop_single_box()` for crop generation. The existing crop mapping `(result_index, box_index)` is retained.
+1. runs the existing YOLO detector;
+2. collects crops using `_crop_single_box()` and the existing `(result_index, box_index)` mapping;
+3. encodes all valid crops through the native DINOv3 encoder;
+4. classifies each normalized embedding with `DinoV3Classifier.classify_features()`;
+5. maps predictions back to their original boxes;
+6. preserves YOLO detection confidence as `raw_det_conf`;
+7. adds DINOv3 metadata to candidate/detection data: `known_score`, threshold, head species, nearest base-prototype species, head/prototype consistency, source, registry id, registration status, and accepted flag;
+8. allows only `accepted=true` predictions to become the official final species for a box.
 
-When `dinov3_classifier` is active:
+Base-checkpoint acceptance requires both reviewed-threshold passage and head/prototype class agreement. If the base checkpoint rejects a crop, dynamic registry matching is attempted. `provisional`, `confirmed`, and `mature` matches may be accepted according to the registry threshold. `candidate` matches remain auxiliary identities and are never emitted as official Known species.
 
-1. collect all valid YOLO crops in the batch;
-2. encode the crops in batches with the native DINOv3 encoder;
-3. L2-normalize each crop embedding;
-4. classify each embedding with `DinoV3Classifier.classify_features()`;
-5. map the prediction back to the original detection box;
-6. preserve the existing detection confidence as `raw_det_conf`;
-7. expose DINOv3 metadata in the candidate/detection structure, including `known_score`, checkpoint threshold, head species, nearest base prototype species, head/prototype consistency, source, registry id, and registration status;
-8. only an accepted prediction may become the official final species for a detection box.
+High-dimensional embeddings must not appear in detection JSON, SQLite detection records, or API responses.
 
-A base checkpoint result is accepted only when its prototype score reaches the reviewed threshold and the linear-head class equals the nearest base-prototype class. A base-rejected embedding is then checked against the dynamic registry. `provisional`, `confirmed`, and `mature` registry matches may be accepted according to the registry threshold; a `candidate` match remains an unregistered auxiliary identity and must not be emitted as an official known species.
+`ImageProcessor` gains an exact in-memory transfer API:
 
-The normal return value of `detect_batch_species()` remains compatible with current callers. High-dimensional embeddings must never be serialized into ordinary detection JSON.
+```text
+drain_dinov3_observations() -> tuple[DinoV3RuntimeObservation, ...]
+```
 
-To transfer embeddings to the backend service without leaking them into API results, `ImageProcessor` maintains an ephemeral DINOv3 observation buffer for the current call. A focused method such as `drain_dinov3_observations()` returns immutable in-memory observations and clears the buffer. Each observation contains only runtime objects needed by the service: source result index, box index, normalized embedding, prediction source/status/registry id, and detection confidence. The buffer is cleared at the start of every DINOv3 inference call and after draining, preventing stale observations from crossing batches.
+`DinoV3RuntimeObservation` carries result index, box index, normalized embedding, prediction source/status/registry id, accepted flag, and detection confidence. The buffer is cleared at the start of each DINOv3 batch, cleared after draining, and cleared on inference failure.
 
-## 3. Unknown and registered-species accumulation
+## 3. Registry accumulation
 
-After `_detect_image_batch()` receives normal detection results, the backend immediately drains DINOv3 observations from the processor.
+Immediately after `_detect_image_batch()` finishes inference, the backend drains DINOv3 observations.
 
-For each base-rejected observation:
+For every base-rejected observation:
 
-- resolve `source_path` from the batch index;
-- derive `camera_id` with the existing `camera_id_for_path()` rule using the job input root when available;
-- use EXIF capture time from the corresponding `DetectionItem.date_taken` when it can be parsed;
-- call `SpeciesRegistry.record_unknown()` when no registry id exists;
-- call `SpeciesRegistry.record_observation()` when the embedding already matched an existing Candidate/Provisional/Confirmed/Mature entry.
+- map result index to the original media path;
+- derive camera id with `camera_id_for_path(path, input_root)`;
+- parse `DetectionItem.date_taken` when available;
+- call `record_unknown()` if no registry id exists;
+- call `record_observation()` when the prediction already matched Candidate/Provisional/Confirmed/Mature.
 
-This means registered species continue accumulating events after registration, allowing automatic progression to Confirmed and Mature.
+This lets registered identities continue accumulating evidence toward Confirmed and Mature. Base-known species are never copied into the dynamic registry.
 
-The independent-event boundary remains exactly 1,800 seconds. Same camera + same registry identity with a gap below 1,800 seconds updates the same event embedding; a gap at or above 1,800 seconds creates a new event. Missing timestamps are isolated using source-path-derived event keys. Multiple crops belonging to the same candidate inside one independent event are averaged in the registry and count as one event.
+The independent-event boundary remains exactly 1,800 seconds. Same camera + same registry identity with gap `<1800` seconds updates one event; gap `>=1800` creates a new event. Multiple matching crops in one event update that event's normalized mean and still count as one event. Missing timestamps use source-path-derived keys.
 
-Base known species are not copied into the dynamic registry.
+Fast-video sampled frames are special: registry `source_path` and camera identity use the original video path, never the temporary extracted-frame path. Multiple unknown sampled frames from one video therefore cannot leave stale temporary-file references in the registry.
 
-Registry accumulation happens after inference, so SQLite failures cannot corrupt the original checkpoint or encoder. A registry write failure is logged and exposed as non-fatal DINOv3 registration metadata where possible; it does not silently convert a known model prediction into another species.
+Registry-write errors are logged without rewriting checkpoint output. A write failure must not transform a valid base-known prediction into another species.
 
-## 4. Registry state and persistence
+## 4. Registry state and state directory
 
-The existing state semantics are retained:
+Existing state semantics remain normative:
 
-- `Candidate`: newly discovered identity; not an official known species.
-- At 4 independent events: create/refresh a temporary prototype while the public status remains Candidate.
-- Manual registration becomes available when all conditions are true: at least 5 independent events, at least 2 cameras, cluster purity at or above `0.90`, embedding consistency at or above `0.75`, and a confirmed common name.
-- Manual registration changes Candidate to `Provisional`.
-- `Provisional` automatically becomes `Confirmed` at at least 10 independent events from at least 2 cameras.
-- `Confirmed` may become `Mature` at at least 20 events from at least 3 cameras when deterministic two-cluster prototype splitting succeeds; Mature uses multiple prototypes.
+- Candidate: unregistered identity.
+- At 4 independent events: build/refresh a temporary prototype; public state remains Candidate.
+- Candidate is manually registrable only when: events `>=5`, cameras `>=2`, cluster purity `>=0.90`, embedding consistency `>=0.75`, and common name is non-empty.
+- Successful manual registration changes Candidate to Provisional.
+- Provisional automatically becomes Confirmed at events `>=10` and cameras `>=2`.
+- Confirmed may become Mature at events `>=20`, cameras `>=3`, and successful deterministic two-cluster splitting; Mature stores multiple prototypes.
 
-The SQLite database remains isolated by classifier fingerprint. Replacing the checkpoint, encoder hash, architecture, feature dimension, preprocessing contract, or aggregation contract must produce a different fingerprint and therefore a different registry namespace.
+Registry isolation remains classifier-fingerprint based.
 
-Persistent state root:
+State root is resolved exactly as follows:
 
-- if `NERI_DINOV3_STATE_DIR` is set, use it;
-- on Windows, default to `%LOCALAPPDATA%/Neri/dinov3`;
-- on other platforms, default to `${XDG_STATE_HOME:-~/.local/state}/neri/dinov3`.
+- `NERI_DINOV3_STATE_DIR` when set;
+- Windows: `%LOCALAPPDATA%/Neri/dinov3`;
+- other platforms: `${XDG_STATE_HOME:-~/.local/state}/neri/dinov3`.
 
-The existing `registry_path_for_fingerprint()` then creates the fingerprint-specific SQLite path below that root.
+`registry_path_for_fingerprint()` creates the fingerprint subdirectory and `registry.sqlite3` below that root.
 
-## 5. Backend model resolution and job restrictions
+## 5. Backend model loading and mode validation
 
-`system/backend/services.py` resolves the selected classification model through the model catalog rather than treating every classification path as an Ultralytics model.
+`system/backend/services.py` resolves classification models through the model catalog. For `backend=dinov3`:
 
-For a DINOv3 manifest:
+- `model_path` for a detector is mandatory;
+- `classification_model_path` is the DINOv3 manifest path returned by the catalog;
+- manifest/checkpoint/fingerprint are validated;
+- the fingerprint-scoped `SpeciesRegistry` is opened;
+- `ImageProcessor.load_dinov3_model()` is called with that registry;
+- classification-only/full-image operation is rejected.
 
-- a detection model path is mandatory;
-- the manifest and checkpoint are validated before inference;
-- a fingerprint-scoped registry is opened;
-- the native encoder/classifier is attached to `ImageProcessor`;
-- the registry is attached to `DinoV3Classifier` for dynamic prototype matching;
-- full-image classification-only operation is rejected.
+The backend rejects DINOv3 + `video_mode=all` before expensive model loading. `fast` remains supported and uses sampled frames -> YOLO -> crops -> DINOv3. `skip` remains unchanged.
 
-A DINOv3 job with `video_mode=all` is rejected before processing with a clear user-facing message. `video_mode=fast` is supported and continues to use sampled frames followed by YOLO detection, crops, and DINOv3 classification. `video_mode=skip` remains unchanged.
+## 6. FastAPI registry layer
 
-These restrictions are enforced in the backend even if an old or custom client bypasses Flutter.
+Create `system/backend/dinov3_services.py` for model resolution, registry opening, DTO conversion, identity updates, registration, and event listing. Create `system/backend/dinov3_routes.py` with an `APIRouter`, then include it from `main_core.py`.
 
-## 6. FastAPI registry service and routes
-
-Create a focused backend registry service, separate from image processing, that resolves a DINOv3 manifest, validates the checkpoint, derives the model fingerprint, opens the correct SQLite registry, and converts registry records to API schemas.
-
-The public API is:
+Public API:
 
 ```text
 GET   /api/dinov3/registry
@@ -121,156 +117,104 @@ PATCH /api/dinov3/registry/{registration_id}/identity
 POST  /api/dinov3/registry/{registration_id}/register
 ```
 
-All endpoints are explicitly scoped to `classification_model_path`. Read endpoints receive it as a query parameter. Write requests include it in the request body so a stale UI cannot accidentally mutate the registry for another DINOv3 model.
+All calls are scoped to `classification_model_path`. GET calls receive it as a query parameter. PATCH/POST request bodies include it explicitly.
 
-Registry summary/detail responses include:
+Registry summary/detail fields are: `id`, `candidate_number`, `status`, `display_name`, `common_name`, `scientific_name`, `event_count`, `camera_count`, `prototype_count`, `cluster_purity`, `embedding_consistency`, `conditions`, and `can_register`.
 
-- `id`;
-- `candidate_number`;
-- `status`;
-- `display_name`;
-- `common_name`;
-- `scientific_name`;
-- `event_count`;
-- `camera_count`;
-- `prototype_count`;
-- `cluster_purity`;
-- `embedding_consistency`;
-- individual registration conditions;
-- `can_register`.
+Event rows expose only `source_path`, `camera_id`, `started_at`, `ended_at`, `timestamp_missing`, and `sample_count`; embedding blobs are never returned.
 
-The events endpoint returns one row per independent event with `source_path`, `camera_id`, `started_at`, `ended_at`, `timestamp_missing`, and sample count. It never returns embedding blobs.
+Error mapping is fixed:
 
-`PATCH .../identity` accepts `common_name` and optional `scientific_name`. Empty common names are rejected. `POST .../register` re-checks all registration conditions server-side and returns HTTP 409 when the entry is not currently eligible. Missing entries return 404. Non-DINOv3 model paths return 400.
+- unknown registration id -> HTTP 404;
+- non-DINOv3/invalid model path -> HTTP 400;
+- unmet manual registration conditions -> HTTP 409;
+- corrupt/incompatible DINOv3 checkpoint -> HTTP 400 with a DINOv3-specific message.
 
 ## 7. Flutter model metadata
 
-Extend Flutter `ModelInfo` to parse the backend metadata already exposed for DINOv3:
+Extend Flutter `ModelInfo` to decode `backend`, `architecture`, `feature_dim`, `requires_detector`, `supports_video_fast`, `supports_video_all`, and `checkpoint_path`. UI capability decisions must use those fields, never filename matching.
 
-- `backend`;
-- `architecture`;
-- `feature_dim`;
-- `requires_detector`;
-- `supports_video_fast`;
-- `supports_video_all`;
-- `checkpoint_path`.
+## 8. Registration status UI
 
-A helper resolves the selected classification `ModelInfo` by path. UI behavior must use these explicit capabilities instead of filename substring matching.
+Create `frontend/lib/src/models/dinov3_registry.dart` for registry DTOs and `frontend/lib/src/widgets/dinov3_registry_dialog.dart` for the UI.
 
-## 8. Settings-page registration entry and dialog
+When the selected classification model has `backend == 'dinov3'`, Settings shows a `物种注册状态` row directly below the classification-model selector. Other backends do not show it. The row loads `/api/dinov3/registry` and displays compact counts such as `Candidate 3 · Provisional 2 · Confirmed 18 · Mature 6`.
 
-When the currently selected classification model has `backend == 'dinov3'`, the classification-model section shows a `物种注册状态` row directly below the selector. Non-DINOv3 models do not show this row.
+The dialog supports status filtering and detail display. Candidate detail includes editable common/scientific names, event count, camera count, purity, consistency, every registration condition, `继续验证`, and `注册为新物种`.
 
-The row displays compact counts such as:
+Identity edits call PATCH and then replace the displayed detail with the server response. Registration is enabled only when `can_register=true`; POST remains authoritative. Successful registration immediately displays the returned Provisional state.
+
+## 9. “继续验证” flow
+
+`SettingsScreen` gains an exact callback:
 
 ```text
-Candidate 3 · Provisional 2 · Confirmed 18 · Mature 6
+onOpenDinoCandidateValidation(Set<String> sourcePaths)
 ```
 
-Opening it shows a dedicated DINOv3 registry dialog/widget. The dialog supports status filtering and shows each registration's name/number, status, independent-event count, camera count, purity, consistency, and registration conditions.
+The registry dialog calls the events endpoint, collects one representative `source_path` per independent event, closes, and invokes this callback.
 
-A detail view follows the established example:
+`MainWindow` stores a normalized temporary DINOv3 validation-path filter, switches to the existing species-validation tab, and filters the normal validation item list in `_buildValidationPage()`. `SpeciesValidationScreen` remains the only validation editor.
 
-```text
-未知物种 #17
-状态：Candidate
-人工确认物种
-豹猫
-Prionailurus bengalensis
-5 个独立事件
-3 台相机
+The validation page displays a visible Candidate filter indicator with a clear action. If historical paths are absent from currently loaded jobs/preview data, the UI displays the available subset and reports the unavailable count; it never fabricates `DetectionItem` objects.
 
-注册条件
-✓ ≥5 个独立事件
-✓ ≥2 台相机
-✓ cluster purity ≥ threshold
-✓ embedding consistency ≥ threshold
-✓ 已确认物种名称
+## 10. Settings and Start video restrictions
 
-[继续验证] [注册为新物种]
-```
+Both Settings and Start resolve the selected classification `ModelInfo` by exact path.
 
-The identity fields are editable for Candidate entries and are saved through the identity API. The register button is enabled only when the API reports `can_register=true`; the backend still performs the authoritative re-check.
+For DINOv3:
 
-## 9. “继续验证” integration
+- detector selection is mandatory;
+- `all` is disabled;
+- an existing/persisted `all` value is normalized to `fast` before saving or job creation;
+- `fast` and `skip` remain selectable;
+- helper text states that only sampled-frame video recognition is supported.
 
-The registry dialog loads the candidate's event endpoint and obtains representative `source_path` values, one per independent event.
+Start blocks submission when DINOv3 is selected without a detector and shows a specific message. Backend validation remains authoritative.
 
-`SettingsScreen` receives a callback from `MainWindow`, for example `onOpenDinoCandidateValidation(Set<String> sourcePaths)`. When `继续验证` is pressed:
+## 11. Flutter API client
 
-1. close the registry dialog;
-2. send the event source paths to `MainWindow`;
-3. `MainWindow` stores a normalized temporary validation-path filter;
-4. switch to the existing species-validation tab;
-5. `_buildValidationPage()` filters the current job/preview items to those source paths;
-6. show a visible filter indicator with an action to clear the Candidate filter and return to the normal validation list.
+Add methods to `NeriApiClient`/`api_client_core.dart` for all five registry endpoints. Registry responses are decoded into `dinov3_registry.dart` models. Network failures use the existing API error mechanism.
 
-No second validation system is created. Existing marking, species editing, quick marks, export, metadata loading, and media viewing remain provided by `SpeciesValidationScreen`.
+After PATCH/POST, Flutter refreshes from server responses rather than optimistically inventing state. Automatic Confirmed/Mature transitions appear on subsequent registry refreshes after more inference observations are processed.
 
-If some historical event paths are not present in the currently loaded job/preview data, the UI shows the available subset and states how many requested files were unavailable rather than fabricating `DetectionItem` records.
+## 12. Resource lifecycle and failure rules
 
-## 10. Settings-page and start-page video restrictions
-
-Both Settings and Start pages inspect the selected classification model's capability metadata.
-
-When DINOv3 is selected:
-
-- the detection-model selector remains required;
-- `完整识别` (`all`) is disabled in the video-mode selector;
-- if the persisted/current mode is `all`, it is immediately normalized to `fast` before saving or creating a job;
-- `快速识别` (`fast`) remains selectable;
-- `跳过视频` (`skip`) remains selectable;
-- helper text explains that DINOv3 currently supports sampled-frame video recognition only.
-
-The Start page prevents job submission when DINOv3 is selected without a detector and presents a specific message rather than a generic model error.
-
-Backend validation remains authoritative and rejects invalid combinations even if Flutter state becomes stale.
-
-## 11. API client and Flutter data models
-
-Add Flutter models for registry summary/detail/event responses and API-client methods for the five registry endpoints. Network errors use the existing Neri API error surface.
-
-After identity updates or registration, the dialog refreshes the single detail entry and summary counts from backend responses rather than mutating local status optimistically.
-
-After a successful registration, the UI shows the returned status (`Provisional`) immediately. Later automatic upgrades to Confirmed/Mature appear on the next registry refresh after additional observations have been processed.
-
-## 12. Error handling and resource lifecycle
-
-- Encoder/checkpoint/manifest incompatibility fails model loading with a clear DINOv3-specific message.
-- Encoder SHA-256 mismatch remains fatal for DINOv3 model loading.
-- Registry database opening errors fail registry API requests clearly but do not rewrite model assets.
-- Per-batch registry write failures are logged and do not crash already completed base inference for unrelated files.
-- Registry connections created for a processing job are closed when the processor/job is released.
-- The ephemeral observation buffer is always cleared on success and on inference exceptions.
-- DINOv3 full-video requests fail before expensive model loading when possible.
+- Encoder SHA-256 mismatch is fatal to DINOv3 loading.
+- Manifest/checkpoint/architecture/feature-dimension mismatch is fatal to DINOv3 loading.
+- Registry API open failures are explicit and do not modify model assets.
+- Registry connections owned by a processing job are closed when that processor/job is released.
+- Observation buffers are cleared on success and exceptions.
+- `video_mode=all` fails before native DINOv3 encoder loading when possible.
 
 ## 13. Required tests
 
-Python tests must cover at least:
+Python tests must prove:
 
-1. `detect_batch_species()` uses the existing YOLO crop path and routes crops to DINOv3 instead of Ultralytics classification.
-2. Crop predictions map back to the correct result/box indexes.
-3. Candidate matches are not emitted as official known species; Provisional/Confirmed/Mature registry matches may be accepted.
+1. `detect_batch_species()` uses existing YOLO crops and routes them to DINOv3, not Ultralytics classification.
+2. Crop predictions map to the correct result/box indexes.
+3. Candidate matches are not official species; Provisional/Confirmed/Mature registry matches can be accepted.
 4. Base-rejected observations automatically create/update registry entries.
-5. Same candidate + same camera at 29:59 stays one event; 30:00 creates a second event.
-6. Repeated crops in one event update the event mean without increasing `event_count`.
-7. Registry API list/detail/events/identity/register success paths.
-8. Registry API 404, invalid model, and unmet registration-condition behavior.
-9. DINOv3 without detector is rejected.
-10. DINOv3 + `video_mode=all` is rejected; fast remains valid.
-11. Existing YOLO-only and YOLO-classification tests remain green.
+5. 29:59 remains one event and 30:00 starts a new event.
+6. Repeated crops in one event update its mean without increasing event count.
+7. Fast-video registry paths refer to the original video, not temporary frames.
+8. Registry list/detail/events/identity/register success paths work.
+9. API 404/400/409 mappings work.
+10. DINOv3 without detector is rejected.
+11. DINOv3 + `video_mode=all` is rejected and `fast` remains valid.
+12. Existing YOLO-only and YOLO-classification suites remain green.
 
-Flutter tests must cover at least:
+Flutter tests must prove:
 
-1. DINOv3 model metadata decoding.
+1. DINOv3 capability metadata decodes correctly.
 2. Registration row appears only for DINOv3.
-3. Registry dialog renders status and registration conditions.
-4. Identity update and register actions invoke the correct API methods and refresh state.
-5. `继续验证` passes representative source paths to MainWindow and activates validation filtering.
-6. DINOv3 disables `all` and normalizes an existing `all` selection to `fast` in both Settings and Start flows.
-7. DINOv3 without a detector prevents job submission.
-8. Non-DINOv3 behavior is unchanged.
+3. Registry dialog renders status and conditions.
+4. Identity update and registration call the right API methods and refresh from responses.
+5. `继续验证` passes event source paths to MainWindow and activates validation filtering.
+6. Settings and Start disable/normalize `all` to `fast` for DINOv3.
+7. DINOv3 without detector blocks job creation.
+8. Non-DINOv3 behavior remains unchanged.
 
 ## 14. Out of scope
 
-This integration does not fine-tune the DINOv3 backbone, retrain the supplied 17-class linear head, modify the built-in China species catalog, synchronize registries across computers, enable cloud registry storage, or enable DINOv3 full tracked-video mode. Those require separate designs and calibration work.
+This integration does not fine-tune the backbone, retrain the supplied 17-class head, modify the built-in China species catalog, synchronize registries between computers, add cloud registry storage, or enable DINOv3 full tracked-video mode.
