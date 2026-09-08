@@ -17,6 +17,28 @@ def aggregate_event_embeddings(crop_embeddings: np.ndarray) -> np.ndarray:
     return _normalize_rows(_normalize_rows(array).mean(axis=0,keepdims=True))[0]
 
 @dataclass(frozen=True)
+class DinoV3Observation:
+    result_index: int
+    box_index: int
+    embedding: np.ndarray
+    accepted: bool
+    species: str
+    source: str
+    registry_id: int | None
+    registration_status: str | None
+    known_score: float
+    threshold: float
+    detection_confidence: float
+
+    def __post_init__(self):
+        embedding = np.asarray(self.embedding, dtype=np.float32).copy()
+        if embedding.shape != (DINO_FEATURE_DIM,):
+            raise ValueError("Expected observation embedding with shape (768,)")
+        embedding.setflags(write=False)
+        object.__setattr__(self, "embedding", embedding)
+
+
+@dataclass(frozen=True)
 class DinoV3Prediction:
     species: str; accepted: bool; best_known_species: str; head_species: str; prototype_species: str
     head_prototype_consistent: bool; known_score: float; threshold: float

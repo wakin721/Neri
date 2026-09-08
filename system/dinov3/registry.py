@@ -103,6 +103,20 @@ class SpeciesRegistry:
         return RegistryEntry(int(row['id']),int(row['candidate_number']),status,common,row['scientific_name'],events,cameras,len(protos),purity,consistency,conditions,status=='candidate' and all(conditions.values()),display)
     def list(self,*,status=None):
         rows=self._conn.execute("SELECT id FROM registrations"+(" WHERE status=?" if status else "")+" ORDER BY candidate_number",(status,) if status else ()).fetchall();return [self.get(int(r[0])) for r in rows]
+    def list_events(self,entry_id):
+        self._row(entry_id)
+        return [
+            {
+                'event_key': str(row['event_key']),
+                'source_path': str(row['source_path']),
+                'camera_id': str(row['camera_id']),
+                'started_at': row['started_at'],
+                'ended_at': row['ended_at'],
+                'timestamp_missing': bool(row['timestamp_missing']),
+                'sample_count': int(row['sample_count']),
+            }
+            for row in self._event_rows(entry_id)
+        ]
     def register(self,entry_id):
         detail=self.get(entry_id)
         if not detail.can_register:raise RegistrationConditionError("Registration conditions not met: "+", ".join(k for k,v in detail.conditions.items() if not v))

@@ -8,8 +8,6 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
-import torch
-
 DINO_BACKBONE = "dinov3_vitb16"
 DINO_FEATURE_DIM = 768
 DINO_PREPROCESSING = "letterbox224_imagenet"
@@ -27,9 +25,9 @@ class DinoV3Checkpoint:
     backbone: str
     feature_dim: int
     classes: tuple[str, ...]
-    head_weight: torch.Tensor
-    head_bias: torch.Tensor
-    prototypes: torch.Tensor
+    head_weight: Any
+    head_bias: Any
+    prototypes: Any
     threshold: float
     encoder_weights: str
     encoder_sha256: str
@@ -38,7 +36,18 @@ class DinoV3Checkpoint:
     fingerprint: str
 
 
-def _tensor(value: Any, field: str) -> torch.Tensor:
+def _require_torch():
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyTorch is required to load or validate a DINOv3 checkpoint"
+        ) from exc
+    return torch
+
+
+def _tensor(value: Any, field: str) -> Any:
+    torch = _require_torch()
     if not isinstance(value, torch.Tensor):
         raise CheckpointValidationError(f"{field} must be a torch.Tensor")
     result = value.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -48,6 +57,7 @@ def _tensor(value: Any, field: str) -> torch.Tensor:
 
 
 def _payload_fingerprint(payload: Mapping[str, Any]) -> str:
+    torch = _require_torch()
     digest = hashlib.sha256()
     digest.update(str(payload.get("backbone", "")).encode("utf-8"))
     digest.update(str(payload.get("feature_dim", "")).encode("ascii"))
@@ -120,6 +130,7 @@ def validate_checkpoint(saved: Mapping[str, Any], *, path: Path | None = None,
 
 
 def load_checkpoint(path: str | Path) -> DinoV3Checkpoint:
+    torch = _require_torch()
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(f"DINOv3 classifier checkpoint not found: {resolved}")
