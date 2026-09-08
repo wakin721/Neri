@@ -138,8 +138,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pumpAndSettle();
 
     expect(find.text('物种注册状态'), findsOneWidget);
     expect(find.textContaining('Candidate 1'), findsOneWidget);

@@ -278,61 +278,70 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(entry.displayName, style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 4),
-        Text('状态：${entry.status}'),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _commonNameController,
-          enabled: editable && !_saving,
-          decoration: const InputDecoration(
-            labelText: '人工确认物种',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: _scientificNameController,
-          enabled: editable && !_saving,
-          decoration: const InputDecoration(
-            labelText: '学名',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        if (editable) ...[
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(
-              onPressed: _saving ? null : _saveIdentity,
-              child: const Text('保存物种名称'),
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(entry.displayName, style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 4),
+                Text('状态：${entry.status}'),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _commonNameController,
+                  enabled: editable && !_saving,
+                  decoration: const InputDecoration(
+                    labelText: '人工确认物种',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _scientificNameController,
+                  enabled: editable && !_saving,
+                  decoration: const InputDecoration(
+                    labelText: '学名',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (editable) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: _saving ? null : _saveIdentity,
+                      child: const Text('保存物种名称'),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Text('${entry.eventCount} 个独立事件 · ${entry.cameraCount} 台相机'),
+                Text(
+                  'cluster purity ${entry.clusterPurity.toStringAsFixed(3)} · '
+                  'embedding consistency ${entry.embeddingConsistency.toStringAsFixed(3)}',
+                ),
+                const SizedBox(height: 14),
+                Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
+                _conditionRow('≥5 个独立事件', conditions['events'] == true),
+                _conditionRow('≥2 台相机', conditions['cameras'] == true),
+                _conditionRow('cluster purity ≥ threshold', conditions['cluster_purity'] == true),
+                _conditionRow(
+                  'embedding consistency ≥ threshold',
+                  conditions['embedding_consistency'] == true,
+                ),
+                _conditionRow('已确认物种名称', conditions['identity'] == true),
+                if (_error != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _error!,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
+              ],
             ),
           ),
-        ],
-        const SizedBox(height: 8),
-        Text('${entry.eventCount} 个独立事件 · ${entry.cameraCount} 台相机'),
-        Text(
-          'cluster purity ${entry.clusterPurity.toStringAsFixed(3)} · '
-          'embedding consistency ${entry.embeddingConsistency.toStringAsFixed(3)}',
         ),
-        const SizedBox(height: 14),
-        Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
-        _conditionRow('≥5 个独立事件', conditions['events'] == true),
-        _conditionRow('≥2 台相机', conditions['cameras'] == true),
-        _conditionRow('cluster purity ≥ threshold', conditions['cluster_purity'] == true),
-        _conditionRow(
-          'embedding consistency ≥ threshold',
-          conditions['embedding_consistency'] == true,
-        ),
-        _conditionRow('已确认物种名称', conditions['identity'] == true),
-        if (_error != null) ...[
-          const SizedBox(height: 8),
-          Text(
-            _error!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        ],
-        const Spacer(),
+        const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
