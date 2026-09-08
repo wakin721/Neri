@@ -78,6 +78,7 @@ void main() {
           return http.Response(
             '[{"id":1,"candidate_number":1,"status":"candidate","display_name":"未知物种 #1","common_name":"","scientific_name":"","event_count":4,"camera_count":2,"prototype_count":1,"cluster_purity":1.0,"embedding_consistency":1.0,"conditions":{},"can_register":false}]',
             200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
           );
         }
         if (request.url.path == '/api/models/classes') {
