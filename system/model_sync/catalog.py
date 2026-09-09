@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Sequence
 
 from system.dinov3.component import dinov3_component_status
@@ -108,6 +108,38 @@ def _scan(directory: Path, source: ModelSource, kind: ModelKind) -> list[Discove
     return sorted(items, key=lambda item: item.name.casefold())
 
 
+def _declared_dinov3_manifest(root: Path) -> Path | None:
+    try:
+        payload = json.loads((root / "install.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    classifier = payload.get("classifier")
+    if not isinstance(classifier, dict):
+        return None
+    raw = classifier.get("manifest")
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or raw != raw.strip()
+        or "\\" in raw
+        or raw.startswith("/")
+    ):
+        return None
+    relative = PurePosixPath(raw)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+    manifest = root.joinpath(*relative.parts)
+    try:
+        manifest.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    if not manifest.is_file():
+        return None
+    return manifest
+
+
 def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredModel]:
     if kind == "detect":
         directories: tuple[tuple[Path, ModelSource], ...] = (
@@ -129,7 +161,11 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
     if kind == "cls":
         status = dinov3_component_status(root=layout.dinov3_root)
         if status.get("healthy") is True:
-            models.extend(_scan(layout.dinov3_root, "user", kind))
+            manifest = _declared_dinov3_manifest(layout.dinov3_root)
+            if manifest is not None:
+                resolved = _manifest_model(manifest, "user")
+                if resolved is not None:
+                    models.append(resolved[0])
 
     unique: dict[str, DiscoveredModel] = {}
     for model in models:
