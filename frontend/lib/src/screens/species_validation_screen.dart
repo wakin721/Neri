@@ -192,6 +192,7 @@ enum _ValidationListFocus { species, photos }
 class _MarkHistoryEntry {
   _MarkHistoryEntry(
     Iterable<DetectionItem> items, {
+    this.feedbackOperationId,
     Iterable<String>? quickMarkSpecies,
   }) : items = items.toList(),
        quickMarkSpecies = List<String>.from(
@@ -200,6 +201,7 @@ class _MarkHistoryEntry {
 
   final List<DetectionItem> items;
   final List<String> quickMarkSpecies;
+  final String? feedbackOperationId;
 }
 
 class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
@@ -883,7 +885,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
     _setMarking(true);
     try {
-      await widget.apiClient.markDinoV3BoxFeedback(
+      final result = await widget.apiClient.markDinoV3BoxFeedback(
         inputPath: widget.inputPath,
         filePath: item.path,
         classificationModelPath: classificationModelPath,
@@ -893,6 +895,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         feedbackOperationId: operationId,
       );
       if (!mounted) return;
+      final recordedOperationId = result.operationId.trim().isEmpty
+          ? operationId
+          : result.operationId.trim();
+      _recordMarkHistory(
+        <DetectionItem>[result.item],
+        feedbackOperationId: recordedOperationId,
+      );
       _showSnackBar('已记录检测框反馈');
     } catch (error) {
       if (!mounted) return;
@@ -2914,6 +2923,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   void _recordMarkHistory(
     Iterable<DetectionItem> items, {
     String? quickMarkSpeciesName,
+    String? feedbackOperationId,
   }) {
     final itemsByPath = <String, DetectionItem>{};
     for (final item in items) {
@@ -2925,6 +2935,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _markHistory.add(
       _MarkHistoryEntry(
         itemsByPath.values,
+        feedbackOperationId: feedbackOperationId,
         quickMarkSpecies: quickMarkSpeciesName == null
             ? const <String>[]
             : _splitSpeciesNames(quickMarkSpeciesName),
@@ -2988,6 +2999,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final quickMarkSpeciesToUndo = List<String>.from(
       _markHistory.last.quickMarkSpecies,
     );
+    final feedbackOperationId = _markHistory.last.feedbackOperationId?.trim();
 
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, targets);
@@ -2996,6 +3008,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _setMarking(true);
     try {
       final updatedItems = await widget.onMarkItems(targets, 'unverified');
+      if (feedbackOperationId != null && feedbackOperationId.isNotEmpty) {
+        final classificationModelPath =
+            widget.classificationModelPath?.trim() ?? '';
+        if (classificationModelPath.isEmpty) {
+          throw StateError('缺少 DINOv3 分类模型路径，无法撤回学习反馈。');
+        }
+        await widget.apiClient.revertDinoV3Feedback(
+          classificationModelPath: classificationModelPath,
+          feedbackOperationId: feedbackOperationId,
+        );
+      }
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
       final targetPaths = targets.map((item) => item.path).toSet();
