@@ -253,33 +253,33 @@ Incremental learning operates on independent event embeddings and never performs
 
 ### Candidate
 
-- fewer than 4 independent confirmed events, or registration conditions not yet met
+- fewer than 4 independent human-confirmed events
 - does not enter the classifier bank
 - remains available for clustering and human review
 
 ### Provisional
 
 - at least 4 independent human-confirmed events
-- produces one overlay prototype
+- produces exactly one overlay prototype
 - may provide assistive recognition
 - never returns `accepted = true`
 
 ### Confirmed
 
-- at least 10 diverse independent events
-- requires at least 2 cameras or equivalent diversity evidence already represented by the registry's registration policy
+- at least 10 independent human-confirmed events
+- observations must span at least 2 distinct cameras
 - becomes a formal Known species
 - may maintain 1 or 2 stable prototypes
 - returns `accepted = true` when its winning prototype meets threshold
 
 ### Mature
 
-- at least 20 independent events
-- requires at least 3 cameras or equivalent diversity evidence represented by the registry policy
+- at least 20 independent human-confirmed events
+- observations must span at least 3 distinct cameras
 - remains a formal Known species
 - may maintain up to 3 stable prototypes
 
-The number of prototypes is a maximum, not a mandatory count. A Mature species may remain at one or two prototypes if additional stable subclusters are not supported.
+The number of prototypes is a maximum, not a mandatory count. A Confirmed or Mature species keeps fewer prototypes unless a larger deterministic split passes the support and separation criteria below.
 
 ## 10. K=3 overlay prototype maintenance
 
@@ -297,28 +297,41 @@ When an entry is promoted into the classifier overlay:
 
 1. load the confirmed event embeddings
 2. transform each event embedding into the base classifier space with `z = x - feature_center`
-3. choose a deterministic cluster count from 1 to the status-specific maximum
-4. compute prototype centroids as arithmetic means in centered feature space
-5. do not L2-normalize the stored centroid solely for Euclidean classification
-6. use cosine normalization only when computing the rejection score
+3. evaluate deterministic cluster counts from the status-specific maximum down to 1
+4. initialize multi-cluster candidates by deterministic farthest-first selection, then run deterministic assignment/update iterations
+5. compute each prototype centroid as the arithmetic mean of the centered event embeddings assigned to that cluster
+6. do not L2-normalize the stored centroid solely for Euclidean classification
+7. use normalization only inside cosine rejection-score calculation
+8. choose the largest candidate cluster count that satisfies every support and separation rule
 
 Cluster count limits:
 
-- Provisional: maximum 1
+- Provisional: exactly 1
 - Confirmed: maximum 2
 - Mature: maximum 3
 
-The clustering algorithm must be deterministic. It may use deterministic K-means or deterministic farthest-first initialization followed by deterministic assignment/update. A new cluster must have sufficient independent-event support; unsupported tiny clusters are rejected and the entry falls back to fewer prototypes.
+For `k > 1`, a split is valid only when:
 
-Exact support criteria must be deterministic and covered by tests; they must not permit a single anomalous event to create a new prototype.
+- every cluster contains at least 4 independent events
+- every pair of resulting centroids has cosine similarity `<= 0.98`
+
+If a candidate `k` fails either rule, try `k-1`. If all multi-cluster candidates fail, use one prototype.
+
+These rules deliberately extend the current `deterministic_two_means` behavior, which already rejects clusters with fewer than four events and centroids whose cosine similarity exceeds 0.98. A single anomalous event therefore cannot create an additional prototype.
 
 ## 11. Registration duplicate protection
 
-Before a Candidate is registered as a new species, Neri must check its human-confirmed events against the current formal bank.
+Before a Candidate becomes Provisional, Neri must classify all of its human-confirmed independent events against the current formal bank.
 
-If a substantial and stable share of those events is already formally accepted as an existing base/Confirmed/Mature species, registration is blocked and the UI instructs the user to verify whether the candidate is actually an existing species.
+Registration is blocked as a duplicate when all of the following hold:
 
-This guard prevents duplicate species creation without introducing a new arbitrary runtime distance margin.
+- the Candidate has at least 4 human-confirmed independent events
+- at least 80% of those events are formally accepted
+- the same existing base/Confirmed/Mature species accounts for that accepted >=80% share
+
+When blocked, the UI identifies the conflicting existing species and asks the user to verify whether the Candidate is actually that known species.
+
+This guard prevents duplicate species creation without adding a new runtime distance-margin hyperparameter.
 
 ## 12. Conflict resolution
 
@@ -410,9 +423,11 @@ classifier.manifest
 files[]
 ```
 
-`files[]` lists every integrity-controlled component file other than `install.json` itself, with at least relative path, SHA-256, and optional size. This permits local health checks without needing live NeriCloud access.
+`files[]` lists every integrity-controlled component file other than `install.json` itself, with at least relative path and SHA-256; size may also be recorded. This permits local health checks without needing live NeriCloud access.
 
 The classifier section for the supplied base model must identify `multi_prototype.pt` and SHA-256 `4bb63f224a11e318c9a3586006146cad94a4df95f3dd5fe6157963aeafe0ab43`.
+
+A successful mirror activation requires the staged path set, excluding transient files created by the installer itself, to equal the authoritative recursively enumerated NeriCloud path set. This is what enforces deletion of local extra files.
 
 ## 16. Local health and cloud synchronization state
 
@@ -569,13 +584,14 @@ If the base checkpoint changes and therefore its SHA-256 changes:
 - Candidate is excluded from classifier bank
 - four qualifying events produce Provisional with one prototype
 - Provisional is assistive only
-- ten diverse events can promote to Confirmed with at most two prototypes
-- twenty diverse events can promote to Mature with at most three prototypes
+- Confirmed requires at least 10 events and 2 cameras
+- Mature requires at least 20 events and 3 cameras
 - deterministic clustering returns repeatable prototypes
-- tiny/anomalous subcluster does not create a new prototype
+- no cluster with fewer than four events is accepted
+- no multi-cluster split with centroid cosine similarity above 0.98 is accepted
 - Confirmed/Mature prototypes join the formal bank
 - Provisional never overrides an accepted formal match
-- duplicate-registration guard blocks a candidate consistently matching an existing formal species
+- duplicate registration is blocked when one existing formal species accepts at least 80% of at least four confirmed candidate events
 
 ### Synchronization tests
 
@@ -583,6 +599,7 @@ If the base checkpoint changes and therefore its SHA-256 changes:
 - cloud-added files appear locally
 - cloud-modified files replace local versions
 - cloud-deleted/local-extra files disappear after successful sync
+- authoritative path-set equality is enforced
 - `files[]` integrity is enforced
 - failed download/hash/schema/import leaves prior local component untouched
 - post-activation failure restores backup
@@ -617,11 +634,12 @@ The feature is complete when:
 4. Linear Head logits no longer participate in production DINOv3 classification.
 5. Base inference uses centered features, squared Euclidean nearest-prototype selection, and cosine rejection exactly as declared by the checkpoint.
 6. The supplied 17 base species expose three base prototypes each.
-7. New species can progress Candidate -> Provisional -> Confirmed -> Mature without gradient training.
-8. Overlay species maintain at most K=3 prototypes.
+7. New species can progress Candidate -> Provisional -> Confirmed -> Mature without gradient training under the fixed 4-event, 10-event/2-camera, and 20-event/3-camera lifecycle.
+8. Overlay species maintain at most K=3 prototypes, with every multi-prototype cluster supported by at least four events and centroid cosine separation <= 0.98.
 9. Provisional matches are assistive only; Confirmed/Mature matches can be formally accepted.
-10. Local learned species survive DINOv3 repair, removal, and reinstall when the same checkpoint fingerprint is active.
-11. A changed checkpoint fingerprint never silently consumes the previous overlay registry.
-12. Failed cloud synchronization cannot destroy a previously healthy local component.
-13. Removing DINOv3 does not remove PyTorch, YOLO dependencies, or learned registry data.
-14. Python, Flutter, and Windows packaging regression checks pass.
+10. Duplicate registration is blocked under the fixed >=80% same-formal-species rule.
+11. Local learned species survive DINOv3 repair, removal, and reinstall when the same checkpoint fingerprint is active.
+12. A changed checkpoint fingerprint never silently consumes the previous overlay registry.
+13. Failed cloud synchronization cannot destroy a previously healthy local component.
+14. Removing DINOv3 does not remove PyTorch, YOLO dependencies, or learned registry data.
+15. Python, Flutter, and Windows packaging regression checks pass.
