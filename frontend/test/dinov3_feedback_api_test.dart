@@ -41,6 +41,7 @@ void main() {
             'affected_species': <String>['盘羊'],
           }),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
@@ -84,6 +85,7 @@ void main() {
             'affected_species': <String>['家牛', '盘羊'],
           }),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
@@ -116,6 +118,7 @@ void main() {
             'affected_species': <String>['盘羊'],
           }),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
