@@ -3242,9 +3242,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         if (action == 'unverified') {
           _discardMarkHistoryForPaths({item.path});
         } else {
-          _recordMarkHistory(<DetectionItem>[
-            updated,
-          ], quickMarkSpeciesName: usedQuickSpecies);
+          _recordMarkHistory(
+            <DetectionItem>[updated],
+            quickMarkSpeciesName: usedQuickSpecies,
+            feedbackOperationId: feedbackOperationId,
+          );
         }
         final targetPath = targetItem.path;
         _selectedPath = targetPath;
