@@ -71,15 +71,18 @@ void main() {
       find.descendant(of: viewer, matching: find.byType(Image)),
       findsOneWidget,
     );
-    final tapUpGestures = tester
-        .widgetList<GestureDetector>(
-          find.descendant(of: viewer, matching: find.byType(GestureDetector)),
-        )
-        .where((gesture) => gesture.onTapUp != null)
-        .toList();
-    expect(tapUpGestures, isNotEmpty);
+    final selectableGesture = find.descendant(
+      of: viewer,
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is GestureDetector &&
+            widget.behavior == HitTestBehavior.translucent &&
+            widget.onTapUp != null,
+      ),
+    );
+    expect(selectableGesture, findsOneWidget);
 
-    await tester.tapAt(tester.getCenter(viewer));
+    await tester.tapAt(tester.getCenter(selectableGesture));
     await tester.pump();
 
     expect(callbackCalled, isTrue);
