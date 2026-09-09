@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 from system.model_sync.layout import get_model_layout
 
+from .checkpoint import CheckpointValidationError, load_checkpoint
+
 DINO_COMPONENT_VERSION = 2
 DINO_ARCHITECTURE = "DINOv3 ViT-B/16"
 DINO_ARCHITECTURE_ID = "dinov3_vitb16"
@@ -246,7 +248,6 @@ def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict
     items = install_manifest.get("files")
     if not isinstance(items, list) or not items:
         raise ValueError("DINOv3 install.json files 必须是完整的非空文件清单。")
-
     declared: dict[str, dict[str, Any]] = {}
     root = paths.root.resolve()
     for item in items:
@@ -265,8 +266,7 @@ def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict
         if candidate.is_symlink():
             raise ValueError(f"DINOv3 install.json files 不允许符号链接: {relative}")
         try:
-            resolved = candidate.resolve()
-            resolved.relative_to(root)
+            candidate.resolve().relative_to(root)
         except (OSError, ValueError) as exc:
             raise ValueError(f"DINOv3 install.json files 包含不安全路径: {relative}") from exc
         if not candidate.is_file():
@@ -276,7 +276,6 @@ def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict
         if _sha256_file(candidate).lower() != raw_sha.lower():
             raise ValueError(f"DINOv3 install.json files SHA-256 不匹配: {relative}")
         declared[relative] = item
-
     actual = {
         path.relative_to(paths.root).as_posix()
         for path in paths.root.rglob("*")
@@ -308,7 +307,6 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
     missing = [path.relative_to(paths.root).as_posix() for path in required_files if not path.is_file()]
     if missing:
         return False, "DINOv3 安装不完整，缺少: " + "、".join(missing[:4])
-
     try:
         install_manifest = _read_json_object(paths.install_manifest)
         if install_manifest.get("schema_version") != 1:
@@ -338,9 +336,7 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
             return False, "DINOv3 classifier selection_k 不匹配。"
         if classifier_meta.get("manifest") != DINO_MODEL_MANIFEST_FILENAME:
             return False, "DINOv3 classifier manifest 不匹配。"
-
         _validate_file_inventory(paths, install_manifest)
-
         model_manifest = _read_json_object(paths.model_manifest)
         if model_manifest.get("schema_version") != 1 or model_manifest.get("backend") != "dinov3":
             return False, "DINOv3 模型 manifest 不受支持。"
@@ -357,6 +353,12 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
         return False, "DINOv3 backbone SHA-256 校验失败。"
     if _sha256_file(paths.classifier).lower() != DINO_CLASSIFIER_SHA256:
         return False, "DINOv3 classifier SHA-256 校验失败。"
+    try:
+        checkpoint = load_checkpoint(paths.classifier)
+    except (CheckpointValidationError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        return False, f"DINOv3 checkpoint 校验失败: {exc}"
+    if checkpoint.head_type != "multi_prototype" or checkpoint.selection_k != 3:
+        return False, "DINOv3 checkpoint 必须使用 K=3 Multi-prototype。"
     return True, "DINOv3 ViT-B/16 Multi-prototype 已安装。"
 
 
@@ -401,7 +403,6 @@ def install_dinov3_component(
     ``seed_dir`` is accepted only for call-site compatibility with older Neri
     builds. Strict mirror installation deliberately ignores it.
     """
-
     del seed_dir
     target = _component_root(root)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -418,13 +419,11 @@ def install_dinov3_component(
     try:
         progress(10, "正在同步 NeriCloud DINOv3 组件...")
         cloud.download_tree("", stage)
-
         progress(75, "正在校验 DINOv3 镜像完整性...")
         staged_paths = dinov3_component_paths(root=stage)
         healthy, message = _component_health(staged_paths)
         if not healthy:
             raise RuntimeError(message)
-
         _remove_path(backup)
         if had_previous:
             target.rename(backup)
@@ -435,7 +434,6 @@ def install_dinov3_component(
             if backup.exists() and not target.exists():
                 backup.rename(target)
             raise
-
         progress(90, "正在验证已激活的 DINOv3 组件...")
         active_paths = dinov3_component_paths(root=target)
         active_healthy, active_message = _component_health(active_paths)
@@ -445,7 +443,6 @@ def install_dinov3_component(
             if backup.exists():
                 backup.rename(target)
             raise RuntimeError(active_message)
-
         _remove_path(backup)
         progress(100, "DINOv3 ViT-B/16 同步完成。")
         return target
