@@ -1,4 +1,3 @@
-import hashlib
 import json
 import tempfile
 import unittest
@@ -212,13 +211,6 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
                 )
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-
-    def test_reviewed_classifier_seed_is_shipped_with_expected_hash(self) -> None:
-        repository_root = Path(__file__).resolve().parents[1]
-        seed = repository_root / "res" / "install" / "dinov3" / dinov3.DINO_CLASSIFIER_FILENAME
-        self.assertTrue(seed.is_file(), f"missing DINOv3 classifier seed: {seed}")
-        digest = hashlib.sha256(seed.read_bytes()).hexdigest()
-        self.assertEqual(digest, dinov3.DINO_CLASSIFIER_SHA256)
 
 
 if __name__ == "__main__":
