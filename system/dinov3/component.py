@@ -51,23 +51,13 @@ class DinoV3CloudClient:
     """Small OpenList client scoped to Neri's DINOv3 component directory."""
 
     def __init__(self, origin: str | None = None, *, opener=None):
-        configured = (
-            origin
-            or os.environ.get(DINO_CLOUD_ORIGIN_ENV)
-            or DINO_DEFAULT_CLOUD_ORIGIN
-        )
+        configured = origin or os.environ.get(DINO_CLOUD_ORIGIN_ENV) or DINO_DEFAULT_CLOUD_ORIGIN
         parsed = urllib.parse.urlsplit(configured.strip())
         if parsed.scheme not in {"https", "http"} or not parsed.hostname:
             raise ValueError("DINOv3 NeriCloud 地址无效。")
-        if parsed.scheme != "https" and parsed.hostname not in {
-            "localhost",
-            "127.0.0.1",
-            "::1",
-        }:
+        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("DINOv3 NeriCloud 必须使用 HTTPS。")
-        self.origin = urllib.parse.urlunsplit(
-            (parsed.scheme, parsed.netloc, "", "", "")
-        ).rstrip("/")
+        self.origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
         self.opener = opener or urllib.request.urlopen
 
     @staticmethod
@@ -76,10 +66,7 @@ class DinoV3CloudClient:
         if not raw:
             return ()
         parts = PurePosixPath(raw).parts
-        if any(
-            part in {"", ".", ".."} or "/" in part or "\\" in part
-            for part in parts
-        ):
+        if any(part in {"", ".", ".."} or "/" in part or "\\" in part for part in parts):
             raise ValueError("DINOv3 NeriCloud 路径无效。")
         return tuple(parts)
 
@@ -93,16 +80,13 @@ class DinoV3CloudClient:
         request = urllib.request.Request(
             self.origin + endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Neri DINOv3 component installer",
-            },
+            headers={"Content-Type": "application/json", "User-Agent": "Neri DINOv3 component installer"},
             method="POST",
         )
         try:
             with self.opener(request, timeout=30) as response:
                 raw = response.read(8 * 1024 * 1024 + 1)
-        except Exception as exc:  # noqa: BLE001 - normalize remote/network errors
+        except Exception as exc:
             raise DinoV3CloudError(f"NeriCloud 请求失败: {endpoint}") from exc
         if len(raw) > 8 * 1024 * 1024:
             raise DinoV3CloudError("NeriCloud API 响应过大。")
@@ -114,13 +98,7 @@ class DinoV3CloudClient:
             raise DinoV3CloudError("NeriCloud API 响应格式无效。")
         code = value.get("code")
         if code not in (None, 0, 200):
-            raise DinoV3CloudError(
-                str(
-                    value.get("message")
-                    or value.get("msg")
-                    or f"NeriCloud error {code}"
-                )
-            )
+            raise DinoV3CloudError(str(value.get("message") or value.get("msg") or f"NeriCloud error {code}"))
         data = value.get("data")
         if not isinstance(data, dict):
             raise DinoV3CloudError("NeriCloud API 缺少 data。")
@@ -129,57 +107,34 @@ class DinoV3CloudClient:
     def list_directory(self, relative_path: str) -> list[dict[str, Any]]:
         data = self._post_json(
             "/api/fs/list",
-            {
-                "path": self.mount_path(relative_path),
-                "password": "",
-                "page": 1,
-                "per_page": 0,
-                "refresh": False,
-            },
+            {"path": self.mount_path(relative_path), "password": "", "page": 1, "per_page": 0, "refresh": False},
         )
         content = data.get("content")
         if content is None:
             return []
-        if not isinstance(content, list) or not all(
-            isinstance(item, dict) for item in content
-        ):
+        if not isinstance(content, list) or not all(isinstance(item, dict) for item in content):
             raise DinoV3CloudError("NeriCloud 目录列表格式无效。")
         return content
 
     def _file_link(self, relative_path: str) -> tuple[str, dict[str, str]]:
-        data = self._post_json(
-            "/api/fs/link",
-            {"path": self.mount_path(relative_path), "password": ""},
-        )
+        data = self._post_json("/api/fs/link", {"path": self.mount_path(relative_path), "password": ""})
         url = data.get("url") or data.get("download_url") or data.get("raw_url")
         headers = data.get("header") or data.get("headers") or {}
         if not isinstance(url, str) or not url.strip():
-            raise DinoV3CloudError(
-                f"NeriCloud 未返回下载链接: {relative_path}"
-            )
+            raise DinoV3CloudError(f"NeriCloud 未返回下载链接: {relative_path}")
         url = url.strip()
         if url.startswith("//"):
             url = urllib.parse.urlsplit(self.origin).scheme + ":" + url
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {"https", "http"} or not parsed.hostname:
             raise DinoV3CloudError("NeriCloud 下载链接无效。")
-        if parsed.scheme != "https" and parsed.hostname not in {
-            "localhost",
-            "127.0.0.1",
-            "::1",
-        }:
+        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise DinoV3CloudError("NeriCloud 下载链接必须使用 HTTPS。")
         safe_headers: dict[str, str] = {}
         if isinstance(headers, dict):
             for key, value in headers.items():
                 name = str(key)
-                if name.lower() in {
-                    "user-agent",
-                    "referer",
-                    "cookie",
-                    "authorization",
-                    "accept",
-                }:
+                if name.lower() in {"user-agent", "referer", "cookie", "authorization", "accept"}:
                     safe_headers[name] = str(value)
         safe_headers.setdefault("User-Agent", "Neri DINOv3 component installer")
         return url, safe_headers
@@ -198,11 +153,7 @@ class DinoV3CloudClient:
         temp.unlink(missing_ok=True)
         try:
             with self.opener(request, timeout=90) as response, temp.open("wb") as output:
-                raw_total = (
-                    response.headers.get("Content-Length")
-                    if hasattr(response, "headers")
-                    else None
-                )
+                raw_total = response.headers.get("Content-Length") if hasattr(response, "headers") else None
                 total = int(raw_total) if raw_total and str(raw_total).isdigit() else None
                 received = 0
                 while True:
@@ -228,38 +179,18 @@ class DinoV3CloudClient:
         target.mkdir(parents=True, exist_ok=True)
         for item in self.list_directory(relative_path):
             name = item.get("name")
-            if (
-                not isinstance(name, str)
-                or not name
-                or name in {".", ".."}
-                or "/" in name
-                or "\\" in name
-            ):
+            if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
                 raise DinoV3CloudError("NeriCloud 返回了不安全的文件名。")
-            child_relative = "/".join(
-                filter(None, (relative_path.strip("/"), name))
-            )
+            child_relative = "/".join(filter(None, (relative_path.strip("/"), name)))
             child_target = target / name
             if bool(item.get("is_dir")):
-                self.download_tree(
-                    child_relative,
-                    child_target,
-                    on_progress=on_progress,
-                )
+                self.download_tree(child_relative, child_target, on_progress=on_progress)
             else:
-                self.download_file(
-                    child_relative,
-                    child_target,
-                    on_progress=on_progress,
-                )
+                self.download_file(child_relative, child_target, on_progress=on_progress)
 
 
 def _component_root(root: Path | None = None) -> Path:
-    return (
-        Path(root).resolve()
-        if root is not None
-        else get_model_layout().dinov3_root
-    )
+    return Path(root).resolve() if root is not None else get_model_layout().dinov3_root
 
 
 def dinov3_component_paths(*, root: Path | None = None) -> DinoV3ComponentPaths:
@@ -297,6 +228,72 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def _inventory_path(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw or raw != raw.strip() or "\\" in raw:
+        raise ValueError("DINOv3 install.json files 包含不安全路径。")
+    if raw.startswith("/") or raw.endswith("/") or "//" in raw:
+        raise ValueError("DINOv3 install.json files 包含不安全路径。")
+    pure = PurePosixPath(raw)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise ValueError("DINOv3 install.json files 包含不安全路径。")
+    normalized = pure.as_posix()
+    if normalized == "install.json":
+        raise ValueError("DINOv3 install.json files 不应包含 install.json。")
+    return normalized
+
+
+def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict[str, Any]) -> None:
+    items = install_manifest.get("files")
+    if not isinstance(items, list) or not items:
+        raise ValueError("DINOv3 install.json files 必须是完整的非空文件清单。")
+
+    declared: dict[str, dict[str, Any]] = {}
+    root = paths.root.resolve()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("DINOv3 install.json files 条目格式无效。")
+        relative = _inventory_path(item.get("path"))
+        if relative in declared:
+            raise ValueError(f"DINOv3 install.json files 包含重复路径: {relative}")
+        raw_sha = item.get("sha256")
+        if not isinstance(raw_sha, str) or len(raw_sha) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in raw_sha):
+            raise ValueError(f"DINOv3 install.json files SHA-256 无效: {relative}")
+        size = item.get("size")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            raise ValueError(f"DINOv3 install.json files size 无效: {relative}")
+        candidate = paths.root.joinpath(*PurePosixPath(relative).parts)
+        if candidate.is_symlink():
+            raise ValueError(f"DINOv3 install.json files 不允许符号链接: {relative}")
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"DINOv3 install.json files 包含不安全路径: {relative}") from exc
+        if not candidate.is_file():
+            raise ValueError(f"DINOv3 install.json files 缺少文件: {relative}")
+        if size is not None and candidate.stat().st_size != size:
+            raise ValueError(f"DINOv3 install.json files size 不匹配: {relative}")
+        if _sha256_file(candidate).lower() != raw_sha.lower():
+            raise ValueError(f"DINOv3 install.json files SHA-256 不匹配: {relative}")
+        declared[relative] = item
+
+    actual = {
+        path.relative_to(paths.root).as_posix()
+        for path in paths.root.rglob("*")
+        if path.is_file() and path != paths.install_manifest
+    }
+    declared_paths = set(declared)
+    if actual != declared_paths:
+        missing_from_manifest = sorted(actual - declared_paths)
+        missing_from_disk = sorted(declared_paths - actual)
+        details: list[str] = []
+        if missing_from_manifest:
+            details.append("未列出: " + "、".join(missing_from_manifest[:4]))
+        if missing_from_disk:
+            details.append("缺失: " + "、".join(missing_from_disk[:4]))
+        raise ValueError("DINOv3 install.json files 未覆盖完整镜像" + ("（" + "；".join(details) + "）" if details else "。"))
+
+
 def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
     required_files = (
         paths.source_package / "__init__.py",
@@ -308,11 +305,7 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
         paths.license,
         paths.install_manifest,
     )
-    missing = [
-        path.relative_to(paths.root).as_posix()
-        for path in required_files
-        if not path.is_file()
-    ]
+    missing = [path.relative_to(paths.root).as_posix() for path in required_files if not path.is_file()]
     if missing:
         return False, "DINOv3 安装不完整，缺少: " + "、".join(missing[:4])
 
@@ -346,11 +339,10 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
         if classifier_meta.get("manifest") != DINO_MODEL_MANIFEST_FILENAME:
             return False, "DINOv3 classifier manifest 不匹配。"
 
+        _validate_file_inventory(paths, install_manifest)
+
         model_manifest = _read_json_object(paths.model_manifest)
-        if (
-            model_manifest.get("schema_version") != 1
-            or model_manifest.get("backend") != "dinov3"
-        ):
+        if model_manifest.get("schema_version") != 1 or model_manifest.get("backend") != "dinov3":
             return False, "DINOv3 模型 manifest 不受支持。"
         if model_manifest.get("architecture") != DINO_ARCHITECTURE_ID:
             return False, "DINOv3 模型 architecture 不匹配。"
@@ -414,9 +406,7 @@ def install_dinov3_component(
     target = _component_root(root)
     target.parent.mkdir(parents=True, exist_ok=True)
     cloud = cloud_client or DinoV3CloudClient()
-    stage = Path(
-        tempfile.mkdtemp(prefix=".DINOv3-sync-", dir=str(target.parent))
-    ).resolve()
+    stage = Path(tempfile.mkdtemp(prefix=".DINOv3-sync-", dir=str(target.parent))).resolve()
     backup = target.parent / ".DINOv3-backup"
 
     def progress(value: int, message: str) -> None:
@@ -427,8 +417,6 @@ def install_dinov3_component(
     had_previous = target.exists() or target.is_symlink()
     try:
         progress(10, "正在同步 NeriCloud DINOv3 组件...")
-        # The remote root is authoritative. No local seed or manifest rewrite
-        # is allowed inside the mirrored component directory.
         cloud.download_tree("", stage)
 
         progress(75, "正在校验 DINOv3 镜像完整性...")
@@ -469,11 +457,8 @@ def install_dinov3_component(
         raise
     finally:
         _remove_path(stage)
-        # A successful activation deletes backup above. Pre-activation errors
-        # never create it; swap errors restore it. Do not remove a backup here.
 
 
 def remove_dinov3_component(*, root: Path | None = None) -> None:
     """Remove mirrored DINOv3 assets without touching shared or learned state."""
-
     _remove_path(_component_root(root))
