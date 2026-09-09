@@ -911,6 +911,35 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
+  Future<void> _showDinoBoxSpeciesDialog(DetectionBox box) async {
+    if (_marking) return;
+    final predictedSpecies = box.predictedSpecies?.trim() ?? '';
+    final initialSpecies = predictedSpecies.isNotEmpty
+        ? predictedSpecies
+        : box.species.trim();
+    final draft = await showDialog<_OtherSpeciesDraft>(
+      context: context,
+      builder: (context) {
+        return _OtherSpeciesDialog(
+          initialSpecies: initialSpecies,
+          initialCount: '1',
+          initialType: widget.speciesTypes[initialSpecies] ?? '',
+          initialRemark: '',
+          speciesTypes: widget.speciesTypes,
+          speciesUsageCounts: _speciesUsageCounts(),
+        );
+      },
+    );
+    if (!mounted || draft == null) return;
+    final speciesName = draft.speciesName.trim();
+    if (speciesName.isEmpty) return;
+    await _submitDinoBoxFeedback(
+      box,
+      'update',
+      speciesName: speciesName,
+    );
+  }
+
   Widget _buildDinoFeedbackPanel(DetectionBox box) {
     const title = '检测框校验';
     final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
@@ -938,7 +967,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               child: const Text('正确'),
             ),
             const SizedBox(width: 8),
-            OutlinedButton(onPressed: null, child: const Text('修改物种')),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_showDinoBoxSpeciesDialog(box))
+                  : null,
+              child: const Text('修改物种'),
+            ),
             const SizedBox(width: 8),
             OutlinedButton(
               onPressed: canSubmit
