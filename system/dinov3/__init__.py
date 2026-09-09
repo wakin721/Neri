@@ -7,14 +7,20 @@ from .checkpoint import (
     load_checkpoint,
     validate_checkpoint,
 )
-from .component import dinov3_component_status
+from .component import (
+    DinoV3ComponentPaths,
+    dinov3_component_paths,
+    dinov3_component_status,
+)
 
 __all__ = [
     "DINO_BACKBONE",
     "DINO_FEATURE_DIM",
     "CheckpointValidationError",
     "DinoV3Checkpoint",
+    "DinoV3ComponentPaths",
     "load_checkpoint",
     "validate_checkpoint",
+    "dinov3_component_paths",
     "dinov3_component_status",
 ]
