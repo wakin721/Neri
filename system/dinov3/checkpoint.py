@@ -30,25 +30,25 @@ class DinoV3Checkpoint:
     backbone: str
     feature_dim: int
     classes: tuple[str, ...]
-    head_type: str
-    feature_center: Any
+    head_weight: Any
+    head_bias: Any
     prototypes: Any
-    prototype_class_indices: Any
-    prototypes_per_class: tuple[int, ...]
-    selection_k: int
-    decision: str
-    rejection_score: str
     threshold: float
     encoder_weights: str
     encoder_sha256: str
-    encoder_code_commit: str
     preprocessing: str
     event_aggregation: str
     fingerprint: str
-    # Temporary compatibility fields for the pre-migration classifier. They
-    # are never required by the Multi-prototype checkpoint format.
-    head_weight: Any | None = None
-    head_bias: Any | None = None
+    # New Multi-prototype fields are defaulted so older helpers that construct
+    # this value object directly keep working during the migration.
+    head_type: str = "linear"
+    feature_center: Any | None = None
+    prototype_class_indices: Any | None = None
+    prototypes_per_class: tuple[int, ...] = ()
+    selection_k: int = 1
+    decision: str = "linear_head_with_prototype_consistency"
+    rejection_score: str = "cosine_similarity_to_nearest_prototype"
+    encoder_code_commit: str = ""
 
 
 def _require_torch():
@@ -338,23 +338,23 @@ def validate_checkpoint(
         backbone=backbone,
         feature_dim=DINO_FEATURE_DIM,
         classes=classes,
+        head_weight=weight,
+        head_bias=bias,
+        prototypes=prototypes,
+        threshold=threshold,
+        encoder_weights=encoder_weights,
+        encoder_sha256=encoder_sha256,
+        preprocessing=preprocessing,
+        event_aggregation=aggregation,
+        fingerprint=fingerprint or _payload_fingerprint(saved),
         head_type=head_type,
         feature_center=feature_center,
-        prototypes=prototypes,
         prototype_class_indices=indices,
         prototypes_per_class=counts,
         selection_k=selection_k,
         decision=decision,
         rejection_score=rejection_score,
-        threshold=threshold,
-        encoder_weights=encoder_weights,
-        encoder_sha256=encoder_sha256,
         encoder_code_commit=encoder_code_commit,
-        preprocessing=preprocessing,
-        event_aggregation=aggregation,
-        fingerprint=fingerprint or _payload_fingerprint(saved),
-        head_weight=weight,
-        head_bias=bias,
     )
 
 
