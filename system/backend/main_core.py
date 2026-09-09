@@ -21,7 +21,6 @@ from system.dinov3.api import dinov3_registry_router
 from . import __version__
 from .crash_logging import configure_backend_crash_logging
 from .debug_info import clear_debug_storage, installed_packages, list_debug_logs, read_debug_log, runtime_diagnostics
-from .dinov3_environment import dinov3_environment_router
 from .models import (
     ClearCacheRequest,
     ClearCacheResponse,
@@ -100,12 +99,11 @@ async def app_lifespan(_app):
 app = FastAPI(
     title="Neri API",
     version=__version__,
-    description="Python backend that exposes Neri infrared-camera processing capabilities to the Flutter Material 3 UI.",
+    description="Python backend that exposes Neri infrared-camera processing capabilities to a Flutter Material 3 UI.",
     lifespan=app_lifespan,
 )
 app.include_router(privacy_router(get_queue))
 app.include_router(dinov3_registry_router())
-app.include_router(dinov3_environment_router())
 
 app.add_middleware(
     CORSMiddleware,
@@ -158,6 +156,9 @@ def _start_parent_watchdog() -> None:
         infinite = 0xFFFFFFFF
         handle = kernel32.OpenProcess(synchronize, False, parent_pid)
         if not handle:
+            # ERROR_INVALID_PARAMETER means the parent PID no longer exists.
+            # Other failures, such as access-denied across integrity levels,
+            # should not make the backend immediately exit after startup.
             if ctypes.get_last_error() == 87:
                 os._exit(0)
             return
@@ -189,17 +190,23 @@ _start_parent_watchdog()
 
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> HealthResponse:
+    """Return a simple readiness response for the frontend."""
+
     return HealthResponse(version=__version__)
 
 
 @app.post("/api/shutdown")
 def shutdown(background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Schedule the local backend to exit after the response is flushed."""
+
     background_tasks.add_task(schedule_backend_shutdown, 0.2)
     return {"status": "shutting_down"}
 
 
 @app.post("/api/debug/simulate-crash")
 def simulate_backend_crash(background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Schedule a non-zero backend exit for crash-report testing."""
+
     background_tasks.add_task(_exit_with_simulated_crash, 0.2)
     return {"status": "simulated_crash_scheduled"}
 
@@ -214,6 +221,8 @@ def _exit_with_simulated_crash(delay: float) -> None:
 
 @app.get("/api/settings", response_model=SettingsResponse)
 def settings() -> SettingsResponse:
+    """Return Neri runtime settings and supported media formats."""
+
     stored_settings = settings_manager.load_settings() or {}
     stored_settings.setdefault("package_source", "auto")
     stored_settings.setdefault("update_source", "auto")
@@ -246,7 +255,9 @@ def settings() -> SettingsResponse:
     has_saved_model = "selected_model" in stored_settings
     saved_model = stored_settings.get("selected_model")
     if "selected_classification_model" in stored_settings:
-        saved_classification_model = stored_settings.get("selected_classification_model")
+        saved_classification_model = stored_settings.get(
+            "selected_classification_model"
+        )
     else:
         saved_classification_model = stored_settings.get("selected_cls_model")
     selected_model = None
@@ -289,6 +300,8 @@ def settings() -> SettingsResponse:
 
 @app.get("/api/models/classes", response_model=list[ModelClassInfo])
 def model_classes(model_path: str = Query(..., min_length=1)) -> list[ModelClassInfo]:
+    """Return the classes exposed by a selected YOLO model."""
+
     try:
         return list_model_classes(model_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -299,6 +312,8 @@ def model_classes(model_path: str = Query(..., min_length=1)) -> list[ModelClass
 
 @app.put("/api/settings", response_model=SettingsResponse)
 def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
+    """Persist advanced settings and return the refreshed settings snapshot."""
+
     current_settings = settings_manager.load_settings() or {}
     current_settings.update(request.settings)
     if not settings_manager.save_settings(current_settings):
@@ -323,6 +338,8 @@ def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
 
 @app.get("/api/environment/maintenance-status", response_model=MaintenanceStatusResponse)
 def maintenance_status() -> MaintenanceStatusResponse:
+    """Return the last environment-maintenance status."""
+
     return MaintenanceStatusResponse(**read_maintenance_status())
 
 
@@ -330,27 +347,37 @@ def maintenance_status() -> MaintenanceStatusResponse:
 def package_source(
     source: str = Query("auto", min_length=1, max_length=32),
 ) -> PackageSourceResponse:
+    """Resolve the configured Python package source for the current public IP."""
+
     source_key, source_label, _ = resolve_package_source(source)
     return PackageSourceResponse(source=source_key, label=source_label)
 
 
 @app.get("/api/environment/update-source", response_model=UpdateSourceResponse)
 def update_source() -> UpdateSourceResponse:
+    """Use the Python package detector for the desktop update download source."""
+
     return UpdateSourceResponse(mainland_china=is_mainland_china())
 
 
 @app.get("/api/debug/packages", response_model=list[InstalledPackageInfo])
 def debug_packages() -> list[InstalledPackageInfo]:
+    """Return installed Python packages for diagnostics."""
+
     return [InstalledPackageInfo(**item) for item in installed_packages()]
 
 
 @app.get("/api/debug/runtime", response_model=RuntimeDiagnostics)
 def debug_runtime() -> RuntimeDiagnostics:
+    """Return runtime PyTorch and GPU diagnostics."""
+
     return RuntimeDiagnostics(**runtime_diagnostics())
 
 
 @app.get("/api/debug/logs", response_model=list[DebugLogInfo])
 def debug_logs() -> list[DebugLogInfo]:
+    """Return software log files available for diagnostics."""
+
     return [DebugLogInfo(**item) for item in list_debug_logs()]
 
 
@@ -359,6 +386,8 @@ def debug_log_content(
     path: str = Query(..., min_length=1),
     max_bytes: int = Query(32_000, ge=1024, le=200_000),
 ) -> DebugLogContent:
+    """Return readable content for one whitelisted software log."""
+
     try:
         return DebugLogContent(**read_debug_log(path, max_bytes=max_bytes))
     except FileNotFoundError as exc:
@@ -369,6 +398,8 @@ def debug_log_content(
 
 @app.post("/api/debug/clear-cache", response_model=ClearCacheResponse)
 def clear_cache(request: ClearCacheRequest) -> ClearCacheResponse:
+    """Clear selected local logs and runtime cache files."""
+
     try:
         return ClearCacheResponse(
             **clear_debug_storage(
@@ -382,6 +413,8 @@ def clear_cache(request: ClearCacheRequest) -> ClearCacheResponse:
 
 @app.get("/api/environment/pytorch-install-plan", response_model=PytorchInstallPlanResponse)
 def pytorch_install_plan(env_choice: str = Query("自动检测", min_length=1)) -> PytorchInstallPlanResponse:
+    """Resolve PyTorch target and Intel driver preflight data."""
+
     try:
         plan = resolve_pytorch_install_plan(env_choice)
     except RuntimeError as exc:
@@ -391,6 +424,8 @@ def pytorch_install_plan(env_choice: str = Query("自动检测", min_length=1)) 
 
 @app.post("/api/environment/install-pytorch", response_model=MaintenanceStartResponse, status_code=202)
 def install_pytorch(request: InstallPytorchRequest, background_tasks: BackgroundTasks) -> MaintenanceStartResponse:
+    """Start PyTorch installation, then restart the Python backend."""
+
     try:
         status = start_pytorch_install(
             request.env_choice,
@@ -408,6 +443,8 @@ def install_yolo_dependencies(
     request: InstallYoloDependenciesRequest,
     background_tasks: BackgroundTasks,
 ) -> MaintenanceStartResponse:
+    """Install PyTorch and ultralytics, then restart the Python backend."""
+
     try:
         status = start_yolo_dependencies_install(
             request.env_choice,
@@ -425,6 +462,8 @@ def reinstall_package(
     request: ReinstallPackageRequest,
     background_tasks: BackgroundTasks,
 ) -> MaintenanceStartResponse:
+    """Force-reinstall one Python package, then restart the Python backend."""
+
     try:
         status = start_package_reinstall(request.package, request.package_source)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
@@ -433,71 +472,135 @@ def reinstall_package(
     return MaintenanceStartResponse(**status)
 
 
-@app.post("/api/jobs", response_model=JobSummary)
+@app.post("/api/jobs", response_model=JobSummary, status_code=202)
 def create_job(request: CreateJobRequest) -> JobSummary:
+    """Start an asynchronous folder processing job."""
+
+    if request.options.enable_detection:
+        missing = missing_yolo_dependencies()
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "missing_yolo_dependencies",
+                    "message": "缺少 YOLO 处理依赖，请先安装依赖后再开始识别。",
+                    "missing": missing,
+                },
+            )
+    return job_manager.create_job(request)
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=JobSummary)
+def cancel_job(job_id: str) -> JobSummary:
+    """Request cancellation for a queued or running processing job."""
+
     try:
-        return job_manager.create_job(request)
-    except (FileNotFoundError, ValueError) as exc:
+        return job_manager.cancel_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+
+@app.post("/api/jobs/{job_id}/resume", response_model=JobSummary, status_code=202)
+def resume_job(job_id: str) -> JobSummary:
+    """Resume an interrupted processing job in place."""
+
+    try:
+        return job_manager.resume_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/jobs/{job_id}", status_code=204)
+def delete_job(job_id: str) -> None:
+    """Delete one job from the progress list."""
+
+    try:
+        job_manager.delete_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+
+@app.delete("/api/jobs", status_code=204)
+def clear_jobs() -> None:
+    """Clear all jobs from the progress list."""
+
+    job_manager.clear_jobs()
+
+
+@app.get("/api/preview", response_model=list[DetectionItem])
+def preview(
+    input_path: str = Query(..., min_length=1),
+    output_dir: str | None = None,
+    include_cached: bool = True,
+) -> list[DetectionItem]:
+    """List previewable media and cached DB detections without starting a job."""
+
+    try:
+        return preview_media_items(input_path, output_dir, include_cached=include_cached)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/preview/item", response_model=DetectionItem)
+def preview_item(
+    file_path: str = Query(..., min_length=1),
+    input_path: str | None = None,
+    output_dir: str | None = None,
+) -> DetectionItem:
+    """Return full metadata for one preview item."""
+
+    try:
+        return preview_media_item(file_path, input_path, output_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/validation/mark", response_model=DetectionItem)
+def mark_validation(request: ValidationMarkRequest) -> DetectionItem:
+    """Persist one manual validation decision and return the refreshed item."""
+
+    try:
+        return mark_validation_item(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/validation/mark/batch", response_model=list[DetectionItem])
+def mark_validation_batch(request: ValidationBatchMarkRequest) -> list[DetectionItem]:
+    """Persist multiple manual validation decisions in one batch."""
+
+    try:
+        return mark_validation_items(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/validation/export", response_model=ValidationExportResponse)
+def export_validation(request: ValidationExportRequest) -> ValidationExportResponse:
+    """Export validation data using system.data_processor."""
+
+    try:
+        return export_validation_data(request)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/jobs", response_model=list[JobSummary])
+def list_jobs(include_results: bool = Query(True)) -> list[JobSummary]:
+    """List all jobs known to this backend process."""
+
+    return job_manager.list_jobs(include_results=include_results)
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobSummary)
 def get_job(job_id: str) -> JobSummary:
+    """Fetch progress and results for a single job."""
+
     try:
         return job_manager.get_job(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/jobs/{job_id}/cancel", response_model=JobSummary)
-def cancel_job(job_id: str) -> JobSummary:
-    try:
-        return job_manager.cancel_job(job_id)
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/jobs/{job_id}/preview", response_model=DetectionItem)
-def preview_item(job_id: str, index: int = Query(..., ge=0)) -> DetectionItem:
-    try:
-        return preview_media_item(job_manager.get_job(job_id), index)
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (IndexError, FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/jobs/{job_id}/previews", response_model=list[DetectionItem])
-def preview_items(job_id: str, start: int = Query(0, ge=0), count: int = Query(20, ge=1, le=100)) -> list[DetectionItem]:
-    try:
-        return preview_media_items(job_manager.get_job(job_id), start=start, count=count)
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (IndexError, FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/jobs/{job_id}/validation/mark", response_model=ValidationExportResponse)
-def mark_validation_item(request: ValidationMarkRequest, job_id: str) -> ValidationExportResponse:
-    try:
-        return ValidationExportResponse(**mark_validation_item(job_manager.get_job(job_id), request))
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/jobs/{job_id}/validation/mark-batch", response_model=ValidationExportResponse)
-def mark_validation_batch(request: ValidationBatchMarkRequest, job_id: str) -> ValidationExportResponse:
-    try:
-        return ValidationExportResponse(**mark_validation_items(job_manager.get_job(job_id), request))
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/jobs/{job_id}/validation/export", response_model=ValidationExportResponse)
-def export_validation(request: ValidationExportRequest, job_id: str) -> ValidationExportResponse:
-    try:
-        return ValidationExportResponse(**export_validation_data(job_manager.get_job(job_id), request))
-    except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Job not found") from exc
