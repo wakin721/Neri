@@ -99,13 +99,25 @@ jobs:
           if count != 1:
               raise SystemExit('Expected exactly one BASE_VERSION assignment')
           version.write_text(updated, encoding='utf-8')
+
+          contract = Path('tests/test_release_contract.py')
+          contract_text = contract.read_text(encoding='utf-8')
+          contract_text, count = re.subn(
+              r'def test_release_version_is_beta1_with_valid_build_number\(self\):\n\s+self\.assertEqual\(BASE_VERSION, "3\.0\.6-beta1"\)',
+              'def test_nightly_version_is_alpha1_with_valid_build_number(self):\n        self.assertEqual(BASE_VERSION, "3.1.0-alpha1")',
+              contract_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Expected exactly one release-version contract to update')
+          contract.write_text(contract_text, encoding='utf-8')
           PY
 
           build_code="$(git rev-parse --short=6 HEAD)"
           build_number="$(git rev-list --count HEAD)"
           python scripts/sync_version.py --code "$build_code" --build-number "$build_number"
 
-          git add .github/workflows/dinov3-implementation-verification.yml system/version.py frontend/pubspec.yaml frontend/lib/src/screens/settings_screen.dart
+          git add .github/workflows/dinov3-implementation-verification.yml system/version.py frontend/pubspec.yaml frontend/lib/src/screens/settings_screen.dart tests/test_release_contract.py
           git commit -m "chore: set nightly version to 3.1.0-alpha1"
 
       - name: Verify migration contract
@@ -116,6 +128,7 @@ jobs:
           grep -F 'BASE_VERSION = "3.1.0-alpha1"' system/version.py
           grep -E '^version: 3\.1\.0-alpha1\+[0-9]+$' frontend/pubspec.yaml
           grep -F "defaultValue: '3.1.0-alpha1(" frontend/lib/src/screens/settings_screen.dart
+          grep -F 'self.assertEqual(BASE_VERSION, "3.1.0-alpha1")' tests/test_release_contract.py
           grep -F "import 'widgets/notification_card.dart';" frontend/lib/src/main_window.dart
           test "$(grep -c 'return NotificationCard(' frontend/lib/src/main_window.dart)" -ge 3
           test -f frontend/lib/src/widgets/notification_card.dart
