@@ -6,8 +6,8 @@ from system.version import BASE_VERSION, DEFAULT_BUILD_NUMBER
 
 
 class ReleaseContractTests(unittest.TestCase):
-    def test_release_version_is_beta1_with_valid_build_number(self):
-        self.assertEqual(BASE_VERSION, "3.0.6-beta1")
+    def test_nightly_version_is_alpha1_with_valid_build_number(self):
+        self.assertEqual(BASE_VERSION, "3.1.0-alpha1")
         self.assertGreaterEqual(DEFAULT_BUILD_NUMBER, 1)
         self.assertLessEqual(DEFAULT_BUILD_NUMBER, 65535)
 
