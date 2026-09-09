@@ -1,0 +1,31 @@
+name: Apply Task 9 media-size hint patch
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-apply-media-size-hint.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch media-size hint
+        run: python .github/scripts/task9_media_size_hint.py
+      - name: Commit media-size hint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/widgets/detection_media_viewer.dart
+          git diff --cached --check
+          git commit -m "fix: use item dimensions for DINOv3 image hit testing"
+          git push origin HEAD:${GITHUB_REF_NAME}
