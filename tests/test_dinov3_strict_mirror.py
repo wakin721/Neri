@@ -234,3 +234,13 @@ def test_source_smoke_failure_preserves_previous_component(tmp_path, monkeypatch
 
     assert marker.read_text(encoding="utf-8") == "healthy-old"
     assert not (target / "remote-extra.txt").exists()
+
+
+def test_source_smoke_does_not_mutate_mirror_tree(tmp_path):
+    tree = _cloud_tree(tmp_path)
+    before = sorted(path.relative_to(tree).as_posix() for path in tree.rglob("*") if path.is_file())
+
+    component._smoke_test_source(component.dinov3_component_paths(root=tree))
+
+    after = sorted(path.relative_to(tree).as_posix() for path in tree.rglob("*") if path.is_file())
+    assert after == before
