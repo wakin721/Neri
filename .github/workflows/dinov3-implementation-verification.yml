@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - nightly
+      - chore/dinov3-environment-installer
     paths-ignore:
       - docs/dinov3-ci-verified.txt
   workflow_dispatch:
@@ -68,6 +69,7 @@ jobs:
 
   flutter:
     name: Flutter analysis and tests
+    if: github.ref == 'refs/heads/nightly'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -94,6 +96,7 @@ jobs:
 
   mark-verified:
     name: Record verified revision
+    if: github.ref == 'refs/heads/nightly'
     needs:
       - python
       - flutter

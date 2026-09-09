@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "backend": "dinov3",
+  "display_name": "DINOv3 ViT-B/16 · 17 species · reviewed 2026-09-08",
+  "checkpoint": "dinov3_classifier_merged_reviewed_20260908.pt",
+  "architecture": "dinov3_vitb16",
+  "feature_dim": 768,
+  "requires_detector": true,
+  "supports_full_image": false,
+  "supports_video_fast": true,
+  "supports_video_all": false,
+  "encoder_weights": "dinov3-vitb16/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+  "encoder_sha256": "73cec8be7427c8655ceced13ce62f6e20a1fa90d1b4d4a550df17a1144081a7c",
+  "preprocessing": "letterbox224_imagenet",
+  "event_aggregation": "mean_l2_normalized_crop_embeddings"
+}
