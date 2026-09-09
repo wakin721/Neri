@@ -1,0 +1,24 @@
+name: Verify Task 9 current-frame video hit-test RED
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-focused-video-hit-test-red.yml
+
+jobs:
+  flutter-video-hit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - working-directory: frontend
+        run: flutter pub get
+      - working-directory: frontend
+        run: flutter test test/dinov3_box_hit_test_test.dart --plain-name "video overlay hit-tests only current-frame DINO boxes"
