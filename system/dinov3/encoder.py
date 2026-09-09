@@ -57,9 +57,9 @@ def resolve_encoder_weights(
 def _default_model_factory(source_root=None):
     configured = source_root
     if configured is None:
-        installed = dinov3_component_paths()
-        if installed.source_package.is_dir():
-            configured = installed.source_root
+        installed_root = dinov3_component_paths().source_root
+        if (installed_root / "dinov3").is_dir():
+            configured = installed_root
     if configured is None:
         configured = os.environ.get("NERI_DINOV3_SOURCE")
     if configured:
