@@ -1,4 +1,4 @@
-name: Verify Task 9 empty feedback RED
+name: Verify Task 9 empty feedback GREEN
 
 on:
   push:
