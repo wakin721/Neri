@@ -625,7 +625,9 @@ class ImageProcessor:
                                     "DINOv3 classifier returned a different number of predictions than crops"
                                 )
                             for prediction, (r_idx, b_idx) in zip(predictions, crop_map_info):
-                                det_conf = float(det_results[r_idx].boxes[b_idx].conf.item())
+                                box = det_results[r_idx].boxes[b_idx]
+                                det_conf = float(box.conf.item())
+                                bbox = tuple(float(value) for value in box.xyxy.tolist()[0])
                                 observation_id = uuid.uuid4().hex
                                 candidate = prediction.as_candidate(
                                     detection_confidence=det_conf
@@ -653,6 +655,7 @@ class ImageProcessor:
                                         detection_confidence=det_conf,
                                         observation_id=observation_id,
                                         best_known_species=prediction.best_known_species,
+                                        bbox=bbox,
                                     )
                                 )
                         else:
