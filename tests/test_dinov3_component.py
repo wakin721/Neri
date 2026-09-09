@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import system.dinov3 as dinov3
 from system.model_sync.layout import get_model_layout
 
 
@@ -14,6 +15,9 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
                 layout.dinov3_root,
                 resource_root / "model" / "DINOv3",
             )
+
+    def test_dinov3_package_exposes_component_status_api(self) -> None:
+        self.assertTrue(hasattr(dinov3, "dinov3_component_status"))
 
 
 if __name__ == "__main__":
