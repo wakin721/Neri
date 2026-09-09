@@ -1,0 +1,29 @@
+name: Apply Task 9 MainWindow feedback GREEN
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-apply-main-window-feedback-green.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - name: Patch MainWindow feedback wiring
+        run: python .github/scripts/task9_main_window_feedback_green.py
+      - name: Commit MainWindow feedback wiring
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/main_window.dart
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: wire DINOv3 validation feedback through MainWindow"
+          git push
