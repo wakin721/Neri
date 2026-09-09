@@ -75,6 +75,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Apply staged DINOv3 environment UI patch
+        if: github.ref == 'refs/heads/feat/dinov3-multiprototype-remaining'
+        run: python scripts/apply_dinov3_environment_ui.py
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
