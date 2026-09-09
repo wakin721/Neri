@@ -9,6 +9,7 @@ import pytest
 from system.backend.models import DetectionItem
 from system.dinov3.classifier import DinoV3Observation
 from system.dinov3.registry import SpeciesRegistry
+from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
 
 FP = "c" * 64
 
@@ -114,31 +115,15 @@ def test_dinov3_job_restrictions_require_detector_and_reject_full_video(tmp_path
 
 
 def _write_test_checkpoint(path: Path):
-    import hashlib
     import torch
 
-    encoder = path.parent / "encoder.pth"
-    encoder.write_bytes(b"encoder")
-    encoder_hash = hashlib.sha256(encoder.read_bytes()).hexdigest()
-    payload = {
-        "backbone": "dinov3_vitb16",
-        "feature_dim": 768,
-        "classes": ["species-a", "species-b"],
-        "head_state": {
-            "weight": torch.zeros((2, 768), dtype=torch.float32),
-            "bias": torch.zeros(2, dtype=torch.float32),
-        },
-        "prototypes": torch.stack(
-            [torch.nn.functional.one_hot(torch.tensor(0), 768), torch.nn.functional.one_hot(torch.tensor(1), 768)]
-        ).float(),
-        "threshold": 0.4,
-        "encoder_weights": "encoder.pth",
-        "encoder_sha256": encoder_hash,
-        "preprocessing": "letterbox224_imagenet",
-        "event_aggregation": "mean_l2_normalized_crop_embeddings",
-    }
-    torch.save(payload, path)
-    return encoder
+    torch.save(
+        make_multi_prototype_payload(
+            classes=("species-a", "species-b"),
+            threshold=0.4,
+        ),
+        path,
+    )
 
 
 def test_runtime_resolves_manifest_from_checkpoint_and_attaches_registry(tmp_path):
