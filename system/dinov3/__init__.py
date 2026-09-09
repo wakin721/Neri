@@ -1,4 +1,6 @@
 """Native DINOv3 classification and open-world species registration."""
+from pathlib import PurePosixPath
+
 from .checkpoint import (
     DINO_BACKBONE,
     DINO_FEATURE_DIM,
@@ -21,9 +23,23 @@ from .component import (
     remove_dinov3_component,
 )
 from .public_distribution import (
-    DinoV3CloudClient,
+    DinoV3DistributionClient,
     DinoV3DistributionError as DinoV3CloudError,
 )
+
+
+class DinoV3CloudClient(DinoV3DistributionClient):
+    """Compatibility name for the anonymous DINOv3 distribution client."""
+
+    @staticmethod
+    def mount_path(relative_path: str = "") -> str:
+        raw = str(relative_path or "").replace("\\", "/").strip("/")
+        if not raw:
+            return "/Neri_Data/Model/DINOv3"
+        pure = PurePosixPath(raw)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ValueError("DINOv3 NeriCloud 路径无效。")
+        return "/Neri_Data/Model/DINOv3/" + pure.as_posix()
 
 
 def install_dinov3_component(
