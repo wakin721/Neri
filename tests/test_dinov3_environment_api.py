@@ -3,11 +3,12 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from system.backend import main_core
+from system.backend import dinov3_environment
 
 
 def test_dinov3_environment_status_endpoint(monkeypatch):
     monkeypatch.setattr(
-        main_core,
+        dinov3_environment,
         "dinov3_component_status",
         lambda: {
             "installed": False,
@@ -17,7 +18,6 @@ def test_dinov3_environment_status_endpoint(monkeypatch):
             "source_commit": "6876159a11b4df116f30f667f8c9888617df0751",
             "message": "DINOv3 未安装。",
         },
-        raising=False,
     )
     with TestClient(main_core.app) as client:
         response = client.get("/api/environment/dinov3-status")
@@ -28,7 +28,7 @@ def test_dinov3_environment_status_endpoint(monkeypatch):
 def test_dinov3_environment_install_endpoint(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        main_core,
+        dinov3_environment,
         "start_dinov3_install",
         lambda env_choice, package_source: calls.append((env_choice, package_source))
         or {
@@ -36,9 +36,8 @@ def test_dinov3_environment_install_endpoint(monkeypatch):
             "message": "DINOv3 安装已开始。",
             "progress": 0,
         },
-        raising=False,
     )
-    monkeypatch.setattr(main_core, "schedule_backend_shutdown", lambda *args: None)
+    monkeypatch.setattr(dinov3_environment, "schedule_backend_shutdown", lambda *args: None)
     with TestClient(main_core.app) as client:
         response = client.post(
             "/api/environment/install-dinov3",
@@ -51,16 +50,15 @@ def test_dinov3_environment_install_endpoint(monkeypatch):
 
 def test_dinov3_environment_remove_endpoint(monkeypatch):
     monkeypatch.setattr(
-        main_core,
+        dinov3_environment,
         "start_dinov3_remove",
         lambda: {
             "operation": "remove_dinov3",
             "message": "DINOv3 删除已开始。",
             "progress": 0,
         },
-        raising=False,
     )
-    monkeypatch.setattr(main_core, "schedule_backend_shutdown", lambda *args: None)
+    monkeypatch.setattr(dinov3_environment, "schedule_backend_shutdown", lambda *args: None)
     with TestClient(main_core.app) as client:
         response = client.post("/api/environment/remove-dinov3")
     assert response.status_code == 202
