@@ -266,6 +266,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   // 临时状态（标记中、导出中不需要跨界面保存）
   bool _marking = false;
   bool _exporting = false;
+  String? _selectedObservationId;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   final List<String> _pendingSpeciesNames = <String>[];
   final List<String> _pendingQuantities = <String>[];
@@ -542,6 +543,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
+    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     // 将 220.0 修改为 200.0，与预览界面保持完全一致
     final listWidth = (availableWidth * 0.20).clamp(200.0, 300.0).toDouble();
     return Row(
@@ -557,6 +559,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(child: _buildImagePanel(selectedItem, visibleBoxes)),
+              if (selectedDinoBox != null) ...[
+                const SizedBox(height: 10),
+                _buildDinoFeedbackPanel(selectedDinoBox),
+              ],
               const SizedBox(height: 10),
               _buildSummaryPanel(selectedItem, visibleBoxes),
               const SizedBox(height: 10),
@@ -576,12 +582,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
+    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     return ListView(
       children: [
         SizedBox(
           height: 330,
           child: _buildImagePanel(selectedItem, visibleBoxes),
         ),
+        if (selectedDinoBox != null) ...[
+          const SizedBox(height: 10),
+          _buildDinoFeedbackPanel(selectedDinoBox),
+        ],
         const SizedBox(height: 10),
         SizedBox(height: 260, child: _buildLeftLists(buckets, visibleRows)),
         const SizedBox(height: 10),
@@ -826,10 +837,55 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         visibleBoxes: visibleBoxes,
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
+        selectedObservationId: _selectedObservationId,
+        onDetectionBoxSelected: (box) {
+          setState(() => _selectedObservationId = box?.observationId);
+        },
         isFavorite: _isFavoritePhoto(item),
         onToggleFavorite: _isImage(item) || _isVideo(item)
             ? () => unawaited(_toggleFavoritePhoto(item))
             : null,
+      ),
+    );
+  }
+
+  DetectionBox? _selectedDinoBox(List<DetectionBox> visibleBoxes) {
+    final observationId = _selectedObservationId?.trim();
+    if (observationId == null || observationId.isEmpty) return null;
+    for (final box in visibleBoxes) {
+      if (box.observationId?.trim() == observationId) return box;
+    }
+    return null;
+  }
+
+  Widget _buildDinoFeedbackPanel(DetectionBox box) {
+    final predicted = box.predictedSpecies?.trim();
+    final title = predicted == null || predicted.isEmpty
+        ? '检测框校验'
+        : '检测框校验 · $predicted';
+    return _ValidationPanel(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(width: 12),
+            OutlinedButton(onPressed: null, child: const Text('正确')),
+            const SizedBox(width: 8),
+            OutlinedButton(onPressed: null, child: const Text('修改物种')),
+            const SizedBox(width: 8),
+            OutlinedButton(onPressed: null, child: const Text('空 / 误检')),
+            const SizedBox(width: 8),
+            OutlinedButton(onPressed: null, child: const Text('不参与学习')),
+          ],
+        ),
       ),
     );
   }
