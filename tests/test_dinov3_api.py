@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -13,32 +12,15 @@ from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
 
 
 def _write_model_bundle(tmp_path: Path) -> Path:
-    encoder = tmp_path / "encoder.pth"
-    encoder.write_bytes(b"encoder")
-    encoder_hash = hashlib.sha256(encoder.read_bytes()).hexdigest()
     checkpoint = tmp_path / "head.pt"
-    payload = {
-        "backbone": "dinov3_vitb16",
-        "feature_dim": 768,
-        "classes": ["species-a", "species-b"],
-        "head_state": {
-            "weight": torch.zeros((2, 768)),
-            "bias": torch.zeros(2),
-        },
-        "prototypes": torch.stack(
-            [
-                torch.nn.functional.one_hot(torch.tensor(0), 768),
-                torch.nn.functional.one_hot(torch.tensor(1), 768),
-            ]
-        ).float(),
-        # Keep this generic API fixture outside the formal duplicate guard.
-        "threshold": 1.1,
-        "encoder_weights": "encoder.pth",
-        "encoder_sha256": encoder_hash,
-        "preprocessing": "letterbox224_imagenet",
-        "event_aggregation": "mean_l2_normalized_crop_embeddings",
-    }
-    torch.save(payload, checkpoint)
+    torch.save(
+        make_multi_prototype_payload(
+            classes=("species-a", "species-b"),
+            # Keep this generic API fixture outside the formal duplicate guard.
+            threshold=1.1,
+        ),
+        checkpoint,
+    )
     manifest = tmp_path / "head.neri.json"
     manifest.write_text(
         '{"backend":"dinov3","checkpoint":"head.pt","architecture":"dinov3_vitb16","feature_dim":768}',
