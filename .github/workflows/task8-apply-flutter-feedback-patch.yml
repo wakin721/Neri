@@ -1,0 +1,167 @@
+name: Apply Task 8 Flutter feedback patch
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task8-apply-flutter-feedback-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch Flutter feedback API
+        shell: python
+        run: |
+          from pathlib import Path
+
+          job_path = Path('frontend/lib/src/models/job.dart')
+          job = job_path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  "    this.trackId,\n    this.candidates = const <Map<String, dynamic>>[],\n",
+                  "    this.trackId,\n    this.observationId,\n    this.registryId,\n    this.predictedSpecies,\n    this.feedbackStatus,\n    this.candidates = const <Map<String, dynamic>>[],\n",
+              ),
+              (
+                  "      trackId: _stringFromJson(json['track_id'] ?? json['trackId']),\n      bbox: rawBbox\n",
+                  "      trackId: _stringFromJson(json['track_id'] ?? json['trackId']),\n      observationId: _stringFromJson(json['observation_id']),\n      registryId: _intFromJson(json['registry_id']),\n      predictedSpecies: _stringFromJson(json['predicted_species']),\n      feedbackStatus: _stringFromJson(json['feedback_status']),\n      bbox: rawBbox\n",
+              ),
+              (
+                  "  final String? trackId;\n  final List<double> bbox;\n",
+                  "  final String? trackId;\n  final String? observationId;\n  final int? registryId;\n  final String? predictedSpecies;\n  final String? feedbackStatus;\n  final List<double> bbox;\n",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in job:
+                  raise SystemExit(f'job.dart anchor not found: {old!r}')
+              job = job.replace(old, new, 1)
+          job_path.write_text(job, encoding='utf-8')
+
+          model_path = Path('frontend/lib/src/models/dinov3_feedback.dart')
+          if model_path.exists():
+              raise SystemExit('dinov3_feedback.dart already exists')
+          model_path.write_text("""import 'job.dart';
+
+class DinoV3BoxFeedbackResult {
+  const DinoV3BoxFeedbackResult({
+    required this.item,
+    required this.operationId,
+    required this.affectedSpecies,
+  });
+
+  factory DinoV3BoxFeedbackResult.fromJson(Map<String, dynamic> json) {
+    return DinoV3BoxFeedbackResult(
+      item: DetectionItem.fromJson(json['item'] as Map<String, dynamic>),
+      operationId: json['operation_id'] as String? ?? '',
+      affectedSpecies: (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])
+          .map((value) => value.toString())
+          .toList(),
+    );
+  }
+
+  final DetectionItem item;
+  final String operationId;
+  final List<String> affectedSpecies;
+}
+
+class DinoV3FeedbackRevertResult {
+  const DinoV3FeedbackRevertResult({
+    required this.operationId,
+    required this.affectedSpecies,
+  });
+
+  factory DinoV3FeedbackRevertResult.fromJson(Map<String, dynamic> json) {
+    return DinoV3FeedbackRevertResult(
+      operationId: json['operation_id'] as String? ?? '',
+      affectedSpecies: (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])
+          .map((value) => value.toString())
+          .toList(),
+    );
+  }
+
+  final String operationId;
+  final List<String> affectedSpecies;
+}
+""", encoding='utf-8')
+
+          api_path = Path('frontend/lib/src/api_client_core.dart')
+          api = api_path.read_text(encoding='utf-8')
+          import_anchor = "import 'models/dinov3_registry.dart';\n"
+          if import_anchor not in api:
+              raise SystemExit('api import anchor not found')
+          api = api.replace(
+              import_anchor,
+              "import 'models/dinov3_feedback.dart';\n" + import_anchor,
+              1,
+          )
+
+          method_anchor = "  Future<PrivacyStatus> fetchPrivacyStatus() async {\n"
+          methods = """  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({
+    required String inputPath,
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String action,
+    String? speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/box'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'action': action,
+        if (speciesName != null && speciesName.trim().isNotEmpty)
+          'species_name': speciesName.trim(),
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3BoxFeedbackResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({
+    required String classificationModelPath,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/revert'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3FeedbackRevertResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+"""
+          if method_anchor not in api:
+              raise SystemExit('api method anchor not found')
+          api = api.replace(method_anchor, methods + method_anchor, 1)
+          api_path.write_text(api, encoding='utf-8')
+      - name: Commit Task 8 implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/models/job.dart frontend/lib/src/models/dinov3_feedback.dart frontend/lib/src/api_client_core.dart
+          git diff --cached --check
+          git commit -m "feat: expose DINOv3 feedback API to Flutter"
+          git push origin HEAD:${GITHUB_REF_NAME}
