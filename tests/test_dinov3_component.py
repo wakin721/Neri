@@ -9,41 +9,62 @@ from system.model_sync.layout import get_model_layout
 
 
 class _FakeDinoCloud:
-    def __init__(self, *, fail_on: str | None = None):
-        self.fail_on = fail_on
-
-    def download_file(self, relative_path: str, target: Path, on_progress=None) -> None:
-        if self.fail_on == relative_path:
-            raise RuntimeError("fake cloud failure")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if relative_path == "install.json":
-            target.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "component": "dinov3",
-                        "component_version": 1,
-                        "architecture": "dinov3_vitb16",
-                        "source": {"commit": dinov3.DINO_SOURCE_COMMIT},
-                        "backbone": {"sha256": dinov3.DINO_BACKBONE_SHA256},
-                    }
-                ),
-                encoding="utf-8",
-            )
-        elif relative_path == "LICENSE_DINOv3.md":
-            target.write_text("license", encoding="utf-8")
-        else:
-            target.write_bytes(b"backbone")
+    def __init__(self, *, fail_on_root: bool = False):
+        self.fail_on_root = fail_on_root
 
     def download_tree(self, relative_path: str, target: Path, on_progress=None) -> None:
-        if self.fail_on == relative_path:
+        if relative_path != "":
+            raise AssertionError(f"strict mirror must download the root, got {relative_path!r}")
+        if self.fail_on_root:
             raise RuntimeError("fake cloud failure")
-        package = target / "dinov3"
+        target.mkdir(parents=True, exist_ok=True)
+        package = target / "source" / "dinov3"
         (package / "hub").mkdir(parents=True)
         (package / "models").mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")
         (package / "hub" / "backbones.py").write_text("", encoding="utf-8")
         (package / "models" / "vision_transformer.py").write_text("", encoding="utf-8")
+        backbone = target / "dinov3-vitb16" / dinov3.DINO_BACKBONE_FILENAME
+        backbone.parent.mkdir(parents=True)
+        backbone.write_bytes(b"backbone")
+        (target / dinov3.DINO_CLASSIFIER_FILENAME).write_bytes(b"classifier")
+        (target / dinov3.DINO_MODEL_MANIFEST_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "backend": "dinov3",
+                    "checkpoint": dinov3.DINO_CLASSIFIER_FILENAME,
+                    "architecture": "dinov3_vitb16",
+                    "feature_dim": 768,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (target / "LICENSE_DINOv3.md").write_text("license", encoding="utf-8")
+        (target / "install.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "component": "dinov3",
+                    "component_version": 2,
+                    "architecture": "dinov3_vitb16",
+                    "source": {"commit": dinov3.DINO_SOURCE_COMMIT},
+                    "backbone": {
+                        "filename": f"dinov3-vitb16/{dinov3.DINO_BACKBONE_FILENAME}",
+                        "sha256": dinov3.DINO_BACKBONE_SHA256,
+                    },
+                    "classifier": {
+                        "filename": dinov3.DINO_CLASSIFIER_FILENAME,
+                        "sha256": dinov3.DINO_CLASSIFIER_SHA256,
+                        "head_type": "multi_prototype",
+                        "selection_k": 3,
+                        "manifest": dinov3.DINO_MODEL_MANIFEST_FILENAME,
+                    },
+                    "files": [],
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 class DinoV3ComponentLayoutTests(unittest.TestCase):
@@ -72,51 +93,20 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
             self.assertEqual(paths.source_package, root.resolve() / "source" / "dinov3")
             self.assertEqual(
                 paths.backbone,
-                root.resolve() / "dinov3-vitb16" / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+                root.resolve()
+                / "dinov3-vitb16"
+                / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
             )
+            self.assertEqual(paths.classifier.name, "multi_prototype.pt")
+            self.assertEqual(paths.model_manifest.name, "multi_prototype.neri.json")
             self.assertEqual(paths.license, root.resolve() / "LICENSE_DINOv3.md")
             self.assertEqual(paths.install_manifest, root.resolve() / "install.json")
 
     def test_complete_component_is_healthy_when_hashes_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "DINOv3"
+            _FakeDinoCloud().download_tree("", root)
             paths = dinov3.dinov3_component_paths(root=root)
-            paths.source_package.mkdir(parents=True)
-            paths.backbone.parent.mkdir(parents=True)
-            (paths.source_package / "__init__.py").write_text("", encoding="utf-8")
-            (paths.source_package / "hub").mkdir()
-            (paths.source_package / "hub" / "backbones.py").write_text("", encoding="utf-8")
-            (paths.source_package / "models").mkdir()
-            (paths.source_package / "models" / "vision_transformer.py").write_text("", encoding="utf-8")
-            paths.backbone.write_bytes(b"backbone")
-            paths.classifier.write_bytes(b"classifier")
-            paths.license.write_text("license", encoding="utf-8")
-            paths.install_manifest.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "component": "dinov3",
-                        "component_version": 1,
-                        "architecture": "dinov3_vitb16",
-                        "source": {"commit": dinov3.DINO_SOURCE_COMMIT},
-                        "backbone": {"sha256": dinov3.DINO_BACKBONE_SHA256},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            paths.model_manifest.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "backend": "dinov3",
-                        "checkpoint": paths.classifier.name,
-                        "architecture": "dinov3_vitb16",
-                        "feature_dim": 768,
-                        "encoder_sha256": dinov3.DINO_BACKBONE_SHA256,
-                    }
-                ),
-                encoding="utf-8",
-            )
             with mock.patch(
                 "system.dinov3.component._sha256_file",
                 side_effect=lambda path: (
@@ -135,7 +125,9 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
             root = base / "res" / "model" / "DINOv3"
             root.mkdir(parents=True)
             (root / "install.json").write_text("{}", encoding="utf-8")
-            shared_torch = base / "toolkit" / "Lib" / "site-packages" / "torch" / "__init__.py"
+            shared_torch = (
+                base / "toolkit" / "Lib" / "site-packages" / "torch" / "__init__.py"
+            )
             shared_torch.parent.mkdir(parents=True)
             shared_torch.write_text("shared", encoding="utf-8")
 
@@ -152,26 +144,9 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
             "/Neri_Data/Model/DINOv3/source/dinov3",
         )
 
-    def test_install_assembles_cloud_assets_and_seed_atomically(self) -> None:
+    def test_install_mirrors_cloud_tree_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            root = base / "res" / "model" / "DINOv3"
-            seed = base / "seed"
-            seed.mkdir()
-            (seed / dinov3.DINO_CLASSIFIER_FILENAME).write_bytes(b"classifier")
-            (seed / dinov3.DINO_MODEL_MANIFEST_FILENAME).write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "backend": "dinov3",
-                        "checkpoint": dinov3.DINO_CLASSIFIER_FILENAME,
-                        "architecture": "dinov3_vitb16",
-                        "feature_dim": 768,
-                        "encoder_sha256": dinov3.DINO_BACKBONE_SHA256,
-                    }
-                ),
-                encoding="utf-8",
-            )
+            root = Path(tmp) / "res" / "model" / "DINOv3"
             with mock.patch(
                 "system.dinov3.component._sha256_file",
                 side_effect=lambda path: (
@@ -183,31 +158,25 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
                 installed = dinov3.install_dinov3_component(
                     root=root,
                     cloud_client=_FakeDinoCloud(),
-                    seed_dir=seed,
                 )
                 status = dinov3.dinov3_component_status(root=root)
             self.assertEqual(installed, root.resolve())
             self.assertTrue(status["healthy"])
             self.assertTrue((root / "source" / "dinov3" / "__init__.py").is_file())
             self.assertTrue((root / "LICENSE_DINOv3.md").is_file())
+            self.assertTrue((root / "multi_prototype.pt").is_file())
 
     def test_failed_install_preserves_previous_component(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            root = base / "DINOv3"
+            root = Path(tmp) / "DINOv3"
             root.mkdir()
             marker = root / "existing.txt"
             marker.write_text("keep", encoding="utf-8")
-            seed = base / "seed"
-            seed.mkdir()
-            (seed / dinov3.DINO_CLASSIFIER_FILENAME).write_bytes(b"classifier")
-            (seed / dinov3.DINO_MODEL_MANIFEST_FILENAME).write_text("{}", encoding="utf-8")
 
             with self.assertRaises(RuntimeError):
                 dinov3.install_dinov3_component(
                     root=root,
-                    cloud_client=_FakeDinoCloud(fail_on="source"),
-                    seed_dir=seed,
+                    cloud_client=_FakeDinoCloud(fail_on_root=True),
                 )
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
