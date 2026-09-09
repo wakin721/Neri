@@ -37,7 +37,13 @@ def _cloud_tree(tmp_path: Path) -> Path:
     (tree / "source" / "dinov3" / "hub").mkdir(parents=True)
     (tree / "source" / "dinov3" / "models").mkdir(parents=True)
     (tree / "source" / "dinov3" / "__init__.py").write_text("# package\n", encoding="utf-8")
-    (tree / "source" / "dinov3" / "hub" / "backbones.py").write_text("# hub\n", encoding="utf-8")
+    (tree / "source" / "dinov3" / "hub" / "backbones.py").write_text(
+        "def dinov3_vitb16(*, pretrained=True):\n"
+        "    if pretrained is not False:\n"
+        "        raise RuntimeError('pretrained must be false')\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
     (tree / "source" / "dinov3" / "models" / "vision_transformer.py").write_text("# vit\n", encoding="utf-8")
     backbone_dir = tree / "dinov3-vitb16"
     backbone_dir.mkdir()
