@@ -374,6 +374,8 @@ class ValidationMarkRequest(BaseModel):
     species_count: str | None = None
     species_type: str | None = None
     remark: str | None = None
+    classification_model_path: str | None = None
+    feedback_operation_id: str | None = None
 
 
 class ValidationBatchMarkRequest(BaseModel):
@@ -386,6 +388,8 @@ class ValidationBatchMarkRequest(BaseModel):
     species_count: str | None = None
     species_type: str | None = None
     remark: str | None = None
+    classification_model_path: str | None = None
+    feedback_operation_id: str | None = None
 
 
 class ValidationExportRequest(BaseModel):
