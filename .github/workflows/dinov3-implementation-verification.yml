@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - nightly
+      - chore/dinov3-environment-installer
     paths-ignore:
       - docs/dinov3-ci-verified.txt
   workflow_dispatch:
