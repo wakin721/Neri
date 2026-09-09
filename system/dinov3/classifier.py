@@ -102,7 +102,14 @@ class DinoV3Prediction:
 
 
 class DinoV3Classifier:
-    def __init__(self, checkpoint: DinoV3Checkpoint, *, encoder=None, registry=None) -> None:
+    def __init__(
+        self,
+        checkpoint: DinoV3Checkpoint,
+        *,
+        encoder=None,
+        feedback=None,
+        registry=None,
+    ) -> None:
         if checkpoint.head_type != DINO_MULTI_PROTOTYPE_HEAD:
             raise ValueError(
                 "DINOv3 classifier requires head_type=multi_prototype; Linear Head checkpoints are not supported"
@@ -112,6 +119,7 @@ class DinoV3Classifier:
 
         self.checkpoint = checkpoint
         self.encoder = encoder
+        self.feedback = feedback
         self.registry = registry
         self.names = {index: name for index, name in enumerate(checkpoint.classes)}
         self.backend = "dinov3"
@@ -150,17 +158,30 @@ class DinoV3Classifier:
             raise ValueError("Expected finite L2-normalized event features")
         return array
 
+    def _provider_bank(self, provider, *, name: str) -> PrototypeBank:
+        if provider is None:
+            return PrototypeBank(())
+        bank_provider = getattr(provider, "prototype_bank", None)
+        if not callable(bank_provider):
+            return PrototypeBank(())
+        bank = bank_provider(self._feature_center)
+        if not isinstance(bank, PrototypeBank):
+            raise TypeError(f"{name}.prototype_bank() must return PrototypeBank")
+        return bank
+
     def _effective_bank(self) -> PrototypeBank:
-        overlay = PrototypeBank(())
-        if self.registry is not None:
-            provider = getattr(self.registry, "prototype_bank", None)
-            if callable(provider):
-                overlay = provider(self._feature_center)
-                if not isinstance(overlay, PrototypeBank):
-                    raise TypeError("registry.prototype_bank() must return PrototypeBank")
+        feedback = self._provider_bank(self.feedback, name="feedback")
+        registry = self._provider_bank(self.registry, name="registry")
         return PrototypeBank(
-            formal=self._base_records + tuple(overlay.formal),
-            provisional=tuple(overlay.provisional),
+            formal=(
+                self._base_records
+                + tuple(feedback.formal)
+                + tuple(registry.formal)
+            ),
+            provisional=(
+                tuple(feedback.provisional)
+                + tuple(registry.provisional)
+            ),
         )
 
     @staticmethod
