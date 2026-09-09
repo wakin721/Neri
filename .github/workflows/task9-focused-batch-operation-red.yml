@@ -1,0 +1,24 @@
+name: Verify Task 9 batch operation RED
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-focused-batch-operation-red.yml
+
+jobs:
+  flutter-batch-operation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - working-directory: frontend
+        run: flutter pub get
+      - working-directory: frontend
+        run: flutter test test/dinov3_box_feedback_ui_test.dart --plain-name "collapsed DINO batch forwards one generated feedback operation id"
