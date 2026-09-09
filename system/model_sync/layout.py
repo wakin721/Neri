@@ -20,6 +20,7 @@ class ModelLayout:
     detect_sync: Path
     cls_user: Path
     cls_sync: Path
+    dinov3_root: Path
     tracker: Path
     state_file: Path
 
@@ -75,7 +76,7 @@ def _merge_tree(source: Path, target: Path) -> None:
             continue
 
         if destination.exists():
-            destination = _collision_target(destination)
+            destination = _collision_target(target)
         shutil.move(str(child), str(destination))
 
     try:
@@ -128,6 +129,7 @@ def _build_layout(resource_root: Path) -> ModelLayout:
         detect_sync=root / "detect" / "sync",
         cls_user=root / "cls" / "user",
         cls_sync=root / "cls" / "sync",
+        dinov3_root=root / "DINOv3",
         tracker=root / "tracker.yaml",
         state_file=root / ".sync-state.json",
     )
