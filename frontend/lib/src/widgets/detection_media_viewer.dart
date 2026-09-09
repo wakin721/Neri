@@ -141,6 +141,8 @@ class _MediaContent extends StatelessWidget {
         showDetections: showDetections,
         detectionData: item.detectionData,
         onOpenExternal: onOpenExternal,
+        selectedObservationId: selectedObservationId,
+        onDetectionBoxSelected: onDetectionBoxSelected,
       );
     } else {
       final itemWidth = item.width;
@@ -498,6 +500,66 @@ List<DetectionBox> currentVideoDetectionBoxes({
   return matches.map((match) => match.box).toList();
 }
 
+class DinoVideoDetectionOverlay extends StatelessWidget {
+  const DinoVideoDetectionOverlay({
+    required this.boxes,
+    required this.mediaSize,
+    required this.position,
+    required this.duration,
+    required this.detectionData,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
+    this.onBackgroundTap,
+    super.key,
+  });
+
+  final List<DetectionBox> boxes;
+  final Size mediaSize;
+  final Duration position;
+  final Duration duration;
+  final Map<String, dynamic> detectionData;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
+  final VoidCallback? onBackgroundTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final currentBoxes = currentVideoDetectionBoxes(
+      boxes: boxes,
+      position: position,
+      duration: duration,
+      detectionData: detectionData,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: onDetectionBoxSelected == null && onBackgroundTap == null
+              ? null
+              : (details) {
+                  final selected = _hitTestDinoBox(
+                    details.localPosition,
+                    viewport,
+                    mediaSize,
+                    currentBoxes,
+                  );
+                  onDetectionBoxSelected?.call(selected);
+                  if (selected == null) onBackgroundTap?.call();
+                },
+          child: CustomPaint(
+            painter: _DetectionOverlayPainter(
+              boxes: currentBoxes,
+              mediaSize: mediaSize,
+            ),
+            child: const SizedBox.expand(),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _ValidationVideoPlayer extends StatefulWidget {
   const _ValidationVideoPlayer({
     required this.path,
@@ -505,6 +567,8 @@ class _ValidationVideoPlayer extends StatefulWidget {
     required this.showDetections,
     required this.detectionData,
     required this.onOpenExternal,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final String path;
@@ -512,6 +576,8 @@ class _ValidationVideoPlayer extends StatefulWidget {
   final bool showDetections;
   final Map<String, dynamic> detectionData;
   final VoidCallback onOpenExternal;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   @override
   State<_ValidationVideoPlayer> createState() => _ValidationVideoPlayerState();
@@ -736,13 +802,15 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
               valueListenable: _positionNotifier,
               builder: (context, position, child) {
                 return RepaintBoundary(
-                  child: IgnorePointer(
-                    child: CustomPaint(
-                      painter: _DetectionOverlayPainter(
-                        boxes: _currentBoxes(position),
-                        mediaSize: _videoSize!,
-                      ),
-                    ),
+                  child: DinoVideoDetectionOverlay(
+                    boxes: widget.visibleBoxes,
+                    mediaSize: _videoSize!,
+                    position: position,
+                    duration: _duration,
+                    detectionData: widget.detectionData,
+                    selectedObservationId: widget.selectedObservationId,
+                    onDetectionBoxSelected: widget.onDetectionBoxSelected,
+                    onBackgroundTap: _togglePlayPause,
                   ),
                 );
               },
