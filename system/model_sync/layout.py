@@ -76,7 +76,7 @@ def _merge_tree(source: Path, target: Path) -> None:
             continue
 
         if destination.exists():
-            destination = _collision_target(target)
+            destination = _collision_target(destination)
         shutil.move(str(child), str(destination))
 
     try:
