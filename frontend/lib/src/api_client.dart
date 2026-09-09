@@ -41,13 +41,80 @@ class NeriApiClient extends core.NeriApiClient {
     );
   }
 
+  Future<DinoV3ComponentStatus> fetchDinoV3ComponentStatus() async {
+    final response = await _modelSyncHttpClient.get(
+      Uri.parse('$baseUrl/api/environment/dinov3-status'),
+    );
+    _ensureModelSyncSuccess(response);
+    return DinoV3ComponentStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<core.MaintenanceStartResponse> installDinoV3({
+    required String envChoice,
+    String packageSource = 'auto',
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/environment/install-dinov3'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'env_choice': envChoice,
+        'package_source': packageSource,
+      }),
+    );
+    _ensureModelSyncSuccess(response);
+    return core.MaintenanceStartResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<core.MaintenanceStartResponse> removeDinoV3() async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/environment/remove-dinov3'),
+    );
+    _ensureModelSyncSuccess(response);
+    return core.MaintenanceStartResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   void _ensureModelSyncSuccess(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return;
     }
     throw http.ClientException(
-      '模型同步 API 请求失败 (${response.statusCode})',
+      'Neri API 请求失败 (${response.statusCode})',
       response.request?.url,
     );
   }
+}
+
+class DinoV3ComponentStatus {
+  const DinoV3ComponentStatus({
+    required this.installed,
+    required this.healthy,
+    required this.architecture,
+    required this.componentVersion,
+    required this.sourceCommit,
+    required this.message,
+  });
+
+  factory DinoV3ComponentStatus.fromJson(Map<String, dynamic> json) {
+    return DinoV3ComponentStatus(
+      installed: json['installed'] as bool? ?? false,
+      healthy: json['healthy'] as bool? ?? false,
+      architecture: json['architecture'] as String? ?? 'DINOv3 ViT-B/16',
+      componentVersion: (json['component_version'] as num?)?.toInt() ?? 1,
+      sourceCommit: json['source_commit'] as String? ?? '',
+      message: json['message'] as String? ?? '',
+    );
+  }
+
+  final bool installed;
+  final bool healthy;
+  final String architecture;
+  final int componentVersion;
+  final String sourceCommit;
+  final String message;
 }
