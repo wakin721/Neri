@@ -1268,11 +1268,11 @@ class ProcessingJobManager:
         finally:
             if detector is not None:
                 runtime = getattr(detector, "dinov3_runtime", None)
-                if runtime is not None and getattr(runtime, "owns_registry", False):
+                if runtime is not None:
                     try:
-                        runtime.registry.close()
+                        runtime.close()
                     except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
-                        logger.warning("DINOv3 registry cleanup failed: %s", exc)
+                        logger.warning("DINOv3 runtime cleanup failed: %s", exc)
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
@@ -1603,47 +1603,21 @@ def _persist_dinov3_observations(
     input_path: Path,
     *,
     source_paths: list[Path] | None = None,
+    frame_indices: list[int | None] | None = None,
+    timestamp_seconds: list[float | None] | None = None,
 ) -> None:
-    registry = getattr(detector, "dinov3_registry", None)
-    drain = getattr(detector, "drain_dinov3_observations", None)
-    if registry is None or not callable(drain):
-        return
-    observations = drain()
-    if not observations:
-        return
-    roots = source_paths or paths
-    from system.dinov3.events import camera_id_for_path
+    from .dinov3_feedback_service import persist_runtime_observations
 
-    camera_root = input_path if input_path.is_dir() else input_path.parent
-    for observation in observations:
-        try:
-            index = int(observation.result_index)
-            if index < 0 or index >= len(paths) or index >= len(items) or index >= len(roots):
-                logger.warning("Ignoring out-of-range DINOv3 observation index: %s", index)
-                continue
-            source_path = Path(roots[index])
-            item = items[index]
-            captured_at = _parse_dinov3_capture_time(item.date_taken)
-            camera_id = camera_id_for_path(source_path, camera_root)
-            if observation.source == "checkpoint" and observation.accepted:
-                continue
-            if observation.registry_id is not None:
-                registry.record_observation(
-                    int(observation.registry_id),
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                )
-            else:
-                registry.record_unknown(
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                )
-        except Exception as exc:  # noqa: BLE001 - registry persistence is non-fatal
-            logger.warning("Failed to persist DINOv3 observation: %s", exc)
+    persist_runtime_observations(
+        detector,
+        paths,
+        items,
+        input_path,
+        source_paths=source_paths,
+        frame_indices=frame_indices,
+        timestamp_seconds=timestamp_seconds,
+    )
+
 
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
     from system.image_processor import ImageProcessor
@@ -1669,6 +1643,7 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
             runtime = load_dinov3_model(resolved_classification_path)
             detector.load_dinov3_classifier(runtime.classifier)
             detector.dinov3_registry = runtime.registry
+            detector.dinov3_feedback = runtime.feedback
             detector.dinov3_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
@@ -2540,12 +2515,22 @@ def _detect_video_fast_batch(
             inference_elapsed += time.perf_counter() - inference_started
             frame_items = [items[record["video_index"]] for record in frame_batch]
             original_video_paths = [paths[record["video_index"]] for record in frame_batch]
+            frame_indices = [int(record["frame_index"]) for record in frame_batch]
+            frame_timestamps = []
+            for record in frame_batch:
+                video_info = video_infos[record["video_index"]] or {}
+                fps = video_info.get("fps") or 25
+                frame_timestamps.append(
+                    float(record["frame_index"]) / float(fps) if fps else None
+                )
             _persist_dinov3_observations(
                 detector,
                 [Path(record["path"]) for record in frame_batch],
                 frame_items,
                 input_path,
                 source_paths=original_video_paths,
+                frame_indices=frame_indices,
+                timestamp_seconds=frame_timestamps,
             )
             _raise_if_cancelled(cancelled)
             frame_serialize_started = time.perf_counter()
