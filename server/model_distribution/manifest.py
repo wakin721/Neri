@@ -11,6 +11,7 @@ from pathlib import Path
 from .storage import RemoteEntry
 
 ROOT = "/Neri_Data/Model"
+DINO_ROOT = ROOT + "/DINOv3"
 
 
 class ManifestError(RuntimeError):
@@ -37,6 +38,15 @@ def _allowed(folder: str, name: str) -> bool:
     if folder == "cls":
         return suffix in {".pt", ".onnx", ".engine"}
     return False
+
+
+def _snapshot(files: tuple[ManifestEntry, ...]) -> ManifestSnapshot:
+    payload = json.dumps(
+        [[item.path, item.size, item.sha256] for item in files],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return ManifestSnapshot(hashlib.sha256(payload).hexdigest(), files)
 
 
 class ManifestBuilder:
@@ -85,6 +95,18 @@ class ManifestBuilder:
                 )
         return value
 
+    @staticmethod
+    def _deduplicate(candidates: list[tuple[str, str, RemoteEntry]]) -> list[tuple[str, str, RemoteEntry]]:
+        seen: set[str] = set()
+        normalized: list[tuple[str, str, RemoteEntry]] = []
+        for logical, remote, entry in candidates:
+            key = unicodedata.normalize("NFC", logical).casefold()
+            if key in seen:
+                raise ManifestError("duplicate_model_path")
+            seen.add(key)
+            normalized.append((logical, remote, entry))
+        return normalized
+
     def build(self) -> ManifestSnapshot:
         candidates: list[tuple[str, str, RemoteEntry]] = []
         for folder in ("detect", "cls"):
@@ -100,22 +122,50 @@ class ManifestBuilder:
         if tracker is not None and not tracker.is_dir:
             candidates.append(("tracker.yaml", f"{ROOT}/tracker.yaml", tracker))
 
-        seen: set[str] = set()
-        normalized: list[tuple[str, str, RemoteEntry]] = []
-        for logical, remote, entry in candidates:
-            key = unicodedata.normalize("NFC", logical).casefold()
-            if key in seen:
-                raise ManifestError("duplicate_model_path")
-            seen.add(key)
-            normalized.append((logical, remote, entry))
-
+        normalized = self._deduplicate(candidates)
         files = tuple(
             ManifestEntry(logical, entry.size, self._hash_remote(logical, remote, entry))
             for logical, remote, entry in sorted(normalized, key=lambda item: item[0])
         )
-        payload = json.dumps(
-            [[item.path, item.size, item.sha256] for item in files],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return ManifestSnapshot(hashlib.sha256(payload).hexdigest(), files)
+        return _snapshot(files)
+
+
+class DinoV3ManifestBuilder(ManifestBuilder):
+    """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv3."""
+
+    @staticmethod
+    def _safe_name(name: str) -> bool:
+        return (
+            isinstance(name, str)
+            and bool(name)
+            and name not in {".", ".."}
+            and "/" not in name
+            and "\\" not in name
+            and "\x00" not in name
+        )
+
+    def _walk(
+        self,
+        remote_dir: str,
+        logical_dir: str,
+        candidates: list[tuple[str, str, RemoteEntry]],
+    ) -> None:
+        for entry in self.store.list_dir(remote_dir):
+            if not self._safe_name(entry.name):
+                raise ManifestError("invalid_dinov3_path")
+            remote = f"{remote_dir}/{entry.name}"
+            logical = f"{logical_dir}/{entry.name}"
+            if entry.is_dir:
+                self._walk(remote, logical, candidates)
+            else:
+                candidates.append((logical, remote, entry))
+
+    def build(self) -> ManifestSnapshot:
+        candidates: list[tuple[str, str, RemoteEntry]] = []
+        self._walk(DINO_ROOT, "DINOv3", candidates)
+        normalized = self._deduplicate(candidates)
+        files = tuple(
+            ManifestEntry(logical, entry.size, self._hash_remote(logical, remote, entry))
+            for logical, remote, entry in sorted(normalized, key=lambda item: item[0])
+        )
+        return _snapshot(files)
