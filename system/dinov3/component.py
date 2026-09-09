@@ -246,6 +246,11 @@ def _inventory_path(raw: Any) -> str:
     return normalized
 
 
+def _is_runtime_bytecode_cache(path: Path) -> bool:
+    relative = path.relative_to(path.anchor) if path.is_absolute() else path
+    return "__pycache__" in relative.parts and path.suffix.lower() in {".pyc", ".pyo"}
+
+
 def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict[str, Any]) -> None:
     items = install_manifest.get("files")
     if not isinstance(items, list) or not items:
@@ -281,7 +286,9 @@ def _validate_file_inventory(paths: DinoV3ComponentPaths, install_manifest: dict
     actual = {
         path.relative_to(paths.root).as_posix()
         for path in paths.root.rglob("*")
-        if path.is_file() and path != paths.install_manifest
+        if path.is_file()
+        and path != paths.install_manifest
+        and not _is_runtime_bytecode_cache(path)
     }
     declared_paths = set(declared)
     if actual != declared_paths:
