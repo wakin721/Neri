@@ -17,6 +17,7 @@ ModelBackend = Literal["yolo", "dinov3"]
 _DETECT_EXTENSIONS = frozenset({".pt"})
 _CLS_EXTENSIONS = frozenset({".pt", ".onnx", ".engine"})
 _MANIFEST_SUFFIX = ".neri.json"
+_SOURCE_ORDER: dict[ModelSource, int] = {"user": 0, "sync": 1}
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,10 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
     unique: dict[str, DiscoveredModel] = {}
     for model in models:
         unique.setdefault(model.path, model)
-    return sorted(unique.values(), key=lambda item: item.name.casefold())
+    return sorted(
+        unique.values(),
+        key=lambda item: (_SOURCE_ORDER[item.source], item.name.casefold()),
+    )
 
 
 def _saved_path_matches(saved: str, current: str) -> bool:
