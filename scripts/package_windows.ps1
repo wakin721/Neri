@@ -36,6 +36,14 @@ $package = Join-Path $packageRoot "Neri"
 $release = Join-Path $env:GITHUB_WORKSPACE "frontend\build\windows\x64\runner\Release"
 $pythonRoot = Split-Path -Parent (Get-Command python).Source
 
+$dinov3SeedDir = Join-Path $env:GITHUB_WORKSPACE "res\install\dinov3"
+python "system\dinov3\seed.py" $dinov3SeedDir
+if ($LASTEXITCODE -ne 0) { throw "DINOv3 classifier seed materialization failed." }
+$dinov3Seed = Join-Path $dinov3SeedDir "dinov3_classifier_merged_reviewed_20260908.pt"
+if (-not (Test-Path $dinov3Seed)) {
+  throw "DINOv3 classifier seed was not materialized."
+}
+
 New-Item -ItemType Directory -Path $package -Force | Out-Null
 Copy-Item "$release\*" $package -Recurse -Force
 Copy-Item "system" $package -Recurse -Force
