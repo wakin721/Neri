@@ -77,7 +77,11 @@ jobs:
 
       - name: Apply staged DINOv3 environment UI patch
         if: github.ref == 'refs/heads/feat/dinov3-multiprototype-remaining'
-        run: python scripts/apply_dinov3_environment_ui.py
+        shell: bash
+        run: |
+          if ! grep -Fq "dinov3-component-action" frontend/lib/src/screens/settings_screen.dart; then
+            python scripts/apply_dinov3_environment_ui.py
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -96,6 +100,19 @@ jobs:
       - name: Test
         working-directory: frontend
         run: flutter test
+
+      - name: Persist verified DINOv3 environment UI
+        if: github.ref == 'refs/heads/feat/dinov3-multiprototype-remaining' && success()
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add frontend/lib/src/screens/settings_screen.dart
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "feat: add DINOv3 environment maintenance panel"
+          git push origin HEAD:feat/dinov3-multiprototype-remaining
 
   mark-verified:
     name: Record verified revision
