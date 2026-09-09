@@ -1,4 +1,4 @@
-name: Verify Task 9 file operation undo RED
+name: Verify Task 9 file operation undo GREEN
 
 on:
   push:
