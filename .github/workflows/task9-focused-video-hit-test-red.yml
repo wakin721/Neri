@@ -1,4 +1,4 @@
-name: Verify Task 9 current-frame video hit-test RED
+name: Verify Task 9 current-frame video hit-test GREEN
 
 on:
   push:
