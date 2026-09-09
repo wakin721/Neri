@@ -29,6 +29,7 @@ void main() {
   testWidgets('clicking a fitted DINO box selects its observation id', (
     tester,
   ) async {
+    var callbackCalled = false;
     DetectionBox? selected;
     final box = DetectionBox(
       species: '盘羊',
@@ -54,7 +55,10 @@ void main() {
               showDetections: true,
               selectedObservationId: null,
               onOpenExternal: () {},
-              onDetectionBoxSelected: (value) => selected = value,
+              onDetectionBoxSelected: (value) {
+                callbackCalled = true;
+                selected = value;
+              },
             ),
           ),
         ),
@@ -65,6 +69,7 @@ void main() {
     await tester.tapAt(tester.getCenter(find.byType(DetectionMediaViewer)));
     await tester.pump();
 
+    expect(callbackCalled, isTrue);
     expect(selected?.observationId, 'obs-1');
   });
 }
