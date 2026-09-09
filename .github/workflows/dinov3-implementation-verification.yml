@@ -95,6 +95,7 @@ jobs:
 
   mark-verified:
     name: Record verified revision
+    if: github.ref == 'refs/heads/nightly'
     needs:
       - python
       - flutter
