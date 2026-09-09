@@ -1,4 +1,4 @@
-name: Verify Task 9 MainWindow feedback GREEN
+name: Verify Task 9 MainWindow feedback GREEN rerun
 
 on:
   push:
