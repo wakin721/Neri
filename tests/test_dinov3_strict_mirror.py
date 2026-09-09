@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from system.dinov3 import component
+from system.dinov3.checkpoint import CheckpointValidationError
 
 
 class MirrorCloud:
@@ -36,9 +37,7 @@ def _cloud_tree(tmp_path: Path) -> Path:
     (tree / "source" / "dinov3" / "models").mkdir(parents=True)
     (tree / "source" / "dinov3" / "__init__.py").write_text("# package\n", encoding="utf-8")
     (tree / "source" / "dinov3" / "hub" / "backbones.py").write_text("# hub\n", encoding="utf-8")
-    (tree / "source" / "dinov3" / "models" / "vision_transformer.py").write_text(
-        "# vit\n", encoding="utf-8"
-    )
+    (tree / "source" / "dinov3" / "models" / "vision_transformer.py").write_text("# vit\n", encoding="utf-8")
     backbone_dir = tree / "dinov3-vitb16"
     backbone_dir.mkdir()
     (backbone_dir / component.DINO_BACKBONE_FILENAME).write_bytes(b"cloud-backbone")
@@ -110,9 +109,7 @@ def test_install_downloads_authoritative_root_as_complete_mirror(tmp_path, monke
     target.mkdir(parents=True)
     (target / "local-only.txt").write_text("stale", encoding="utf-8")
     monkeypatch.setattr(component, "_component_health", lambda _paths: (True, "ok"))
-
     component.install_dinov3_component(root=target, cloud_client=cloud)
-
     assert cloud.download_tree_calls == [""]
     assert (target / "remote-extra.txt").read_text(encoding="utf-8") == "must mirror\n"
     assert not (target / "local-only.txt").exists()
@@ -127,11 +124,7 @@ def test_install_preserves_cloud_manifest_bytes_without_normalization(tmp_path, 
     (seed / component.DINO_CLASSIFIER_FILENAME).write_bytes(b"poisoned-seed")
     (seed / component.DINO_MODEL_MANIFEST_FILENAME).write_bytes(b'{"backend":"dinov3"}\n')
     monkeypatch.setattr(component, "_component_health", lambda _paths: (True, "ok"))
-
-    component.install_dinov3_component(
-        root=target, cloud_client=MirrorCloud(cloud_tree), seed_dir=seed
-    )
-
+    component.install_dinov3_component(root=target, cloud_client=MirrorCloud(cloud_tree), seed_dir=seed)
     assert (target / component.DINO_MODEL_MANIFEST_FILENAME).read_bytes() == original
     assert (target / component.DINO_CLASSIFIER_FILENAME).read_bytes() == b"cloud-classifier"
 
@@ -144,10 +137,8 @@ def test_post_activation_validation_failure_restores_previous_component(tmp_path
     marker.write_text("healthy-old", encoding="utf-8")
     checks = iter([(True, "staged ok"), (False, "active smoke failed")])
     monkeypatch.setattr(component, "_component_health", lambda _paths: next(checks))
-
     with pytest.raises(RuntimeError, match="active smoke failed"):
         component.install_dinov3_component(root=target, cloud_client=MirrorCloud(cloud_tree))
-
     assert marker.read_text(encoding="utf-8") == "healthy-old"
     assert not (target / "remote-extra.txt").exists()
 
@@ -161,9 +152,7 @@ def test_health_rejects_declared_file_hash_mismatch(tmp_path, monkeypatch):
             item["sha256"] = "0" * 64
     (tree / "install.json").write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(component, "_sha256_file", _fake_component_hash)
-
     status = component.dinov3_component_status(root=tree)
-
     assert status["healthy"] is False
     assert "remote-extra.txt" in status["message"]
     assert "SHA-256" in status["message"]
@@ -177,9 +166,7 @@ def test_health_rejects_duplicate_or_unsafe_inventory_path(tmp_path, monkeypatch
     payload["files"].append({"path": "../escape.txt", "sha256": "0" * 64, "size": 0})
     (tree / "install.json").write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(component, "_sha256_file", _fake_component_hash)
-
     status = component.dinov3_component_status(root=tree)
-
     assert status["healthy"] is False
     assert "files" in status["message"].lower()
 
@@ -188,17 +175,27 @@ def test_integrity_failure_preserves_previous_component(tmp_path, monkeypatch):
     tree = _cloud_tree(tmp_path)
     _write_full_inventory(tree)
     payload = json.loads((tree / "install.json").read_text(encoding="utf-8"))
-    payload["files"] = [
-        item for item in payload["files"] if item["path"] != "remote-extra.txt"
-    ]
+    payload["files"] = [item for item in payload["files"] if item["path"] != "remote-extra.txt"]
     (tree / "install.json").write_text(json.dumps(payload), encoding="utf-8")
     target = tmp_path / "installed"
     target.mkdir()
     marker = target / "existing.txt"
     marker.write_text("healthy-old", encoding="utf-8")
     monkeypatch.setattr(component, "_sha256_file", _fake_component_hash)
-
     with pytest.raises(RuntimeError, match="files"):
         component.install_dinov3_component(root=target, cloud_client=MirrorCloud(tree))
-
     assert marker.read_text(encoding="utf-8") == "healthy-old"
+
+
+def test_health_rejects_invalid_multi_prototype_checkpoint(tmp_path, monkeypatch):
+    tree = _cloud_tree(tmp_path)
+    _write_full_inventory(tree)
+    monkeypatch.setattr(component, "_sha256_file", _fake_component_hash)
+
+    def invalid_checkpoint(_path):
+        raise CheckpointValidationError("invalid multi-prototype checkpoint")
+
+    monkeypatch.setattr(component, "load_checkpoint", invalid_checkpoint, raising=False)
+    status = component.dinov3_component_status(root=tree)
+    assert status["healthy"] is False
+    assert "checkpoint" in status["message"].lower()
