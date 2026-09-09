@@ -152,8 +152,8 @@ def main() -> None:
 
     text = replace_once(
         text,
-        """      _installingPytorch = false;\n      _reinstallingPackage = false;\n      _maintenanceOperation = null;\n""",
-        """      _installingPytorch = false;\n      _reinstallingPackage = false;\n      _maintainingDinoV3 = false;\n      _maintenanceOperation = null;\n""",
+        """  Future<void> _handleMaintenanceStartFailure(\n    Object error,\n    String prefix,\n  ) async {\n    if (await _resumeMaintenanceWatchIfActive(announce: true)) return;\n    if (!mounted) return;\n    setState(() {\n      _installingPytorch = false;\n      _reinstallingPackage = false;\n      _maintenanceOperation = null;\n""",
+        """  Future<void> _handleMaintenanceStartFailure(\n    Object error,\n    String prefix,\n  ) async {\n    if (await _resumeMaintenanceWatchIfActive(announce: true)) return;\n    if (!mounted) return;\n    setState(() {\n      _installingPytorch = false;\n      _reinstallingPackage = false;\n      _maintainingDinoV3 = false;\n      _maintenanceOperation = null;\n""",
         "maintenance failure reset",
     )
     text = replace_once(
