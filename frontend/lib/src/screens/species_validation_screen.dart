@@ -33,6 +33,28 @@ typedef MarkValidationItems =
       String? remark,
     });
 
+typedef MarkValidationItemWithFeedback =
+    Future<DetectionItem> Function(
+      DetectionItem item,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+    });
+
+typedef MarkValidationItemsWithFeedback =
+    Future<List<DetectionItem>> Function(
+      List<DetectionItem> items,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+    });
+
 typedef RedetectValidationItems =
     Future<void> Function(
       List<DetectionItem> items, {
@@ -2895,6 +2917,44 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
+  String? _newValidationFeedbackOperationId(String action) {
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    if (action == 'unverified' || classificationModelPath.isEmpty) return null;
+    return _newFeedbackOperationId();
+  }
+
+  Future<DetectionItem> _callMarkItem(
+    DetectionItem item,
+    String action, {
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? feedbackOperationId,
+  }) {
+    final callback = widget.onMarkItem;
+    if (feedbackOperationId != null &&
+        callback is MarkValidationItemWithFeedback) {
+      return callback(
+        item,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+      );
+    }
+    return callback(
+      item,
+      action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+    );
+  }
+
   Future<void> _markBatch(
     List<DetectionItem> items,
     String action, {
@@ -3153,15 +3213,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
     _deferRegroupForItems(<DetectionItem>[item]);
 
+    final feedbackOperationId = _newValidationFeedbackOperationId(action);
     _setMarking(true);
     try {
-      final updated = await widget.onMarkItem(
+      final updated = await _callMarkItem(
         item,
         action,
         speciesName: speciesName,
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        feedbackOperationId: feedbackOperationId,
       );
       if (!mounted) return;
       final usedQuickSpecies =
