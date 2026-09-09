@@ -115,4 +115,53 @@ void main() {
 
     expect(boxes.map((box) => box.observationId), <String?>['obs-current']);
   });
+
+  testWidgets('video overlay hit-tests only current-frame DINO boxes', (
+    tester,
+  ) async {
+    DetectionBox? selected;
+    final current = DetectionBox(
+      species: '盘羊',
+      bbox: const <double>[0.1, 0.1, 0.6, 0.6],
+      timestamp: 0,
+      observationId: 'obs-current',
+    );
+    final future = DetectionBox(
+      species: '家牛',
+      bbox: const <double>[0.1, 0.1, 0.6, 0.6],
+      timestamp: 2,
+      observationId: 'obs-future',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Center(
+          child: SizedBox(
+            width: 400,
+            height: 300,
+            child: DinoVideoDetectionOverlay(
+              boxes: <DetectionBox>[current, future],
+              mediaSize: const Size(400, 300),
+              position: Duration.zero,
+              duration: const Duration(seconds: 4),
+              detectionData: const <String, dynamic>{
+                'total_frames_processed': 100,
+                'vid_stride': 1,
+              },
+              selectedObservationId: null,
+              onDetectionBoxSelected: (value) => selected = value,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final overlay = find.byType(DinoVideoDetectionOverlay);
+    expect(overlay, findsOneWidget);
+    await tester.tapAt(tester.getCenter(overlay));
+    await tester.pump();
+
+    expect(selected?.observationId, 'obs-current');
+  });
 }
