@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -382,6 +384,28 @@ def dinov3_component_status(*, root: Path | None = None) -> dict[str, object]:
     }
 
 
+def _smoke_test_source(paths: DinoV3ComponentPaths) -> None:
+    code = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from dinov3.hub.backbones import dinov3_vitb16\n"
+        "dinov3_vitb16(pretrained=False)\n"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(paths.source_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"DINOv3 source smoke test failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "unknown source error").strip()
+        raise RuntimeError(f"DINOv3 source smoke test failed: {detail}")
+
+
 def _remove_path(path: Path) -> None:
     if not path.exists() and not path.is_symlink():
         return
@@ -424,6 +448,8 @@ def install_dinov3_component(
         healthy, message = _component_health(staged_paths)
         if not healthy:
             raise RuntimeError(message)
+        progress(82, "正在验证 DINOv3 source...")
+        _smoke_test_source(staged_paths)
         _remove_path(backup)
         if had_previous:
             target.rename(backup)
