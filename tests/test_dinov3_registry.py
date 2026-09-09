@@ -10,14 +10,13 @@ def vector(index=0):
 def test_registry_is_scoped_by_model_fingerprint(tmp_path):
     path=registry_path_for_fingerprint(tmp_path,FP);reg=SpeciesRegistry(path,model_fingerprint=FP);reg.close()
     with pytest.raises(ValueError,match='fingerprint'):SpeciesRegistry(path,model_fingerprint='b'*64)
-def test_four_events_create_temporary_prototype_but_five_gate_registration(tmp_path):
+def test_four_events_gate_explicit_provisional_registration(tmp_path):
     reg=SpeciesRegistry(tmp_path/'r.db',model_fingerprint=FP,consistency_threshold=.5)
     entry=None
-    for i in range(4):entry=reg.record_unknown(vector(),camera_id=f'cam-{i%2}',captured_at=BASE+timedelta(hours=i),source_path=f'{i}.jpg')
+    for i in range(4):entry=reg.record_unknown(vector(),camera_id='cam-0',captured_at=BASE+timedelta(hours=i),source_path=f'{i}.jpg')
     assert entry.status=='candidate';assert entry.event_count==4;assert entry.prototype_count==1;assert not entry.can_register
     entry=reg.set_identity(entry.id,common_name='豹猫',scientific_name='Prionailurus bengalensis')
-    entry=reg.record_observation(entry.id,vector(),camera_id='cam-2',captured_at=BASE+timedelta(hours=5),source_path='5.jpg')
-    assert entry.event_count==5;assert entry.can_register
+    assert entry.event_count==4;assert entry.status=='candidate';assert entry.can_register
     registered=reg.register(entry.id);assert registered.status=='provisional';assert registered.display_name.startswith('豹猫')
     reg.close()
 def test_same_identity_within_30_minutes_counts_once(tmp_path):
