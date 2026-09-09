@@ -8,6 +8,7 @@ import numpy as np
 
 from .checkpoint import DINO_FEATURE_DIM, DINO_MULTI_PROTOTYPE_HEAD, DinoV3Checkpoint
 from .preprocess import ImageInput
+from .prototype_bank import PrototypeBank, PrototypeRecord
 
 
 def _normalize_rows(values: np.ndarray) -> np.ndarray:
@@ -36,28 +37,6 @@ def aggregate_event_embeddings(crop_embeddings: np.ndarray) -> np.ndarray:
     if array.ndim != 2 or array.shape[1] != DINO_FEATURE_DIM or len(array) == 0:
         raise ValueError("Expected crop embeddings with shape (N, 768)")
     return _normalize_rows(_normalize_rows(array).mean(axis=0, keepdims=True))[0]
-
-
-@dataclass(frozen=True)
-class PrototypeRecord:
-    species: str
-    embedding: np.ndarray
-    source: str
-    registry_id: int | None = None
-    registration_status: str | None = None
-
-    def __post_init__(self) -> None:
-        embedding = np.asarray(self.embedding, dtype=np.float32).copy()
-        if embedding.shape != (DINO_FEATURE_DIM,) or not np.isfinite(embedding).all():
-            raise ValueError("Expected a finite 768-dimensional prototype")
-        embedding.setflags(write=False)
-        object.__setattr__(self, "embedding", embedding)
-
-
-@dataclass(frozen=True)
-class PrototypeBank:
-    formal: tuple[PrototypeRecord, ...]
-    provisional: tuple[PrototypeRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,8 +89,6 @@ class DinoV3Prediction:
             "known_score": self.known_score,
             "threshold": self.threshold,
             "accepted": self.accepted,
-            # Response compatibility only. Linear Head values no longer
-            # participate in Multi-prototype decisions.
             "head_species": self.head_species,
             "prototype_species": self.prototype_species,
             "head_prototype_consistent": self.head_prototype_consistent,
@@ -125,13 +102,7 @@ class DinoV3Prediction:
 
 
 class DinoV3Classifier:
-    def __init__(
-        self,
-        checkpoint: DinoV3Checkpoint,
-        *,
-        encoder=None,
-        registry=None,
-    ) -> None:
+    def __init__(self, checkpoint: DinoV3Checkpoint, *, encoder=None, registry=None) -> None:
         self.checkpoint = checkpoint
         self.encoder = encoder
         self.registry = registry
@@ -141,16 +112,11 @@ class DinoV3Classifier:
         if checkpoint.head_type == DINO_MULTI_PROTOTYPE_HEAD:
             if checkpoint.feature_center is None or checkpoint.prototype_class_indices is None:
                 raise ValueError("Multi-prototype checkpoint is missing classifier metadata")
-            self._feature_center = checkpoint.feature_center.numpy().astype(
-                np.float32,
+            self._feature_center = checkpoint.feature_center.numpy().astype(np.float32, copy=False)
+            self._prototypes = checkpoint.prototypes.numpy().astype(np.float32, copy=False)
+            self._prototype_class_indices = checkpoint.prototype_class_indices.numpy().astype(
+                np.int64,
                 copy=False,
-            )
-            self._prototypes = checkpoint.prototypes.numpy().astype(
-                np.float32,
-                copy=False,
-            )
-            self._prototype_class_indices = (
-                checkpoint.prototype_class_indices.numpy().astype(np.int64, copy=False)
             )
             self._base_records = tuple(
                 PrototypeRecord(
@@ -158,30 +124,20 @@ class DinoV3Classifier:
                     embedding=self._prototypes[prototype_index],
                     source="base",
                 )
-                for prototype_index, class_index in enumerate(
-                    self._prototype_class_indices
-                )
+                for prototype_index, class_index in enumerate(self._prototype_class_indices)
             )
             self._weight = None
             self._bias = None
         else:
-            # Temporary migration compatibility. Production DINOv3 components
-            # switch to Multi-prototype; Task 7 removes the obsolete head path.
             if checkpoint.head_weight is None or checkpoint.head_bias is None:
                 raise ValueError("Legacy DINOv3 checkpoint is missing Linear Head state")
-            self._weight = checkpoint.head_weight.numpy().astype(
-                np.float32,
-                copy=False,
-            )
+            self._weight = checkpoint.head_weight.numpy().astype(np.float32, copy=False)
             self._bias = checkpoint.head_bias.numpy().astype(np.float32, copy=False)
             self._prototypes = _normalize_rows(
                 checkpoint.prototypes.numpy().astype(np.float32, copy=False)
             )
             self._feature_center = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
-            self._prototype_class_indices = np.arange(
-                len(checkpoint.classes),
-                dtype=np.int64,
-            )
+            self._prototype_class_indices = np.arange(len(checkpoint.classes), dtype=np.int64)
             self._base_records = ()
 
     @property
@@ -218,10 +174,7 @@ class DinoV3Classifier:
     def _record_matrix(records: Sequence[PrototypeRecord]) -> np.ndarray:
         if not records:
             return np.empty((0, DINO_FEATURE_DIM), dtype=np.float32)
-        return np.stack([record.embedding for record in records]).astype(
-            np.float32,
-            copy=False,
-        )
+        return np.stack([record.embedding for record in records]).astype(np.float32, copy=False)
 
     @staticmethod
     def _distances(centered: np.ndarray, records: Sequence[PrototypeRecord]) -> np.ndarray:
@@ -275,13 +228,7 @@ class DinoV3Classifier:
         )
         return tuple(candidates[:3])
 
-    def _classify_multi_prototype(
-        self,
-        array: np.ndarray,
-    ) -> list[DinoV3Prediction]:
-        # Refresh the overlay exactly once per classify call. A SpeciesRegistry
-        # can therefore promote Provisional -> Confirmed -> Mature without
-        # reconstructing this classifier or restarting the backend.
+    def _classify_multi_prototype(self, array: np.ndarray) -> list[DinoV3Prediction]:
         bank = self._effective_bank()
         if not bank.formal:
             raise ValueError("Formal Multi-prototype bank cannot be empty")
@@ -293,10 +240,8 @@ class DinoV3Classifier:
                 centered,
                 bank.formal,
             )
-            formal_accepted = formal_score >= self.checkpoint.threshold
             candidates = self._species_candidates(centered, bank.formal)
-
-            if formal_accepted:
+            if formal_score >= self.checkpoint.threshold:
                 results.append(
                     DinoV3Prediction(
                         species=formal.species,
@@ -312,7 +257,6 @@ class DinoV3Classifier:
                         source=formal.source,
                         registry_id=formal.registry_id,
                         registration_status=formal.registration_status,
-                        assistive_match=False,
                         nearest_prototype_index=formal_index,
                         squared_distance=formal_distance,
                     )
@@ -320,12 +264,9 @@ class DinoV3Classifier:
                 continue
 
             if bank.provisional:
-                (
-                    provisional_index,
-                    provisional,
-                    provisional_distance,
-                    provisional_score,
-                ) = self._winning_record(centered, bank.provisional)
+                provisional_index, provisional, provisional_distance, provisional_score = (
+                    self._winning_record(centered, bank.provisional)
+                )
                 if provisional_score >= self.checkpoint.threshold:
                     results.append(
                         DinoV3Prediction(
@@ -364,7 +305,6 @@ class DinoV3Classifier:
                     source=formal.source,
                     registry_id=formal.registry_id,
                     registration_status=formal.registration_status,
-                    assistive_match=False,
                     nearest_prototype_index=formal_index,
                     squared_distance=formal_distance,
                 )
@@ -442,9 +382,7 @@ class DinoV3Classifier:
     ) -> list[DinoV3Prediction]:
         if self.encoder is None:
             raise RuntimeError("DINOv3 encoder is not loaded")
-        return self.classify_features(
-            self.encoder.encode(crops, array_color=array_color)
-        )
+        return self.classify_features(self.encoder.encode(crops, array_color=array_color))
 
     def classify_event(
         self,
