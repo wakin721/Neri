@@ -29,6 +29,8 @@ class DetectionMediaViewer extends StatelessWidget {
     required this.onOpenExternal,
     this.isFavorite = false,
     this.onToggleFavorite,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
     super.key,
   });
 
@@ -38,6 +40,8 @@ class DetectionMediaViewer extends StatelessWidget {
   final VoidCallback onOpenExternal;
   final bool isFavorite;
   final VoidCallback? onToggleFavorite;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   bool get _isImage {
     return _viewerImageTypes.contains(item.fileType.toLowerCase());
@@ -62,6 +66,8 @@ class DetectionMediaViewer extends StatelessWidget {
                 visibleBoxes: visibleBoxes,
                 showDetections: showDetections,
                 onOpenExternal: onOpenExternal,
+                selectedObservationId: selectedObservationId,
+                onDetectionBoxSelected: onDetectionBoxSelected,
               ),
               Positioned(
                 top: 12,
@@ -111,12 +117,16 @@ class _MediaContent extends StatelessWidget {
     required this.visibleBoxes,
     required this.showDetections,
     required this.onOpenExternal,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final DetectionItem item;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
   final VoidCallback onOpenExternal;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   bool get isVideo {
     return _viewerVideoTypes.contains(item.fileType.toLowerCase());
@@ -137,6 +147,8 @@ class _MediaContent extends StatelessWidget {
         path: item.path,
         visibleBoxes: visibleBoxes,
         showDetections: showDetections,
+        selectedObservationId: selectedObservationId,
+        onDetectionBoxSelected: onDetectionBoxSelected,
       );
     }
   }
@@ -147,11 +159,15 @@ class _ImageMediaViewer extends StatefulWidget {
     required this.path,
     required this.visibleBoxes,
     required this.showDetections,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final String path;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   @override
   State<_ImageMediaViewer> createState() => _ImageMediaViewerState();
@@ -235,24 +251,45 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
     if (_imageError != null) {
       return _MissingImagePlaceholder(path: widget.path);
     }
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Image.file(
-          File(widget.path),
-          key: ValueKey(widget.path),
-          fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) =>
-              _MissingImagePlaceholder(path: widget.path),
-        ),
-        if (widget.showDetections && _imageSize != null)
-          CustomPaint(
-            painter: _DetectionOverlayPainter(
-              boxes: widget.visibleBoxes,
-              mediaSize: _imageSize!,
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: widget.onDetectionBoxSelected == null || _imageSize == null
+              ? null
+              : (details) {
+                  final selected = widget.showDetections
+                      ? _hitTestDinoBox(
+                          details.localPosition,
+                          viewport,
+                          _imageSize!,
+                          widget.visibleBoxes,
+                        )
+                      : null;
+                  widget.onDetectionBoxSelected!(selected);
+                },
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.file(
+                File(widget.path),
+                key: ValueKey(widget.path),
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) =>
+                    _MissingImagePlaceholder(path: widget.path),
+              ),
+              if (widget.showDetections && _imageSize != null)
+                CustomPaint(
+                  painter: _DetectionOverlayPainter(
+                    boxes: widget.visibleBoxes,
+                    mediaSize: _imageSize!,
+                  ),
+                ),
+            ],
           ),
-      ],
+        );
+      },
     );
   }
 }
@@ -826,6 +863,63 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 }
 
+Rect _fittedMediaRect(Size viewport, Size media) {
+  if (viewport.isEmpty || media.isEmpty) return Rect.zero;
+  final scale = math.min(
+    viewport.width / media.width,
+    viewport.height / media.height,
+  );
+  final fittedSize = Size(media.width * scale, media.height * scale);
+  return Rect.fromLTWH(
+    (viewport.width - fittedSize.width) / 2,
+    (viewport.height - fittedSize.height) / 2,
+    fittedSize.width,
+    fittedSize.height,
+  );
+}
+
+Rect? _renderRectForBox(
+  DetectionBox box,
+  Size viewport,
+  Size mediaSize,
+) {
+  if (box.bbox.length < 4 || viewport.isEmpty || mediaSize.isEmpty) {
+    return null;
+  }
+  final fitted = _fittedMediaRect(viewport, mediaSize);
+  if (fitted.isEmpty) return null;
+
+  final xmin = box.bbox[0];
+  final ymin = box.bbox[1];
+  final xmax = box.bbox[2];
+  final ymax = box.bbox[3];
+  final isNormalized = xmax <= 1.5 && ymax <= 1.5;
+  final scaleX = fitted.width / mediaSize.width;
+  final scaleY = fitted.height / mediaSize.height;
+
+  return Rect.fromLTRB(
+    fitted.left + (isNormalized ? xmin * fitted.width : xmin * scaleX),
+    fitted.top + (isNormalized ? ymin * fitted.height : ymin * scaleY),
+    fitted.left + (isNormalized ? xmax * fitted.width : xmax * scaleX),
+    fitted.top + (isNormalized ? ymax * fitted.height : ymax * scaleY),
+  );
+}
+
+DetectionBox? _hitTestDinoBox(
+  Offset localPosition,
+  Size viewport,
+  Size mediaSize,
+  List<DetectionBox> boxes,
+) {
+  for (final box in boxes.reversed) {
+    final observationId = box.observationId?.trim();
+    if (observationId == null || observationId.isEmpty) continue;
+    final rect = _renderRectForBox(box, viewport, mediaSize);
+    if (rect != null && rect.contains(localPosition)) return box;
+  }
+  return null;
+}
+
 class _TimedBoxMatch {
   const _TimedBoxMatch({
     required this.box,
@@ -854,25 +948,6 @@ class _DetectionOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (mediaSize.isEmpty || boxes.isEmpty) return;
 
-    final mediaRatio = mediaSize.width / mediaSize.height;
-    final canvasRatio = size.width / size.height;
-    double w, h, dx, dy;
-
-    if (mediaRatio > canvasRatio) {
-      w = size.width;
-      h = w / mediaRatio;
-      dx = 0;
-      dy = (size.height - h) / 2;
-    } else {
-      h = size.height;
-      w = h * mediaRatio;
-      dx = (size.width - w) / 2;
-      dy = 0;
-    }
-
-    final scaleX = w / mediaSize.width;
-    final scaleY = h / mediaSize.height;
-
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.5;
@@ -883,32 +958,9 @@ class _DetectionOverlayPainter extends CustomPainter {
       final box = boxes[index];
       if (box.bbox.length < 4) continue;
 
-      final xmin = box.bbox[0];
-      final ymin = box.bbox[1];
-      final xmax = box.bbox[2];
-      final ymax = box.bbox[3];
-
-      final isNormalized = xmax <= 1.5 && ymax <= 1.5;
-
-      double renderXMin, renderYMin, renderXMax, renderYMax;
-      if (isNormalized) {
-        renderXMin = dx + xmin * w;
-        renderYMin = dy + ymin * h;
-        renderXMax = dx + xmax * w;
-        renderYMax = dy + ymax * h;
-      } else {
-        renderXMin = dx + xmin * scaleX;
-        renderYMin = dy + ymin * scaleY;
-        renderXMax = dx + xmax * scaleX;
-        renderYMax = dy + ymax * scaleY;
-      }
-
-      final rect = Rect.fromLTRB(
-        renderXMin,
-        renderYMin,
-        renderXMax,
-        renderYMax,
-      );
+      final rect = _renderRectForBox(box, size, mediaSize);
+      if (rect == null) continue;
+      final fitted = _fittedMediaRect(size, mediaSize);
       final color = _getColorForSpecies(box.species);
       paint.color = color;
 
@@ -929,7 +981,10 @@ class _DetectionOverlayPainter extends CustomPainter {
       );
       textPainter.layout();
 
-      final textY = math.max(dy, rect.top - textPainter.height - 2);
+      final textY = math.max(
+        fitted.top,
+        rect.top - textPainter.height - 2,
+      );
 
       final bgRect = Rect.fromLTWH(
         rect.left,
