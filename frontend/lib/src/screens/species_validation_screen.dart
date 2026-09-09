@@ -108,6 +108,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   const SpeciesValidationScreen({
     required this.apiClient,
     required this.inputPath,
+    this.classificationModelPath,
     required this.items,
     required this.loading,
     required this.refreshVersion,
@@ -146,6 +147,7 @@ class SpeciesValidationScreen extends StatefulWidget {
 
   final NeriApiClient apiClient;
   final String inputPath;
+  final String? classificationModelPath;
   final List<DetectionItem> items;
   final bool loading;
   final int refreshVersion;
@@ -267,6 +269,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool _marking = false;
   bool _exporting = false;
   String? _selectedObservationId;
+  int _feedbackOperationSequence = 0;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   final List<String> _pendingSpeciesNames = <String>[];
   final List<String> _pendingQuantities = <String>[];
@@ -858,8 +861,53 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return null;
   }
 
+  String _newFeedbackOperationId() {
+    _feedbackOperationSequence += 1;
+    return 'feedback-${DateTime.now().microsecondsSinceEpoch}-$_feedbackOperationSequence';
+  }
+
+  Future<void> _submitDinoBoxFeedback(
+    DetectionBox box,
+    String action, {
+    String? speciesName,
+  }) async {
+    if (_marking || widget.items.isEmpty) return;
+    final observationId = box.observationId?.trim() ?? '';
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    if (observationId.isEmpty || classificationModelPath.isEmpty) return;
+    final item = widget.items.firstWhere(
+      (candidate) => candidate.path == _selectedPath,
+      orElse: () => widget.items.first,
+    );
+    final operationId = _newFeedbackOperationId();
+
+    _setMarking(true);
+    try {
+      await widget.apiClient.markDinoV3BoxFeedback(
+        inputPath: widget.inputPath,
+        filePath: item.path,
+        classificationModelPath: classificationModelPath,
+        observationId: observationId,
+        action: action,
+        speciesName: speciesName,
+        feedbackOperationId: operationId,
+      );
+      if (!mounted) return;
+      _showSnackBar('已记录检测框反馈');
+    } catch (error) {
+      if (!mounted) return;
+      _showSnackBar('检测框反馈失败：$error');
+    } finally {
+      _setMarking(false);
+    }
+  }
+
   Widget _buildDinoFeedbackPanel(DetectionBox box) {
     const title = '检测框校验';
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    final observationId = box.observationId?.trim() ?? '';
+    final canSubmit =
+        !_marking && classificationModelPath.isNotEmpty && observationId.isNotEmpty;
     return _ValidationPanel(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -874,7 +922,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               ),
             ),
             const SizedBox(width: 12),
-            OutlinedButton(onPressed: null, child: const Text('正确')),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_submitDinoBoxFeedback(box, 'correct'))
+                  : null,
+              child: const Text('正确'),
+            ),
             const SizedBox(width: 8),
             OutlinedButton(onPressed: null, child: const Text('修改物种')),
             const SizedBox(width: 8),
