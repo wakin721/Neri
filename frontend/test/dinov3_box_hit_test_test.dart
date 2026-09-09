@@ -40,6 +40,8 @@ void main() {
       filename: 'frame.png',
       path: imageFile.path,
       fileType: 'png',
+      width: 10,
+      height: 10,
       detectionBoxes: <DetectionBox>[box],
     );
 
