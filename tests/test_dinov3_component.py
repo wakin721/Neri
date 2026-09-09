@@ -41,6 +41,22 @@ class _FakeDinoCloud:
             encoding="utf-8",
         )
         (target / "LICENSE_DINOv3.md").write_text("license", encoding="utf-8")
+        files = []
+        for path in sorted(target.rglob("*")):
+            if not path.is_file():
+                continue
+            sha256 = (
+                dinov3.DINO_BACKBONE_SHA256
+                if path.name == dinov3.DINO_BACKBONE_FILENAME
+                else dinov3.DINO_CLASSIFIER_SHA256
+            )
+            files.append(
+                {
+                    "path": path.relative_to(target).as_posix(),
+                    "sha256": sha256,
+                    "size": path.stat().st_size,
+                }
+            )
         (target / "install.json").write_text(
             json.dumps(
                 {
@@ -60,7 +76,7 @@ class _FakeDinoCloud:
                         "selection_k": 3,
                         "manifest": dinov3.DINO_MODEL_MANIFEST_FILENAME,
                     },
-                    "files": [],
+                    "files": files,
                 }
             ),
             encoding="utf-8",
