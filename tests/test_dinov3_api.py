@@ -9,6 +9,8 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
+
 
 def _write_model_bundle(tmp_path: Path) -> Path:
     encoder = tmp_path / "encoder.pth"
@@ -29,7 +31,8 @@ def _write_model_bundle(tmp_path: Path) -> Path:
                 torch.nn.functional.one_hot(torch.tensor(1), 768),
             ]
         ).float(),
-        "threshold": 0.4,
+        # Keep this generic API fixture outside the formal duplicate guard.
+        "threshold": 1.1,
         "encoder_weights": "encoder.pth",
         "encoder_sha256": encoder_hash,
         "preprocessing": "letterbox224_imagenet",
@@ -39,6 +42,17 @@ def _write_model_bundle(tmp_path: Path) -> Path:
     manifest = tmp_path / "head.neri.json"
     manifest.write_text(
         '{"backend":"dinov3","checkpoint":"head.pt","architecture":"dinov3_vitb16","feature_dim":768}',
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _write_multi_prototype_bundle(tmp_path: Path) -> Path:
+    checkpoint = tmp_path / "multi_prototype.pt"
+    torch.save(make_multi_prototype_payload(threshold=0.31), checkpoint)
+    manifest = tmp_path / "multi_prototype.neri.json"
+    manifest.write_text(
+        '{"backend":"dinov3","checkpoint":"multi_prototype.pt","architecture":"dinov3_vitb16","feature_dim":768}',
         encoding="utf-8",
     )
     return manifest
@@ -138,6 +152,21 @@ def test_registry_list_detail_events_identity_and_register(monkeypatch, tmp_path
     )
     assert registered.status_code == 200
     assert registered.json()["status"] == "provisional"
+
+
+def test_register_api_blocks_duplicate_species_matching_formal_bank(monkeypatch, tmp_path):
+    manifest = _write_multi_prototype_bundle(tmp_path)
+    client = _client(monkeypatch, tmp_path)
+    registration_id = _seed_registration(manifest, event_count=5)
+
+    response = client.post(
+        f"/api/dinov3/registry/{registration_id}/register",
+        json={"classification_model_path": str(manifest)},
+    )
+
+    assert response.status_code == 409
+    assert "species" in response.json()["detail"].lower()
+    assert "A" in response.json()["detail"]
 
 
 def test_registry_api_maps_not_found_invalid_model_and_unmet_conditions(monkeypatch, tmp_path):
