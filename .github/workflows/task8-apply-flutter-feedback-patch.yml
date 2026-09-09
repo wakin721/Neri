@@ -18,8 +18,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Patch Flutter feedback API
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           job_path = Path('frontend/lib/src/models/job.dart')
@@ -47,49 +48,54 @@ jobs:
           model_path = Path('frontend/lib/src/models/dinov3_feedback.dart')
           if model_path.exists():
               raise SystemExit('dinov3_feedback.dart already exists')
-          model_path.write_text("""import 'job.dart';
-
-class DinoV3BoxFeedbackResult {
-  const DinoV3BoxFeedbackResult({
-    required this.item,
-    required this.operationId,
-    required this.affectedSpecies,
-  });
-
-  factory DinoV3BoxFeedbackResult.fromJson(Map<String, dynamic> json) {
-    return DinoV3BoxFeedbackResult(
-      item: DetectionItem.fromJson(json['item'] as Map<String, dynamic>),
-      operationId: json['operation_id'] as String? ?? '',
-      affectedSpecies: (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])
-          .map((value) => value.toString())
-          .toList(),
-    );
-  }
-
-  final DetectionItem item;
-  final String operationId;
-  final List<String> affectedSpecies;
-}
-
-class DinoV3FeedbackRevertResult {
-  const DinoV3FeedbackRevertResult({
-    required this.operationId,
-    required this.affectedSpecies,
-  });
-
-  factory DinoV3FeedbackRevertResult.fromJson(Map<String, dynamic> json) {
-    return DinoV3FeedbackRevertResult(
-      operationId: json['operation_id'] as String? ?? '',
-      affectedSpecies: (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])
-          .map((value) => value.toString())
-          .toList(),
-    );
-  }
-
-  final String operationId;
-  final List<String> affectedSpecies;
-}
-""", encoding='utf-8')
+          model_lines = [
+              "import 'job.dart';",
+              "",
+              "class DinoV3BoxFeedbackResult {",
+              "  const DinoV3BoxFeedbackResult({",
+              "    required this.item,",
+              "    required this.operationId,",
+              "    required this.affectedSpecies,",
+              "  });",
+              "",
+              "  factory DinoV3BoxFeedbackResult.fromJson(Map<String, dynamic> json) {",
+              "    return DinoV3BoxFeedbackResult(",
+              "      item: DetectionItem.fromJson(json['item'] as Map<String, dynamic>),",
+              "      operationId: json['operation_id'] as String? ?? '',",
+              "      affectedSpecies:",
+              "          (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])",
+              "              .map((value) => value.toString())",
+              "              .toList(),",
+              "    );",
+              "  }",
+              "",
+              "  final DetectionItem item;",
+              "  final String operationId;",
+              "  final List<String> affectedSpecies;",
+              "}",
+              "",
+              "class DinoV3FeedbackRevertResult {",
+              "  const DinoV3FeedbackRevertResult({",
+              "    required this.operationId,",
+              "    required this.affectedSpecies,",
+              "  });",
+              "",
+              "  factory DinoV3FeedbackRevertResult.fromJson(Map<String, dynamic> json) {",
+              "    return DinoV3FeedbackRevertResult(",
+              "      operationId: json['operation_id'] as String? ?? '',",
+              "      affectedSpecies:",
+              "          (json['affected_species'] as List<dynamic>? ?? const <dynamic>[])",
+              "              .map((value) => value.toString())",
+              "              .toList(),",
+              "    );",
+              "  }",
+              "",
+              "  final String operationId;",
+              "  final List<String> affectedSpecies;",
+              "}",
+              "",
+          ]
+          model_path.write_text('\n'.join(model_lines), encoding='utf-8')
 
           api_path = Path('frontend/lib/src/api_client_core.dart')
           api = api_path.read_text(encoding='utf-8')
@@ -103,58 +109,61 @@ class DinoV3FeedbackRevertResult {
           )
 
           method_anchor = "  Future<PrivacyStatus> fetchPrivacyStatus() async {\n"
-          methods = """  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({
-    required String inputPath,
-    required String filePath,
-    required String classificationModelPath,
-    required String observationId,
-    required String action,
-    String? speciesName,
-    required String feedbackOperationId,
-  }) async {
-    final response = await _httpClient.post(
-      _uri('/api/dinov3/feedback/box'),
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode({
-        'input_path': inputPath,
-        'file_path': filePath,
-        'classification_model_path': classificationModelPath,
-        'observation_id': observationId,
-        'action': action,
-        if (speciesName != null && speciesName.trim().isNotEmpty)
-          'species_name': speciesName.trim(),
-        'feedback_operation_id': feedbackOperationId,
-      }),
-    );
-    _ensureSuccess(response);
-    return DinoV3BoxFeedbackResult.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
-  }
-
-  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({
-    required String classificationModelPath,
-    required String feedbackOperationId,
-  }) async {
-    final response = await _httpClient.post(
-      _uri('/api/dinov3/feedback/revert'),
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode({
-        'classification_model_path': classificationModelPath,
-        'feedback_operation_id': feedbackOperationId,
-      }),
-    );
-    _ensureSuccess(response);
-    return DinoV3FeedbackRevertResult.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
-  }
-
-"""
+          method_lines = [
+              "  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({",
+              "    required String inputPath,",
+              "    required String filePath,",
+              "    required String classificationModelPath,",
+              "    required String observationId,",
+              "    required String action,",
+              "    String? speciesName,",
+              "    required String feedbackOperationId,",
+              "  }) async {",
+              "    final response = await _httpClient.post(",
+              "      _uri('/api/dinov3/feedback/box'),",
+              "      headers: const {'content-type': 'application/json'},",
+              "      body: jsonEncode({",
+              "        'input_path': inputPath,",
+              "        'file_path': filePath,",
+              "        'classification_model_path': classificationModelPath,",
+              "        'observation_id': observationId,",
+              "        'action': action,",
+              "        if (speciesName != null && speciesName.trim().isNotEmpty)",
+              "          'species_name': speciesName.trim(),",
+              "        'feedback_operation_id': feedbackOperationId,",
+              "      }),",
+              "    );",
+              "    _ensureSuccess(response);",
+              "    return DinoV3BoxFeedbackResult.fromJson(",
+              "      jsonDecode(response.body) as Map<String, dynamic>,",
+              "    );",
+              "  }",
+              "",
+              "  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({",
+              "    required String classificationModelPath,",
+              "    required String feedbackOperationId,",
+              "  }) async {",
+              "    final response = await _httpClient.post(",
+              "      _uri('/api/dinov3/feedback/revert'),",
+              "      headers: const {'content-type': 'application/json'},",
+              "      body: jsonEncode({",
+              "        'classification_model_path': classificationModelPath,",
+              "        'feedback_operation_id': feedbackOperationId,",
+              "      }),",
+              "    );",
+              "    _ensureSuccess(response);",
+              "    return DinoV3FeedbackRevertResult.fromJson(",
+              "      jsonDecode(response.body) as Map<String, dynamic>,",
+              "    );",
+              "  }",
+              "",
+          ]
+          methods = '\n'.join(method_lines)
           if method_anchor not in api:
               raise SystemExit('api method anchor not found')
           api = api.replace(method_anchor, methods + method_anchor, 1)
           api_path.write_text(api, encoding='utf-8')
+          PY
       - name: Commit Task 8 implementation
         shell: bash
         run: |
