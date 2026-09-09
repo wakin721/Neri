@@ -30,6 +30,15 @@ import 'utils/local_detection_items.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
+String? resolveDinoV3ValidationModelPath(
+  ModelInfo? model,
+  String? selectedPath,
+) {
+  final path = selectedPath?.trim() ?? '';
+  if (model?.isDinoV3 != true || path.isEmpty) return null;
+  return path;
+}
+
 enum _CloseDialogPhase { choosing, shuttingDown, restoring }
 
 enum _CloseAction { hideToTray, exit }
@@ -2287,6 +2296,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return null;
   }
 
+  String? _selectedDinoV3ValidationModelPath() {
+    return resolveDinoV3ValidationModelPath(
+      _selectedClassificationModelInfo(),
+      _selectedClassificationModelPath,
+    );
+  }
+
   bool _useAugment() {
     return _boolSetting(_settingsOrEmpty(), 'use_augment', true);
   }
@@ -2759,6 +2775,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? feedbackOperationId,
   }) async {
     return _runValidationBusy(() async {
       final inputPath = _inputController.text.trim();
@@ -2774,6 +2791,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        classificationModelPath: _selectedDinoV3ValidationModelPath(),
+        feedbackOperationId: feedbackOperationId,
       );
       final merged = _mergeValidationUpdate(item, updated);
 
@@ -2794,6 +2813,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? feedbackOperationId,
   }) async {
     return _runValidationBusy(() async {
       final inputPath = _inputController.text.trim();
@@ -2809,6 +2829,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        classificationModelPath: _selectedDinoV3ValidationModelPath(),
+        feedbackOperationId: feedbackOperationId,
       );
       final fallbackByPath = <String, DetectionItem>{
         for (final item in items) item.path: item,
@@ -3466,6 +3488,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final validationScreen = SpeciesValidationScreen(
       apiClient: widget.apiClient,
       inputPath: inputPath,
+      classificationModelPath: _selectedDinoV3ValidationModelPath(),
       items: items,
       loading: _previewLoading,
       refreshVersion: _previewContentVersion,
