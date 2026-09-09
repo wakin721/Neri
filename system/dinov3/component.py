@@ -393,7 +393,7 @@ def _smoke_test_source(paths: DinoV3ComponentPaths) -> None:
     )
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", code, str(paths.source_root)],
+            [sys.executable, "-B", "-c", code, str(paths.source_root)],
             check=False,
             capture_output=True,
             text=True,
