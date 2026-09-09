@@ -14,14 +14,33 @@ from .component import (
     DINO_CLASSIFIER_SHA256,
     DINO_MODEL_MANIFEST_FILENAME,
     DINO_SOURCE_COMMIT,
-    DinoV3CloudClient,
-    DinoV3CloudError,
     DinoV3ComponentPaths,
     dinov3_component_paths,
     dinov3_component_status,
-    install_dinov3_component,
+    install_dinov3_component as _install_dinov3_component,
     remove_dinov3_component,
 )
+from .public_distribution import (
+    DinoV3CloudClient,
+    DinoV3DistributionError as DinoV3CloudError,
+)
+
+
+def install_dinov3_component(
+    *,
+    root=None,
+    cloud_client=None,
+    seed_dir=None,
+    on_progress=None,
+):
+    """Install DINOv3 through the anonymous Neri model-distribution service."""
+    return _install_dinov3_component(
+        root=root,
+        cloud_client=cloud_client or DinoV3CloudClient(),
+        seed_dir=seed_dir,
+        on_progress=on_progress,
+    )
+
 
 __all__ = [
     "DINO_BACKBONE",
