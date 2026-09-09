@@ -940,7 +940,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             const SizedBox(width: 8),
             OutlinedButton(onPressed: null, child: const Text('修改物种')),
             const SizedBox(width: 8),
-            OutlinedButton(onPressed: null, child: const Text('空 / 误检')),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_submitDinoBoxFeedback(box, 'empty'))
+                  : null,
+              child: const Text('空 / 误检'),
+            ),
             const SizedBox(width: 8),
             OutlinedButton(onPressed: null, child: const Text('不参与学习')),
           ],
