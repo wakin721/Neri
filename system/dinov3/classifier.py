@@ -52,6 +52,8 @@ class DinoV3Observation:
     known_score: float
     threshold: float
     detection_confidence: float
+    observation_id: str = ""
+    best_known_species: str = ""
 
     def __post_init__(self) -> None:
         embedding = np.asarray(self.embedding, dtype=np.float32).copy()
