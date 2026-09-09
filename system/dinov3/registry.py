@@ -11,8 +11,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .classifier import PrototypeBank, PrototypeRecord
 from .events import EVENT_GAP_SECONDS
+from .prototype_bank import PrototypeBank, PrototypeRecord
 from .simple_shot import (
     build_prototype,
     cosine_similarity,
