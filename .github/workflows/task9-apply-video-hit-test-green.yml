@@ -1,0 +1,29 @@
+name: Apply Task 9 video hit-test GREEN
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-apply-video-hit-test-green.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - name: Patch video DINO box hit-testing
+        run: python .github/scripts/task9_video_hit_test_green.py
+      - name: Commit video DINO box hit-testing
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/widgets/detection_media_viewer.dart
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: hit-test current DINOv3 video boxes"
+          git push
