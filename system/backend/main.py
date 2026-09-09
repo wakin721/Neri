@@ -17,7 +17,9 @@ for _name in (
 from .main_core import *  # noqa: F401,F403 - preserve the historical module surface
 from .main_core import app
 from .dinov3_environment import dinov3_environment_router
+from .dinov3_feedback_api import dinov3_feedback_router
 from system.model_sync.integration import wire_model_sync
 
 app.include_router(dinov3_environment_router())
+app.include_router(dinov3_feedback_router())
 wire_model_sync(app)
