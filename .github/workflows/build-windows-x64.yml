@@ -6,6 +6,7 @@ on:
     branches:
       - dev
       - nightly
+      - feat/dinov3-multiprototype-remaining
     tags:
       - "v*"
 
