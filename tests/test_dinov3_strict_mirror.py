@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -199,3 +200,31 @@ def test_health_rejects_invalid_multi_prototype_checkpoint(tmp_path, monkeypatch
     status = component.dinov3_component_status(root=tree)
     assert status["healthy"] is False
     assert "checkpoint" in status["message"].lower()
+
+
+def test_source_smoke_failure_preserves_previous_component(tmp_path, monkeypatch):
+    tree = _cloud_tree(tmp_path)
+    (tree / "source" / "dinov3" / "hub" / "backbones.py").write_text(
+        "def dinov3_vitb16(*, pretrained=True):\n"
+        "    if pretrained is not False:\n"
+        "        raise RuntimeError('pretrained must be false')\n"
+        "    raise RuntimeError('source factory invoked')\n",
+        encoding="utf-8",
+    )
+    _write_full_inventory(tree)
+    target = tmp_path / "installed"
+    target.mkdir()
+    marker = target / "existing.txt"
+    marker.write_text("healthy-old", encoding="utf-8")
+    monkeypatch.setattr(component, "_sha256_file", _fake_component_hash)
+    monkeypatch.setattr(
+        component,
+        "load_checkpoint",
+        lambda _path: SimpleNamespace(head_type="multi_prototype", selection_k=3),
+    )
+
+    with pytest.raises(RuntimeError, match="source factory invoked"):
+        component.install_dinov3_component(root=target, cloud_client=MirrorCloud(tree))
+
+    assert marker.read_text(encoding="utf-8") == "healthy-old"
+    assert not (target / "remote-extra.txt").exists()
