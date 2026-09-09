@@ -1,4 +1,4 @@
-name: Verify Task 9 batch operation RED
+name: Verify Task 9 batch operation GREEN
 
 on:
   push:
