@@ -10,16 +10,19 @@ void main() {
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
         expect(request.url.path, '/api/environment/dinov3-status');
-        return http.Response(
-          jsonEncode({
-            'installed': true,
-            'healthy': false,
-            'architecture': 'DINOv3 ViT-B/16',
-            'component_version': 1,
-            'source_commit': '6876159a11b4df116f30f667f8c9888617df0751',
-            'message': '需要修复',
-          }),
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'installed': true,
+              'healthy': false,
+              'architecture': 'DINOv3 ViT-B/16',
+              'component_version': 1,
+              'source_commit': '6876159a11b4df116f30f667f8c9888617df0751',
+              'message': '需要修复',
+            }),
+          ),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
