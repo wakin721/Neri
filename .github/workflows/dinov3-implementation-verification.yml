@@ -1,128 +1,45 @@
-name: Migrate DINOv3 branch to nightly
+name: DINOv3 implementation verification
 
 on:
   push:
     branches:
       - nightly
-    paths:
-      - .github/workflows/dinov3-implementation-verification.yml
+    paths-ignore:
+      - docs/dinov3-ci-verified.txt
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: migrate-dinov3-to-nightly
-  cancel-in-progress: false
+  group: dinov3-implementation-verification-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  migrate:
+  python:
+    name: Python integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - name: Check out DINOv3 with full history
+      - name: Check out source
         uses: actions/checkout@v4
-        with:
-          ref: nightly
-          fetch-depth: 0
 
-      - name: Configure Git
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git fetch origin dev
-
-      - name: Merge dev notification-card fix
+      - name: Verify required integration files
         shell: bash
         run: |
           set -euo pipefail
-          if git merge --no-ff --no-commit origin/dev; then
-            echo "dev merged without conflicts"
-          else
-            conflicts="$(git diff --name-only --diff-filter=U | sort)"
-            printf 'Merge conflicts:\n%s\n' "$conflicts"
-            expected='.gitignore'
-            if [[ "$conflicts" != "$expected" ]]; then
-              echo "Unexpected merge conflicts; refusing automatic resolution."
-              exit 1
-            fi
-
-            git checkout --ours -- .gitignore
-            python - <<'PY'
-          from pathlib import Path
-
-          path = Path('.gitignore')
-          text = path.read_text(encoding='utf-8')
-          marker = '!frontend/test/model_sync_settings_host_test.dart\n'
-          notification = '!frontend/test/notification_card_test.dart\n'
-          if notification not in text:
-              if marker not in text:
-                  raise SystemExit('Could not locate Flutter test whitelist anchor')
-              text = text.replace(marker, marker + notification, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
-            git add .gitignore
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "Unresolved conflicts remain."
-              git diff --name-only --diff-filter=U
-              exit 1
-            fi
-          fi
-
-          git commit -m "Merge dev notification-card fix into nightly"
-          git merge-base --is-ancestor 8a6eb9d9f36fc7424804bb113831c1bd5148b735 HEAD
-
-      - name: Restore verification workflow for nightly and bump version
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show "${GITHUB_SHA}^:.github/workflows/dinov3-implementation-verification.yml" > .github/workflows/dinov3-implementation-verification.yml
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          workflow = Path('.github/workflows/dinov3-implementation-verification.yml')
-          text = workflow.read_text(encoding='utf-8')
-          text = text.replace('      - DINOv3\n', '      - nightly\n')
-          text = text.replace('ref: nightly', 'ref: nightly')
-          text = text.replace('git push origin HEAD:nightly', 'git push origin HEAD:nightly')
-          workflow.write_text(text, encoding='utf-8')
-
-          version = Path('system/version.py')
-          version_text = version.read_text(encoding='utf-8')
-          updated, count = re.subn(
-              r'^BASE_VERSION = "[^"]+"$',
-              'BASE_VERSION = "3.1.0-alpha1"',
-              version_text,
-              count=1,
-              flags=re.MULTILINE,
-          )
-          if count != 1:
-              raise SystemExit('Expected exactly one BASE_VERSION assignment')
-          version.write_text(updated, encoding='utf-8')
-          PY
-
-          build_code="$(git rev-parse --short=6 HEAD)"
-          build_number="$(git rev-list --count HEAD)"
-          python scripts/sync_version.py --code "$build_code" --build-number "$build_number"
-
-          git add .github/workflows/dinov3-implementation-verification.yml system/version.py frontend/pubspec.yaml frontend/lib/src/screens/settings_screen.dart
-          git commit -m "chore: set nightly version to 3.1.0-alpha1"
-
-      - name: Verify migration contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          git merge-base --is-ancestor 8a6eb9d9f36fc7424804bb113831c1bd5148b735 HEAD
-          grep -F 'BASE_VERSION = "3.1.0-alpha1"' system/version.py
-          grep -E '^version: 3\.1\.0-alpha1\+[0-9]+$' frontend/pubspec.yaml
-          grep -F "defaultValue: '3.1.0-alpha1(" frontend/lib/src/screens/settings_screen.dart
-          grep -F "import 'widgets/notification_card.dart';" frontend/lib/src/main_window.dart
-          test "$(grep -c 'return NotificationCard(' frontend/lib/src/main_window.dart)" -ge 3
-          test -f frontend/lib/src/widgets/notification_card.dart
-          test -f frontend/test/notification_card_test.dart
-          grep -F '      - nightly' .github/workflows/dinov3-implementation-verification.yml
-          grep -F 'ref: nightly' .github/workflows/dinov3-implementation-verification.yml
-          grep -F 'git push origin HEAD:nightly' .github/workflows/dinov3-implementation-verification.yml
+          test -d system/dinov3
+          test -f system/dinov3/__init__.py
+          find system/dinov3 -maxdepth 1 -type f | grep -E '/[^/]*(classif|runtime|inference)[^/]*\.py$'
+          find system/dinov3 -maxdepth 1 -type f | grep -E '/[^/]*(registr|store)[^/]*\.py$'
+          find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' | grep .
+          grep -F 'APIRouter(prefix="/api/dinov3"' system/dinov3/api.py
+          grep -F '@router.get("/registry"' system/dinov3/api.py
+          grep -F '@router.get("/registry/{registration_id}"' system/dinov3/api.py
+          grep -F '"/registry/{registration_id}/events"' system/dinov3/api.py
+          grep -F '@router.patch("/registry/{registration_id}/identity"' system/dinov3/api.py
+          grep -F '@router.post("/registry/{registration_id}/register"' system/dinov3/api.py
+          grep -R 'EVENT_GAP_SECONDS' system/dinov3
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -131,16 +48,31 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Install Python test dependencies
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest httpx numpy
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Compile and test Python
+      - name: Compile Python sources
+        run: python -m compileall -q system tests
+
+      - name: Run DINOv3 tests
+        shell: bash
         run: |
-          python -m compileall -q system tests
-          python -m pytest -q
+          mapfile -t tests < <(find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' -print | sort)
+          python -m pytest -q "${tests[@]}"
+
+      - name: Run full Python test suite
+        run: python -m pytest -q
+
+  flutter:
+    name: Flutter analysis and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -148,29 +80,46 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Analyze and test Flutter
+      - name: Resolve dependencies
         working-directory: frontend
-        run: |
-          flutter pub get
-          flutter analyze
-          flutter test
+        run: flutter pub get
 
-      - name: Record verified revision
+      - name: Analyze
+        working-directory: frontend
+        run: flutter analyze
+
+      - name: Test
+        working-directory: frontend
+        run: flutter test
+
+  mark-verified:
+    name: Record verified revision
+    needs:
+      - python
+      - flutter
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: nightly
+
+      - name: Write verification marker
         shell: bash
+        env:
+          VERIFIED_SHA: ${{ github.sha }}
+          VERIFIED_RUN_ID: ${{ github.run_id }}
         run: |
-          set -euo pipefail
-          source_sha="$(git rev-parse HEAD)"
           cat > docs/dinov3-ci-verified.txt <<EOF
           DINOv3 implementation verification passed.
-          Source commit: ${source_sha}
-          Workflow run: ${GITHUB_RUN_ID}
+          Source commit: ${VERIFIED_SHA}
+          Workflow run: ${VERIFIED_RUN_ID}
           EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add docs/dinov3-ci-verified.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
           git commit -m "chore: record nightly verification"
-
-      - name: Publish nightly and remove DINOv3
-        shell: bash
-        run: |
-          set -euo pipefail
-          git push origin HEAD:refs/heads/nightly
-          git push origin --delete DINOv3
+          git push origin HEAD:nightly
