@@ -1,4 +1,4 @@
-name: Verify Task 9 corrected-species feedback RED
+name: Verify Task 9 corrected-species feedback GREEN
 
 on:
   push:
