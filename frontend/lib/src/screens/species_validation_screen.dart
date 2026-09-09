@@ -2955,6 +2955,38 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
   }
 
+  Future<List<DetectionItem>> _callMarkItems(
+    List<DetectionItem> items,
+    String action, {
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? feedbackOperationId,
+  }) {
+    final callback = widget.onMarkItems;
+    if (feedbackOperationId != null &&
+        callback is MarkValidationItemsWithFeedback) {
+      return callback(
+        items,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+      );
+    }
+    return callback(
+      items,
+      action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+    );
+  }
+
   Future<void> _markBatch(
     List<DetectionItem> items,
     String action, {
@@ -2967,16 +2999,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
+    final feedbackOperationId = _newValidationFeedbackOperationId(action);
 
     _setMarking(true);
     try {
-      final updatedItems = await widget.onMarkItems(
+      final updatedItems = await _callMarkItems(
         items,
         action,
         speciesName: speciesName,
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        feedbackOperationId: feedbackOperationId,
       );
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
@@ -2993,6 +3027,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           _recordMarkHistory(
             updatedItems,
             quickMarkSpeciesName: usedQuickSpecies,
+            feedbackOperationId: feedbackOperationId,
           );
         }
         final nextSelection = nextPath ?? lastUpdated?.path;
