@@ -66,7 +66,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tapAt(tester.getCenter(find.byType(DetectionMediaViewer)));
+    final viewer = find.byType(DetectionMediaViewer);
+    expect(
+      find.descendant(of: viewer, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    final tapUpGestures = tester
+        .widgetList<GestureDetector>(
+          find.descendant(of: viewer, matching: find.byType(GestureDetector)),
+        )
+        .where((gesture) => gesture.onTapUp != null)
+        .toList();
+    expect(tapUpGestures, isNotEmpty);
+
+    await tester.tapAt(tester.getCenter(viewer));
     await tester.pump();
 
     expect(callbackCalled, isTrue);
