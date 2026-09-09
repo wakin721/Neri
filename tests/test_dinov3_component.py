@@ -27,7 +27,13 @@ class _FakeDinoCloud:
         (package / "hub").mkdir(parents=True)
         (package / "models").mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")
-        (package / "hub" / "backbones.py").write_text("", encoding="utf-8")
+        (package / "hub" / "backbones.py").write_text(
+            "def dinov3_vitb16(*, pretrained=True):\n"
+            "    if pretrained is not False:\n"
+            "        raise RuntimeError('pretrained must be false')\n"
+            "    return object()\n",
+            encoding="utf-8",
+        )
         (package / "models" / "vision_transformer.py").write_text("", encoding="utf-8")
         backbone = target / "dinov3-vitb16" / dinov3.DINO_BACKBONE_FILENAME
         backbone.parent.mkdir(parents=True)
