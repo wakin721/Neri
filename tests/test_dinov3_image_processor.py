@@ -161,3 +161,29 @@ def test_provisional_registry_match_is_emitted_as_official_species():
     selected = result["detect_results"][0].selected_candidates_data[0]
     assert selected["registry_id"] == 12
     assert selected["registration_status"] == "provisional"
+
+
+def test_dinov3_candidate_and_runtime_observation_share_observation_id():
+    boxes = [_FakeBox([10, 12, 30, 40], conf=0.81)]
+    prediction = _prediction(
+        species="Leopard",
+        accepted=True,
+        embedding_value=3,
+        source="checkpoint",
+    )
+    processor = _processor_with_predictions([prediction], boxes)
+    rgb = np.zeros((64, 64, 3), dtype=np.uint8)
+
+    result = processor.detect_batch_species(
+        ["camera-c/image.jpg"],
+        preloaded_data=([0], [rgb.copy()], [rgb]),
+        conf=0.25,
+    )[0]
+    candidate = result["detect_results"][0].candidates_data[0][0]
+    observations = processor.drain_dinov3_observations()
+
+    assert isinstance(candidate["observation_id"], str)
+    assert candidate["observation_id"]
+    assert candidate["predicted_species"] == "Leopard"
+    assert observations[0].observation_id == candidate["observation_id"]
+    assert observations[0].best_known_species == "animal"
