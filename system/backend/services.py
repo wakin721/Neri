@@ -2949,6 +2949,69 @@ def _update_species_database(species_name_str: str, species_type_str: str) -> No
         print(f"Failed to auto-update species_database.db: {e}")
 
 
+def _learnable_observations_for_file(
+    classification_model_path: str,
+    file_path: Path,
+):
+    """Return persisted DINOv3 observations belonging to one media file."""
+    from .dinov3_feedback_service import _open_feedback_state, _path_identity
+
+    feedback, _feature_center = _open_feedback_state(classification_model_path)
+    try:
+        target = _path_identity(file_path)
+        rows = feedback._conn.execute(  # noqa: SLF001 - same feedback-store boundary
+            "SELECT id,payload FROM observations ORDER BY id"
+        ).fetchall()
+        observations = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if _path_identity(payload.get("source_path", "")) != target:
+                continue
+            observation_id = str(row["id"] or "")
+            if not observation_id:
+                continue
+            observations.append(feedback.get_observation(observation_id))
+        return observations
+    finally:
+        feedback.close()
+
+
+def _eligible_auto_feedback(observations):
+    learnable = [observation for observation in observations if getattr(observation, "id", "")]
+    return learnable[0] if len(learnable) == 1 else None
+
+
+def _record_validation_feedback(
+    classification_model_path: str,
+    observation,
+    operation_id: str,
+    action: str,
+    confirmed_species: str | None,
+):
+    """Record one conservative file-level validation feedback event."""
+    from .dinov3_feedback_service import (
+        _affected_learning_species,
+        _open_feedback_state,
+    )
+
+    feedback, feature_center = _open_feedback_state(classification_model_path)
+    try:
+        record = feedback.record_feedback(
+            observation.id,
+            operation_id=operation_id,
+            action=action,
+            confirmed_species=confirmed_species,
+        )
+        for species in sorted(_affected_learning_species(record)):
+            feedback.recompute_species(species, feature_center)
+        return record
+    finally:
+        feedback.close()
+
+
 def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
     items = mark_validation_items(
         ValidationBatchMarkRequest(
@@ -2959,6 +3022,8 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
             species_count=request.species_count,
             species_type=request.species_type,
             remark=request.remark,
+            classification_model_path=request.classification_model_path,
+            feedback_operation_id=request.feedback_operation_id,
         )
     )
     if not items:
@@ -3029,6 +3094,32 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
     _persist_validation_updates(updates, input_path)
     for species_name, species_type in species_database_updates:
         _update_species_database(species_name, species_type)
+
+    if request.classification_model_path and request.action != "unverified":
+        operation_id = request.feedback_operation_id or uuid.uuid4().hex
+        confirmed_species = (
+            (request.species_name or "").strip() or None
+            if request.action == "update"
+            else None
+        )
+        try:
+            for path in paths:
+                observations = _learnable_observations_for_file(
+                    request.classification_model_path,
+                    path,
+                )
+                observation = _eligible_auto_feedback(observations)
+                if observation is None:
+                    continue
+                _record_validation_feedback(
+                    request.classification_model_path,
+                    observation,
+                    operation_id,
+                    request.action,
+                    confirmed_species,
+                )
+        except Exception as exc:
+            raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
 
     # Only journal after the user's local decision is saved. Compression/network run
     # on an independent worker; this optional feature must never break annotation.
