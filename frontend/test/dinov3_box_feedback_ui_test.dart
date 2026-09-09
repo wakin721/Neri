@@ -58,6 +58,8 @@ void main() {
       filename: 'frame.png',
       path: imageFile.path,
       fileType: 'png',
+      width: 10,
+      height: 10,
       species: const <String>['盘羊'],
       detectionBoxes: <DetectionBox>[box],
       detectionData: const <String, dynamic>{'物种名称': '盘羊'},
