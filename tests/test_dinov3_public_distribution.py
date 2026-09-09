@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from system.dinov3.component import DinoV3CloudClient
+from system.dinov3 import DinoV3CloudClient
 
 
 class _Response:
