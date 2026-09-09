@@ -1,0 +1,24 @@
+name: Verify Task 9 validation model path RED
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-focused-validation-model-path-red.yml
+
+jobs:
+  flutter-validation-model-path:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - working-directory: frontend
+        run: flutter pub get
+      - working-directory: frontend
+        run: flutter test test/dinov3_validation_model_path_test.dart
