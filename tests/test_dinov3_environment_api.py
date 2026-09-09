@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from system.backend import main_core
 from system.backend import dinov3_environment
+from system.backend import main as backend_main
 
 
 def test_dinov3_environment_status_endpoint(monkeypatch):
@@ -19,7 +19,7 @@ def test_dinov3_environment_status_endpoint(monkeypatch):
             "message": "DINOv3 未安装。",
         },
     )
-    with TestClient(main_core.app) as client:
+    with TestClient(backend_main.app) as client:
         response = client.get("/api/environment/dinov3-status")
     assert response.status_code == 200
     assert response.json()["healthy"] is False
@@ -38,7 +38,7 @@ def test_dinov3_environment_install_endpoint(monkeypatch):
         },
     )
     monkeypatch.setattr(dinov3_environment, "schedule_backend_shutdown", lambda *args: None)
-    with TestClient(main_core.app) as client:
+    with TestClient(backend_main.app) as client:
         response = client.post(
             "/api/environment/install-dinov3",
             json={"env_choice": "CPU Only", "package_source": "nju"},
@@ -59,7 +59,7 @@ def test_dinov3_environment_remove_endpoint(monkeypatch):
         },
     )
     monkeypatch.setattr(dinov3_environment, "schedule_backend_shutdown", lambda *args: None)
-    with TestClient(main_core.app) as client:
+    with TestClient(backend_main.app) as client:
         response = client.post("/api/environment/remove-dinov3")
     assert response.status_code == 202
     assert response.json()["operation"] == "remove_dinov3"
