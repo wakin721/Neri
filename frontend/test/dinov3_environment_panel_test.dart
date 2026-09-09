@@ -10,6 +10,8 @@ import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 
 void main() {
+  const dinoActionKey = Key('dinov3-component-action');
+
   Future<void> pumpEnvironmentPanel(
     WidgetTester tester, {
     required Map<String, dynamic> dinoStatus,
@@ -98,8 +100,13 @@ void main() {
 
     expect(find.text('DINOv3 ViT-B/16'), findsOneWidget);
     expect(find.textContaining('K=3'), findsOneWidget);
-    final deleteButton = find.widgetWithText(OutlinedButton, '删除');
+    final deleteButton = find.byKey(dinoActionKey);
     expect(deleteButton, findsOneWidget);
+    expect(tester.widget(deleteButton), isA<OutlinedButton>());
+    expect(
+      find.descendant(of: deleteButton, matching: find.text('删除')),
+      findsOneWidget,
+    );
 
     await tester.tap(deleteButton);
     await tester.pumpAndSettle();
@@ -128,7 +135,13 @@ void main() {
 
     expect(find.text('DINOv3 ViT-B/16'), findsOneWidget);
     expect(find.textContaining('需要修复'), findsWidgets);
-    expect(find.widgetWithText(FilledButton, '安装/修复'), findsOneWidget);
+    final repairButton = find.byKey(dinoActionKey);
+    expect(repairButton, findsOneWidget);
+    expect(tester.widget(repairButton), isA<FilledButton>());
+    expect(
+      find.descendant(of: repairButton, matching: find.text('安装/修复')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('missing DINOv3 component offers install', (tester) async {
@@ -149,6 +162,12 @@ void main() {
     );
 
     expect(find.text('DINOv3 ViT-B/16'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, '安装'), findsOneWidget);
+    final installButton = find.byKey(dinoActionKey);
+    expect(installButton, findsOneWidget);
+    expect(tester.widget(installButton), isA<FilledButton>());
+    expect(
+      find.descendant(of: installButton, matching: find.text('安装')),
+      findsOneWidget,
+    );
   });
 }
