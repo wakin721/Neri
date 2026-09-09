@@ -1,4 +1,4 @@
-name: Verify Task 9 validation feedback bridge API RED
+name: Verify Task 9 validation feedback bridge API GREEN
 
 on:
   push:
@@ -21,4 +21,4 @@ jobs:
       - working-directory: frontend
         run: flutter pub get
       - working-directory: frontend
-        run: flutter test test/dinov3_feedback_api_test.dart --plain-name "single validation forwards DINO model and operation ids"
+        run: flutter test test/dinov3_feedback_api_test.dart
