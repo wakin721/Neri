@@ -15,7 +15,7 @@ void main() {
     imageFile = File('${tempDir.path}/frame.png');
     await imageFile.writeAsBytes(
       base64Decode(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl3Z1sAAAAASUVORK5CYII=',
+        'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',
       ),
     );
   });
