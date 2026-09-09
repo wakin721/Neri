@@ -19,6 +19,14 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
     def test_dinov3_package_exposes_component_status_api(self) -> None:
         self.assertTrue(hasattr(dinov3, "dinov3_component_status"))
 
+    def test_existing_incomplete_component_is_installed_but_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "DINOv3"
+            root.mkdir()
+            status = dinov3.dinov3_component_status(root=root)
+            self.assertTrue(status["installed"])
+            self.assertFalse(status["healthy"])
+
 
 if __name__ == "__main__":
     unittest.main()
