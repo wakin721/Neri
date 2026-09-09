@@ -88,4 +88,31 @@ void main() {
     expect(callbackCalled, isTrue);
     expect(selected?.observationId, 'obs-1');
   });
+
+  test('video box filtering keeps only the current-frame DINO observation', () {
+    final current = DetectionBox(
+      species: '盘羊',
+      bbox: const <double>[0.1, 0.1, 0.5, 0.5],
+      timestamp: 0,
+      observationId: 'obs-current',
+    );
+    final future = DetectionBox(
+      species: '家牛',
+      bbox: const <double>[0.1, 0.1, 0.5, 0.5],
+      timestamp: 2,
+      observationId: 'obs-future',
+    );
+
+    final boxes = currentVideoDetectionBoxes(
+      boxes: <DetectionBox>[current, future],
+      position: Duration.zero,
+      duration: const Duration(seconds: 4),
+      detectionData: const <String, dynamic>{
+        'total_frames_processed': 100,
+        'vid_stride': 1,
+      },
+    );
+
+    expect(boxes.map((box) => box.observationId), <String?>['obs-current']);
+  });
 }
