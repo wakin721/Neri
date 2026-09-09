@@ -7,6 +7,7 @@ from .checkpoint import (
     load_checkpoint,
     validate_checkpoint,
 )
+from .component import dinov3_component_status
 
 __all__ = [
     "DINO_BACKBONE",
@@ -15,4 +16,5 @@ __all__ = [
     "DinoV3Checkpoint",
     "load_checkpoint",
     "validate_checkpoint",
+    "dinov3_component_status",
 ]
