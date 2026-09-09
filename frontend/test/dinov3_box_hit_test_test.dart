@@ -67,22 +67,20 @@ void main() {
     await tester.pumpAndSettle();
 
     final viewer = find.byType(DetectionMediaViewer);
-    expect(
-      find.descendant(of: viewer, matching: find.byType(Image)),
-      findsOneWidget,
-    );
-    final selectableGesture = find.descendant(
+    expect(find.text('图片已被删除或移动'), findsNothing);
+    final imageGesture = find.descendant(
       of: viewer,
       matching: find.byWidgetPredicate(
         (widget) =>
             widget is GestureDetector &&
-            widget.behavior == HitTestBehavior.translucent &&
-            widget.onTapUp != null,
+            widget.behavior == HitTestBehavior.translucent,
       ),
     );
-    expect(selectableGesture, findsOneWidget);
+    expect(imageGesture, findsOneWidget);
+    final imageGestureWidget = tester.widget<GestureDetector>(imageGesture);
+    expect(imageGestureWidget.onTapUp, isNotNull);
 
-    await tester.tapAt(tester.getCenter(selectableGesture));
+    await tester.tapAt(tester.getCenter(imageGesture));
     await tester.pump();
 
     expect(callbackCalled, isTrue);
