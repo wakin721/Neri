@@ -6,7 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from system.backend.dinov3_registry_service import open_registry_for_model
+from system.backend.dinov3_registry_service import (
+    load_checkpoint_for_model,
+    open_registry_for_model,
+)
 from system.backend.models import (
     DinoV3IdentityUpdateRequest,
     DinoV3RegisterRequest,
@@ -31,6 +34,30 @@ def _run_with_registry(classification_model_path: str, action: Callable[[Any], A
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         registry.close()
+
+
+def _register_with_duplicate_guard(
+    registry: Any,
+    registration_id: int,
+    classification_model_path: str,
+) -> dict[str, Any]:
+    # Keep classifier/PyTorch imports out of module import time so the registry
+    # API itself remains importable in environments where torch is unavailable.
+    from .classifier import DinoV3Classifier
+
+    checkpoint = load_checkpoint_for_model(classification_model_path)
+    classifier = DinoV3Classifier(checkpoint, registry=registry)
+
+    def formal_matcher(embedding):
+        prediction = classifier.classify_features(embedding[None, :])[0]
+        if not prediction.accepted:
+            return None
+        return prediction.species
+
+    return registry.register(
+        registration_id,
+        formal_matcher=formal_matcher,
+    ).as_dict()
 
 
 def dinov3_registry_router() -> APIRouter:
@@ -84,7 +111,11 @@ def dinov3_registry_router() -> APIRouter:
     def register_species(registration_id: int, request: DinoV3RegisterRequest):
         return _run_with_registry(
             request.classification_model_path,
-            lambda registry: registry.register(registration_id).as_dict(),
+            lambda registry: _register_with_duplicate_guard(
+                registry,
+                registration_id,
+                request.classification_model_path,
+            ),
         )
 
     return router
