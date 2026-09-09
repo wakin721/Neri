@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'models/dinov3_feedback.dart';
 import 'models/dinov3_registry.dart';
 import 'models/export_result.dart';
 import 'models/job.dart';
@@ -134,6 +135,52 @@ class NeriApiClient {
     );
   }
 
+  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({
+    required String inputPath,
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String action,
+    String? speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/box'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'action': action,
+        if (speciesName != null && speciesName.trim().isNotEmpty)
+          'species_name': speciesName.trim(),
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3BoxFeedbackResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({
+    required String classificationModelPath,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/revert'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3FeedbackRevertResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
   Future<PrivacyStatus> fetchPrivacyStatus() async {
     final response = await _httpClient
         .get(_uri('/api/privacy'))
