@@ -103,42 +103,35 @@ class DinoV3Prediction:
 
 class DinoV3Classifier:
     def __init__(self, checkpoint: DinoV3Checkpoint, *, encoder=None, registry=None) -> None:
+        if checkpoint.head_type != DINO_MULTI_PROTOTYPE_HEAD:
+            raise ValueError(
+                "DINOv3 classifier requires head_type=multi_prototype; Linear Head checkpoints are not supported"
+            )
+        if checkpoint.feature_center is None or checkpoint.prototype_class_indices is None:
+            raise ValueError("Multi-prototype checkpoint is missing classifier metadata")
+
         self.checkpoint = checkpoint
         self.encoder = encoder
         self.registry = registry
         self.names = {index: name for index, name in enumerate(checkpoint.classes)}
         self.backend = "dinov3"
-
-        if checkpoint.head_type == DINO_MULTI_PROTOTYPE_HEAD:
-            if checkpoint.feature_center is None or checkpoint.prototype_class_indices is None:
-                raise ValueError("Multi-prototype checkpoint is missing classifier metadata")
-            self._feature_center = checkpoint.feature_center.numpy().astype(np.float32, copy=False)
-            self._prototypes = checkpoint.prototypes.numpy().astype(np.float32, copy=False)
-            self._prototype_class_indices = checkpoint.prototype_class_indices.numpy().astype(
-                np.int64,
-                copy=False,
+        self._feature_center = checkpoint.feature_center.numpy().astype(
+            np.float32,
+            copy=False,
+        )
+        self._prototypes = checkpoint.prototypes.numpy().astype(np.float32, copy=False)
+        self._prototype_class_indices = checkpoint.prototype_class_indices.numpy().astype(
+            np.int64,
+            copy=False,
+        )
+        self._base_records = tuple(
+            PrototypeRecord(
+                species=checkpoint.classes[int(class_index)],
+                embedding=self._prototypes[prototype_index],
+                source="base",
             )
-            self._base_records = tuple(
-                PrototypeRecord(
-                    species=checkpoint.classes[int(class_index)],
-                    embedding=self._prototypes[prototype_index],
-                    source="base",
-                )
-                for prototype_index, class_index in enumerate(self._prototype_class_indices)
-            )
-            self._weight = None
-            self._bias = None
-        else:
-            if checkpoint.head_weight is None or checkpoint.head_bias is None:
-                raise ValueError("Legacy DINOv3 checkpoint is missing Linear Head state")
-            self._weight = checkpoint.head_weight.numpy().astype(np.float32, copy=False)
-            self._bias = checkpoint.head_bias.numpy().astype(np.float32, copy=False)
-            self._prototypes = _normalize_rows(
-                checkpoint.prototypes.numpy().astype(np.float32, copy=False)
-            )
-            self._feature_center = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
-            self._prototype_class_indices = np.arange(len(checkpoint.classes), dtype=np.int64)
-            self._base_records = ()
+            for prototype_index, class_index in enumerate(self._prototype_class_indices)
+        )
 
     @property
     def classes(self) -> tuple[str, ...]:
@@ -311,68 +304,9 @@ class DinoV3Classifier:
             )
         return results
 
-    def _classify_legacy(self, array: np.ndarray) -> list[DinoV3Prediction]:
-        assert self._weight is not None and self._bias is not None
-        logits = array @ self._weight.T + self._bias
-        sims = array @ self._prototypes.T
-        heads = logits.argmax(axis=1)
-        nearest = sims.argmax(axis=1)
-        results: list[DinoV3Prediction] = []
-        for row, (head_index, prototype_index) in enumerate(zip(heads, nearest)):
-            hi = int(head_index)
-            pi = int(prototype_index)
-            score = float(sims[row, pi])
-            consistent = hi == pi
-            accepted = score >= self.checkpoint.threshold and consistent
-            head = self.checkpoint.classes[hi]
-            proto = self.checkpoint.classes[pi]
-            order = np.argsort(logits[row])[::-1][:3]
-            candidates = tuple(
-                {
-                    "name": self.checkpoint.classes[int(index)],
-                    "logit": float(logits[row, int(index)]),
-                    "prototype_score": float(sims[row, int(index)]),
-                }
-                for index in order
-            )
-            prediction = DinoV3Prediction(
-                head if accepted else "Unknown",
-                accepted,
-                proto,
-                head,
-                proto,
-                consistent,
-                score,
-                self.checkpoint.threshold,
-                candidates,
-                array[row].copy(),
-            )
-            if not accepted and self.registry is not None:
-                matched = self.registry.match(array[row])
-                if matched is not None:
-                    prediction = DinoV3Prediction(
-                        matched["display_name"],
-                        bool(matched["accepted"]),
-                        proto,
-                        head,
-                        proto,
-                        consistent,
-                        float(matched["score"]),
-                        float(matched["threshold"]),
-                        candidates,
-                        array[row].copy(),
-                        "registry",
-                        int(matched["id"]),
-                        str(matched["status"]),
-                    )
-            results.append(prediction)
-        return results
-
     def classify_features(self, features: np.ndarray) -> list[DinoV3Prediction]:
         array = self._validate_features(features)
-        if self.checkpoint.head_type == DINO_MULTI_PROTOTYPE_HEAD:
-            return self._classify_multi_prototype(array)
-        return self._classify_legacy(array)
+        return self._classify_multi_prototype(array)
 
     def classify_crops(
         self,
