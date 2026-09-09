@@ -221,11 +221,13 @@ def main() -> None:
                 final status = _dinoV3Status;
                 if (status?.healthy == true) {
                   return OutlinedButton(
+                    key: const Key('dinov3-component-action'),
                     onPressed: _maintenanceBusy ? null : _removeDinoV3,
                     child: const Text('删除'),
                   );
                 }
                 return FilledButton(
+                  key: const Key('dinov3-component-action'),
                   onPressed: _maintenanceBusy ? null : _installDinoV3,
                   child: Text(status?.installed == true ? '安装/修复' : '安装'),
                 );
