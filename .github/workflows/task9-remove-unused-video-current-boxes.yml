@@ -1,0 +1,29 @@
+name: Remove unused Task 9 video current-box helper
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-remove-unused-video-current-boxes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - name: Remove unused helper
+        run: python .github/scripts/task9_remove_unused_video_current_boxes.py
+      - name: Commit cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/widgets/detection_media_viewer.dart
+          git diff --cached --quiet && exit 0
+          git commit -m "refactor: remove unused video current-box helper"
+          git push
