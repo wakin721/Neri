@@ -136,4 +136,75 @@ void main() {
     expect(result.operationId, 'op-1');
     expect(result.affectedSpecies, <String>['盘羊']);
   });
+
+  test('single validation forwards DINO model and operation ids', () async {
+    late Map<String, dynamic> body;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/api/validation/mark');
+        body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode(<String, dynamic>{
+            'filename': 'a.jpg',
+            'path': 'C:/camera/a.jpg',
+            'file_type': 'jpg',
+          }),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await client.markValidationItem(
+      inputPath: 'C:/camera',
+      filePath: 'C:/camera/a.jpg',
+      action: 'correct',
+      classificationModelPath: 'model.neri.json',
+      feedbackOperationId: 'op-file-1',
+    );
+
+    expect(body['classification_model_path'], 'model.neri.json');
+    expect(body['feedback_operation_id'], 'op-file-1');
+  });
+
+  test('batch validation forwards one DINO operation id', () async {
+    late Map<String, dynamic> body;
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/api/validation/mark/batch');
+        body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode(<Map<String, dynamic>>[
+            <String, dynamic>{
+              'filename': 'a.jpg',
+              'path': 'C:/camera/a.jpg',
+              'file_type': 'jpg',
+            },
+            <String, dynamic>{
+              'filename': 'b.jpg',
+              'path': 'C:/camera/b.jpg',
+              'file_type': 'jpg',
+            },
+          ]),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await client.markValidationItems(
+      inputPath: 'C:/camera',
+      filePaths: const <String>['C:/camera/a.jpg', 'C:/camera/b.jpg'],
+      action: 'correct',
+      classificationModelPath: 'model.neri.json',
+      feedbackOperationId: 'op-batch-1',
+    );
+
+    expect(body['classification_model_path'], 'model.neri.json');
+    expect(body['feedback_operation_id'], 'op-batch-1');
+  });
 }
