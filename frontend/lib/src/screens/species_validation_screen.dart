@@ -2333,6 +2333,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           timestamp: box.timestamp,
           trackId: box.trackId,
           candidates: box.candidates,
+          observationId: box.observationId,
+          registryId: box.registryId,
+          predictedSpecies: box.predictedSpecies,
+          feedbackStatus: box.feedbackStatus,
         );
       }
       return null;
