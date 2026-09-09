@@ -27,6 +27,21 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
             self.assertTrue(status["installed"])
             self.assertFalse(status["healthy"])
 
+    def test_component_paths_match_res_model_dinov3_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "DINOv3"
+            paths = dinov3.dinov3_component_paths(root=root)
+            self.assertEqual(paths.root, root.resolve())
+            self.assertEqual(paths.source_package, root.resolve() / "source" / "dinov3")
+            self.assertEqual(
+                paths.backbone,
+                root.resolve()
+                / "dinov3-vitb16"
+                / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+            )
+            self.assertEqual(paths.license, root.resolve() / "LICENSE_DINOv3.md")
+            self.assertEqual(paths.install_manifest, root.resolve() / "install.json")
+
 
 if __name__ == "__main__":
     unittest.main()
