@@ -54,6 +54,7 @@ class DinoV3Observation:
     detection_confidence: float
     observation_id: str = ""
     best_known_species: str = ""
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
         embedding = np.asarray(self.embedding, dtype=np.float32).copy()
@@ -61,6 +62,10 @@ class DinoV3Observation:
             raise ValueError("Expected observation embedding with shape (768,)")
         embedding.setflags(write=False)
         object.__setattr__(self, "embedding", embedding)
+        bbox = tuple(float(value) for value in self.bbox)
+        if len(bbox) != 4 or not np.isfinite(np.asarray(bbox, dtype=np.float32)).all():
+            raise ValueError("Expected observation bbox with four finite coordinates")
+        object.__setattr__(self, "bbox", bbox)
 
 
 @dataclass(frozen=True)
