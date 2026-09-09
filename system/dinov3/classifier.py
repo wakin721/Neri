@@ -110,8 +110,8 @@ class DinoV3Prediction:
             "known_score": self.known_score,
             "threshold": self.threshold,
             "accepted": self.accepted,
-            # Kept as response compatibility metadata while the Linear Head
-            # implementation is removed. They do not participate in decisions.
+            # Response compatibility only. Linear Head values no longer
+            # participate in Multi-prototype decisions.
             "head_species": self.head_species,
             "prototype_species": self.prototype_species,
             "head_prototype_consistent": self.head_prototype_consistent,
@@ -141,8 +141,9 @@ class DinoV3Classifier:
         if checkpoint.head_type == DINO_MULTI_PROTOTYPE_HEAD:
             if checkpoint.feature_center is None or checkpoint.prototype_class_indices is None:
                 raise ValueError("Multi-prototype checkpoint is missing classifier metadata")
-            self._feature_center = (
-                checkpoint.feature_center.numpy().astype(np.float32, copy=False)
+            self._feature_center = checkpoint.feature_center.numpy().astype(
+                np.float32,
+                copy=False,
             )
             self._prototypes = checkpoint.prototypes.numpy().astype(
                 np.float32,
@@ -150,6 +151,16 @@ class DinoV3Classifier:
             )
             self._prototype_class_indices = (
                 checkpoint.prototype_class_indices.numpy().astype(np.int64, copy=False)
+            )
+            self._base_records = tuple(
+                PrototypeRecord(
+                    species=checkpoint.classes[int(class_index)],
+                    embedding=self._prototypes[prototype_index],
+                    source="base",
+                )
+                for prototype_index, class_index in enumerate(
+                    self._prototype_class_indices
+                )
             )
             self._weight = None
             self._bias = None
@@ -171,6 +182,7 @@ class DinoV3Classifier:
                 len(checkpoint.classes),
                 dtype=np.int64,
             )
+            self._base_records = ()
 
     @property
     def classes(self) -> tuple[str, ...]:
@@ -189,71 +201,172 @@ class DinoV3Classifier:
             raise ValueError("Expected finite L2-normalized event features")
         return array
 
-    def _species_candidates(
-        self,
+    def _effective_bank(self) -> PrototypeBank:
+        overlay = PrototypeBank(())
+        if self.registry is not None:
+            provider = getattr(self.registry, "prototype_bank", None)
+            if callable(provider):
+                overlay = provider(self._feature_center)
+                if not isinstance(overlay, PrototypeBank):
+                    raise TypeError("registry.prototype_bank() must return PrototypeBank")
+        return PrototypeBank(
+            formal=self._base_records + tuple(overlay.formal),
+            provisional=tuple(overlay.provisional),
+        )
+
+    @staticmethod
+    def _record_matrix(records: Sequence[PrototypeRecord]) -> np.ndarray:
+        if not records:
+            return np.empty((0, DINO_FEATURE_DIM), dtype=np.float32)
+        return np.stack([record.embedding for record in records]).astype(
+            np.float32,
+            copy=False,
+        )
+
+    @staticmethod
+    def _distances(centered: np.ndarray, records: Sequence[PrototypeRecord]) -> np.ndarray:
+        matrix = DinoV3Classifier._record_matrix(records)
+        deltas = matrix - centered[None, :]
+        return np.einsum("md,md->m", deltas, deltas, optimize=True)
+
+    @staticmethod
+    def _winning_record(
         centered: np.ndarray,
-        distances: np.ndarray,
+        records: Sequence[PrototypeRecord],
+    ) -> tuple[int, PrototypeRecord, float, float]:
+        if not records:
+            raise ValueError("Prototype bank must contain at least one record")
+        distances = DinoV3Classifier._distances(centered, records)
+        winner_index = int(np.argmin(distances))
+        winner = records[winner_index]
+        return (
+            winner_index,
+            winner,
+            float(distances[winner_index]),
+            _cosine_score(centered, winner.embedding),
+        )
+
+    @staticmethod
+    def _species_candidates(
+        centered: np.ndarray,
+        records: Sequence[PrototypeRecord],
     ) -> tuple[dict[str, Any], ...]:
-        candidates: list[dict[str, Any]] = []
-        for class_index, species in enumerate(self.checkpoint.classes):
-            prototype_indices = np.flatnonzero(
-                self._prototype_class_indices == class_index
-            )
-            if len(prototype_indices) == 0:
+        if not records:
+            return ()
+        distances = DinoV3Classifier._distances(centered, records)
+        best_by_species: dict[str, dict[str, Any]] = {}
+        for prototype_index, record in enumerate(records):
+            distance = float(distances[prototype_index])
+            existing = best_by_species.get(record.species)
+            if existing is not None and float(existing["squared_distance"]) <= distance:
                 continue
-            local = int(np.argmin(distances[prototype_indices]))
-            prototype_index = int(prototype_indices[local])
-            prototype = self._prototypes[prototype_index]
-            candidates.append(
-                {
-                    "name": species,
-                    "nearest_prototype_index": prototype_index,
-                    "squared_distance": float(distances[prototype_index]),
-                    "cosine_score": _cosine_score(centered, prototype),
-                    "source": "base",
-                    "registration_status": None,
-                }
-            )
-        candidates.sort(key=lambda item: (item["squared_distance"], item["name"]))
+            best_by_species[record.species] = {
+                "name": record.species,
+                "nearest_prototype_index": prototype_index,
+                "squared_distance": distance,
+                "cosine_score": _cosine_score(centered, record.embedding),
+                "source": record.source,
+                "registry_id": record.registry_id,
+                "registration_status": record.registration_status,
+            }
+        candidates = sorted(
+            best_by_species.values(),
+            key=lambda item: (float(item["squared_distance"]), str(item["name"])),
+        )
         return tuple(candidates[:3])
 
     def _classify_multi_prototype(
         self,
         array: np.ndarray,
     ) -> list[DinoV3Prediction]:
+        # Refresh the overlay exactly once per classify call. A SpeciesRegistry
+        # can therefore promote Provisional -> Confirmed -> Mature without
+        # reconstructing this classifier or restarting the backend.
+        bank = self._effective_bank()
+        if not bank.formal:
+            raise ValueError("Formal Multi-prototype bank cannot be empty")
         centered_rows = array - self._feature_center[None, :]
-        deltas = centered_rows[:, None, :] - self._prototypes[None, :, :]
-        distances = np.einsum("nmd,nmd->nm", deltas, deltas, optimize=True)
-        winning_indices = np.argmin(distances, axis=1)
 
         results: list[DinoV3Prediction] = []
-        for row_index, raw_winner in enumerate(winning_indices):
-            winner = int(raw_winner)
-            class_index = int(self._prototype_class_indices[winner])
-            known_species = self.checkpoint.classes[class_index]
-            centered = centered_rows[row_index]
-            prototype = self._prototypes[winner]
-            score = _cosine_score(centered, prototype)
-            accepted = score >= self.checkpoint.threshold
-            candidates = self._species_candidates(
+        for row_index, centered in enumerate(centered_rows):
+            formal_index, formal, formal_distance, formal_score = self._winning_record(
                 centered,
-                distances[row_index],
+                bank.formal,
             )
+            formal_accepted = formal_score >= self.checkpoint.threshold
+            candidates = self._species_candidates(centered, bank.formal)
+
+            if formal_accepted:
+                results.append(
+                    DinoV3Prediction(
+                        species=formal.species,
+                        accepted=True,
+                        best_known_species=formal.species,
+                        head_species=formal.species,
+                        prototype_species=formal.species,
+                        head_prototype_consistent=True,
+                        known_score=formal_score,
+                        threshold=self.checkpoint.threshold,
+                        candidates=candidates,
+                        embedding=array[row_index].copy(),
+                        source=formal.source,
+                        registry_id=formal.registry_id,
+                        registration_status=formal.registration_status,
+                        assistive_match=False,
+                        nearest_prototype_index=formal_index,
+                        squared_distance=formal_distance,
+                    )
+                )
+                continue
+
+            if bank.provisional:
+                (
+                    provisional_index,
+                    provisional,
+                    provisional_distance,
+                    provisional_score,
+                ) = self._winning_record(centered, bank.provisional)
+                if provisional_score >= self.checkpoint.threshold:
+                    results.append(
+                        DinoV3Prediction(
+                            species=provisional.species,
+                            accepted=False,
+                            best_known_species=formal.species,
+                            head_species=formal.species,
+                            prototype_species=provisional.species,
+                            head_prototype_consistent=False,
+                            known_score=provisional_score,
+                            threshold=self.checkpoint.threshold,
+                            candidates=candidates,
+                            embedding=array[row_index].copy(),
+                            source=provisional.source,
+                            registry_id=provisional.registry_id,
+                            registration_status=provisional.registration_status,
+                            assistive_match=True,
+                            nearest_prototype_index=len(bank.formal) + provisional_index,
+                            squared_distance=provisional_distance,
+                        )
+                    )
+                    continue
+
             results.append(
                 DinoV3Prediction(
-                    species=known_species if accepted else "Unknown",
-                    accepted=accepted,
-                    best_known_species=known_species,
-                    head_species=known_species,
-                    prototype_species=known_species,
+                    species="Unknown",
+                    accepted=False,
+                    best_known_species=formal.species,
+                    head_species=formal.species,
+                    prototype_species=formal.species,
                     head_prototype_consistent=True,
-                    known_score=score,
+                    known_score=formal_score,
                     threshold=self.checkpoint.threshold,
                     candidates=candidates,
                     embedding=array[row_index].copy(),
-                    source="base",
-                    nearest_prototype_index=winner,
-                    squared_distance=float(distances[row_index, winner]),
+                    source=formal.source,
+                    registry_id=formal.registry_id,
+                    registration_status=formal.registration_status,
+                    assistive_match=False,
+                    nearest_prototype_index=formal_index,
+                    squared_distance=formal_distance,
                 )
             )
         return results
