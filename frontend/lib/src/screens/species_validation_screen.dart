@@ -859,10 +859,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   Widget _buildDinoFeedbackPanel(DetectionBox box) {
-    final predicted = box.predictedSpecies?.trim();
-    final title = predicted == null || predicted.isEmpty
-        ? '检测框校验'
-        : '检测框校验 · $predicted';
+    const title = '检测框校验';
     return _ValidationPanel(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
