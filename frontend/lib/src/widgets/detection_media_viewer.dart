@@ -143,10 +143,20 @@ class _MediaContent extends StatelessWidget {
         onOpenExternal: onOpenExternal,
       );
     } else {
+      final itemWidth = item.width;
+      final itemHeight = item.height;
+      final mediaSizeHint =
+          itemWidth != null &&
+              itemWidth > 0 &&
+              itemHeight != null &&
+              itemHeight > 0
+          ? Size(itemWidth.toDouble(), itemHeight.toDouble())
+          : null;
       return _ImageMediaViewer(
         path: item.path,
         visibleBoxes: visibleBoxes,
         showDetections: showDetections,
+        mediaSizeHint: mediaSizeHint,
         selectedObservationId: selectedObservationId,
         onDetectionBoxSelected: onDetectionBoxSelected,
       );
@@ -159,6 +169,7 @@ class _ImageMediaViewer extends StatefulWidget {
     required this.path,
     required this.visibleBoxes,
     required this.showDetections,
+    this.mediaSizeHint,
     this.selectedObservationId,
     this.onDetectionBoxSelected,
   });
@@ -166,6 +177,7 @@ class _ImageMediaViewer extends StatefulWidget {
   final String path;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
+  final Size? mediaSizeHint;
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
@@ -188,7 +200,8 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
   @override
   void didUpdateWidget(covariant _ImageMediaViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path) {
+    if (oldWidget.path != widget.path ||
+        oldWidget.mediaSizeHint != widget.mediaSizeHint) {
       _resolveImageSize();
     }
   }
@@ -211,7 +224,7 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
 
   void _resolveImageSize() {
     _removeImageStreamListener();
-    _imageSize = null;
+    _imageSize = widget.mediaSizeHint;
     _imageError = null;
     final file = File(widget.path);
     if (!file.existsSync()) {
