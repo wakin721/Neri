@@ -8,6 +8,7 @@ import pytest
 
 from system.backend.models import DetectionItem
 from system.dinov3.classifier import DinoV3Observation
+from system.dinov3.feedback import HumanFeedbackStore
 from system.dinov3.registry import SpeciesRegistry
 from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
 
@@ -95,6 +96,67 @@ def test_exact_30_minute_gap_creates_new_event(tmp_path):
     registry.close()
 
 
+def test_backend_persists_checkpoint_accepted_observation_to_feedback_only(tmp_path):
+    from system.backend import services
+
+    registry = SpeciesRegistry(tmp_path / "registry.db", model_fingerprint=FP)
+    feedback = HumanFeedbackStore(
+        tmp_path / "feedback.sqlite3",
+        model_fingerprint=FP,
+        checkpoint_classes=("Known", "Other"),
+        threshold=0.8,
+    )
+    path = tmp_path / "camera-03" / "accepted.jpg"
+    item = DetectionItem(
+        filename=path.name,
+        path=str(path),
+        file_type="jpg",
+        date_taken="2026-09-09T02:03:04",
+    )
+    observation = DinoV3Observation(
+        result_index=0,
+        box_index=2,
+        embedding=_embedding(4),
+        accepted=True,
+        species="Known",
+        source="checkpoint",
+        registry_id=None,
+        registration_status=None,
+        known_score=0.91,
+        threshold=0.8,
+        detection_confidence=0.93,
+        observation_id="obs-accepted",
+        best_known_species="Known",
+        bbox=(1.0, 2.0, 30.0, 40.0),
+    )
+    detector = _ObservationDetector(registry, [observation])
+    detector.dinov3_feedback = feedback
+
+    services._persist_dinov3_observations(detector, [path], [item], tmp_path)
+
+    stored = feedback.get_observation("obs-accepted")
+    assert stored.source_path == str(path)
+    assert stored.media_kind == "image"
+    assert stored.box_index == 2
+    assert stored.frame_index is None
+    assert stored.timestamp_seconds is None
+    assert stored.bbox == (1.0, 2.0, 30.0, 40.0)
+    assert stored.camera_id == "camera-03"
+    assert stored.captured_at == datetime(2026, 9, 9, 2, 3, 4)
+    assert stored.predicted_species == "Known"
+    assert stored.best_known_species == "Known"
+    assert stored.accepted is True
+    assert stored.prediction_source == "checkpoint"
+    assert stored.registry_id is None
+    assert stored.known_score == pytest.approx(0.91)
+    assert stored.threshold == pytest.approx(0.8)
+    assert np.allclose(stored.embedding, _embedding(4))
+    assert registry.list() == []
+
+    feedback.close()
+    registry.close()
+
+
 def test_dinov3_job_restrictions_require_detector_and_reject_full_video(tmp_path):
     from system.backend import services
 
@@ -178,7 +240,12 @@ def test_load_detector_uses_native_dinov3_runtime(monkeypatch, tmp_path):
 
     classifier = object()
     registry = object()
-    fake_runtime = SimpleNamespace(classifier=classifier, registry=registry)
+    feedback = object()
+    fake_runtime = SimpleNamespace(
+        classifier=classifier,
+        registry=registry,
+        feedback=feedback,
+    )
     monkeypatch.setattr(dinov3_runtime, "load_dinov3_model", lambda *args, **kwargs: fake_runtime)
 
     class FakeProcessor:
@@ -203,6 +270,7 @@ def test_load_detector_uses_native_dinov3_runtime(monkeypatch, tmp_path):
 
     assert processor.dinov3_classifier is classifier
     assert processor.dinov3_registry is registry
+    assert processor.dinov3_feedback is feedback
     assert processor.loaded_cls_paths == []
 
 
