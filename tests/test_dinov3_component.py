@@ -2,10 +2,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import system.dinov3 as dinov3
 from system.model_sync.layout import get_model_layout
+
+
+def _valid_checkpoint():
+    return SimpleNamespace(head_type="multi_prototype", selection_k=3)
 
 
 class _FakeDinoCloud:
@@ -123,12 +128,18 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
             root = Path(tmp) / "DINOv3"
             _FakeDinoCloud().download_tree("", root)
             paths = dinov3.dinov3_component_paths(root=root)
-            with mock.patch(
-                "system.dinov3.component._sha256_file",
-                side_effect=lambda path: (
-                    dinov3.DINO_BACKBONE_SHA256
-                    if Path(path).name == paths.backbone.name
-                    else dinov3.DINO_CLASSIFIER_SHA256
+            with (
+                mock.patch(
+                    "system.dinov3.component._sha256_file",
+                    side_effect=lambda path: (
+                        dinov3.DINO_BACKBONE_SHA256
+                        if Path(path).name == paths.backbone.name
+                        else dinov3.DINO_CLASSIFIER_SHA256
+                    ),
+                ),
+                mock.patch(
+                    "system.dinov3.component.load_checkpoint",
+                    return_value=_valid_checkpoint(),
                 ),
             ):
                 status = dinov3.dinov3_component_status(root=root)
@@ -163,12 +174,18 @@ class DinoV3ComponentLayoutTests(unittest.TestCase):
     def test_install_mirrors_cloud_tree_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "res" / "model" / "DINOv3"
-            with mock.patch(
-                "system.dinov3.component._sha256_file",
-                side_effect=lambda path: (
-                    dinov3.DINO_BACKBONE_SHA256
-                    if Path(path).name == dinov3.DINO_BACKBONE_FILENAME
-                    else dinov3.DINO_CLASSIFIER_SHA256
+            with (
+                mock.patch(
+                    "system.dinov3.component._sha256_file",
+                    side_effect=lambda path: (
+                        dinov3.DINO_BACKBONE_SHA256
+                        if Path(path).name == dinov3.DINO_BACKBONE_FILENAME
+                        else dinov3.DINO_CLASSIFIER_SHA256
+                    ),
+                ),
+                mock.patch(
+                    "system.dinov3.component.load_checkpoint",
+                    return_value=_valid_checkpoint(),
                 ),
             ):
                 installed = dinov3.install_dinov3_component(
