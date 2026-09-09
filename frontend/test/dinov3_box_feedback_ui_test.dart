@@ -268,5 +268,7 @@ void main() {
     expect(feedbackBody['action'], 'correct');
     final operationId = feedbackBody['feedback_operation_id']?.toString() ?? '';
     expect(operationId, isNotEmpty);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
   });
 }
