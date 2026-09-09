@@ -525,6 +525,8 @@ class NeriApiClient {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark'),
@@ -537,6 +539,12 @@ class NeriApiClient {
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
         if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
       }),
     );
     _ensureSuccess(response);
@@ -553,6 +561,8 @@ class NeriApiClient {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark/batch'),
@@ -565,6 +575,12 @@ class NeriApiClient {
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
         if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
       }),
     );
     try {
@@ -582,6 +598,8 @@ class NeriApiClient {
             speciesCount: speciesCount,
             speciesType: speciesType,
             remark: remark,
+            classificationModelPath: classificationModelPath,
+            feedbackOperationId: feedbackOperationId,
           ),
         );
       }
