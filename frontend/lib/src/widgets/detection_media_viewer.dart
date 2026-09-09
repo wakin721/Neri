@@ -738,15 +738,6 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     super.dispose();
   }
 
-  List<DetectionBox> _currentBoxes(Duration position) {
-    return currentVideoDetectionBoxes(
-      boxes: widget.visibleBoxes,
-      position: position,
-      duration: _duration,
-      detectionData: widget.detectionData,
-    );
-  }
-
   String _formatDuration(Duration d) {
     final hours = d.inHours;
     final mins = (d.inMinutes % 60).toString().padLeft(2, '0');
