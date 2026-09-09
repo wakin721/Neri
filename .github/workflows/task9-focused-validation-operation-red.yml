@@ -1,4 +1,4 @@
-name: Verify Task 9 file validation operation RED
+name: Verify Task 9 file validation operation GREEN
 
 on:
   push:
