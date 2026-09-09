@@ -1,0 +1,56 @@
+name: Apply Task 7 services patch
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task7-apply-services-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch validation feedback bridge
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("system/backend/services.py")
+          text = path.read_text(encoding="utf-8")
+
+          old_forward = '''            species_type=request.species_type,\n            remark=request.remark,\n        )\n'''
+          new_forward = '''            species_type=request.species_type,\n            remark=request.remark,\n            classification_model_path=request.classification_model_path,\n            feedback_operation_id=request.feedback_operation_id,\n        )\n'''
+          if old_forward not in text:
+              raise SystemExit("mark_validation_item forwarding anchor not found")
+          text = text.replace(old_forward, new_forward, 1)
+
+          helper_anchor = '''def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:\n'''
+          helpers = '''def _learnable_observations_for_file(\n    classification_model_path: str,\n    file_path: Path,\n):\n    \"\"\"Return persisted DINOv3 observations belonging to one media file.\"\"\"\n    from .dinov3_feedback_service import _open_feedback_state, _path_identity\n\n    feedback, _feature_center = _open_feedback_state(classification_model_path)\n    try:\n        target = _path_identity(file_path)\n        rows = feedback._conn.execute(  # noqa: SLF001 - same feedback-store boundary\n            \"SELECT id,payload FROM observations ORDER BY id\"\n        ).fetchall()\n        observations = []\n        for row in rows:\n            try:\n                payload = json.loads(row[\"payload\"])\n            except (TypeError, json.JSONDecodeError):\n                continue\n            if _path_identity(payload.get(\"source_path\", \"\")) != target:\n                continue\n            observation_id = str(row[\"id\"] or \"\")\n            if not observation_id:\n                continue\n            observations.append(feedback.get_observation(observation_id))\n        return observations\n    finally:\n        feedback.close()\n\n\ndef _eligible_auto_feedback(observations):\n    learnable = [observation for observation in observations if getattr(observation, \"id\", \"\")]\n    return learnable[0] if len(learnable) == 1 else None\n\n\ndef _record_validation_feedback(\n    classification_model_path: str,\n    observation,\n    operation_id: str,\n    action: str,\n    confirmed_species: str | None,\n):\n    \"\"\"Record one conservative file-level validation feedback event.\"\"\"\n    from .dinov3_feedback_service import (\n        _affected_learning_species,\n        _open_feedback_state,\n    )\n\n    feedback, feature_center = _open_feedback_state(classification_model_path)\n    try:\n        record = feedback.record_feedback(\n            observation.id,\n            operation_id=operation_id,\n            action=action,\n            confirmed_species=confirmed_species,\n        )\n        for species in sorted(_affected_learning_species(record)):\n            feedback.recompute_species(species, feature_center)\n        return record\n    finally:\n        feedback.close()\n\n\n'''
+          if helper_anchor not in text:
+              raise SystemExit("helper insertion anchor not found")
+          text = text.replace(helper_anchor, helpers + helper_anchor, 1)
+
+          old_after_persist = '''    _persist_validation_updates(updates, input_path)\n    for species_name, species_type in species_database_updates:\n        _update_species_database(species_name, species_type)\n\n    # Only journal after the user's local decision is saved. Compression/network run\n'''
+          new_after_persist = '''    _persist_validation_updates(updates, input_path)\n    for species_name, species_type in species_database_updates:\n        _update_species_database(species_name, species_type)\n\n    if request.classification_model_path and request.action != \"unverified\":\n        operation_id = request.feedback_operation_id or uuid.uuid4().hex\n        confirmed_species = (\n            (request.species_name or \"\").strip() or None\n            if request.action == \"update\"\n            else None\n        )\n        try:\n            for path in paths:\n                observations = _learnable_observations_for_file(\n                    request.classification_model_path,\n                    path,\n                )\n                observation = _eligible_auto_feedback(observations)\n                if observation is None:\n                    continue\n                _record_validation_feedback(\n                    request.classification_model_path,\n                    observation,\n                    operation_id,\n                    request.action,\n                    confirmed_species,\n                )\n        except Exception as exc:\n            raise RuntimeError(f\"DINOv3 自动反馈失败: {exc}\") from exc\n\n    # Only journal after the user's local decision is saved. Compression/network run\n'''
+          if old_after_persist not in text:
+              raise SystemExit("post-persistence anchor not found")
+          text = text.replace(old_after_persist, new_after_persist, 1)
+
+          path.write_text(text, encoding="utf-8")
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add system/backend/services.py
+          git diff --cached --check
+          git commit -m "feat: bridge validation into DINOv3 feedback"
+          git push origin HEAD:${GITHUB_REF_NAME}
