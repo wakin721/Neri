@@ -98,6 +98,10 @@ class DinoV3ComponentStatus {
     required this.componentVersion,
     required this.sourceCommit,
     required this.message,
+    this.classifierFilename,
+    this.classifierFingerprint,
+    this.classifierHeadType,
+    this.selectionK,
   });
 
   factory DinoV3ComponentStatus.fromJson(Map<String, dynamic> json) {
@@ -107,6 +111,10 @@ class DinoV3ComponentStatus {
       architecture: json['architecture'] as String? ?? 'DINOv3 ViT-B/16',
       componentVersion: (json['component_version'] as num?)?.toInt() ?? 1,
       sourceCommit: json['source_commit'] as String? ?? '',
+      classifierFilename: json['classifier_filename'] as String?,
+      classifierFingerprint: json['classifier_fingerprint'] as String?,
+      classifierHeadType: json['classifier_head_type'] as String?,
+      selectionK: (json['selection_k'] as num?)?.toInt(),
       message: json['message'] as String? ?? '',
     );
   }
@@ -116,5 +124,9 @@ class DinoV3ComponentStatus {
   final String architecture;
   final int componentVersion;
   final String sourceCommit;
+  final String? classifierFilename;
+  final String? classifierFingerprint;
+  final String? classifierHeadType;
+  final int? selectionK;
   final String message;
 }
