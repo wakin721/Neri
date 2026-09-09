@@ -1,0 +1,24 @@
+name: Verify Task 9 current-frame video boxes RED
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-focused-video-box-filter-red.yml
+
+jobs:
+  flutter-video-box-filter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - working-directory: frontend
+        run: flutter pub get
+      - working-directory: frontend
+        run: flutter test test/dinov3_box_hit_test_test.dart --plain-name "video box filtering keeps only the current-frame DINO observation"
