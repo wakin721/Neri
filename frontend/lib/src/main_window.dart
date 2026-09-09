@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'widgets/notification_card.dart';
 import 'api_client.dart';
 import 'app_updater.dart';
 import 'crash_reporter.dart';
@@ -3699,9 +3700,7 @@ class _SoftwareUpdateProgressCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Positioned(
-      right: 20,
-      bottom: 20,
+    return NotificationCard(
       child: Card(
         elevation: 6,
         child: SizedBox(
@@ -3769,9 +3768,7 @@ class _AvailableSoftwareUpdateCard extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final notes = release.notes.trim();
-    return Positioned(
-      right: 20,
-      bottom: 20,
+    return NotificationCard(
       child: Card(
         elevation: 7,
         child: SizedBox(
@@ -3863,9 +3860,7 @@ class _DownloadedSoftwareUpdateCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Positioned(
-      right: 20,
-      bottom: 20,
+    return NotificationCard(
       child: Card(
         elevation: 7,
         child: SizedBox(
