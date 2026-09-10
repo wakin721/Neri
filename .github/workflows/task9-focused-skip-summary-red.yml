@@ -1,6 +1,6 @@
-name: Verify Task 9 learning skip summary RED
+name: Verify Task 9 learning skip summary GREEN
 
-# pure-summary-rule RED
+# pure-summary-rule GREEN
 on:
   push:
     branches:
