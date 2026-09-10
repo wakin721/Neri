@@ -1,6 +1,6 @@
 name: Verify Task 9 learning skip summary RED
 
-# bounded-pumps rerun
+# pure-summary-rule RED
 on:
   push:
     branches:
