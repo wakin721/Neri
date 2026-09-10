@@ -1,0 +1,76 @@
+name: Temporary Windows x64 calibration fix verification
+
+on:
+  push:
+    branches:
+      - feat/dinov3-startup-registry-ui
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tmp-windows-x64-calibration-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python backend and test dependencies
+        run: |
+          python -m pip install -r requirements.txt pytest httpx numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run Python backend tests
+        run: python -m pytest -q
+
+      - name: Sync build version
+        run: python scripts/sync_version.py
+
+      - name: Set up Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - name: Generate Windows project files
+        working-directory: frontend
+        run: ../scripts/prepare_windows.ps1
+
+      - name: Get Flutter dependencies
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run Flutter tests
+        working-directory: frontend
+        run: flutter test
+
+      - name: Build Flutter Windows release
+        working-directory: frontend
+        run: flutter build windows --release
+
+      - name: Assemble portable application
+        id: artifact
+        run: ./scripts/package_windows.ps1
+
+      - name: Upload Windows x64 application
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: package/${{ steps.artifact.outputs.artifact_name }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
