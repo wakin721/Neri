@@ -74,6 +74,54 @@ def test_registry_event_keeps_crop_metadata_and_renders_square_example(tmp_path:
     registry.close()
 
 
+def test_registry_video_event_renders_requested_frame_as_square_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_path = tmp_path / "clip.mp4"
+    video_path.touch()
+    frame = np.zeros((90, 140, 3), dtype=np.uint8)
+    frame[10:60, 30:70] = (20, 120, 240)
+    calls: list[tuple[int, float]] = []
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            assert Path(path) == video_path.resolve()
+
+        def set(self, prop: int, value: float) -> bool:
+            calls.append((prop, value))
+            return True
+
+        def read(self):
+            return True, frame.copy()
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(dinov3_registry_service.cv2, "VideoCapture", FakeCapture)
+
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint=FP)
+    entry = registry.record_unknown(
+        _vector(),
+        camera_id="cam-a",
+        captured_at=BASE,
+        source_path=str(video_path),
+        bbox=(30.0, 10.0, 70.0, 60.0),
+        frame_index=17,
+        timestamp_seconds=0.68,
+    )
+    event = registry.list_events(entry.id)[0]
+
+    encoded = dinov3_registry_service.render_registry_example(
+        registry, entry.id, event["id"]
+    )
+    decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+    assert decoded is not None
+    assert decoded.shape[0] == decoded.shape[1]
+    assert (cv2.CAP_PROP_POS_FRAMES, 17.0) in calls
+    registry.close()
+
+
 def test_registry_example_is_unavailable_for_legacy_event_without_bbox(tmp_path: Path) -> None:
     registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint=FP)
     entry = registry.record_unknown(
