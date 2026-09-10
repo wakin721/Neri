@@ -133,6 +133,22 @@ class SpeciesRegistry:
             );
             """
         )
+        existing_event_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        for column_name, column_type in (
+            ("box_x1", "REAL"),
+            ("box_y1", "REAL"),
+            ("box_x2", "REAL"),
+            ("box_y2", "REAL"),
+            ("frame_index", "INTEGER"),
+            ("timestamp_seconds", "REAL"),
+        ):
+            if column_name not in existing_event_columns:
+                self._conn.execute(
+                    f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"
+                )
         row = self._conn.execute(
             "SELECT value FROM metadata WHERE key='model_fingerprint'"
         ).fetchone()
@@ -200,7 +216,17 @@ class SpeciesRegistry:
             0,
         )
 
-    def record_unknown(self, embedding, *, camera_id, captured_at, source_path):
+    def record_unknown(
+        self,
+        embedding,
+        *,
+        camera_id,
+        captured_at,
+        source_path,
+        bbox=None,
+        frame_index=None,
+        timestamp_seconds=None,
+    ):
         vector = normalize_embedding(embedding)
         matched = self.match(vector)
         entry_id = int(matched["id"]) if matched else self._create()
@@ -210,6 +236,9 @@ class SpeciesRegistry:
             camera_id=camera_id,
             captured_at=captured_at,
             source_path=source_path,
+            bbox=bbox,
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
         )
 
     def record_observation(
@@ -220,9 +249,24 @@ class SpeciesRegistry:
         camera_id,
         captured_at,
         source_path,
+        bbox=None,
+        frame_index=None,
+        timestamp_seconds=None,
     ):
         self._row(entry_id)
         vector = normalize_embedding(embedding)
+        bbox_values = None
+        if bbox is not None:
+            values = np.asarray(bbox, dtype=np.float64)
+            if values.shape != (4,) or not np.isfinite(values).all():
+                raise ValueError("bbox must contain four finite coordinates")
+            bbox_values = tuple(float(value) for value in values)
+        frame_value = None if frame_index is None else int(frame_index)
+        timestamp_value = (
+            None if timestamp_seconds is None else float(timestamp_seconds)
+        )
+        if timestamp_value is not None and not np.isfinite(timestamp_value):
+            raise ValueError("timestamp_seconds must be finite")
         key, start, end, missing = self._event_key(
             entry_id,
             camera_id,
@@ -238,8 +282,9 @@ class SpeciesRegistry:
             raw = vector.astype("<f4").tobytes()
             self._conn.execute(
                 "INSERT INTO events(registration_id,event_key,camera_id,started_at,ended_at,"
-                "timestamp_missing,source_path,embedding_sum,embedding,sample_count) "
-                "VALUES(?,?,?,?,?,?,?,?,?,1)",
+                "timestamp_missing,source_path,embedding_sum,embedding,box_x1,box_y1,box_x2,box_y2,"
+                "frame_index,timestamp_seconds,sample_count) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
                 (
                     entry_id,
                     key,
@@ -250,6 +295,9 @@ class SpeciesRegistry:
                     source_path,
                     raw,
                     raw,
+                    *(bbox_values or (None, None, None, None)),
+                    frame_value,
+                    timestamp_value,
                 ),
             )
         else:
@@ -257,13 +305,20 @@ class SpeciesRegistry:
             aggregate = normalize_embedding(total)
             self._conn.execute(
                 "UPDATE events SET ended_at=COALESCE(?,ended_at),source_path=?,"
-                "embedding_sum=?,embedding=?,sample_count=? WHERE id=?",
+                "embedding_sum=?,embedding=?,sample_count=?,"
+                "box_x1=COALESCE(?,box_x1),box_y1=COALESCE(?,box_y1),"
+                "box_x2=COALESCE(?,box_x2),box_y2=COALESCE(?,box_y2),"
+                "frame_index=COALESCE(?,frame_index),"
+                "timestamp_seconds=COALESCE(?,timestamp_seconds) WHERE id=?",
                 (
                     end,
                     source_path,
                     total.astype("<f4").tobytes(),
                     aggregate.astype("<f4").tobytes(),
                     int(old["sample_count"]) + 1,
+                    *(bbox_values or (None, None, None, None)),
+                    frame_value,
+                    timestamp_value,
                     int(old["id"]),
                 ),
             )
@@ -298,6 +353,11 @@ class SpeciesRegistry:
         )
         self._conn.commit()
         return self.get(entry_id)
+
+    def delete(self, entry_id: int) -> None:
+        self._row(entry_id)
+        self._conn.execute("DELETE FROM registrations WHERE id=?", (entry_id,))
+        self._conn.commit()
 
     def _event_rows(self, entry_id):
         return self._conn.execute(
@@ -442,18 +502,45 @@ class SpeciesRegistry:
 
     def list_events(self, entry_id):
         self._row(entry_id)
-        return [
-            {
-                "event_key": str(row["event_key"]),
-                "source_path": str(row["source_path"]),
-                "camera_id": str(row["camera_id"]),
-                "started_at": row["started_at"],
-                "ended_at": row["ended_at"],
-                "timestamp_missing": bool(row["timestamp_missing"]),
-                "sample_count": int(row["sample_count"]),
-            }
-            for row in self._event_rows(entry_id)
-        ]
+        result = []
+        for row in self._event_rows(entry_id):
+            coordinates = (
+                row["box_x1"],
+                row["box_y1"],
+                row["box_x2"],
+                row["box_y2"],
+            )
+            bbox = (
+                [float(value) for value in coordinates]
+                if all(value is not None for value in coordinates)
+                else None
+            )
+            source_path = str(row["source_path"])
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "event_key": str(row["event_key"]),
+                    "source_path": source_path,
+                    "camera_id": str(row["camera_id"]),
+                    "started_at": row["started_at"],
+                    "ended_at": row["ended_at"],
+                    "timestamp_missing": bool(row["timestamp_missing"]),
+                    "sample_count": int(row["sample_count"]),
+                    "bbox": bbox,
+                    "frame_index": (
+                        int(row["frame_index"])
+                        if row["frame_index"] is not None
+                        else None
+                    ),
+                    "timestamp_seconds": (
+                        float(row["timestamp_seconds"])
+                        if row["timestamp_seconds"] is not None
+                        else None
+                    ),
+                    "has_example": bool(source_path and bbox is not None),
+                }
+            )
+        return result
 
     def prototype_bank(self, feature_center: np.ndarray) -> PrototypeBank:
         center = np.asarray(feature_center, dtype=np.float32)

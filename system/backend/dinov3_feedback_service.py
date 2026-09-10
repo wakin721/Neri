@@ -147,6 +147,9 @@ def persist_runtime_observations(
                     camera_id=camera_id,
                     captured_at=captured_at,
                     source_path=str(source_path),
+                    bbox=tuple(float(value) for value in observation.bbox),
+                    frame_index=(int(frame_index) if frame_index is not None else None),
+                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),
                 )
             else:
                 registry.record_unknown(
@@ -154,6 +157,9 @@ def persist_runtime_observations(
                     camera_id=camera_id,
                     captured_at=captured_at,
                     source_path=str(source_path),
+                    bbox=tuple(float(value) for value in observation.bbox),
+                    frame_index=(int(frame_index) if frame_index is not None else None),
+                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),
                 )
         except Exception as exc:  # noqa: BLE001 - inference persistence is non-fatal
             logger.warning("Failed to persist DINOv3 observation: %s", exc)

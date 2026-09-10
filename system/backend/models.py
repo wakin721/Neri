@@ -66,6 +66,7 @@ class DinoV3RegistryEntryResponse(BaseModel):
 
 
 class DinoV3RegistryEventResponse(BaseModel):
+    id: int
     event_key: str
     source_path: str
     camera_id: str
@@ -73,6 +74,10 @@ class DinoV3RegistryEventResponse(BaseModel):
     ended_at: str | None = None
     timestamp_missing: bool = False
     sample_count: int = 1
+    bbox: list[float] | None = None
+    frame_index: int | None = None
+    timestamp_seconds: float | None = None
+    has_example: bool = False
 
 
 class DinoV3IdentityUpdateRequest(BaseModel):

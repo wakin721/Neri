@@ -4,11 +4,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from system.backend.dinov3_registry_service import (
     load_checkpoint_for_model,
     open_registry_for_model,
+    render_registry_example,
 )
 from system.backend.models import (
     DinoV3IdentityUpdateRequest,
@@ -94,6 +95,38 @@ def dinov3_registry_router() -> APIRouter:
         return _run_with_registry(
             classification_model_path,
             lambda registry: registry.list_events(registration_id),
+        )
+
+    @router.delete("/registry/{registration_id}")
+    def delete_registry_entry(
+        registration_id: int,
+        classification_model_path: str = Query(..., min_length=1),
+    ):
+        _run_with_registry(
+            classification_model_path,
+            lambda registry: registry.delete(registration_id),
+        )
+        return {"deleted": True, "registration_id": registration_id}
+
+    @router.get("/registry/{registration_id}/events/{event_id}/example")
+    def get_registry_example(
+        registration_id: int,
+        event_id: int,
+        classification_model_path: str = Query(..., min_length=1),
+    ):
+        try:
+            content = _run_with_registry(
+                classification_model_path,
+                lambda registry: render_registry_example(
+                    registry, registration_id, event_id
+                ),
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=60"},
         )
 
     @router.patch("/registry/{registration_id}/identity", response_model=DinoV3RegistryEntryResponse)
