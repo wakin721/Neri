@@ -69,6 +69,66 @@ def _cache_ids(cache) -> np.ndarray | None:
     return None
 
 
+def _validate_source_protocol(
+    source_run: Path,
+    checkpoint_payload: dict[str, Any],
+    *,
+    feature_dim: int,
+    classes: tuple[str, ...],
+) -> dict[str, Any]:
+    protocol_path = source_run / "protocol.json"
+    if not protocol_path.is_file():
+        raise FileNotFoundError(
+            f"Missing source protocol required for safe calibration: {protocol_path}"
+        )
+    protocol = _read_json(protocol_path)
+    if not isinstance(protocol, dict):
+        raise ValueError("source-run protocol.json must contain an object")
+
+    checkpoint_fingerprint = str(
+        checkpoint_payload.get("data_fingerprint", "")
+    ).strip()
+    source_fingerprint = str(
+        protocol.get("data_fingerprint")
+        or protocol.get("source_data_fingerprint")
+        or ""
+    ).strip()
+    if not checkpoint_fingerprint:
+        raise ValueError("Checkpoint data_fingerprint is required for safe calibration")
+    if not source_fingerprint:
+        raise ValueError("source-run protocol is missing data_fingerprint")
+    if source_fingerprint != checkpoint_fingerprint:
+        raise ValueError(
+            "source-run data_fingerprint does not match checkpoint data_fingerprint"
+        )
+
+    source_dim = protocol.get("feature_dim")
+    if source_dim is not None and int(source_dim) != int(feature_dim):
+        raise ValueError("source-run feature_dim does not match checkpoint")
+
+    checkpoint_encoder = str(
+        checkpoint_payload.get("encoder_sha256", "")
+    ).strip().lower()
+    source_encoder = str(
+        protocol.get("encoder_sha256")
+        or protocol.get("source_encoder_sha256")
+        or ""
+    ).strip().lower()
+    if checkpoint_encoder and source_encoder and checkpoint_encoder != source_encoder:
+        raise ValueError("source-run encoder_sha256 does not match checkpoint")
+
+    source_classes = protocol.get("classes") or protocol.get("source_known_classes")
+    if isinstance(source_classes, (list, tuple)):
+        available = {str(name) for name in source_classes}
+        missing = [name for name in classes if name not in available]
+        if missing:
+            raise ValueError(
+                "source-run protocol is missing checkpoint classes: "
+                + ", ".join(missing)
+            )
+    return protocol
+
+
 def load_calibration_source(source_run: Path, *, feature_dim: int):
     split_path = source_run / "splits.json"
     if not split_path.is_file():
@@ -179,6 +239,12 @@ def main(argv: list[str] | None = None) -> int:
     if (manifest_path.parent / checkpoint_name).resolve() != checkpoint_path:
         raise ValueError("Manifest checkpoint does not match --checkpoint")
 
+    source_protocol = _validate_source_protocol(
+        source_run,
+        payload,
+        feature_dim=feature_dim,
+        classes=classes,
+    )
     raw, truth, split, cache_path = load_calibration_source(
         source_run,
         feature_dim=feature_dim,
@@ -203,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         grid_size=args.grid_size,
     )
 
+    source_fingerprint = str(
+        source_protocol.get("data_fingerprint")
+        or source_protocol.get("source_data_fingerprint")
+    )
     derived = dict(manifest)
     derived["rejection"] = {
         "mode": "multi_dual",
@@ -223,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_known_frr": calibration["max_known_frr"],
         "grid_size": calibration["grid_size"],
         "source_feature_cache": cache_path.name,
-        "source_data_fingerprint": payload.get("data_fingerprint"),
+        "source_data_fingerprint": source_fingerprint,
         "test_isolation": "test and unknown_test rows are not used for threshold calibration",
     }
 
