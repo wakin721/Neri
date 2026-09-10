@@ -23,6 +23,16 @@ def test_multi_prototype_checkpoint_does_not_require_linear_head():
     assert checkpoint.selection_k == 3
 
 
+def test_multi_prototype_checkpoint_accepts_selection_k_from_checkpoint():
+    checkpoint = validate_checkpoint(
+        make_multi_prototype_payload(selection_k=5)
+    )
+
+    assert checkpoint.selection_k == 5
+    assert tuple(checkpoint.prototypes.shape) == (10, 768)
+    assert checkpoint.prototypes_per_class == (5, 5)
+
+
 def test_multi_prototype_checkpoint_rejects_invalid_class_indices():
     payload = make_multi_prototype_payload()
     payload["prototype_class_indices"][0] = 99
@@ -31,11 +41,12 @@ def test_multi_prototype_checkpoint_rejects_invalid_class_indices():
         validate_checkpoint(payload)
 
 
-def test_multi_prototype_checkpoint_rejects_non_k3_contract():
+@pytest.mark.parametrize("selection_k", [0, -1, True, 3.0, "3", None])
+def test_multi_prototype_checkpoint_rejects_invalid_selection_k(selection_k):
     payload = make_multi_prototype_payload()
-    payload["selection_k"] = 5
+    payload["selection_k"] = selection_k
 
-    with pytest.raises(CheckpointValidationError):
+    with pytest.raises(CheckpointValidationError, match="selection_k"):
         validate_checkpoint(payload)
 
 
