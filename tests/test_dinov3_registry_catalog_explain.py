@@ -7,7 +7,10 @@ import pytest
 
 from system.dinov3.checkpoint import validate_checkpoint
 from system.dinov3.classifier import DinoV3Classifier
+from system.dinov3.feedback import HumanFeedbackStore
+from system.dinov3.registry import SpeciesRegistry
 from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
+from tests.test_dinov3_feedback_store import FP, make_observation
 from tests.test_dinov3_feedback_validation_bridge import _isolate_validation, _request
 
 
@@ -171,3 +174,82 @@ def test_feature_explanation_projects_nearest_two_species_without_embeddings():
     for point in points:
         assert np.isfinite(float(point["x"]))
         assert np.isfinite(float(point["y"]))
+
+
+def test_human_new_species_assignment_is_named_and_audited(tmp_path):
+    observation = make_observation("obs-registry")
+    registry = SpeciesRegistry(
+        tmp_path / "registry.sqlite3",
+        model_fingerprint=FP,
+    )
+    initial = registry.record_unknown(
+        observation.embedding,
+        camera_id=observation.camera_id,
+        captured_at=observation.captured_at,
+        source_path=observation.source_path,
+        bbox=observation.bbox,
+        frame_index=observation.frame_index,
+        timestamp_seconds=observation.timestamp_seconds,
+    )
+    feedback = HumanFeedbackStore(
+        tmp_path / "feedback.sqlite3",
+        model_fingerprint=FP,
+        checkpoint_classes=("盘羊", "家牛"),
+        threshold=0.31,
+    )
+    feedback.persist_observation(observation)
+
+    assign = getattr(registry, "record_human_species", None)
+    assert callable(assign), "SpeciesRegistry.record_human_species is required"
+    updated, previous_common, previous_scientific = assign(
+        observation.embedding,
+        common_name="赤麂",
+        camera_id=observation.camera_id,
+        captured_at=observation.captured_at,
+        source_path=observation.source_path,
+        bbox=observation.bbox,
+        frame_index=observation.frame_index,
+        timestamp_seconds=observation.timestamp_seconds,
+        preferred_entry_id=initial.id,
+    )
+    feedback.record_registry_feedback(
+        observation.id,
+        operation_id="op-registry",
+        registration_id=updated.id,
+        previous_common_name=previous_common,
+        previous_scientific_name=previous_scientific,
+        confirmed_species="赤麂",
+    )
+
+    assert updated.id == initial.id
+    assert updated.status == "candidate"
+    assert updated.common_name == "赤麂"
+    assert "赤麂" in updated.display_name
+    record = feedback.active_feedback(observation.id)
+    assert record is not None
+    assert record.feedback_type == "registry"
+    assert record.confirmed_species == "赤麂"
+    assert record.positive_species is None
+    assert feedback.registry_assignments("op-registry") == [
+        {
+            "registration_id": updated.id,
+            "previous_common_name": previous_common,
+            "previous_scientific_name": previous_scientific,
+            "assigned_common_name": "赤麂",
+        }
+    ]
+
+    feedback.close()
+    registry.close()
+
+
+def test_registry_and_feedback_routers_expose_catalog_and_observation_explain():
+    from system.backend.dinov3_feedback_api import dinov3_feedback_router
+    from system.dinov3.api import dinov3_registry_router
+
+    registry_paths = {route.path for route in dinov3_registry_router().routes}
+    feedback_paths = {route.path for route in dinov3_feedback_router().routes}
+
+    assert "/api/dinov3/registry/catalog" in registry_paths
+    assert "/api/dinov3/feedback/observations/{observation_id}/explain" in feedback_paths
+    assert "/api/dinov3/feedback/observations/{observation_id}/example" in feedback_paths
