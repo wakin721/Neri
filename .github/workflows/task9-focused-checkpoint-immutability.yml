@@ -1,5 +1,6 @@
 name: Verify Task 9 checkpoint immutability
 
+# fixture-corrected rerun
 on:
   push:
     branches:
