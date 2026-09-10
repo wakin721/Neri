@@ -1,6 +1,6 @@
-name: Verify Task 9 feedback merge RED
+name: Verify Task 9 feedback merge GREEN
 
-# pure effective-items RED
+# pure effective-items GREEN
 on:
   push:
     branches:
