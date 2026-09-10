@@ -7,16 +7,22 @@ on:
     paths:
       - 'frontend/**'
 
+permissions:
+  contents: write
+
 concurrency:
   group: tmp-dinov3-registry-explain-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frontend-red:
+  frontend-green:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - name: Apply frontend implementation
+        run: python tools/apply_dinov3_registry_explain_frontend.py
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -24,6 +30,36 @@ jobs:
       - name: Install Flutter dependencies
         working-directory: frontend
         run: flutter pub get
-      - name: Run feature scatter RED tests
+      - name: Format changed Dart sources
+        working-directory: frontend
+        run: dart format lib/src/api_client_core.dart lib/src/models/dinov3_registry.dart lib/src/models/dinov3_explanation.dart lib/src/widgets/dinov3_registry_dialog.dart lib/src/widgets/dinov3_feature_scatter.dart lib/src/screens/species_validation_screen.dart test/dinov3_feature_scatter_test.dart
+      - name: Run feature scatter tests
         working-directory: frontend
         run: flutter test test/dinov3_feature_scatter_test.dart
+      - name: Run existing DINOv3 frontend tests
+        working-directory: frontend
+        run: flutter test test/dinov3_startup_registry_features_test.dart
+      - name: Analyze Flutter frontend
+        working-directory: frontend
+        run: flutter analyze
+      - name: Run full Flutter tests
+        working-directory: frontend
+        run: flutter test
+      - name: Commit verified frontend implementation
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            frontend/lib/src/api_client_core.dart \
+            frontend/lib/src/models/dinov3_registry.dart \
+            frontend/lib/src/models/dinov3_explanation.dart \
+            frontend/lib/src/widgets/dinov3_registry_dialog.dart \
+            frontend/lib/src/widgets/dinov3_feature_scatter.dart \
+            frontend/lib/src/screens/species_validation_screen.dart \
+            frontend/test/dinov3_feature_scatter_test.dart
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "feat: add DINOv3 registry catalog and local feature scatter UI"
+          git push origin HEAD:feat/dinov3-startup-registry-ui
