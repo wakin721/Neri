@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
-from system.backend.dinov3_registry_service import render_registry_example
+from system.backend import dinov3_registry_service
 from system.dinov3.registry import RegistryEntryNotFound, SpeciesRegistry
 
 
@@ -29,6 +29,7 @@ def test_registry_delete_cascades_events_and_prototypes(tmp_path: Path) -> None:
         captured_at=BASE,
         source_path=str(tmp_path / "frame.jpg"),
     )
+    assert hasattr(registry, "delete"), "SpeciesRegistry.delete is required"
     registry.delete(entry.id)
 
     with pytest.raises(RegistryEntryNotFound):
@@ -59,8 +60,13 @@ def test_registry_event_keeps_crop_metadata_and_renders_square_example(tmp_path:
     assert event["id"] > 0
     assert event["bbox"] == [20.0, 10.0, 60.0, 70.0]
     assert event["has_example"] is True
+    assert hasattr(
+        dinov3_registry_service, "render_registry_example"
+    ), "render_registry_example is required"
 
-    encoded = render_registry_example(registry, entry.id, event["id"])
+    encoded = dinov3_registry_service.render_registry_example(
+        registry, entry.id, event["id"]
+    )
     decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
     assert decoded is not None
     assert decoded.shape[0] == decoded.shape[1]
@@ -77,7 +83,10 @@ def test_registry_example_is_unavailable_for_legacy_event_without_bbox(tmp_path:
         source_path=str(tmp_path / "missing.jpg"),
     )
     event = registry.list_events(entry.id)[0]
-    assert event["has_example"] is False
+    assert event.get("has_example") is False
+    assert hasattr(
+        dinov3_registry_service, "render_registry_example"
+    ), "render_registry_example is required"
     with pytest.raises(FileNotFoundError):
-        render_registry_example(registry, entry.id, event["id"])
+        dinov3_registry_service.render_registry_example(registry, entry.id, event["id"])
     registry.close()
