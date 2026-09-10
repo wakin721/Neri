@@ -24,6 +24,42 @@ jobs:
           sed -i 's/new_confirmed, count=2/new_confirmed, count=1/' tools/apply_dinov3_registry_explain_backend.py
           sed -i 's/old_call, new_call, count=2/old_call, new_call, count=1/' tools/apply_dinov3_registry_explain_backend.py
           python tools/apply_dinov3_registry_explain_backend.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('system/backend/services.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''def _checkpoint_species_for_model(classification_model_path: str) -> set[str]:
+              from .dinov3_registry_service import load_checkpoint_for_model
+
+              return set(load_checkpoint_for_model(classification_model_path).classes)
+          '''
+          new = '''def _checkpoint_species_for_model(classification_model_path: str) -> set[str] | None:
+              from .dinov3_registry_service import load_checkpoint_for_model
+              from system.dinov3.runtime import DinoV3ManifestError
+
+              try:
+                  return set(load_checkpoint_for_model(classification_model_path).classes)
+              except (DinoV3ManifestError, FileNotFoundError):
+                  # Preserve the historical feedback path when the model cannot be
+                  # resolved (including mocked test paths). That path will surface
+                  # the original model error rather than misclassifying it as a
+                  # new-species Registry assignment.
+                  return None
+          '''
+          if old not in text:
+              raise RuntimeError('checkpoint species helper anchor missing')
+          text = text.replace(old, new, 1)
+          old_condition = '''                    and confirmed_species not in checkpoint_species
+          '''
+          new_condition = '''                    and checkpoint_species is not None
+                      and confirmed_species not in checkpoint_species
+          '''
+          if old_condition not in text:
+              raise RuntimeError('registry routing condition anchor missing')
+          text = text.replace(old_condition, new_condition, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
