@@ -26,39 +26,30 @@ jobs:
 
           path = Path('system/backend/services.py')
           text = path.read_text(encoding='utf-8')
-          old = '''        box_data = {
-              "species": str(species or "Unknown"),
-              "confidence": confidence,
-              "bbox": bbox,
-              "candidates": candidates if isinstance(candidates, list) else [],
-          }
-          '''
-          new = '''        box_data = {
-              "species": str(species or "Unknown"),
-              "confidence": confidence,
-              "bbox": bbox,
-              "candidates": candidates if isinstance(candidates, list) else [],
-          }
-          candidate_metadata = None
-          if isinstance(candidates, list):
-              for candidate in candidates:
-                  if isinstance(candidate, dict) and candidate.get("observation_id"):
-                      candidate_metadata = candidate
-                      break
-          metadata_source = candidate_metadata or raw_box
-          observation_id = _value_from_keys(metadata_source, ("observation_id",))
-          registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))
-          predicted_species = _value_from_keys(metadata_source, ("predicted_species",))
-          if observation_id is not None:
-              box_data["observation_id"] = str(observation_id)
-          if registry_id is not None:
-              box_data["registry_id"] = registry_id
-          if predicted_species is not None:
-              box_data["predicted_species"] = str(predicted_species)
-          '''
-          if old not in text:
-              raise SystemExit('target block not found or already changed')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          anchor = '        if frame_index is not None:\n'
+          insert = (
+              '        candidate_metadata = None\n'
+              '        if isinstance(candidates, list):\n'
+              '            for candidate in candidates:\n'
+              '                if isinstance(candidate, dict) and candidate.get("observation_id"):\n'
+              '                    candidate_metadata = candidate\n'
+              '                    break\n'
+              '        metadata_source = candidate_metadata or raw_box\n'
+              '        observation_id = _value_from_keys(metadata_source, ("observation_id",))\n'
+              '        registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))\n'
+              '        predicted_species = _value_from_keys(metadata_source, ("predicted_species",))\n'
+              '        if observation_id is not None:\n'
+              '            box_data["observation_id"] = str(observation_id)\n'
+              '        if registry_id is not None:\n'
+              '            box_data["registry_id"] = registry_id\n'
+              '        if predicted_species is not None:\n'
+              '            box_data["predicted_species"] = str(predicted_species)\n'
+          )
+          if 'box_data["observation_id"]' in text:
+              raise SystemExit('metadata fix already present')
+          if anchor not in text:
+              raise SystemExit('target anchor not found')
+          path.write_text(text.replace(anchor, insert + anchor, 1), encoding='utf-8')
           PY
 
       - name: Commit fix
