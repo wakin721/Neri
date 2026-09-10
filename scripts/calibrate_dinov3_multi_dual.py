@@ -143,20 +143,40 @@ def load_calibration_source(source_run: Path, *, feature_dim: int):
             raise ValueError(f"{cache_path.name} is missing features")
         raw = np.asarray(cache["features"], dtype=np.float32)
         cache_ids = _cache_ids(cache)
-    if raw.shape != (len(rows), int(feature_dim)):
+
+    if raw.ndim != 2 or raw.shape[1] != int(feature_dim):
+        raise ValueError(
+            f"Feature cache shape {raw.shape} does not have feature_dim {feature_dim}"
+        )
+
+    row_ids = [_row_id(row) for row in rows]
+    if cache_ids is not None and all(value is not None for value in row_ids):
+        if cache_ids.ndim != 1 or len(cache_ids) != len(raw):
+            raise ValueError("Feature-cache id count does not match feature rows")
+        typed_row_ids = [str(value) for value in row_ids]
+        if len(set(typed_row_ids)) != len(typed_row_ids):
+            raise ValueError("splits.json contains duplicate feature-cache ids")
+        typed_cache_ids = [str(value) for value in cache_ids.tolist()]
+        if len(set(typed_cache_ids)) != len(typed_cache_ids):
+            raise ValueError("Feature cache contains duplicate ids")
+
+        rows_by_id = dict(zip(typed_row_ids, rows, strict=True))
+        missing = [value for value in typed_cache_ids if value not in rows_by_id]
+        if missing:
+            raise ValueError(
+                "Feature-cache ids are missing from splits.json: "
+                + ", ".join(missing[:5])
+            )
+        rows = [rows_by_id[value] for value in typed_cache_ids]
+    elif raw.shape[0] != len(rows):
         raise ValueError(
             f"Feature cache shape {raw.shape} does not match splits ({len(rows)}, {feature_dim})"
         )
+
     if not np.isfinite(raw).all() or not np.allclose(
         np.linalg.norm(raw, axis=1), 1.0, atol=1e-5
     ):
         raise ValueError("Expected finite L2-normalized frozen DINOv3 source features")
-
-    row_ids = [_row_id(row) for row in rows]
-    if cache_ids is not None and all(value is not None for value in row_ids):
-        expected = np.asarray(row_ids, dtype=str)
-        if not np.array_equal(cache_ids, expected):
-            raise ValueError("Feature-cache ids do not match splits.json order")
 
     truth = np.asarray([str(row.get("species", "")) for row in rows])
     split = np.asarray([str(row.get("split", "")) for row in rows])
