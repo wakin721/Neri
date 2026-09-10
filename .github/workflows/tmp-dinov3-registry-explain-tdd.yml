@@ -6,6 +6,7 @@ on:
       - feat/dinov3-startup-registry-ui
     paths:
       - 'frontend/**'
+      - '.github/workflows/tmp-dinov3-registry-explain-tdd.yml'
 
 permissions:
   contents: write
