@@ -1,0 +1,68 @@
+name: Apply Task 9 learning skip summary GREEN
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+    paths:
+      - .github/workflows/task9-apply-skip-summary-green.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+      - name: Patch learning skip summary
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('frontend/lib/src/screens/species_validation_screen.dart')
+          text = path.read_text(encoding='utf-8')
+
+          anchor = """const double _validationButtonHeight = 40;\n"""
+          helper = """String dinoValidationLearningSkipSummary(\n  Iterable<DetectionItem> items, {\n  required bool learningRequested,\n}) {\n  if (!learningRequested) return '';\n  final targets = items.toList(growable: false);\n  if (targets.isEmpty) return '';\n\n  var skipped = 0;\n  for (final item in targets) {\n    final observationIds = item.detectionBoxes\n        .map((box) => box.observationId?.trim() ?? '')\n        .where((id) => id.isNotEmpty)\n        .toSet();\n    if (observationIds.length != 1) skipped += 1;\n  }\n  if (skipped == 0) return '';\n  if (targets.length == 1) {\n    return 'DINOv3 学习已跳过：该文件需恰好 1 个可学习检测框';\n  }\n  return 'DINOv3 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';\n}\n\nconst double _validationButtonHeight = 40;\n"""
+          if anchor not in text:
+              raise SystemExit('helper anchor not found')
+          text = text.replace(anchor, helper, 1)
+
+          anchor = """    final feedbackOperationId = _newValidationFeedbackOperationId(action);\n\n    _setMarking(true);\n"""
+          replacement = """    final feedbackOperationId = _newValidationFeedbackOperationId(action);\n    final learningSkipSummary = dinoValidationLearningSkipSummary(\n      items,\n      learningRequested: feedbackOperationId != null,\n    );\n\n    _setMarking(true);\n"""
+          if anchor not in text:
+              raise SystemExit('batch summary anchor not found')
+          text = text.replace(anchor, replacement, 1)
+
+          anchor = """      _showSnackBar('已批量处理 ${items.length} 个文件');\n"""
+          replacement = """      final message = '已批量处理 ${items.length} 个文件';\n      _showSnackBar(\n        learningSkipSummary.isEmpty\n            ? message\n            : '$message；$learningSkipSummary',\n      );\n"""
+          if anchor not in text:
+              raise SystemExit('batch snackbar anchor not found')
+          text = text.replace(anchor, replacement, 1)
+
+          anchor = """    final feedbackOperationId = _newValidationFeedbackOperationId(action);\n    _setMarking(true);\n"""
+          replacement = """    final feedbackOperationId = _newValidationFeedbackOperationId(action);\n    final learningSkipSummary = dinoValidationLearningSkipSummary(\n      <DetectionItem>[item],\n      learningRequested: feedbackOperationId != null,\n    );\n    _setMarking(true);\n"""
+          if anchor not in text:
+              raise SystemExit('single summary anchor not found')
+          text = text.replace(anchor, replacement, 1)
+
+          anchor = """      _showSnackBar(message);\n"""
+          replacement = """      _showSnackBar(\n        learningSkipSummary.isEmpty\n            ? message\n            : '$message；$learningSkipSummary',\n      );\n"""
+          if anchor not in text:
+              raise SystemExit('single snackbar anchor not found')
+          text = text.replace(anchor, replacement, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Commit learning skip summary
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/lib/src/screens/species_validation_screen.dart
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: report skipped DINOv3 validation learning"
+          git push
