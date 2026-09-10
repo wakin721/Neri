@@ -1,0 +1,123 @@
+name: Temporary DINOv3 registry backend GREEN
+
+on:
+  push:
+    branches:
+      - feat/dinov3-startup-registry-ui
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-startup-registry-ui
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply backend patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              text = path.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'marker missing in {path}: {old[:80]!r}')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          registry = Path('system/dinov3/registry.py')
+          replace_once(
+              registry,
+              '''        )\n        row = self._conn.execute(\n            "SELECT value FROM metadata WHERE key='model_fingerprint'"\n        ).fetchone()''',
+              '''        )\n        existing_event_columns = {\n            str(row["name"])\n            for row in self._conn.execute("PRAGMA table_info(events)").fetchall()\n        }\n        for column_name, column_type in (\n            ("box_x1", "REAL"),\n            ("box_y1", "REAL"),\n            ("box_x2", "REAL"),\n            ("box_y2", "REAL"),\n            ("frame_index", "INTEGER"),\n            ("timestamp_seconds", "REAL"),\n        ):\n            if column_name not in existing_event_columns:\n                self._conn.execute(\n                    f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"\n                )\n        row = self._conn.execute(\n            "SELECT value FROM metadata WHERE key='model_fingerprint'"\n        ).fetchone()''',
+          )
+          replace_once(
+              registry,
+              '''    def record_unknown(self, embedding, *, camera_id, captured_at, source_path):\n        vector = normalize_embedding(embedding)\n        matched = self.match(vector)\n        entry_id = int(matched["id"]) if matched else self._create()\n        return self.record_observation(\n            entry_id,\n            vector,\n            camera_id=camera_id,\n            captured_at=captured_at,\n            source_path=source_path,\n        )''',
+              '''    def record_unknown(\n        self,\n        embedding,\n        *,\n        camera_id,\n        captured_at,\n        source_path,\n        bbox=None,\n        frame_index=None,\n        timestamp_seconds=None,\n    ):\n        vector = normalize_embedding(embedding)\n        matched = self.match(vector)\n        entry_id = int(matched["id"]) if matched else self._create()\n        return self.record_observation(\n            entry_id,\n            vector,\n            camera_id=camera_id,\n            captured_at=captured_at,\n            source_path=source_path,\n            bbox=bbox,\n            frame_index=frame_index,\n            timestamp_seconds=timestamp_seconds,\n        )''',
+          )
+          replace_once(
+              registry,
+              '''        camera_id,\n        captured_at,\n        source_path,\n    ):\n        self._row(entry_id)\n        vector = normalize_embedding(embedding)''',
+              '''        camera_id,\n        captured_at,\n        source_path,\n        bbox=None,\n        frame_index=None,\n        timestamp_seconds=None,\n    ):\n        self._row(entry_id)\n        vector = normalize_embedding(embedding)\n        bbox_values = None\n        if bbox is not None:\n            values = np.asarray(bbox, dtype=np.float64)\n            if values.shape != (4,) or not np.isfinite(values).all():\n                raise ValueError("bbox must contain four finite coordinates")\n            bbox_values = tuple(float(value) for value in values)\n        frame_value = None if frame_index is None else int(frame_index)\n        timestamp_value = (\n            None if timestamp_seconds is None else float(timestamp_seconds)\n        )\n        if timestamp_value is not None and not np.isfinite(timestamp_value):\n            raise ValueError("timestamp_seconds must be finite")''',
+          )
+          replace_once(
+              registry,
+              '''                "INSERT INTO events(registration_id,event_key,camera_id,started_at,ended_at,"\n                "timestamp_missing,source_path,embedding_sum,embedding,sample_count) "\n                "VALUES(?,?,?,?,?,?,?,?,?,1)",\n                (\n                    entry_id,\n                    key,\n                    camera_id,\n                    start,\n                    end,\n                    missing,\n                    source_path,\n                    raw,\n                    raw,\n                ),''',
+              '''                "INSERT INTO events(registration_id,event_key,camera_id,started_at,ended_at,"\n                "timestamp_missing,source_path,embedding_sum,embedding,box_x1,box_y1,box_x2,box_y2,"\n                "frame_index,timestamp_seconds,sample_count) "\n                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",\n                (\n                    entry_id,\n                    key,\n                    camera_id,\n                    start,\n                    end,\n                    missing,\n                    source_path,\n                    raw,\n                    raw,\n                    *(bbox_values or (None, None, None, None)),\n                    frame_value,\n                    timestamp_value,\n                ),''',
+          )
+          replace_once(
+              registry,
+              '''                "UPDATE events SET ended_at=COALESCE(?,ended_at),source_path=?,"\n                "embedding_sum=?,embedding=?,sample_count=? WHERE id=?",\n                (\n                    end,\n                    source_path,\n                    total.astype("<f4").tobytes(),\n                    aggregate.astype("<f4").tobytes(),\n                    int(old["sample_count"]) + 1,\n                    int(old["id"]),\n                ),''',
+              '''                "UPDATE events SET ended_at=COALESCE(?,ended_at),source_path=?,"\n                "embedding_sum=?,embedding=?,sample_count=?,"\n                "box_x1=COALESCE(?,box_x1),box_y1=COALESCE(?,box_y1),"\n                "box_x2=COALESCE(?,box_x2),box_y2=COALESCE(?,box_y2),"\n                "frame_index=COALESCE(?,frame_index),"\n                "timestamp_seconds=COALESCE(?,timestamp_seconds) WHERE id=?",\n                (\n                    end,\n                    source_path,\n                    total.astype("<f4").tobytes(),\n                    aggregate.astype("<f4").tobytes(),\n                    int(old["sample_count"]) + 1,\n                    *(bbox_values or (None, None, None, None)),\n                    frame_value,\n                    timestamp_value,\n                    int(old["id"]),\n                ),''',
+          )
+          replace_once(
+              registry,
+              '''    def _event_rows(self, entry_id):\n        return self._conn.execute(''',
+              '''    def delete(self, entry_id: int) -> None:\n        self._row(entry_id)\n        self._conn.execute("DELETE FROM registrations WHERE id=?", (entry_id,))\n        self._conn.commit()\n\n    def _event_rows(self, entry_id):\n        return self._conn.execute(''',
+          )
+          replace_once(
+              registry,
+              '''    def list_events(self, entry_id):\n        self._row(entry_id)\n        return [\n            {\n                "event_key": str(row["event_key"]),\n                "source_path": str(row["source_path"]),\n                "camera_id": str(row["camera_id"]),\n                "started_at": row["started_at"],\n                "ended_at": row["ended_at"],\n                "timestamp_missing": bool(row["timestamp_missing"]),\n                "sample_count": int(row["sample_count"]),\n            }\n            for row in self._event_rows(entry_id)\n        ]''',
+              '''    def list_events(self, entry_id):\n        self._row(entry_id)\n        result = []\n        for row in self._event_rows(entry_id):\n            coordinates = (\n                row["box_x1"],\n                row["box_y1"],\n                row["box_x2"],\n                row["box_y2"],\n            )\n            bbox = (\n                [float(value) for value in coordinates]\n                if all(value is not None for value in coordinates)\n                else None\n            )\n            source_path = str(row["source_path"])\n            result.append(\n                {\n                    "id": int(row["id"]),\n                    "event_key": str(row["event_key"]),\n                    "source_path": source_path,\n                    "camera_id": str(row["camera_id"]),\n                    "started_at": row["started_at"],\n                    "ended_at": row["ended_at"],\n                    "timestamp_missing": bool(row["timestamp_missing"]),\n                    "sample_count": int(row["sample_count"]),\n                    "bbox": bbox,\n                    "frame_index": (\n                        int(row["frame_index"])\n                        if row["frame_index"] is not None\n                        else None\n                    ),\n                    "timestamp_seconds": (\n                        float(row["timestamp_seconds"])\n                        if row["timestamp_seconds"] is not None\n                        else None\n                    ),\n                    "has_example": bool(source_path and bbox is not None),\n                }\n            )\n        return result''',
+          )
+
+          feedback = Path('system/backend/dinov3_feedback_service.py')
+          text = feedback.read_text(encoding='utf-8')
+          old = '''                    source_path=str(source_path),\n                )'''
+          new = '''                    source_path=str(source_path),\n                    bbox=tuple(float(value) for value in observation.bbox),\n                    frame_index=(int(frame_index) if frame_index is not None else None),\n                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),\n                )'''
+          count = text.count(old)
+          if count != 2:
+              raise SystemExit(f'expected two registry persistence calls, found {count}')
+          feedback.write_text(text.replace(old, new), encoding='utf-8')
+
+          service = Path('system/backend/dinov3_registry_service.py')
+          service.write_text('''"""Backend helpers for opening the registry associated with a DINOv3 model."""\nfrom __future__ import annotations\n\nimport json\nfrom pathlib import Path\n\nimport cv2\nimport numpy as np\n\nfrom system.config import SUPPORTED_VIDEO_EXTENSIONS\nfrom system.dinov3.checkpoint import DinoV3Checkpoint, load_checkpoint\nfrom system.dinov3.registry import SpeciesRegistry, registry_path_for_fingerprint\nfrom system.dinov3.runtime import DinoV3ManifestError, resolve_dinov3_manifest\nfrom system.dinov3.state import default_dinov3_state_root\n\n\ndef load_checkpoint_for_model(classification_model_path: str) -> DinoV3Checkpoint:\n    manifest_path = resolve_dinov3_manifest(classification_model_path)\n    try:\n        payload = json.loads(manifest_path.read_text(encoding="utf-8"))\n    except (OSError, UnicodeError, json.JSONDecodeError) as exc:\n        raise DinoV3ManifestError(f"Invalid DINOv3 manifest: {manifest_path}") from exc\n    checkpoint_name = payload.get("checkpoint") if isinstance(payload, dict) else None\n    if not isinstance(checkpoint_name, str) or not checkpoint_name.strip():\n        raise DinoV3ManifestError("DINOv3 manifest checkpoint is missing")\n    return load_checkpoint(manifest_path.parent / checkpoint_name)\n\n\ndef open_registry_for_model(classification_model_path: str) -> SpeciesRegistry:\n    checkpoint = load_checkpoint_for_model(classification_model_path)\n    path = registry_path_for_fingerprint(\n        default_dinov3_state_root(),\n        checkpoint.fingerprint,\n    )\n    return SpeciesRegistry(path, model_fingerprint=checkpoint.fingerprint)\n\n\ndef _read_registry_frame(event: dict[str, object]) -> np.ndarray:\n    source = Path(str(event.get("source_path") or "")).expanduser().resolve()\n    if not source.is_file():\n        raise FileNotFoundError(f"例图源文件不存在: {source}")\n    if source.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:\n        capture = cv2.VideoCapture(str(source))\n        try:\n            frame_index = event.get("frame_index")\n            timestamp_seconds = event.get("timestamp_seconds")\n            if frame_index is not None:\n                capture.set(cv2.CAP_PROP_POS_FRAMES, float(frame_index))\n            elif timestamp_seconds is not None:\n                capture.set(cv2.CAP_PROP_POS_MSEC, float(timestamp_seconds) * 1000.0)\n            ok, frame = capture.read()\n        finally:\n            capture.release()\n        if not ok or frame is None:\n            raise FileNotFoundError(f"无法读取例图视频帧: {source}")\n        return frame\n    frame = cv2.imread(str(source))\n    if frame is None:\n        raise FileNotFoundError(f"无法读取例图: {source}")\n    return frame\n\n\ndef render_registry_example(\n    registry: SpeciesRegistry, registration_id: int, event_id: int\n) -> bytes:\n    event = next(\n        (item for item in registry.list_events(registration_id) if item["id"] == event_id),\n        None,\n    )\n    if event is None:\n        raise FileNotFoundError("DINOv3 registry event not found")\n    bbox = event.get("bbox")\n    if not isinstance(bbox, list) or len(bbox) != 4:\n        raise FileNotFoundError("该历史事件没有裁切框信息")\n    frame = _read_registry_frame(event)\n    height, width = frame.shape[:2]\n    x1, y1, x2, y2 = (float(value) for value in bbox)\n    box_width = x2 - x1\n    box_height = y2 - y1\n    if box_width <= 0 or box_height <= 0:\n        raise FileNotFoundError("该历史事件的裁切框无效")\n    pad_w = int(box_width * 0.1)\n    pad_h = int(box_height * 0.1)\n    left = max(0, int(x1) - pad_w)\n    top = max(0, int(y1) - pad_h)\n    right = min(width, int(x2) + pad_w)\n    bottom = min(height, int(y2) + pad_h)\n    if right <= left or bottom <= top:\n        raise FileNotFoundError("该历史事件的裁切框超出图像范围")\n    crop = frame[top:bottom, left:right]\n    crop_h, crop_w = crop.shape[:2]\n    if crop_h != crop_w:\n        size = max(crop_h, crop_w)\n        pad_top = (size - crop_h) // 2\n        pad_bottom = size - crop_h - pad_top\n        pad_left = (size - crop_w) // 2\n        pad_right = size - crop_w - pad_left\n        crop = cv2.copyMakeBorder(\n            crop,\n            pad_top,\n            pad_bottom,\n            pad_left,\n            pad_right,\n            cv2.BORDER_CONSTANT,\n            value=[114, 114, 114],\n        )\n    ok, encoded = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])\n    if not ok:\n        raise RuntimeError("裁切例图编码失败")\n    return encoded.tobytes()\n''', encoding='utf-8')
+
+          models = Path('system/backend/models.py')
+          replace_once(
+              models,
+              '''class DinoV3RegistryEventResponse(BaseModel):\n    event_key: str\n    source_path: str\n    camera_id: str\n    started_at: str | None = None\n    ended_at: str | None = None\n    timestamp_missing: bool = False\n    sample_count: int = 1''',
+              '''class DinoV3RegistryEventResponse(BaseModel):\n    id: int\n    event_key: str\n    source_path: str\n    camera_id: str\n    started_at: str | None = None\n    ended_at: str | None = None\n    timestamp_missing: bool = False\n    sample_count: int = 1\n    bbox: list[float] | None = None\n    frame_index: int | None = None\n    timestamp_seconds: float | None = None\n    has_example: bool = False''',
+          )
+
+          api = Path('system/dinov3/api.py')
+          text = api.read_text(encoding='utf-8')
+          text = text.replace(
+              'from fastapi import APIRouter, HTTPException, Query',
+              'from fastapi import APIRouter, HTTPException, Query, Response',
+          )
+          text = text.replace(
+              '''    load_checkpoint_for_model,\n    open_registry_for_model,\n)''',
+              '''    load_checkpoint_for_model,\n    open_registry_for_model,\n    render_registry_example,\n)''',
+          )
+          marker = '''    @router.patch("/registry/{registration_id}/identity", response_model=DinoV3RegistryEntryResponse)'''
+          addition = '''    @router.delete("/registry/{registration_id}")\n    def delete_registry_entry(\n        registration_id: int,\n        classification_model_path: str = Query(..., min_length=1),\n    ):\n        _run_with_registry(\n            classification_model_path,\n            lambda registry: registry.delete(registration_id),\n        )\n        return {"deleted": True, "registration_id": registration_id}\n\n    @router.get("/registry/{registration_id}/events/{event_id}/example")\n    def get_registry_example(\n        registration_id: int,\n        event_id: int,\n        classification_model_path: str = Query(..., min_length=1),\n    ):\n        try:\n            content = _run_with_registry(\n                classification_model_path,\n                lambda registry: render_registry_example(\n                    registry, registration_id, event_id\n                ),\n            )\n        except FileNotFoundError as exc:\n            raise HTTPException(status_code=404, detail=str(exc)) from exc\n        return Response(\n            content=content,\n            media_type="image/jpeg",\n            headers={"Cache-Control": "private, max-age=60"},\n        )\n\n'''
+          if marker not in text:
+              raise SystemExit('api insertion marker missing')
+          api.write_text(text.replace(marker, addition + marker, 1), encoding='utf-8')
+          PY
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest httpx numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Verify backend target
+        run: |
+          python -m compileall -q system tests
+          python -m pytest -q tests/test_dinov3_registry_management.py tests/test_dinov3_registry.py tests/test_dinov3_backend_integration.py
+      - name: Commit verified backend
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add system/dinov3/registry.py system/dinov3/api.py system/backend/dinov3_registry_service.py system/backend/dinov3_feedback_service.py system/backend/models.py
+          git commit -m "feat: manage DINOv3 registry examples"
+          git push origin HEAD:feat/dinov3-startup-registry-ui
