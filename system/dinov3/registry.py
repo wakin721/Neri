@@ -445,6 +445,20 @@ class SpeciesRegistry:
         self._conn.execute("DELETE FROM registrations WHERE id=?", (entry_id,))
         self._conn.commit()
 
+    def delete_candidates(self) -> int:
+        """Delete every unregistered Candidate and its cascaded local evidence."""
+        count = int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM registrations WHERE status='candidate'"
+            ).fetchone()[0]
+        )
+        if count:
+            self._conn.execute(
+                "DELETE FROM registrations WHERE status='candidate'"
+            )
+            self._conn.commit()
+        return count
+
     def _event_rows(self, entry_id):
         return self._conn.execute(
             "SELECT * FROM events WHERE registration_id=? ORDER BY id",

@@ -444,6 +444,51 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
+  Future<void> _clearCandidates() async {
+    final candidateCount = _entries
+        .where((entry) => entry.status == 'candidate')
+        .length;
+    if (candidateCount == 0 || _saving) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('清除所有未注册事件？'),
+        content: Text(
+          '将删除 $candidateCount 个 Candidate 物种及其未注册事件和本地 prototypes。\n'
+          'Provisional / Confirmed / Mature、Checkpoint 以及历史 human-feedback / audit 数据都会保留。\n\n'
+          '此操作不可撤销。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认清除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.apiClient.clearDinoV3UnregisteredCandidates(
+        widget.modelPath,
+      );
+      if (mounted) await _load();
+    } catch (error) {
+      if (mounted) setState(() => _error = '清除未注册事件失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Widget _buildExampleGallery() {
     final selectedCluster = _selectedCluster;
     if (selectedCluster != null) {
@@ -761,6 +806,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   @override
   Widget build(BuildContext context) {
     final selected = _selected;
+    final candidateCount = _entries
+        .where((entry) => entry.status == 'candidate')
+        .length;
     return AlertDialog(
       title: const Text('DINOv3 物种注册状态'),
       content: SizedBox(
@@ -853,6 +901,12 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
               ),
       ),
       actions: [
+        OutlinedButton.icon(
+          key: const ValueKey('dinov3-clear-unregistered-events'),
+          onPressed: !_saving && candidateCount > 0 ? _clearCandidates : null,
+          icon: const Icon(Icons.delete_sweep_outlined),
+          label: const Text('清除未注册事件'),
+        ),
         TextButton(
           onPressed: _saving ? null : () => Navigator.of(context).maybePop(),
           child: const Text('关闭'),

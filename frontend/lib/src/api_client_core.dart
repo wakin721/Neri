@@ -150,6 +150,21 @@ class NeriApiClient {
     _ensureSuccess(response);
   }
 
+  Future<int> clearDinoV3UnregisteredCandidates(
+    String classificationModelPath,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/candidates').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.delete(uri);
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      return (decoded['deleted'] as num?)?.toInt() ?? 0;
+    }
+    return 0;
+  }
+
   Future<DinoV3RegistryEntry> updateDinoV3RegistryIdentity({
     required String classificationModelPath,
     required int registrationId,

@@ -189,6 +189,16 @@ def dinov3_registry_router() -> APIRouter:
             lambda registry: _catalog_with_feedback(checkpoint, registry),
         )
 
+    @router.delete("/registry/candidates")
+    def delete_registry_candidates(
+        classification_model_path: str = Query(..., min_length=1),
+    ):
+        deleted = _run_with_registry(
+            classification_model_path,
+            lambda registry: registry.delete_candidates(),
+        )
+        return {"deleted": int(deleted)}
+
     @router.get("/registry/{registration_id}", response_model=DinoV3RegistryEntryResponse)
     def get_registry_entry(
         registration_id: int,
