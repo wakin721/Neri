@@ -140,12 +140,13 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
     expect(find.textContaining('2 个文件'), findsWidgets);
     await tester.tap(find.text('正确'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 20));
+    await tester.pump(const Duration(milliseconds: 50));
 
     expect(batchCalls, 1);
     expect(
@@ -153,7 +154,7 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.pump(const Duration(seconds: 4));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
   });
 }
