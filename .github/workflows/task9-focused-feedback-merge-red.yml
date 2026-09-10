@@ -1,6 +1,6 @@
 name: Verify Task 9 feedback merge RED
 
-# bounded-pumps rerun
+# traced bounded-pumps rerun
 on:
   push:
     branches:
@@ -11,7 +11,7 @@ on:
 jobs:
   flutter-feedback-merge:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
         with:
