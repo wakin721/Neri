@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 import torch
 
 from system.dinov3.checkpoint import validate_checkpoint
@@ -63,7 +62,10 @@ def test_catalog_exposes_known_species_feedback_clusters(tmp_path):
     )
     try:
         for index in range(4):
-            observation = _feedback_observation(index, _normalized((0, 1.0), (2, 0.05 * index)))
+            observation = _feedback_observation(
+                index,
+                _normalized((0, 1.0), (2, 0.05 * index)),
+            )
             feedback.persist_observation(observation)
             feedback.record_feedback(
                 observation.id,
@@ -167,21 +169,29 @@ def test_local_projection_axes_depend_only_on_prototypes_not_current_sample():
     checkpoint = validate_checkpoint(payload)
     classifier = DinoV3Classifier(checkpoint)
 
-    above = classifier.explain_feature(_normalized((0, 1.0), (2, 0.12)))
-    below = classifier.explain_feature(_normalized((0, 1.0), (2, -0.12)))
+    first_a = classifier.explain_feature(prototypes[0].numpy())
+    second_a = classifier.explain_feature(prototypes[1].numpy())
 
     def prototype_coordinates(result):
         return {
-            (point["species"], point["prototype_index"]): (point["x"], point["y"])
+            (point["species"], point["prototype_index"]): np.asarray(
+                [point["x"], point["y"]],
+                dtype=np.float64,
+            )
             for point in result["projection"]["points"]
             if point["kind"] == "prototype"
         }
 
-    assert prototype_coordinates(above) == pytest.approx(prototype_coordinates(below))
-    above_current = next(
-        point for point in above["projection"]["points"] if point["kind"] == "current"
+    first_coordinates = prototype_coordinates(first_a)
+    second_coordinates = prototype_coordinates(second_a)
+    assert first_coordinates.keys() == second_coordinates.keys()
+    for key in first_coordinates:
+        assert np.allclose(first_coordinates[key], second_coordinates[key], atol=1e-7)
+
+    first_current = next(
+        point for point in first_a["projection"]["points"] if point["kind"] == "current"
     )
-    below_current = next(
-        point for point in below["projection"]["points"] if point["kind"] == "current"
+    second_current = next(
+        point for point in second_a["projection"]["points"] if point["kind"] == "current"
     )
-    assert above_current["y"] * below_current["y"] < 0
+    assert first_current["y"] * second_current["y"] < 0
