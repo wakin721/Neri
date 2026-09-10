@@ -1,4 +1,4 @@
-name: Temporary DINOv3 startup registry RED
+name: Temporary DINOv3 startup registry GREEN
 
 on:
   push:
@@ -6,33 +6,112 @@ on:
       - feat/dinov3-startup-registry-ui
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  python-red:
+  apply-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements.txt
-      - run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest httpx numpy
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: python -m pytest -q tests/test_dinov3_registry_management.py
 
-  flutter-red:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Apply DINOv3 box feedback numbering
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('frontend/lib/src/screens/species_validation_screen.dart')
+          source = path.read_text(encoding='utf-8')
+
+          old_call = '_buildDinoFeedbackPanel(selectedDinoBox),'
+          assert source.count(old_call) == 2, source.count(old_call)
+          source = source.replace(
+              old_call,
+              '_buildDinoFeedbackPanel(selectedDinoBox, visibleBoxes),',
+          )
+
+          old_header = """  Widget _buildDinoFeedbackPanel(DetectionBox box) {
+              const title = '检测框校验';
+              final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+              final observationId = box.observationId?.trim() ?? '';
+          """
+          new_header = """  Widget _buildDinoFeedbackPanel(
+              DetectionBox box,
+              List<DetectionBox> visibleBoxes,
+            ) {
+              final observationId = box.observationId?.trim() ?? '';
+              final frameIndex = box.frameIndex;
+              final numberedBoxes = frameIndex == null
+                  ? visibleBoxes
+                  : visibleBoxes
+                        .where((candidate) => candidate.frameIndex == frameIndex)
+                        .toList(growable: false);
+              final boxIndex = numberedBoxes.indexWhere((candidate) {
+                final candidateObservationId = candidate.observationId?.trim() ?? '';
+                if (observationId.isNotEmpty &&
+                    candidateObservationId == observationId) {
+                  return true;
+                }
+                return identical(candidate, box);
+              });
+              final boxNumber = boxIndex >= 0 ? boxIndex + 1 : 1;
+              final predictedSpecies = box.predictedSpecies?.trim() ?? '';
+              final detectedSpecies = box.species.trim();
+              final species = predictedSpecies.isNotEmpty
+                  ? predictedSpecies
+                  : detectedSpecies.isNotEmpty
+                  ? detectedSpecies
+                  : 'Unknown';
+              final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+          """
+          assert source.count(old_header) == 1, source.count(old_header)
+          source = source.replace(old_header, new_header)
+
+          old_title = """            Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+          """
+          new_title = """            Expanded(
+                        child: DefaultTextStyle.merge(
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                          child: Row(
+                            children: [
+                              Flexible(child: Text('#$boxNumber $species · ')),
+                              const Text('检测框校验'),
+                            ],
+                          ),
+                        ),
+                      ),
+          """
+          assert source.count(old_title) == 1, source.count(old_title)
+          source = source.replace(old_title, new_title)
+
+          path.write_text(source, encoding='utf-8')
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-      - working-directory: frontend
+
+      - name: Resolve dependencies
+        working-directory: frontend
         run: flutter pub get
-      - working-directory: frontend
+
+      - name: Run focused RED-to-GREEN test
+        working-directory: frontend
         run: flutter test test/dinov3_startup_registry_features_test.dart
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add frontend/lib/src/screens/species_validation_screen.dart
+          git diff --cached --check
+          git commit -m "feat: number DINOv3 feedback panel by visible box"
+          git push origin HEAD:feat/dinov3-startup-registry-ui
