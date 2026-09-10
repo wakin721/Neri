@@ -43,9 +43,9 @@ jobs:
         with:
           channel: stable
           cache: true
-      - name: Resolve dependencies
+      - name: Resolve dependencies from restored cache
         working-directory: frontend
-        run: flutter pub get
+        run: flutter pub get --offline
       - name: Analyze frontend
         working-directory: frontend
         run: flutter analyze
