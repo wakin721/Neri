@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,13 @@ void main() {
     addTearDown(() async {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
+    final firstPath = '${tempDir.path}/a.jpg';
+    final secondPath = '${tempDir.path}/b.jpg';
+    final imageBytes = base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',
+    );
+    await File(firstPath).writeAsBytes(imageBytes);
+    await File(secondPath).writeAsBytes(imageBytes);
 
     final client = NeriApiClient(
       httpClient: MockClient(
@@ -31,10 +39,10 @@ void main() {
 
     final first = DetectionItem(
       filename: 'a.jpg',
-      path: '${tempDir.path}/a.jpg',
+      path: firstPath,
       fileType: 'jpg',
-      width: 100,
-      height: 100,
+      width: 10,
+      height: 10,
       species: const <String>['盘羊'],
       detectionBoxes: <DetectionBox>[
         DetectionBox(
@@ -52,10 +60,10 @@ void main() {
     );
     final second = DetectionItem(
       filename: 'b.jpg',
-      path: '${tempDir.path}/b.jpg',
+      path: secondPath,
       fileType: 'jpg',
-      width: 100,
-      height: 100,
+      width: 10,
+      height: 10,
       species: const <String>['盘羊'],
       detectionBoxes: <DetectionBox>[
         DetectionBox(
