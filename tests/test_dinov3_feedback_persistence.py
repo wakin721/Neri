@@ -7,6 +7,7 @@ import numpy as np
 
 from system.backend.models import DetectionItem
 from system.dinov3.classifier import DinoV3Observation
+from system.dinov3.events import camera_id_for_path
 from system.dinov3.feedback import HumanFeedbackStore
 from system.dinov3.registry import SpeciesRegistry
 
@@ -107,7 +108,7 @@ def test_backend_persists_known_and_rejected_dinov3_observations(tmp_path):
     assert unknown.accepted is False
     assert unknown.predicted_species == "Unknown"
     assert known.captured_at == datetime(2026, 9, 9, 3, 4, 5)
-    assert unknown.camera_id == "camera-a"
+    assert unknown.camera_id == camera_id_for_path(path, tmp_path)
 
     entries = registry.list()
     assert len(entries) == 1
