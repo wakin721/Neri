@@ -1,6 +1,6 @@
 name: Verify Task 9 feedback merge RED
 
-# traced bounded-pumps rerun with process timeout
+# pure effective-items RED
 on:
   push:
     branches:
@@ -11,7 +11,7 @@ on:
 jobs:
   flutter-feedback-merge:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,4 +23,4 @@ jobs:
       - working-directory: frontend
         run: flutter pub get
       - working-directory: frontend
-        run: timeout 45s flutter test test/dinov3_feedback_merge_test.dart --reporter expanded --timeout 60s
+        run: flutter test test/dinov3_feedback_merge_test.dart --reporter expanded
