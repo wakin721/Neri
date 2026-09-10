@@ -563,6 +563,30 @@ class HumanFeedbackStore:
         )
 
     def registry_assignments(self, operation_id: str) -> list[dict[str, object]]:
+        """Return the stable public assignment shape used by existing callers."""
+        rows = self._conn.execute(
+            """
+            SELECT registration_id,previous_common_name,previous_scientific_name,
+                   assigned_common_name
+            FROM feedback_registry_assignments
+            WHERE operation_id=? ORDER BY registration_id
+            """,
+            (operation_id,),
+        ).fetchall()
+        return [
+            {
+                "registration_id": int(row["registration_id"]),
+                "previous_common_name": str(row["previous_common_name"]),
+                "previous_scientific_name": str(row["previous_scientific_name"]),
+                "assigned_common_name": str(row["assigned_common_name"]),
+            }
+            for row in rows
+        ]
+
+    def registry_assignments_for_restore(
+        self, operation_id: str
+    ) -> list[dict[str, object]]:
+        """Return assignment rows plus the internal identity-restore policy."""
         rows = self._conn.execute(
             """
             SELECT registration_id,previous_common_name,previous_scientific_name,

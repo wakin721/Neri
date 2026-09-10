@@ -545,7 +545,7 @@ def revert_feedback_operation(request):
 
     feedback, feature_center = _open_feedback_state(request.classification_model_path)
     try:
-        registry_assignments = feedback.registry_assignments(
+        registry_assignments = feedback.registry_assignments_for_restore(
             request.feedback_operation_id
         )
         affected = feedback.revert_operation(request.feedback_operation_id)
