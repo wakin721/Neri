@@ -5,6 +5,7 @@ on:
     branches:
       - nightly
       - feat/dinov3-multiprototype-remaining
+      - feat/dinov3-startup-registry-ui
     paths-ignore:
       - docs/dinov3-ci-verified.txt
   workflow_dispatch:
