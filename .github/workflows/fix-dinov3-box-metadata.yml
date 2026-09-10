@@ -1,0 +1,71 @@
+name: Apply DINOv3 box metadata fix
+
+on:
+  push:
+    branches:
+      - feat/dinov3-multiprototype-remaining
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dinov3-multiprototype-remaining
+          fetch-depth: 0
+
+      - name: Preserve DINOv3 box identity metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('system/backend/services.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''        box_data = {
+              "species": str(species or "Unknown"),
+              "confidence": confidence,
+              "bbox": bbox,
+              "candidates": candidates if isinstance(candidates, list) else [],
+          }
+          '''
+          new = '''        box_data = {
+              "species": str(species or "Unknown"),
+              "confidence": confidence,
+              "bbox": bbox,
+              "candidates": candidates if isinstance(candidates, list) else [],
+          }
+          candidate_metadata = None
+          if isinstance(candidates, list):
+              for candidate in candidates:
+                  if isinstance(candidate, dict) and candidate.get("observation_id"):
+                      candidate_metadata = candidate
+                      break
+          metadata_source = candidate_metadata or raw_box
+          observation_id = _value_from_keys(metadata_source, ("observation_id",))
+          registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))
+          predicted_species = _value_from_keys(metadata_source, ("predicted_species",))
+          if observation_id is not None:
+              box_data["observation_id"] = str(observation_id)
+          if registry_id is not None:
+              box_data["registry_id"] = registry_id
+          if predicted_species is not None:
+              box_data["predicted_species"] = str(predicted_species)
+          '''
+          if old not in text:
+              raise SystemExit('target block not found or already changed')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add system/backend/services.py
+          git commit -m "fix: preserve DINOv3 box observation metadata"
+          git push origin HEAD:feat/dinov3-multiprototype-remaining
