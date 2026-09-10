@@ -172,6 +172,14 @@ class HumanFeedbackStore:
               species TEXT PRIMARY KEY,
               payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS feedback_registry_assignments(
+              operation_id TEXT NOT NULL,
+              registration_id INTEGER NOT NULL,
+              previous_common_name TEXT NOT NULL DEFAULT '',
+              previous_scientific_name TEXT NOT NULL DEFAULT '',
+              assigned_common_name TEXT NOT NULL,
+              PRIMARY KEY(operation_id, registration_id)
+            );
             """
         )
         row = self._conn.execute(
@@ -315,6 +323,123 @@ class HumanFeedbackStore:
             hard_negative_species=hard_negative_species,
             active=True,
         )
+
+    def record_registry_feedback(
+        self,
+        observation_id: str,
+        *,
+        operation_id: str,
+        registration_id: int,
+        previous_common_name: str,
+        previous_scientific_name: str,
+        confirmed_species: str,
+    ) -> FeedbackRecord:
+        """Record an auditable Registry assignment without training checkpoint classes."""
+        observation = self.get_observation(observation_id)
+        species = str(confirmed_species).strip()
+        if not species or species in {"Unknown", "空"}:
+            raise ValueError("confirmed registry species is required")
+        operation = self._conn.execute(
+            "SELECT reverted FROM feedback_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if operation is not None and bool(operation["reverted"]):
+            raise ValueError("feedback operation has already been reverted")
+        self._conn.execute(
+            "INSERT OR IGNORE INTO feedback_operations(operation_id,reverted) VALUES(?,0)",
+            (operation_id,),
+        )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO feedback_registry_assignments(
+              operation_id,registration_id,previous_common_name,
+              previous_scientific_name,assigned_common_name
+            ) VALUES(?,?,?,?,?)
+            """,
+            (
+                operation_id,
+                int(registration_id),
+                str(previous_common_name),
+                str(previous_scientific_name),
+                species,
+            ),
+        )
+
+        previous = self._conn.execute(
+            "SELECT id FROM human_feedback WHERE observation_id=? AND active=1",
+            (observation_id,),
+        ).fetchone()
+        supersedes_id = int(previous["id"]) if previous is not None else None
+        if supersedes_id is not None:
+            self._conn.execute(
+                "UPDATE human_feedback SET active=0 WHERE id=?",
+                (supersedes_id,),
+            )
+        cursor = self._conn.execute(
+            """
+            INSERT INTO human_feedback(
+              observation_id,operation_id,feedback_type,predicted_species,
+              confirmed_species,positive_species,hard_negative_species,active,
+              supersedes_id
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                observation_id,
+                operation_id,
+                "registry",
+                observation.predicted_species,
+                species,
+                None,
+                None,
+                1,
+                supersedes_id,
+            ),
+        )
+        self._conn.commit()
+        return FeedbackRecord(
+            id=int(cursor.lastrowid),
+            observation_id=observation_id,
+            operation_id=operation_id,
+            feedback_type="registry",
+            predicted_species=observation.predicted_species,
+            confirmed_species=species,
+            positive_species=None,
+            hard_negative_species=None,
+            active=True,
+        )
+
+    def registry_assignments(self, operation_id: str) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            """
+            SELECT registration_id,previous_common_name,previous_scientific_name,
+                   assigned_common_name
+            FROM feedback_registry_assignments
+            WHERE operation_id=? ORDER BY registration_id
+            """,
+            (operation_id,),
+        ).fetchall()
+        return [
+            {
+                "registration_id": int(row["registration_id"]),
+                "previous_common_name": str(row["previous_common_name"]),
+                "previous_scientific_name": str(row["previous_scientific_name"]),
+                "assigned_common_name": str(row["assigned_common_name"]),
+            }
+            for row in rows
+        ]
+
+    def representative_observation_id(self, species: str) -> str | None:
+        row = self._conn.execute(
+            """
+            SELECT h.observation_id
+            FROM human_feedback h
+            JOIN observations o ON o.id=h.observation_id
+            WHERE h.active=1 AND h.positive_species=?
+            ORDER BY h.id DESC LIMIT 1
+            """,
+            (species,),
+        ).fetchone()
+        return None if row is None else str(row["observation_id"])
 
     @staticmethod
     def _feedback_record(row: sqlite3.Row) -> FeedbackRecord:

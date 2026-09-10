@@ -203,6 +203,139 @@ def _open_feedback_state(classification_model_path: str):
     return feedback, center
 
 
+def _assign_registry_species(
+    feedback: HumanFeedbackStore,
+    classification_model_path: str,
+    observation: FeedbackObservation,
+    *,
+    operation_id: str,
+    confirmed_species: str,
+):
+    from .dinov3_registry_service import open_registry_for_model
+
+    registry = open_registry_for_model(classification_model_path)
+    try:
+        updated, previous_common, previous_scientific = registry.record_human_species(
+            observation.embedding,
+            common_name=confirmed_species,
+            camera_id=observation.camera_id,
+            captured_at=observation.captured_at,
+            source_path=observation.source_path,
+            bbox=observation.bbox,
+            frame_index=observation.frame_index,
+            timestamp_seconds=observation.timestamp_seconds,
+            preferred_entry_id=observation.registry_id,
+        )
+        try:
+            feedback.record_registry_feedback(
+                observation.id,
+                operation_id=operation_id,
+                registration_id=updated.id,
+                previous_common_name=previous_common,
+                previous_scientific_name=previous_scientific,
+                confirmed_species=confirmed_species,
+            )
+        except Exception:
+            registry.restore_identity(
+                updated.id,
+                common_name=previous_common,
+                scientific_name=previous_scientific,
+            )
+            raise
+        return updated
+    finally:
+        registry.close()
+
+
+def record_registry_species_feedback(
+    classification_model_path: str,
+    observation: FeedbackObservation,
+    operation_id: str,
+    confirmed_species: str,
+):
+    feedback, _feature_center = _open_feedback_state(classification_model_path)
+    try:
+        return _assign_registry_species(
+            feedback,
+            classification_model_path,
+            observation,
+            operation_id=operation_id,
+            confirmed_species=confirmed_species,
+        )
+    finally:
+        feedback.close()
+
+
+def explain_feedback_observation(
+    classification_model_path: str,
+    observation_id: str,
+) -> dict:
+    from system.dinov3.classifier import DinoV3Classifier
+    from .dinov3_registry_service import load_checkpoint_for_model, open_registry_for_model
+
+    feedback, _feature_center = _open_feedback_state(classification_model_path)
+    registry = open_registry_for_model(classification_model_path)
+    try:
+        observation = feedback.get_observation(observation_id)
+        checkpoint = load_checkpoint_for_model(classification_model_path)
+        classifier = DinoV3Classifier(checkpoint, feedback=feedback, registry=registry)
+        result = classifier.explain_feature(observation.embedding)
+        result["current_example_available"] = bool(
+            observation.source_path and Path(observation.source_path).expanduser().is_file()
+        )
+        nearest_example = None
+        nearest = result.get("nearest_species") or []
+        if nearest:
+            closest = nearest[0]
+            registry_id = closest.get("registry_id")
+            if registry_id is not None:
+                try:
+                    events = registry.list_events(int(registry_id))
+                except KeyError:
+                    events = []
+                event = next((item for item in events if item.get("has_example")), None)
+                if event is not None:
+                    nearest_example = {
+                        "kind": "registry",
+                        "species": str(closest.get("name") or ""),
+                        "registration_id": int(registry_id),
+                        "event_id": int(event["id"]),
+                    }
+            if nearest_example is None:
+                representative_id = feedback.representative_observation_id(
+                    str(closest.get("name") or "")
+                )
+                if representative_id:
+                    nearest_example = {
+                        "kind": "observation",
+                        "species": str(closest.get("name") or ""),
+                        "observation_id": representative_id,
+                    }
+        result["nearest_example"] = nearest_example
+        return result
+    finally:
+        registry.close()
+        feedback.close()
+
+
+def render_feedback_observation_example(
+    classification_model_path: str,
+    observation_id: str,
+) -> bytes:
+    from .dinov3_registry_service import render_media_example
+
+    feedback, _feature_center = _open_feedback_state(classification_model_path)
+    try:
+        observation = feedback.get_observation(observation_id)
+        return render_media_example(
+            source_path=observation.source_path,
+            bbox=observation.bbox,
+            frame_index=observation.frame_index,
+            timestamp_seconds=observation.timestamp_seconds,
+        )
+    finally:
+        feedback.close()
+
 def _raw_box_for_observation(detection_data: dict, observation_id: str) -> dict:
     boxes = detection_data.get("检测框")
     if not isinstance(boxes, list):
@@ -351,21 +484,37 @@ def apply_box_feedback(request):
                 current_item.validated,
             )
 
-        record = feedback.record_feedback(
-            request.observation_id,
-            operation_id=request.feedback_operation_id,
-            action=action,
-            confirmed_species=species_name,
-        )
-        affected = _affected_learning_species(record)
-        for species in sorted(affected):
-            feedback.recompute_species(species, feature_center)
+        registry_entry = None
+        if (
+            action == "update"
+            and species_name
+            and species_name not in feedback.checkpoint_classes
+        ):
+            registry_entry = _assign_registry_species(
+                feedback,
+                request.classification_model_path,
+                observation,
+                operation_id=request.feedback_operation_id,
+                confirmed_species=species_name,
+            )
+            affected: set[str] = set()
+        else:
+            record = feedback.record_feedback(
+                request.observation_id,
+                operation_id=request.feedback_operation_id,
+                action=action,
+                confirmed_species=species_name,
+            )
+            affected = _affected_learning_species(record)
+            for species in sorted(affected):
+                feedback.recompute_species(species, feature_center)
 
         item = services._reload_validation_item(file_path, input_path)
         return {
             "item": item,
             "operation_id": request.feedback_operation_id,
             "affected_species": sorted(affected),
+            "registry_id": registry_entry.id if registry_entry is not None else None,
         }
     finally:
         feedback.close()
@@ -377,10 +526,34 @@ def revert_feedback_operation(request):
 
     feedback, feature_center = _open_feedback_state(request.classification_model_path)
     try:
+        registry_assignments = feedback.registry_assignments(
+            request.feedback_operation_id
+        )
         affected = feedback.revert_operation(request.feedback_operation_id)
         for species in sorted(affected):
             if species in feedback.checkpoint_classes:
                 feedback.recompute_species(species, feature_center)
+
+        if registry_assignments:
+            from .dinov3_registry_service import open_registry_for_model
+
+            registry = open_registry_for_model(request.classification_model_path)
+            try:
+                for assignment in registry_assignments:
+                    registration_id = int(assignment["registration_id"])
+                    try:
+                        current = registry.get(registration_id)
+                    except KeyError:
+                        continue
+                    if current.common_name != assignment["assigned_common_name"]:
+                        continue
+                    registry.restore_identity(
+                        registration_id,
+                        common_name=str(assignment["previous_common_name"]),
+                        scientific_name=str(assignment["previous_scientific_name"]),
+                    )
+            finally:
+                registry.close()
 
         _ensure_ecological_journal(feedback)
         rows = feedback._conn.execute(  # noqa: SLF001

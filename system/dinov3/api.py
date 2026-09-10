@@ -61,6 +61,32 @@ def _register_with_duplicate_guard(
     ).as_dict()
 
 
+def build_registry_catalog(checkpoint: Any, registry: Any) -> list[dict[str, Any]]:
+    """Merge immutable checkpoint classes with mutable local Registry entries."""
+    result: list[dict[str, Any]] = []
+    counts = tuple(int(value) for value in checkpoint.prototypes_per_class)
+    for index, species in enumerate(checkpoint.classes):
+        result.append(
+            {
+                "id": -(index + 1),
+                "candidate_number": index + 1,
+                "status": "checkpoint",
+                "common_name": species,
+                "scientific_name": "",
+                "event_count": 0,
+                "camera_count": 0,
+                "prototype_count": counts[index],
+                "cluster_purity": 1.0,
+                "embedding_consistency": 1.0,
+                "conditions": {},
+                "can_register": False,
+                "display_name": species,
+            }
+        )
+    result.extend(entry.as_dict() for entry in registry.list())
+    return result
+
+
 def dinov3_registry_router() -> APIRouter:
     router = APIRouter(prefix="/api/dinov3", tags=["dinov3"])
 
@@ -72,6 +98,16 @@ def dinov3_registry_router() -> APIRouter:
         return _run_with_registry(
             classification_model_path,
             lambda registry: [entry.as_dict() for entry in registry.list(status=status)],
+        )
+
+    @router.get("/registry/catalog", response_model=list[DinoV3RegistryEntryResponse])
+    def list_registry_catalog(
+        classification_model_path: str = Query(..., min_length=1),
+    ):
+        checkpoint = load_checkpoint_for_model(classification_model_path)
+        return _run_with_registry(
+            classification_model_path,
+            lambda registry: build_registry_catalog(checkpoint, registry),
         )
 
     @router.get("/registry/{registration_id}", response_model=DinoV3RegistryEntryResponse)

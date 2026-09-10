@@ -60,21 +60,25 @@ def _read_registry_frame(event: dict[str, object]) -> np.ndarray:
     return frame
 
 
-def render_registry_example(
-    registry: SpeciesRegistry, registration_id: int, event_id: int
+def render_media_example(
+    *,
+    source_path: str,
+    bbox,
+    frame_index: int | None = None,
+    timestamp_seconds: float | None = None,
 ) -> bytes:
-    event = next(
-        (item for item in registry.list_events(registration_id) if item["id"] == event_id),
-        None,
-    )
-    if event is None:
-        raise FileNotFoundError("DINOv3 registry event not found")
-    bbox = event.get("bbox")
-    if not isinstance(bbox, list) or len(bbox) != 4:
+    values = list(bbox) if bbox is not None else []
+    if len(values) != 4:
         raise FileNotFoundError("该历史事件没有裁切框信息")
+    event = {
+        "source_path": source_path,
+        "bbox": values,
+        "frame_index": frame_index,
+        "timestamp_seconds": timestamp_seconds,
+    }
     frame = _read_registry_frame(event)
     height, width = frame.shape[:2]
-    x1, y1, x2, y2 = (float(value) for value in bbox)
+    x1, y1, x2, y2 = (float(value) for value in values)
     box_width = x2 - x1
     box_height = y2 - y1
     if box_width <= 0 or box_height <= 0:
@@ -108,3 +112,26 @@ def render_registry_example(
     if not ok:
         raise RuntimeError("裁切例图编码失败")
     return encoded.tobytes()
+
+
+def render_registry_example(
+    registry: SpeciesRegistry, registration_id: int, event_id: int
+) -> bytes:
+    event = next(
+        (item for item in registry.list_events(registration_id) if item["id"] == event_id),
+        None,
+    )
+    if event is None:
+        raise FileNotFoundError("DINOv3 registry event not found")
+    return render_media_example(
+        source_path=str(event.get("source_path") or ""),
+        bbox=event.get("bbox"),
+        frame_index=(
+            int(event["frame_index"]) if event.get("frame_index") is not None else None
+        ),
+        timestamp_seconds=(
+            float(event["timestamp_seconds"])
+            if event.get("timestamp_seconds") is not None
+            else None
+        ),
+    )

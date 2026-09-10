@@ -249,6 +249,138 @@ class DinoV3Classifier:
         )
         return tuple(candidates[:3])
 
+    @staticmethod
+    def _projection_y_axis(
+        axis_x: np.ndarray,
+        origin: np.ndarray,
+        current: np.ndarray,
+        prototypes: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        residual = current - origin - float(np.dot(current - origin, axis_x)) * axis_x
+        norm = float(np.linalg.norm(residual))
+        if norm > 1e-8:
+            return residual / norm
+
+        best = None
+        best_norm = 0.0
+        for prototype in prototypes:
+            candidate = prototype - origin
+            candidate = candidate - float(np.dot(candidate, axis_x)) * axis_x
+            candidate_norm = float(np.linalg.norm(candidate))
+            if candidate_norm > best_norm:
+                best = candidate
+                best_norm = candidate_norm
+        if best is not None and best_norm > 1e-8:
+            return best / best_norm
+
+        basis_index = int(np.argmin(np.abs(axis_x)))
+        basis = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
+        basis[basis_index] = 1.0
+        basis = basis - float(np.dot(basis, axis_x)) * axis_x
+        basis_norm = float(np.linalg.norm(basis))
+        if basis_norm <= 1e-8:
+            raise ValueError("Unable to construct local projection axis")
+        return basis / basis_norm
+
+    def explain_feature(self, feature: np.ndarray) -> dict[str, Any]:
+        """Return a deterministic local 2-D explanation around the nearest two species.
+
+        Classification still uses the full 768-dimensional centered feature space.
+        The x-axis joins the closest prototype of the two nearest species; the
+        y-axis is an orthogonal residual direction chosen deterministically.
+        """
+        value = np.asarray(feature, dtype=np.float32)
+        if value.ndim != 1:
+            raise ValueError("Expected one feature vector")
+        array = self._validate_features(value[None, :])
+        centered = array[0] - self._feature_center
+        bank = self._effective_bank()
+        records = tuple(bank.formal) + tuple(bank.provisional)
+        if not records:
+            raise ValueError("Prototype bank cannot be empty")
+
+        nearest_species = list(self._species_candidates(centered, records)[:2])
+        selected_species = [str(item["name"]) for item in nearest_species]
+        selected_indices = [
+            index
+            for index, record in enumerate(records)
+            if record.species in selected_species
+        ]
+        if not selected_indices:
+            raise ValueError("No nearby prototypes are available")
+
+        first_index = int(nearest_species[0]["nearest_prototype_index"])
+        first = records[first_index].embedding
+        if len(nearest_species) > 1:
+            second_index = int(nearest_species[1]["nearest_prototype_index"])
+            second = records[second_index].embedding
+            origin = (first + second) * 0.5
+            axis_x = second - first
+            axis_norm = float(np.linalg.norm(axis_x))
+            if axis_norm <= 1e-8:
+                axis_x = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
+                axis_x[0] = 1.0
+            else:
+                axis_x = axis_x / axis_norm
+        else:
+            origin = first.copy()
+            axis_x = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
+            axis_x[0] = 1.0
+
+        selected_prototypes = [records[index].embedding for index in selected_indices]
+        axis_y = self._projection_y_axis(axis_x, origin, centered, selected_prototypes)
+
+        def project(vector: np.ndarray) -> tuple[float, float]:
+            delta = vector - origin
+            return float(np.dot(delta, axis_x)), float(np.dot(delta, axis_y))
+
+        points: list[dict[str, Any]] = []
+        for index in selected_indices:
+            record = records[index]
+            x, y = project(record.embedding)
+            points.append(
+                {
+                    "kind": "prototype",
+                    "species": record.species,
+                    "source": record.source,
+                    "registry_id": record.registry_id,
+                    "registration_status": record.registration_status,
+                    "prototype_index": index,
+                    "x": x,
+                    "y": y,
+                }
+            )
+
+        prediction = self._classify_multi_prototype(array)[0]
+        current_x, current_y = project(centered)
+        points.append(
+            {
+                "kind": "current",
+                "species": prediction.species,
+                "source": prediction.source,
+                "registry_id": prediction.registry_id,
+                "registration_status": prediction.registration_status,
+                "prototype_index": prediction.nearest_prototype_index,
+                "x": current_x,
+                "y": current_y,
+            }
+        )
+        return {
+            "species": prediction.species,
+            "accepted": prediction.accepted,
+            "best_known_species": prediction.best_known_species,
+            "known_score": prediction.known_score,
+            "threshold": prediction.threshold,
+            "nearest_prototype_index": prediction.nearest_prototype_index,
+            "squared_distance": prediction.squared_distance,
+            "nearest_species": nearest_species,
+            "projection": {
+                "method": "nearest_two_species_axis",
+                "species": selected_species,
+                "points": points,
+            },
+        }
+
     def _classify_multi_prototype(self, array: np.ndarray) -> list[DinoV3Prediction]:
         bank = self._effective_bank()
         if not bank.formal:

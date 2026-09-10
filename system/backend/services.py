@@ -3000,6 +3000,36 @@ def _eligible_auto_feedback(observations):
     return learnable[0] if len(learnable) == 1 else None
 
 
+def _checkpoint_species_for_model(classification_model_path: str) -> set[str] | None:
+    from .dinov3_registry_service import load_checkpoint_for_model
+    from system.dinov3.runtime import DinoV3ManifestError
+
+    try:
+        return set(load_checkpoint_for_model(classification_model_path).classes)
+    except (DinoV3ManifestError, FileNotFoundError):
+        # Preserve the historical feedback path when the model cannot be
+        # resolved (including mocked test paths). That path will surface
+        # the original model error rather than misclassifying it as a
+        # new-species Registry assignment.
+        return None
+
+
+def _record_validation_registry_feedback(
+    classification_model_path: str,
+    observation,
+    operation_id: str,
+    confirmed_species: str,
+):
+    from .dinov3_feedback_service import record_registry_species_feedback
+
+    return record_registry_species_feedback(
+        classification_model_path,
+        observation,
+        operation_id,
+        confirmed_species,
+    )
+
+
 def _record_validation_feedback(
     classification_model_path: str,
     observation,
@@ -3118,6 +3148,11 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
             if request.action == "update"
             else None
         )
+        checkpoint_species = (
+            _checkpoint_species_for_model(request.classification_model_path)
+            if request.action == "update" and confirmed_species
+            else set()
+        )
         try:
             for path in paths:
                 observations = _learnable_observations_for_file(
@@ -3127,13 +3162,26 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
                 observation = _eligible_auto_feedback(observations)
                 if observation is None:
                     continue
-                _record_validation_feedback(
-                    request.classification_model_path,
-                    observation,
-                    operation_id,
-                    request.action,
-                    confirmed_species,
-                )
+                if (
+                    request.action == "update"
+                    and confirmed_species
+                    and checkpoint_species is not None
+            and confirmed_species not in checkpoint_species
+                ):
+                    _record_validation_registry_feedback(
+                        request.classification_model_path,
+                        observation,
+                        operation_id,
+                        confirmed_species,
+                    )
+                else:
+                    _record_validation_feedback(
+                        request.classification_model_path,
+                        observation,
+                        operation_id,
+                        request.action,
+                        confirmed_species,
+                    )
         except Exception as exc:
             raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
 

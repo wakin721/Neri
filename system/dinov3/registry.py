@@ -342,6 +342,72 @@ class SpeciesRegistry:
         self._conn.commit()
         return self.get(entry_id)
 
+    def restore_identity(self, entry_id, *, common_name="", scientific_name=""):
+        self._row(entry_id)
+        self._conn.execute(
+            "UPDATE registrations SET common_name=?,scientific_name=?,updated_at=? WHERE id=?",
+            (str(common_name).strip(), str(scientific_name).strip(), _now(), entry_id),
+        )
+        self._conn.commit()
+        return self.get(entry_id)
+
+    def record_human_species(
+        self,
+        embedding,
+        *,
+        common_name,
+        camera_id,
+        captured_at,
+        source_path,
+        bbox=None,
+        frame_index=None,
+        timestamp_seconds=None,
+        preferred_entry_id=None,
+    ):
+        """Attach explicit human identity to a candidate without renaming formal entries."""
+        common = str(common_name).strip()
+        if not common:
+            raise ValueError("common_name is required")
+        vector = normalize_embedding(embedding)
+        entry_id = None
+
+        candidate_ids = []
+        if preferred_entry_id is not None:
+            candidate_ids.append(int(preferred_entry_id))
+        matched = self.match(vector)
+        if matched is not None:
+            candidate_ids.append(int(matched["id"]))
+        for candidate_id in dict.fromkeys(candidate_ids):
+            try:
+                detail = self.get(candidate_id)
+            except RegistryEntryNotFound:
+                continue
+            if detail.status == "candidate" and (
+                not detail.common_name or detail.common_name == common
+            ):
+                entry_id = candidate_id
+                break
+
+        if entry_id is None:
+            entry_id = self._create()
+        before = self.get(entry_id)
+        self.record_observation(
+            entry_id,
+            vector,
+            camera_id=camera_id,
+            captured_at=captured_at,
+            source_path=source_path,
+            bbox=bbox,
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
+        )
+        updated = self.set_identity(
+            entry_id,
+            common_name=common,
+            scientific_name=before.scientific_name,
+        )
+        return updated, before.common_name, before.scientific_name
+
     def set_cluster_purity(self, entry_id, value):
         self._row(entry_id)
         value = float(value)
@@ -467,7 +533,11 @@ class SpeciesRegistry:
             "identity": bool(common),
         }
         display = (
-            f"未知物种 #{row['candidate_number']}"
+            (
+                f"{common}（候选 #{row['candidate_number']}）"
+                if common
+                else f"未知物种 #{row['candidate_number']}"
+            )
             if status == "candidate"
             else (
                 f"{common}（临时注册，待确认）"
