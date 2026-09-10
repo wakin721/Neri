@@ -1,0 +1,38 @@
+name: Temporary DINOv3 startup registry RED
+
+on:
+  push:
+    branches:
+      - feat/dinov3-startup-registry-ui
+
+permissions:
+  contents: read
+
+jobs:
+  python-red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest httpx numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pytest -q tests/test_dinov3_registry_management.py
+
+  flutter-red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - working-directory: frontend
+        run: flutter pub get
+      - working-directory: frontend
+        run: flutter test test/dinov3_startup_registry_features_test.dart
