@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from hashlib import sha256
 
 import numpy as np
+import torch
 
+from system.dinov3.checkpoint import load_checkpoint
 from system.dinov3.feedback import HumanFeedbackStore
+from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
 from tests.test_dinov3_feedback_store import FP, make_observation, vec
 
 
@@ -193,3 +197,54 @@ def test_failed_generation_preserves_last_known_good_confirmed_generation(tmp_pa
         for before, after in zip(prototypes_before, prototypes_after, strict=True)
     )
     store.close()
+
+
+def test_feedback_learning_never_mutates_checkpoint_bytes(tmp_path):
+    checkpoint_path = tmp_path / "multi_prototype.pt"
+    torch.save(
+        make_multi_prototype_payload(
+            classes=("盘羊", "家牛"),
+            threshold=0.31,
+        ),
+        checkpoint_path,
+    )
+    checkpoint = load_checkpoint(checkpoint_path)
+    checksum_before = sha256(checkpoint_path.read_bytes()).hexdigest()
+    fingerprint_before = checkpoint.fingerprint
+
+    store = HumanFeedbackStore(
+        tmp_path / "feedback.sqlite3",
+        model_fingerprint=checkpoint.fingerprint,
+        checkpoint_classes=checkpoint.classes,
+        threshold=checkpoint.threshold,
+    )
+    for index in range(10):
+        obs = make_observation(f"immutable-{index}")
+        obs = obs.__class__(
+            **{
+                **obs.__dict__,
+                "model_fingerprint": checkpoint.fingerprint,
+                "camera_id": f"cam-{index % 2}",
+                "captured_at": obs.captured_at + timedelta(minutes=index * 31),
+                "source_path": f"C:/camera/immutable-{index}.JPG",
+                "embedding": vec(0),
+            }
+        )
+        store.persist_observation(obs)
+        store.record_feedback(
+            obs.id,
+            operation_id=f"immutable-op-{index}",
+            action="correct",
+            confirmed_species="盘羊",
+        )
+
+    state = store.recompute_species("盘羊", np.zeros(768, dtype=np.float32))
+    bank = store.prototype_bank(np.zeros(768, dtype=np.float32))
+    assert state.status == "confirmed"
+    assert bank.formal
+    store.close()
+
+    checksum_after = sha256(checkpoint_path.read_bytes()).hexdigest()
+    reloaded = load_checkpoint(checkpoint_path)
+    assert checksum_after == checksum_before
+    assert reloaded.fingerprint == fingerprint_before
