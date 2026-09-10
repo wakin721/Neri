@@ -6,6 +6,8 @@ on:
       - feat/dinov3-startup-registry-ui
     paths:
       - 'tools/apply_dinov3_registry_cluster_backend.py'
+      - 'tools/patch_dinov3_registry_cluster_backend_green.py'
+      - 'tests/test_dinov3_registry_cluster_view.py'
       - '.github/workflows/tmp-dinov3-registry-cluster-tdd.yml'
 
 permissions:
@@ -18,7 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply backend implementation
-        run: python tools/apply_dinov3_registry_cluster_backend.py
+        run: |
+          python tools/apply_dinov3_registry_cluster_backend.py
+          python tools/patch_dinov3_registry_cluster_backend_green.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
