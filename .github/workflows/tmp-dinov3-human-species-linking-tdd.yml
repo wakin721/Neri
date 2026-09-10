@@ -9,15 +9,19 @@ permissions:
   contents: read
 
 jobs:
-  red:
+  green:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Apply production patch in workspace
+        run: python tools/patch_dinov3_registry_human_species_linking.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install focused dependencies
         run: python -m pip install numpy pytest
+      - name: Compile changed module
+        run: python -m compileall -q system/dinov3/registry.py tests/test_dinov3_registry_human_species_linking.py
       - name: Run same-name Registry reuse regression
         run: python -m pytest -q tests/test_dinov3_registry_human_species_linking.py
