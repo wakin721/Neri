@@ -3,18 +3,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from .classifier import DinoV3Classifier, DinoV3Prediction
+from .classifier import DinoV3Classifier, DinoV3Prediction, _normalize_rows
 from .rejection import MultiDualRejectionConfig
 
 
 class MultiDualDinoV3Classifier(DinoV3Classifier):
     """Multi-prototype classifier with a jointly calibrated dual rejection gate.
 
-    Closed-set classification is unchanged: the winning prototype is still the
-    nearest formal prototype by squared Euclidean distance. A formal prediction
-    is accepted only when BOTH the cosine and squared-distance gates pass.
-    Provisional registry/feedback prototypes use the same gate before being
-    surfaced as assistive matches.
+    Closed-set classification uses the same raw prototypes, but Dual mode applies
+    the full CL2N transform used by training/ablation: subtract the stored center,
+    then L2-normalize. A formal prediction is accepted only when BOTH the cosine
+    and squared-distance gates pass. Provisional registry/feedback prototypes use
+    the same gate before being surfaced as assistive matches.
     """
 
     def __init__(
@@ -40,6 +40,9 @@ class MultiDualDinoV3Classifier(DinoV3Classifier):
     def rejection_metadata(self) -> dict[str, float | str]:
         return self.rejection.as_dict()
 
+    def _center_features(self, array):
+        return _normalize_rows(super()._center_features(array))
+
     def explain_feature(self, feature) -> dict[str, Any]:
         explanation = super().explain_feature(feature)
         explanation["rejection"] = self.rejection_metadata
@@ -49,7 +52,7 @@ class MultiDualDinoV3Classifier(DinoV3Classifier):
         bank = self._effective_bank()
         if not bank.formal:
             raise ValueError("Formal Multi-prototype bank cannot be empty")
-        centered_rows = array - self._feature_center[None, :]
+        centered_rows = self._center_features(array)
 
         results: list[DinoV3Prediction] = []
         for row_index, centered in enumerate(centered_rows):
