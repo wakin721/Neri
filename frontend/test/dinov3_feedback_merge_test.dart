@@ -14,6 +14,8 @@ void main() {
   testWidgets('box feedback merges the server-authoritative DetectionItem', (
     tester,
   ) async {
+    // ignore: avoid_print
+    print('merge-test: start');
     await tester.binding.setSurfaceSize(const Size(1280, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -27,6 +29,8 @@ void main() {
     addTearDown(() async {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
+    // ignore: avoid_print
+    print('merge-test: fixture-ready');
 
     late Map<String, dynamic> feedbackBody;
     final client = NeriApiClient(
@@ -149,24 +153,40 @@ void main() {
         ),
       ),
     );
+    // ignore: avoid_print
+    print('merge-test: pump-widget-done');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
+    // ignore: avoid_print
+    print('merge-test: initial-pumps-done');
 
     final viewerFinder = find.byType(DetectionMediaViewer);
     expect(viewerFinder, findsOneWidget);
     await tester.tapAt(tester.getCenter(viewerFinder));
+    // ignore: avoid_print
+    print('merge-test: viewer-tapped');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
+    // ignore: avoid_print
+    print('merge-test: selection-pumps-done');
     await tester.tap(find.widgetWithText(OutlinedButton, '正确'));
+    // ignore: avoid_print
+    print('merge-test: correct-tapped');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
+    // ignore: avoid_print
+    print('merge-test: feedback-pumps-done');
 
     final viewer = tester.widget<DetectionMediaViewer>(viewerFinder);
     expect(viewer.visibleBoxes, hasLength(1));
     expect(viewer.visibleBoxes.single.species, '家牛');
     expect(viewer.visibleBoxes.single.feedbackStatus, 'corrected');
+    // ignore: avoid_print
+    print('merge-test: assertions-done');
 
     await tester.pump(const Duration(seconds: 5));
     await tester.pump();
+    // ignore: avoid_print
+    print('merge-test: end');
   });
 }
