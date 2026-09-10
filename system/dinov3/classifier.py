@@ -165,6 +165,15 @@ class DinoV3Classifier:
             raise ValueError("Expected finite L2-normalized event features")
         return array
 
+    def _center_features(self, array: np.ndarray) -> np.ndarray:
+        """Transform validated encoder features into prototype-comparison space.
+
+        Legacy Multi-prototype checkpoints historically used the centered vector
+        directly at runtime. Subclasses may override this hook when their
+        calibrated rejection geometry requires an additional normalization step.
+        """
+        return array - self._feature_center[None, :]
+
     def _provider_bank(self, provider, *, name: str) -> PrototypeBank:
         if provider is None:
             return PrototypeBank(())
@@ -299,7 +308,7 @@ class DinoV3Classifier:
         if value.ndim != 1:
             raise ValueError("Expected one feature vector")
         array = self._validate_features(value[None, :])
-        centered = array[0] - self._feature_center
+        centered = self._center_features(array)[0]
         bank = self._effective_bank()
         records = tuple(bank.formal) + tuple(bank.provisional)
         if not records:
@@ -397,7 +406,7 @@ class DinoV3Classifier:
         bank = self._effective_bank()
         if not bank.formal:
             raise ValueError("Formal Multi-prototype bank cannot be empty")
-        centered_rows = array - self._feature_center[None, :]
+        centered_rows = self._center_features(array)
 
         results: list[DinoV3Prediction] = []
         for row_index, centered in enumerate(centered_rows):
