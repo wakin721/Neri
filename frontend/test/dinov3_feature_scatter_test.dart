@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -100,6 +101,37 @@ DinoV3FeatureExplanation explanationFixture() {
   });
 }
 
+Future<Offset> _centroidForColor(ui.Image image, Color color) async {
+  final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  expect(data, isNotNull);
+  final bytes = data!.buffer.asUint8List();
+  final argb = color.toARGB32();
+  final red = (argb >> 16) & 0xff;
+  final green = (argb >> 8) & 0xff;
+  final blue = argb & 0xff;
+  final alpha = (argb >> 24) & 0xff;
+  var sumX = 0.0;
+  var sumY = 0.0;
+  var count = 0;
+
+  for (var y = 0; y < image.height; y++) {
+    for (var x = 0; x < image.width; x++) {
+      final offset = (y * image.width + x) * 4;
+      if (bytes[offset] == red &&
+          bytes[offset + 1] == green &&
+          bytes[offset + 2] == blue &&
+          bytes[offset + 3] == alpha) {
+        sumX += x;
+        sumY += y;
+        count++;
+      }
+    }
+  }
+
+  expect(count, greaterThan(0));
+  return Offset(sumX / count, sumY / count);
+}
+
 void main() {
   test('feature explanation parses nearest species and local projection', () {
     final explanation = explanationFixture();
@@ -141,6 +173,77 @@ void main() {
     expect(find.text('小麂'), findsWidgets);
     expect(find.text('当前检测框'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('feature scatter uses equal pixel scale for X and Y', (
+    tester,
+  ) async {
+    final explanation = DinoV3FeatureExplanation(
+      species: 'Unknown',
+      accepted: false,
+      bestKnownSpecies: 'A',
+      knownScore: 0,
+      threshold: 0,
+      nearestSpecies: const [],
+      projection: const DinoV3FeatureProjection(
+        method: 'nearest_two_species_axis',
+        species: ['A', 'B'],
+        points: [
+          DinoV3ProjectionPoint(
+            kind: 'prototype',
+            species: 'A',
+            source: 'checkpoint',
+            prototypeIndex: 0,
+            x: 0,
+            y: 0,
+          ),
+          DinoV3ProjectionPoint(
+            kind: 'prototype',
+            species: 'B',
+            source: 'checkpoint',
+            prototypeIndex: 0,
+            x: 1,
+            y: 0,
+          ),
+          DinoV3ProjectionPoint(
+            kind: 'current',
+            species: 'Unknown',
+            source: 'checkpoint',
+            prototypeIndex: 0,
+            x: 0,
+            y: 1,
+          ),
+        ],
+      ),
+      currentExampleAvailable: false,
+    );
+    final scheme = ColorScheme.fromSeed(seedColor: Colors.blue);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(colorScheme: scheme),
+        home: SizedBox(
+          width: 560,
+          height: 360,
+          child: DinoV3FeatureScatter(explanation: explanation),
+        ),
+      ),
+    );
+
+    final paintWidget = tester.widget<CustomPaint>(find.byType(CustomPaint));
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    paintWidget.painter!.paint(canvas, const Size(400, 200));
+    final image = await recorder.endRecording().toImage(400, 200);
+    addTearDown(image.dispose);
+
+    final origin = await _centroidForColor(image, scheme.primary);
+    final xUnit = await _centroidForColor(image, scheme.tertiary);
+    final yUnit = await _centroidForColor(image, scheme.error);
+    final horizontalPixels = (xUnit - origin).distance;
+    final verticalPixels = (yUnit - origin).distance;
+
+    expect(horizontalPixels, closeTo(verticalPixels, 2.0));
   });
 
   test(
