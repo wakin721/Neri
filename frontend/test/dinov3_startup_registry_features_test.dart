@@ -186,7 +186,7 @@ void main() {
             onFavoritePhotoPathsChanged: (_) async {},
             onFavoritePhotoExportModeChanged: (_) async {},
             onEmptyPhotoDeleteModeChanged: (_) async {},
-            onAutoGroupInferredBurstSizeChanged: (_) {},
+            onAutoGroupInferredBurstSizeChanged: (_) async {},
           ),
         ),
       ),
@@ -197,6 +197,7 @@ void main() {
     await tester.tapAt(tester.getCenter(viewer));
     await tester.pumpAndSettle();
 
-    expect(find.text('#1 盘羊 · 检测框校验'), findsOneWidget);
+    expect(find.text('#1 盘羊 · '), findsOneWidget);
+    expect(find.text('检测框校验'), findsOneWidget);
   });
 }
