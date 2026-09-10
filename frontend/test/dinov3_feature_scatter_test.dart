@@ -101,35 +101,18 @@ DinoV3FeatureExplanation explanationFixture() {
   });
 }
 
-Future<Offset> _centroidForColor(ui.Image image, Color color) async {
-  final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-  expect(data, isNotNull);
-  final bytes = data!.buffer.asUint8List();
-  final argb = color.toARGB32();
-  final red = (argb >> 16) & 0xff;
-  final green = (argb >> 8) & 0xff;
-  final blue = argb & 0xff;
-  final alpha = (argb >> 24) & 0xff;
-  var sumX = 0.0;
-  var sumY = 0.0;
-  var count = 0;
+class _RecordingCanvas implements ui.Canvas {
+  final fillCircleCenters = <int, Offset>{};
 
-  for (var y = 0; y < image.height; y++) {
-    for (var x = 0; x < image.width; x++) {
-      final offset = (y * image.width + x) * 4;
-      if (bytes[offset] == red &&
-          bytes[offset + 1] == green &&
-          bytes[offset + 2] == blue &&
-          bytes[offset + 3] == alpha) {
-        sumX += x;
-        sumY += y;
-        count++;
-      }
+  @override
+  void drawCircle(Offset center, double radius, Paint paint) {
+    if (paint.style == PaintingStyle.fill) {
+      fillCircleCenters[paint.color.toARGB32()] = center;
     }
   }
 
-  expect(count, greaterThan(0));
-  return Offset(sumX / count, sumY / count);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 void main() {
@@ -206,8 +189,8 @@ void main() {
             y: 0,
           ),
           DinoV3ProjectionPoint(
-            kind: 'current',
-            species: 'Unknown',
+            kind: 'prototype',
+            species: 'C',
             source: 'checkpoint',
             prototypeIndex: 0,
             x: 0,
@@ -236,19 +219,19 @@ void main() {
           find.descendant(of: scatter, matching: find.byType(CustomPaint)),
         )
         .firstWhere((widget) => widget.painter != null);
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
+    final canvas = _RecordingCanvas();
     paintWidget.painter!.paint(canvas, const Size(400, 200));
-    final image = await recorder.endRecording().toImage(400, 200);
-    addTearDown(image.dispose);
 
-    final origin = await _centroidForColor(image, scheme.primary);
-    final xUnit = await _centroidForColor(image, scheme.tertiary);
-    final yUnit = await _centroidForColor(image, scheme.error);
-    final horizontalPixels = (xUnit - origin).distance;
-    final verticalPixels = (yUnit - origin).distance;
+    final origin = canvas.fillCircleCenters[scheme.primary.toARGB32()];
+    final xUnit = canvas.fillCircleCenters[scheme.tertiary.toARGB32()];
+    final yUnit = canvas.fillCircleCenters[scheme.secondary.toARGB32()];
+    expect(origin, isNotNull);
+    expect(xUnit, isNotNull);
+    expect(yUnit, isNotNull);
 
-    expect(horizontalPixels, closeTo(verticalPixels, 2.0));
+    final horizontalPixels = (xUnit! - origin!).distance;
+    final verticalPixels = (yUnit! - origin).distance;
+    expect(horizontalPixels, closeTo(verticalPixels, 0.001));
   });
 
   test(
