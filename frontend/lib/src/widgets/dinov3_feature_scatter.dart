@@ -363,19 +363,22 @@ class _FeatureScatterPainter extends CustomPainter {
     minY -= ySpan * 0.22;
     maxY += ySpan * 0.22;
 
-    Offset mapPoint(DinoV3ProjectionPoint point) {
-      final nx = (point.x - minX) / (maxX - minX);
-      final ny = (point.y - minY) / (maxY - minY);
-      return Offset(
-        plot.left + nx * plot.width,
-        plot.bottom - ny * plot.height,
-      );
-    }
+    final domainWidth = math.max(maxX - minX, 1e-9);
+    final domainHeight = math.max(maxY - minY, 1e-9);
+    final scale = math.min(
+      plot.width / domainWidth,
+      plot.height / domainHeight,
+    );
+    final centerX = (minX + maxX) / 2;
+    final centerY = (minY + maxY) / 2;
 
-    double mapX(double x) =>
-        plot.left + ((x - minX) / (maxX - minX)) * plot.width;
-    double mapY(double y) =>
-        plot.bottom - ((y - minY) / (maxY - minY)) * plot.height;
+    Offset mapPoint(DinoV3ProjectionPoint point) => Offset(
+      plot.center.dx + (point.x - centerX) * scale,
+      plot.center.dy - (point.y - centerY) * scale,
+    );
+
+    double mapX(double x) => plot.center.dx + (x - centerX) * scale;
+    double mapY(double y) => plot.center.dy - (y - centerY) * scale;
 
     final axisPaint = Paint()
       ..color = colors.outlineVariant
