@@ -144,15 +144,16 @@ void main() {
 
     expect(find.textContaining('2 个文件'), findsWidgets);
     await tester.tap(find.text('正确'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
 
     expect(batchCalls, 1);
-    final hasSkipSummary = find
-        .textContaining('DINOv3 学习已跳过 1/2 个文件')
-        .evaluate()
-        .isNotEmpty;
+    expect(
+      find.textContaining('DINOv3 学习已跳过 1/2 个文件'),
+      findsOneWidget,
+    );
+
     await tester.pump(const Duration(seconds: 4));
     await tester.pumpAndSettle();
-    expect(hasSkipSummary, isTrue);
   });
 }
