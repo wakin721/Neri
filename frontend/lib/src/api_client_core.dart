@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'models/dinov3_explanation.dart';
 import 'models/dinov3_feedback.dart';
 import 'models/dinov3_registry.dart';
 import 'models/export_result.dart';
@@ -66,6 +67,26 @@ class NeriApiClient {
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
     return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEntry.fromJson)
+        .toList();
+  }
+
+  Future<List<DinoV3RegistryEntry>> fetchDinoV3RegistryCatalog(
+    String classificationModelPath,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/catalog').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List<dynamic>) {
+      // Compatibility with older backends and existing mocked clients that do
+      // not expose the unified catalog endpoint yet.
+      return fetchDinoV3Registry(classificationModelPath);
+    }
+    return decoded
         .whereType<Map<String, dynamic>>()
         .map(DinoV3RegistryEntry.fromJson)
         .toList();
@@ -192,6 +213,42 @@ class NeriApiClient {
     return DinoV3BoxFeedbackResult.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
+  }
+
+  Future<DinoV3FeatureExplanation> fetchDinoV3FeatureExplanation(
+    String classificationModelPath,
+    String observationId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/feedback/observations/${Uri.encodeComponent(observationId)}/explain',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DinoV3FeatureExplanation.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<Uint8List> fetchDinoV3ObservationExample(
+    String classificationModelPath,
+    String observationId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/feedback/observations/${Uri.encodeComponent(observationId)}/example',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return response.bodyBytes;
   }
 
   Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({

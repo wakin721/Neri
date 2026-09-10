@@ -9,7 +9,7 @@ import '../models/dinov3_registry.dart';
 String dinov3RegistrySummary(List<DinoV3RegistryEntry> entries) {
   int count(String status) =>
       entries.where((entry) => entry.status == status).length;
-  return 'Candidate ${count('candidate')} · '
+  return 'Checkpoint ${count('checkpoint')} · Candidate ${count('candidate')} · '
       'Provisional ${count('provisional')} · '
       'Confirmed ${count('confirmed')} · '
       'Mature ${count('mature')}';
@@ -55,7 +55,7 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
 
   Future<void> _refresh() async {
     try {
-      final entries = await widget.apiClient.fetchDinoV3Registry(
+      final entries = await widget.apiClient.fetchDinoV3RegistryCatalog(
         widget.modelPath,
       );
       if (!mounted) return;
@@ -157,7 +157,12 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     } else {
       update();
     }
-    unawaited(_loadExamples(entry));
+    if (entry.isCheckpoint) {
+      ++_examplesRequestId;
+      if (notify && mounted) setState(() => _examplesLoading = false);
+    } else {
+      unawaited(_loadExamples(entry));
+    }
   }
 
   Future<void> _load() async {
@@ -166,7 +171,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      final entries = await widget.apiClient.fetchDinoV3Registry(
+      final entries = await widget.apiClient.fetchDinoV3RegistryCatalog(
         widget.modelPath,
       );
       if (!mounted) return;
@@ -199,6 +204,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
 
   Future<void> _saveIdentity() async {
     final selected = _selected;
+    if (selected?.isCheckpoint == true) return;
     final commonName = _commonNameController.text.trim();
     if (selected == null || commonName.isEmpty) {
       setState(() => _error = '请填写人工确认物种名称。');
@@ -238,6 +244,17 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   Future<void> _loadExamples(DinoV3RegistryEntry entry) async {
+    if (entry.isCheckpoint) {
+      ++_examplesRequestId;
+      if (mounted && _selected?.id == entry.id) {
+        setState(() {
+          _events = const <DinoV3RegistryEvent>[];
+          _exampleBytes = const <int, Uint8List>{};
+          _examplesLoading = false;
+        });
+      }
+      return;
+    }
     final requestId = ++_examplesRequestId;
     if (mounted && _selected?.id == entry.id) {
       setState(() => _examplesLoading = true);
@@ -345,6 +362,20 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   Widget _buildExampleGallery() {
+    if (_selected?.isCheckpoint == true) {
+      return SizedBox(
+        height: 72,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'Checkpoint 不包含原始训练图片；暂无 Registry 裁切例图',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      );
+    }
     if (_examplesLoading) {
       return const SizedBox(
         height: 104,
@@ -401,7 +432,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
 
   Future<void> _continueValidation() async {
     final selected = _selected;
-    if (selected == null) return;
+    if (selected == null || selected.isCheckpoint) return;
     setState(() => _saving = true);
     try {
       final events = await widget.apiClient.fetchDinoV3RegistryEvents(
@@ -446,7 +477,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   Widget _detail(DinoV3RegistryEntry entry) {
-    final editable = entry.isCandidate;
+    final editable = entry.isCandidate && !entry.isCheckpoint;
     final conditions = entry.conditions;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -461,7 +492,14 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 4),
-                Text('状态：${entry.status}'),
+                Text(entry.isCheckpoint ? '状态：分类头基础物种' : '状态：${entry.status}'),
+                if (entry.isCheckpoint) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '来自不可变 DINOv3 Checkpoint · ${entry.prototypeCount} 个 prototype。'
+                    '分类头保存特征中心而非原始训练影像。',
+                  ),
+                ],
                 const SizedBox(height: 16),
                 TextField(
                   controller: _commonNameController,
@@ -500,19 +538,21 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                 Text('裁切例图', style: Theme.of(context).textTheme.titleSmall),
                 const SizedBox(height: 8),
                 _buildExampleGallery(),
-                const SizedBox(height: 14),
-                Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
-                _conditionRow('≥5 个独立事件', conditions['events'] == true),
-                _conditionRow('≥2 台相机', conditions['cameras'] == true),
-                _conditionRow(
-                  'cluster purity ≥ threshold',
-                  conditions['cluster_purity'] == true,
-                ),
-                _conditionRow(
-                  'embedding consistency ≥ threshold',
-                  conditions['embedding_consistency'] == true,
-                ),
-                _conditionRow('已确认物种名称', conditions['identity'] == true),
+                if (!entry.isCheckpoint) ...[
+                  const SizedBox(height: 14),
+                  Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
+                  _conditionRow('≥5 个独立事件', conditions['events'] == true),
+                  _conditionRow('≥2 台相机', conditions['cameras'] == true),
+                  _conditionRow(
+                    'cluster purity ≥ threshold',
+                    conditions['cluster_purity'] == true,
+                  ),
+                  _conditionRow(
+                    'embedding consistency ≥ threshold',
+                    conditions['embedding_consistency'] == true,
+                  ),
+                  _conditionRow('已确认物种名称', conditions['identity'] == true),
+                ],
                 if (_error != null) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -540,12 +580,14 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
               ),
               const SizedBox(width: 8),
             ],
-            OutlinedButton.icon(
-              onPressed: _saving ? null : _continueValidation,
-              icon: const Icon(Icons.fact_check_outlined),
-              label: const Text('继续验证'),
-            ),
-            const SizedBox(width: 8),
+            if (!entry.isCheckpoint) ...[
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _continueValidation,
+                icon: const Icon(Icons.fact_check_outlined),
+                label: const Text('继续验证'),
+              ),
+              const SizedBox(width: 8),
+            ],
             FilledButton.icon(
               onPressed: !_saving && entry.canRegister ? _register : null,
               icon: const Icon(Icons.add_circle_outline_rounded),
@@ -588,7 +630,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                                       selected: selected?.id == entry.id,
                                       title: Text(entry.displayName),
                                       subtitle: Text(
-                                        '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机',
+                                        entry.isCheckpoint
+                                            ? '分类头基础物种 · ${entry.prototypeCount} prototypes'
+                                            : '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机',
                                       ),
                                       onTap: () => _select(entry),
                                     );

@@ -110,12 +110,17 @@ void main() {
     expect(explanation.nearestSpecies.first.squaredDistance, 0.18);
     expect(explanation.projection.method, 'nearest_two_species_axis');
     expect(explanation.projection.species, ['赤麂', '小麂']);
-    expect(explanation.projection.points.where((point) => point.isCurrent), hasLength(1));
+    expect(
+      explanation.projection.points.where((point) => point.isCurrent),
+      hasLength(1),
+    );
     expect(explanation.nearestExample?.kind, 'registry');
     expect(explanation.nearestExample?.eventId, 12);
   });
 
-  testWidgets('feature scatter renders nearest classes and current sample', (tester) async {
+  testWidgets('feature scatter renders nearest classes and current sample', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -128,29 +133,35 @@ void main() {
       ),
     );
 
-    expect(find.byKey(const ValueKey('dinov3-feature-scatter')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('dinov3-feature-scatter')),
+      findsOneWidget,
+    );
     expect(find.text('赤麂'), findsWidgets);
     expect(find.text('小麂'), findsWidgets);
     expect(find.text('当前检测框'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  test('Registry and validation UI are wired to catalog and explanation APIs', () {
-    final api = File('lib/src/api_client_core.dart').readAsStringSync();
-    final registry = File(
-      'lib/src/widgets/dinov3_registry_dialog.dart',
-    ).readAsStringSync();
-    final validation = File(
-      'lib/src/screens/species_validation_screen.dart',
-    ).readAsStringSync();
+  test(
+    'Registry and validation UI are wired to catalog and explanation APIs',
+    () {
+      final api = File('lib/src/api_client_core.dart').readAsStringSync();
+      final registry = File(
+        'lib/src/widgets/dinov3_registry_dialog.dart',
+      ).readAsStringSync();
+      final validation = File(
+        'lib/src/screens/species_validation_screen.dart',
+      ).readAsStringSync();
 
-    expect(api, contains('fetchDinoV3RegistryCatalog'));
-    expect(api, contains('/api/dinov3/registry/catalog'));
-    expect(api, contains('fetchDinoV3FeatureExplanation'));
-    expect(api, contains('/api/dinov3/feedback/observations/'));
-    expect(registry, contains('fetchDinoV3RegistryCatalog'));
-    expect(registry, contains('entry.isCheckpoint'));
-    expect(registry, contains('分类头基础物种'));
-    expect(validation, contains('DinoV3FeatureExplanationPanel('));
-  });
+      expect(api, contains('fetchDinoV3RegistryCatalog'));
+      expect(api, contains('/api/dinov3/registry/catalog'));
+      expect(api, contains('fetchDinoV3FeatureExplanation'));
+      expect(api, contains('/api/dinov3/feedback/observations/'));
+      expect(registry, contains('fetchDinoV3RegistryCatalog'));
+      expect(registry, contains('entry.isCheckpoint'));
+      expect(registry, contains('分类头基础物种'));
+      expect(validation, contains('DinoV3FeatureExplanationPanel('));
+    },
+  );
 }

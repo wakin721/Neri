@@ -9,6 +9,7 @@ import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
+import '../widgets/dinov3_feature_scatter.dart';
 import '../widgets/selectable_list_card.dart';
 
 import 'package:lpinyin/lpinyin.dart';
@@ -1084,53 +1085,68 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return _ValidationPanel(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              child: DefaultTextStyle.merge(
-                style: const TextStyle(fontWeight: FontWeight.w600),
-                child: Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        title.substring(0, title.length - '检测框校验'.length),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+            Row(
+              children: [
+                Expanded(
+                  child: DefaultTextStyle.merge(
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title.substring(0, title.length - '检测框校验'.length),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const Text('检测框校验'),
+                      ],
                     ),
-                    const Text('检测框校验'),
-                  ],
+                  ),
                 ),
+                const SizedBox(width: 12),
+                OutlinedButton(
+                  onPressed: canSubmit
+                      ? () => unawaited(_submitDinoBoxFeedback(box, 'correct'))
+                      : null,
+                  child: const Text('正确'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: canSubmit
+                      ? () => unawaited(_showDinoBoxSpeciesDialog(box))
+                      : null,
+                  child: const Text('修改物种'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: canSubmit
+                      ? () => unawaited(_submitDinoBoxFeedback(box, 'empty'))
+                      : null,
+                  child: const Text('空 / 误检'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: canSubmit
+                      ? () =>
+                            unawaited(_submitDinoBoxFeedback(box, 'unverified'))
+                      : null,
+                  child: const Text('不参与学习'),
+                ),
+              ],
+            ),
+            if (classificationModelPath.isNotEmpty &&
+                observationId.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              DinoV3FeatureExplanationPanel(
+                apiClient: widget.apiClient,
+                classificationModelPath: classificationModelPath,
+                observationId: observationId,
               ),
-            ),
-            const SizedBox(width: 12),
-            OutlinedButton(
-              onPressed: canSubmit
-                  ? () => unawaited(_submitDinoBoxFeedback(box, 'correct'))
-                  : null,
-              child: const Text('正确'),
-            ),
-            const SizedBox(width: 8),
-            OutlinedButton(
-              onPressed: canSubmit
-                  ? () => unawaited(_showDinoBoxSpeciesDialog(box))
-                  : null,
-              child: const Text('修改物种'),
-            ),
-            const SizedBox(width: 8),
-            OutlinedButton(
-              onPressed: canSubmit
-                  ? () => unawaited(_submitDinoBoxFeedback(box, 'empty'))
-                  : null,
-              child: const Text('空 / 误检'),
-            ),
-            const SizedBox(width: 8),
-            OutlinedButton(
-              onPressed: canSubmit
-                  ? () => unawaited(_submitDinoBoxFeedback(box, 'unverified'))
-                  : null,
-              child: const Text('不参与学习'),
-            ),
+            ],
           ],
         ),
       ),

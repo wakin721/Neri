@@ -53,6 +53,7 @@ class DinoV3RegistryEntry {
   final bool canRegister;
 
   bool get isCandidate => status == 'candidate';
+  bool get isCheckpoint => status.toLowerCase() == 'checkpoint';
 
   bool get canDelete => const <String>{
     'candidate',
