@@ -149,20 +149,24 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
     final viewerFinder = find.byType(DetectionMediaViewer);
+    expect(viewerFinder, findsOneWidget);
     await tester.tapAt(tester.getCenter(viewerFinder));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
     await tester.tap(find.widgetWithText(OutlinedButton, '正确'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
     final viewer = tester.widget<DetectionMediaViewer>(viewerFinder);
     expect(viewer.visibleBoxes, hasLength(1));
     expect(viewer.visibleBoxes.single.species, '家牛');
     expect(viewer.visibleBoxes.single.feedbackStatus, 'corrected');
 
-    await tester.pump(const Duration(seconds: 4));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
   });
 }
