@@ -30,6 +30,148 @@ def feedback_path_for_registry(registry_path: str | Path) -> Path:
     return Path(registry_path).expanduser().resolve().with_name("feedback.sqlite3")
 
 
+def _feedback_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_registry_assignment_redirect_schema(conn: sqlite3.Connection) -> bool:
+    if not _feedback_table_exists(conn, "feedback_registry_assignments"):
+        return False
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_info(feedback_registry_assignments)"
+        ).fetchall()
+    }
+    if "identity_restore_allowed" not in columns:
+        conn.execute(
+            "ALTER TABLE feedback_registry_assignments "
+            "ADD COLUMN identity_restore_allowed INTEGER NOT NULL DEFAULT 1"
+        )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback_registry_assignment_redirects(
+          operation_id TEXT NOT NULL,
+          old_registration_id INTEGER NOT NULL,
+          new_registration_id INTEGER NOT NULL,
+          assigned_common_name TEXT NOT NULL,
+          migrated_at TEXT NOT NULL,
+          PRIMARY KEY(operation_id, old_registration_id)
+        )
+        """
+    )
+    return True
+
+
+def redirect_registry_assignments_file(
+    feedback_path: str | Path,
+    redirects: dict[int, int],
+) -> int:
+    """Redirect legacy Registry assignment ids before duplicate entries are removed.
+
+    Redirected assignments remain auditable but may no longer restore a Registry
+    identity during undo, because that identity is now canonical for the merged
+    survivor rather than owned by one historical feedback operation.
+    """
+    path = Path(feedback_path).expanduser().resolve()
+    if not redirects or not path.is_file():
+        return 0
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _ensure_registry_assignment_redirect_schema(conn):
+            conn.commit()
+            return 0
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        changed = 0
+        migrated_at = datetime.now(timezone.utc).isoformat()
+        for old_id, new_id in sorted(
+            (int(old), int(new)) for old, new in redirects.items()
+        ):
+            rows = conn.execute(
+                """
+                SELECT operation_id,assigned_common_name
+                FROM feedback_registry_assignments
+                WHERE registration_id=?
+                ORDER BY operation_id
+                """,
+                (old_id,),
+            ).fetchall()
+            for row in rows:
+                operation_id = str(row["operation_id"])
+                assigned_common_name = str(row["assigned_common_name"])
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO feedback_registry_assignment_redirects(
+                      operation_id,old_registration_id,new_registration_id,
+                      assigned_common_name,migrated_at
+                    ) VALUES(?,?,?,?,?)
+                    """,
+                    (
+                        operation_id,
+                        old_id,
+                        new_id,
+                        assigned_common_name,
+                        migrated_at,
+                    ),
+                )
+                if old_id == new_id:
+                    conn.execute(
+                        """
+                        UPDATE feedback_registry_assignments
+                        SET identity_restore_allowed=0
+                        WHERE operation_id=? AND registration_id=?
+                        """,
+                        (operation_id, old_id),
+                    )
+                else:
+                    existing = conn.execute(
+                        """
+                        SELECT 1 FROM feedback_registry_assignments
+                        WHERE operation_id=? AND registration_id=?
+                        """,
+                        (operation_id, new_id),
+                    ).fetchone()
+                    if existing is not None:
+                        conn.execute(
+                            """
+                            UPDATE feedback_registry_assignments
+                            SET identity_restore_allowed=0
+                            WHERE operation_id=? AND registration_id=?
+                            """,
+                            (operation_id, new_id),
+                        )
+                        conn.execute(
+                            """
+                            DELETE FROM feedback_registry_assignments
+                            WHERE operation_id=? AND registration_id=?
+                            """,
+                            (operation_id, old_id),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE feedback_registry_assignments
+                            SET registration_id=?,identity_restore_allowed=0
+                            WHERE operation_id=? AND registration_id=?
+                            """,
+                            (new_id, operation_id, old_id),
+                        )
+                changed += 1
+        conn.commit()
+        return changed
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @dataclass(frozen=True)
 class FeedbackObservation:
     id: str
@@ -180,10 +322,20 @@ class HumanFeedbackStore:
               previous_common_name TEXT NOT NULL DEFAULT '',
               previous_scientific_name TEXT NOT NULL DEFAULT '',
               assigned_common_name TEXT NOT NULL,
+              identity_restore_allowed INTEGER NOT NULL DEFAULT 1,
               PRIMARY KEY(operation_id, registration_id)
+            );
+            CREATE TABLE IF NOT EXISTS feedback_registry_assignment_redirects(
+              operation_id TEXT NOT NULL,
+              old_registration_id INTEGER NOT NULL,
+              new_registration_id INTEGER NOT NULL,
+              assigned_common_name TEXT NOT NULL,
+              migrated_at TEXT NOT NULL,
+              PRIMARY KEY(operation_id, old_registration_id)
             );
             """
         )
+        _ensure_registry_assignment_redirect_schema(self._conn)
         row = self._conn.execute(
             "SELECT value FROM metadata WHERE key='model_fingerprint'"
         ).fetchone()
@@ -414,7 +566,7 @@ class HumanFeedbackStore:
         rows = self._conn.execute(
             """
             SELECT registration_id,previous_common_name,previous_scientific_name,
-                   assigned_common_name
+                   assigned_common_name,identity_restore_allowed
             FROM feedback_registry_assignments
             WHERE operation_id=? ORDER BY registration_id
             """,
@@ -426,6 +578,7 @@ class HumanFeedbackStore:
                 "previous_common_name": str(row["previous_common_name"]),
                 "previous_scientific_name": str(row["previous_scientific_name"]),
                 "assigned_common_name": str(row["assigned_common_name"]),
+                "identity_restore_allowed": bool(row["identity_restore_allowed"]),
             }
             for row in rows
         ]

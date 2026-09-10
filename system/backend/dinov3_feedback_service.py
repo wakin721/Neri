@@ -520,6 +520,25 @@ def apply_box_feedback(request):
         feedback.close()
 
 
+def _restore_registry_assignments(registry, assignments) -> None:
+    """Restore only identities still owned by the historical feedback operation."""
+    for assignment in assignments:
+        if not bool(assignment.get("identity_restore_allowed", True)):
+            continue
+        registration_id = int(assignment["registration_id"])
+        try:
+            current = registry.get(registration_id)
+        except KeyError:
+            continue
+        if current.common_name != assignment["assigned_common_name"]:
+            continue
+        registry.restore_identity(
+            registration_id,
+            common_name=str(assignment["previous_common_name"]),
+            scientific_name=str(assignment["previous_scientific_name"]),
+        )
+
+
 def revert_feedback_operation(request):
     """Revert both feedback learning state and ecological box edits for an operation."""
     from . import services
@@ -539,19 +558,7 @@ def revert_feedback_operation(request):
 
             registry = open_registry_for_model(request.classification_model_path)
             try:
-                for assignment in registry_assignments:
-                    registration_id = int(assignment["registration_id"])
-                    try:
-                        current = registry.get(registration_id)
-                    except KeyError:
-                        continue
-                    if current.common_name != assignment["assigned_common_name"]:
-                        continue
-                    registry.restore_identity(
-                        registration_id,
-                        common_name=str(assignment["previous_common_name"]),
-                        scientific_name=str(assignment["previous_scientific_name"]),
-                    )
+                _restore_registry_assignments(registry, registry_assignments)
             finally:
                 registry.close()
 

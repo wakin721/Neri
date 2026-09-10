@@ -91,6 +91,7 @@ class SpeciesRegistry:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init()
+        self._run_legacy_named_candidate_merge_migration()
 
     def _init(self) -> None:
         self._conn.executescript(
@@ -161,6 +162,154 @@ class SpeciesRegistry:
             (self.model_fingerprint,),
         )
         self._conn.commit()
+
+    def _run_legacy_named_candidate_merge_migration(self) -> None:
+        marker = self._conn.execute(
+            "SELECT value FROM metadata WHERE key='migration_named_candidate_merge_v1'"
+        ).fetchone()
+        if marker is not None and str(marker[0]) == "1":
+            return
+        count = int(
+            self._conn.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
+        )
+        if count == 0:
+            return
+        self.merge_duplicate_named_candidates()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
+            ("migration_named_candidate_merge_v1", "1"),
+        )
+        self._conn.commit()
+
+    def merge_duplicate_named_candidates(self) -> dict[str, object]:
+        """Merge legacy same-name Candidate entries without touching formal states."""
+        rows = self._conn.execute(
+            """
+            SELECT id,candidate_number,common_name,scientific_name,cluster_purity
+            FROM registrations
+            WHERE status='candidate'
+            ORDER BY candidate_number,id
+            """
+        ).fetchall()
+        groups: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            common_name = str(row["common_name"]).strip()
+            if common_name:
+                groups.setdefault(common_name, []).append(row)
+
+        merged_groups = 0
+        merged_entries = 0
+        skipped_conflicts: list[str] = []
+        redirects: dict[int, int] = {}
+        for common_name, group in groups.items():
+            if len(group) < 2:
+                continue
+            scientific_names = {
+                str(row["scientific_name"]).strip()
+                for row in group
+                if str(row["scientific_name"]).strip()
+            }
+            if len(scientific_names) > 1:
+                skipped_conflicts.append(common_name)
+                continue
+
+            survivor = group[0]
+            survivor_id = int(survivor["id"])
+            member_ids = [int(row["id"]) for row in group]
+            duplicate_ids = member_ids[1:]
+            group_redirects = {entry_id: survivor_id for entry_id in member_ids}
+
+            # Redirect feedback first. If the Registry transaction is interrupted,
+            # retrying the migration is safe and no assignment points at a deleted id.
+            from .feedback import (
+                feedback_path_for_registry,
+                redirect_registry_assignments_file,
+            )
+
+            redirect_registry_assignments_file(
+                feedback_path_for_registry(self.path),
+                group_redirects,
+            )
+
+            placeholders = ",".join("?" for _ in member_ids)
+            event_rows = self._conn.execute(
+                f"SELECT embedding FROM events WHERE registration_id IN ({placeholders}) ORDER BY id",
+                tuple(member_ids),
+            ).fetchall()
+            embeddings = (
+                np.stack([_from_blob(row["embedding"]) for row in event_rows])
+                if event_rows
+                else np.empty((0, 768), dtype=np.float32)
+            )
+            prototypes = (
+                deterministic_k_means(
+                    embeddings,
+                    max_k=self._status_prototype_limit("candidate"),
+                )
+                if len(embeddings) >= 4
+                else np.empty((0, 768), dtype=np.float32)
+            )
+            scientific_name = next(iter(scientific_names), "")
+            cluster_purity = min(float(row["cluster_purity"]) for row in group)
+            now = _now()
+
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    f"DELETE FROM prototypes WHERE registration_id IN ({placeholders})",
+                    tuple(member_ids),
+                )
+                if duplicate_ids:
+                    duplicate_placeholders = ",".join("?" for _ in duplicate_ids)
+                    self._conn.execute(
+                        f"UPDATE events SET registration_id=? WHERE registration_id IN ({duplicate_placeholders})",
+                        (survivor_id, *duplicate_ids),
+                    )
+                self._conn.execute(
+                    """
+                    UPDATE registrations
+                    SET common_name=?,scientific_name=?,cluster_purity=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        common_name,
+                        scientific_name,
+                        cluster_purity,
+                        now,
+                        survivor_id,
+                    ),
+                )
+                for prototype_index, prototype in enumerate(prototypes):
+                    self._conn.execute(
+                        "INSERT INTO prototypes VALUES(?,?,?,?)",
+                        (
+                            survivor_id,
+                            prototype_index,
+                            _blob(prototype),
+                            len(embeddings),
+                        ),
+                    )
+                if duplicate_ids:
+                    duplicate_placeholders = ",".join("?" for _ in duplicate_ids)
+                    self._conn.execute(
+                        f"DELETE FROM registrations WHERE id IN ({duplicate_placeholders})",
+                        tuple(duplicate_ids),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+            redirects.update(group_redirects)
+            merged_groups += 1
+            merged_entries += len(duplicate_ids)
+
+        return {
+            "merged_groups": merged_groups,
+            "merged_entries": merged_entries,
+            "redirects": redirects,
+            "skipped_conflicts": tuple(skipped_conflicts),
+        }
 
     def close(self) -> None:
         self._conn.close()
@@ -558,7 +707,7 @@ class SpeciesRegistry:
             else 0.0
         )
         purity = float(row["cluster_purity"])
-        common = str(row["common_name"])
+        common = str(row["common_name"]).strip()
         status = str(row["status"])
         conditions = {
             "events": events >= 4,
@@ -567,11 +716,7 @@ class SpeciesRegistry:
             "identity": bool(common),
         }
         display = (
-            (
-                f"{common}（候选 #{row['candidate_number']}）"
-                if common
-                else f"未知物种 #{row['candidate_number']}"
-            )
+            (common if common else f"未知物种 #{row['candidate_number']}")
             if status == "candidate"
             else (
                 f"{common}（临时注册，待确认）"
