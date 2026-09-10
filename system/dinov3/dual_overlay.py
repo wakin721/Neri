@@ -1,6 +1,7 @@
 """CL2N-compatible Registry and human-feedback overlays for Multi-dual."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +20,20 @@ from .rejection import MultiDualRejectionConfig
 from .simple_shot import deterministic_k_means
 
 
-def multi_dual_feedback_path_for_registry(registry_path: str | Path) -> Path:
-    """Keep Dual generations isolated from legacy centered-only generations."""
-    return Path(registry_path).expanduser().resolve().with_name(
-        "feedback_multi_dual.sqlite3"
-    )
+def multi_dual_feedback_path_for_registry(
+    registry_path: str | Path,
+    rejection: MultiDualRejectionConfig | None = None,
+) -> Path:
+    """Keep Dual generations isolated from legacy and differently calibrated runs."""
+    registry = Path(registry_path).expanduser().resolve()
+    if rejection is None:
+        return registry.with_name("feedback_multi_dual.sqlite3")
+    material = (
+        f"multi_dual|{rejection.cosine_threshold:.17g}|"
+        f"{rejection.squared_distance_threshold:.17g}"
+    ).encode("ascii")
+    suffix = hashlib.sha256(material).hexdigest()[:16]
+    return registry.with_name(f"feedback_multi_dual_{suffix}.sqlite3")
 
 
 class MultiDualSpeciesRegistry(SpeciesRegistry):
