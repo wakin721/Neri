@@ -8,6 +8,7 @@ import pytest
 
 from system.backend.models import DetectionItem
 from system.dinov3.classifier import DinoV3Observation
+from system.dinov3.events import camera_id_for_path
 from system.dinov3.feedback import HumanFeedbackStore
 from system.dinov3.registry import SpeciesRegistry
 from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
@@ -141,7 +142,7 @@ def test_backend_persists_checkpoint_accepted_observation_to_feedback_only(tmp_p
     assert stored.frame_index is None
     assert stored.timestamp_seconds is None
     assert stored.bbox == (1.0, 2.0, 30.0, 40.0)
-    assert stored.camera_id == "camera-03"
+    assert stored.camera_id == camera_id_for_path(path, tmp_path)
     assert stored.captured_at == datetime(2026, 9, 9, 2, 3, 4)
     assert stored.predicted_species == "Known"
     assert stored.best_known_species == "Known"
