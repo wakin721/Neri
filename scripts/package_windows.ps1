@@ -73,6 +73,12 @@ $toolkit = Join-Path $package "toolkit"
 New-Item -ItemType Directory -Path $toolkit -Force | Out-Null
 Copy-Item "$pythonRoot\*" $toolkit -Recurse -Force
 
+$pruneScript = Join-Path $env:GITHUB_WORKSPACE "scripts\prune_lite_python.ps1"
+if (-not (Test-Path -LiteralPath $pruneScript -PathType Leaf)) {
+  throw "Missing lite Python pruning script: $pruneScript"
+}
+& $pruneScript -ToolkitPath $toolkit
+
 $generatedExe = Join-Path $package "neri_flutter.exe"
 $productExe = Join-Path $package "Neri.exe"
 if (Test-Path $generatedExe) {
