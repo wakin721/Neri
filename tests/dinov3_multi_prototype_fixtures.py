@@ -17,14 +17,15 @@ def make_multi_prototype_payload(
     *,
     classes: tuple[str, ...] = ("A", "B"),
     threshold: float = 0.31,
+    selection_k: int = 3,
 ) -> dict[str, object]:
     feature_center = torch.zeros(DINO_FEATURE_DIM, dtype=torch.float32)
     prototypes: list[torch.Tensor] = []
     prototype_class_indices: list[int] = []
     for class_index in range(len(classes)):
-        for prototype_index in range(3):
+        for prototype_index in range(selection_k):
             vector = torch.zeros(DINO_FEATURE_DIM, dtype=torch.float32)
-            vector[class_index * 3 + prototype_index] = 1.0
+            vector[class_index * selection_k + prototype_index] = 1.0
             prototypes.append(vector)
             prototype_class_indices.append(class_index)
     return {
@@ -34,13 +35,13 @@ def make_multi_prototype_payload(
         "classes": list(classes),
         "feature_center": feature_center,
         "head_type": "multi_prototype",
-        "selection_k": 3,
+        "selection_k": selection_k,
         "prototypes": torch.stack(prototypes),
         "prototype_class_indices": torch.tensor(
             prototype_class_indices,
             dtype=torch.int64,
         ),
-        "prototypes_per_class": [3] * len(classes),
+        "prototypes_per_class": [selection_k] * len(classes),
         "threshold": threshold,
         "decision": "squared_euclidean_to_nearest_prototype",
         "rejection_score": "cosine_similarity_to_winning_prototype",
