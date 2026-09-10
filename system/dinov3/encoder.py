@@ -30,20 +30,42 @@ def resolve_encoder_weights(
 ) -> Path:
     raw = Path(weights_path or checkpoint.encoder_weights).expanduser()
     candidates: list[Path] = []
-    if raw.is_absolute():
-        candidates.append(raw)
-    else:
-        if checkpoint.path is not None:
-            candidates.extend(
-                (
-                    checkpoint.path.parent / raw,
-                    checkpoint.path.parent / raw.name,
+
+    if weights_path is not None:
+        # An explicitly supplied path remains the highest-priority override.
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            if checkpoint.path is not None:
+                candidates.extend(
+                    (
+                        checkpoint.path.parent / raw,
+                        checkpoint.path.parent / raw.name,
+                    )
                 )
-            )
-        if weights_path is None and checkpoint.encoder_sha256.lower() == DINO_BACKBONE_SHA256:
+            candidates.extend(Path(root).expanduser() / raw for root in search_roots)
+            candidates.append(Path.cwd() / raw)
+    else:
+        # For the bundled official backbone, prefer Neri's canonical installed
+        # component path. Checkpoints may retain an absolute path from the
+        # training machine, which must not make the deployed model non-portable.
+        if checkpoint.encoder_sha256.lower() == DINO_BACKBONE_SHA256:
             candidates.append(dinov3_component_paths().backbone)
-        candidates.extend(Path(root).expanduser() / raw for root in search_roots)
-        candidates.append(Path.cwd() / raw)
+
+        # Keep the checkpoint-declared location as a compatibility fallback.
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            if checkpoint.path is not None:
+                candidates.extend(
+                    (
+                        checkpoint.path.parent / raw,
+                        checkpoint.path.parent / raw.name,
+                    )
+                )
+            candidates.extend(Path(root).expanduser() / raw for root in search_roots)
+            candidates.append(Path.cwd() / raw)
+
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved.is_file():
