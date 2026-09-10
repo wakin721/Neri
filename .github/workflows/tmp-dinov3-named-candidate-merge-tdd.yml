@@ -1,4 +1,4 @@
-name: Temporary DINOv3 named candidate merge TDD
+name: Temporary DINOv3 named candidate merge final verification
 
 on:
   push:
@@ -6,34 +6,49 @@ on:
       - feat/dinov3-startup-registry-ui
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  commit:
+  python:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -q numpy pytest fastapi pydantic opencv-python-headless
-      - name: Apply production patch
-        run: python tools/apply_dinov3_named_candidate_merge.py
-      - name: Compile modified sources
-        run: python -m compileall -q system tests/test_dinov3_registry_named_candidate_migration.py
-      - name: Run migration regression
-        run: python -m pytest -q tests/test_dinov3_registry_named_candidate_migration.py
-      - name: Check diff
-        run: git diff --check
-      - name: Commit production changes
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest httpx numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Compile DINOv3 sources and tests
+        run: python -m compileall -q system tests
+      - name: Run all DINOv3 Python tests
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add system/dinov3/registry.py system/dinov3/feedback.py system/backend/dinov3_feedback_service.py
-          if git diff --cached --quiet; then
-            echo "No production changes to commit."
-          else
-            git commit -m "feat: merge legacy same-name DINOv3 candidates"
-            git push
-          fi
+          mapfile -t tests < <(find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' -print | sort)
+          python -m pytest -q "${tests[@]}"
+      - name: Check repository diff
+        run: git diff --check
+
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve dependencies
+        working-directory: frontend
+        run: flutter pub get
+      - name: Analyze frontend
+        working-directory: frontend
+        run: flutter analyze
+      - name: Run full Flutter tests
+        working-directory: frontend
+        run: flutter test
