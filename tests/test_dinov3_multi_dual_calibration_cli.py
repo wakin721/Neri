@@ -137,6 +137,35 @@ def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_p
     assert derived["rejection_calibration"]["test_isolation"].startswith("test and unknown_test")
 
 
+def test_calibration_cli_accepts_id_keyed_feature_cache_subset(tmp_path):
+    checkpoint, manifest = _write_fixture(tmp_path)
+    output = tmp_path / "head.multi-dual.neri.json"
+
+    split_rows = json.loads((tmp_path / "splits.json").read_text(encoding="utf-8"))
+    with np.load(tmp_path / "image_features.npz", allow_pickle=False) as cache:
+        features = np.asarray(cache["features"], dtype=np.float32)
+        image_ids = np.asarray(cache["image_ids"]).astype(str)
+
+    keep = image_ids != "v0"
+    np.savez(
+        tmp_path / "image_features.npz",
+        features=features[keep],
+        image_ids=image_ids[keep],
+    )
+    assert len(split_rows) == 10
+    assert int(np.sum(keep)) == 9
+
+    subprocess.run(
+        _command(tmp_path, checkpoint, manifest, output),
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    derived = json.loads(output.read_text(encoding="utf-8"))
+    assert derived["rejection_calibration"]["known_validation_images"] == 7
+    assert derived["rejection_calibration"]["proxy_unknown_images"] == 2
+
+
 def test_calibration_cli_rejects_source_run_from_different_dataset(tmp_path):
     checkpoint, manifest = _write_fixture(
         tmp_path,
