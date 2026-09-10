@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply frontend implementation
-        run: python tools/apply_dinov3_registry_explain_frontend.py
+        run: |
+          python tools/apply_dinov3_registry_explain_frontend.py
+          python tools/patch_dinov3_frontend_catalog_compat.py
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
