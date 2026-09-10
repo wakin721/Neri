@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,25 @@ def test_resolve_encoder_weights_falls_back_to_installed_component(tmp_path, mon
     )
 
     resolved = encoder.resolve_encoder_weights(_checkpoint(tmp_path))
+
+    assert resolved == backbone.resolve()
+
+
+def test_resolve_encoder_weights_falls_back_when_checkpoint_absolute_path_is_stale(tmp_path, monkeypatch):
+    stale = tmp_path / 'training-host' / 'dinov3-vitb16' / 'dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'
+    checkpoint = replace(_checkpoint(tmp_path), encoder_weights=str(stale))
+    installed = tmp_path / 'res' / 'model' / 'DINOv3'
+    backbone = installed / 'dinov3-vitb16' / 'dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'
+    backbone.parent.mkdir(parents=True)
+    backbone.write_bytes(b'weights')
+    monkeypatch.setattr(
+        encoder,
+        'dinov3_component_paths',
+        lambda: SimpleNamespace(backbone=backbone, source_root=installed / 'source'),
+        raising=False,
+    )
+
+    resolved = encoder.resolve_encoder_weights(checkpoint)
 
     assert resolved == backbone.resolve()
 
