@@ -223,7 +223,6 @@ def test_feedback_learning_never_mutates_checkpoint_bytes(tmp_path):
         obs = obs.__class__(
             **{
                 **obs.__dict__,
-                "model_fingerprint": checkpoint.fingerprint,
                 "camera_id": f"cam-{index % 2}",
                 "captured_at": obs.captured_at + timedelta(minutes=index * 31),
                 "source_path": f"C:/camera/immutable-{index}.JPG",
