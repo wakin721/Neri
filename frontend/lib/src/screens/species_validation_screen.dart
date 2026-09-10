@@ -104,6 +104,18 @@ const validationQuantityButtons = <String>[
   '50',
 ];
 
+List<DetectionItem> dinoValidationEffectiveItems(
+  Iterable<DetectionItem> items,
+  Map<String, DetectionItem> authoritativeByPath,
+) {
+  return [
+    for (final item in items)
+      authoritativeByPath[item.path] == null
+          ? item
+          : item.mergeValidationUpdate(authoritativeByPath[item.path]!),
+  ];
+}
+
 String dinoValidationLearningSkipSummary(
   Iterable<DetectionItem> items, {
   required bool learningRequested,
@@ -913,6 +925,39 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return 'feedback-${DateTime.now().microsecondsSinceEpoch}-$_feedbackOperationSequence';
   }
 
+  void _mergeDinoFeedbackItem(DetectionItem authoritative) {
+    _currentBuckets();
+    final current = _bucketCacheItemByPath[authoritative.path] ??
+        widget.items.firstWhere(
+          (candidate) => candidate.path == authoritative.path,
+          orElse: () => authoritative,
+        );
+    final merged = dinoValidationEffectiveItems(
+      <DetectionItem>[current],
+      <String, DetectionItem>{authoritative.path: authoritative},
+    ).single;
+
+    _bucketCacheItemByPath = <String, DetectionItem>{
+      ..._bucketCacheItemByPath,
+      merged.path: merged,
+    };
+    for (final bucket in _bucketCache) {
+      for (var index = 0; index < bucket.items.length; index++) {
+        if (bucket.items[index].path == merged.path) {
+          bucket.items[index] = merged;
+        }
+      }
+      for (final group in bucket.groups) {
+        for (var index = 0; index < group.items.length; index++) {
+          if (group.items[index].path == merged.path) {
+            group.items[index] = merged;
+          }
+        }
+      }
+    }
+    _groupSpeciesLabelCache.clear();
+  }
+
   Future<void> _submitDinoBoxFeedback(
     DetectionBox box,
     String action, {
@@ -940,6 +985,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         feedbackOperationId: operationId,
       );
       if (!mounted) return;
+      setState(() => _mergeDinoFeedbackItem(result.item));
       final recordedOperationId = result.operationId.trim().isEmpty
           ? operationId
           : result.operationId.trim();
@@ -947,6 +993,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         <DetectionItem>[result.item],
         feedbackOperationId: recordedOperationId,
       );
+      unawaited(widget.onRefresh().catchError((_) {}));
       _showSnackBar('已记录检测框反馈');
     } catch (error) {
       if (!mounted) return;
