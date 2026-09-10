@@ -371,7 +371,26 @@ class SpeciesRegistry:
         vector = normalize_embedding(embedding)
         entry_id = None
 
-        candidate_ids = []
+        # An explicit human species label is stronger evidence than automatic
+        # embedding similarity. Reuse an already named Registry species first,
+        # including provisional/confirmed/mature entries, so diverse views of
+        # the same manually confirmed species do not create duplicate candidates.
+        candidate_ids = [
+            int(row["id"])
+            for row in self._conn.execute(
+                """
+                SELECT id FROM registrations
+                WHERE common_name=?
+                ORDER BY CASE status
+                    WHEN 'mature' THEN 0
+                    WHEN 'confirmed' THEN 1
+                    WHEN 'provisional' THEN 2
+                    ELSE 3
+                END, candidate_number
+                """,
+                (common,),
+            ).fetchall()
+        ]
         if preferred_entry_id is not None:
             candidate_ids.append(int(preferred_entry_id))
         matched = self.match(vector)
@@ -382,9 +401,10 @@ class SpeciesRegistry:
                 detail = self.get(candidate_id)
             except RegistryEntryNotFound:
                 continue
-            if detail.status == "candidate" and (
-                not detail.common_name or detail.common_name == common
-            ):
+            if detail.common_name == common:
+                entry_id = candidate_id
+                break
+            if detail.status == "candidate" and not detail.common_name:
                 entry_id = candidate_id
                 break
 
