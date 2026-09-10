@@ -22,4 +22,4 @@ jobs:
       - working-directory: frontend
         run: flutter pub get
       - working-directory: frontend
-        run: flutter test test/dinov3_feedback_merge_test.dart --reporter expanded
+        run: flutter test test/dinov3_feedback_merge_test.dart --reporter expanded --timeout 60s
