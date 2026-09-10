@@ -5,12 +5,21 @@ on:
     branches:
       - feat/dinov3-startup-registry-ui
 
+permissions:
+  contents: write
+
+concurrency:
+  group: tmp-dinov3-registry-explain-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend-red:
+  backend-green:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Apply backend implementation
+        run: python tools/apply_dinov3_registry_explain_backend.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -21,5 +30,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest httpx numpy
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Run registry catalog and explain RED tests
+      - name: Compile changed Python sources
+        run: python -m compileall -q system tests/test_dinov3_registry_catalog_explain.py
+      - name: Run registry catalog and explain tests
         run: python -m pytest -q tests/test_dinov3_registry_catalog_explain.py
+      - name: Run DINOv3 regression tests
+        shell: bash
+        run: |
+          mapfile -t tests < <(find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' -print | sort)
+          python -m pytest -q "${tests[@]}"
+      - name: Commit verified backend implementation
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            system/backend/dinov3_feedback_api.py \
+            system/backend/dinov3_feedback_service.py \
+            system/backend/dinov3_registry_service.py \
+            system/backend/services.py \
+            system/dinov3/api.py \
+            system/dinov3/classifier.py \
+            system/dinov3/feedback.py \
+            system/dinov3/registry.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "feat: add DINOv3 registry catalog and feature explanation backend"
+          git push origin HEAD:feat/dinov3-startup-registry-ui
