@@ -140,7 +140,14 @@ def test_reopen_merges_legacy_same_named_candidates_and_redirects_feedback(tmp_p
     assignments = feedback.registry_assignments("legacy-batch-operation")
     assert len(assignments) == 1
     assert assignments[0]["registration_id"] == survivor_id
-    assert assignments[0]["identity_restore_allowed"] is False
+    assert "identity_restore_allowed" not in assignments[0]
+
+    restore_assignments = feedback.registry_assignments_for_restore(
+        "legacy-batch-operation"
+    )
+    assert len(restore_assignments) == 1
+    assert restore_assignments[0]["registration_id"] == survivor_id
+    assert restore_assignments[0]["identity_restore_allowed"] is False
 
     redirects = feedback._conn.execute(
         """
