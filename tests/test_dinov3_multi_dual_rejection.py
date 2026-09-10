@@ -134,6 +134,29 @@ def test_multi_dual_accepts_when_both_gates_pass():
     assert prediction.squared_distance == pytest.approx(0.25)
 
 
+def test_multi_dual_uses_full_cl2n_geometry_after_centering():
+    payload = make_multi_prototype_payload(threshold=-1.0)
+    payload["feature_center"][0] = 0.25
+    payload["prototypes"][0] = torch.zeros(768, dtype=torch.float32)
+    payload["prototypes"][0, 0] = 1.0
+    checkpoint = validate_checkpoint(payload)
+    classifier = MultiDualDinoV3Classifier(
+        checkpoint,
+        rejection=MultiDualRejectionConfig(
+            cosine_threshold=0.99,
+            squared_distance_threshold=0.01,
+        ),
+    )
+
+    prediction = classifier.classify_features(_unit_feature(0)[None, :])[0]
+
+    assert prediction.nearest_prototype_index == 0
+    assert prediction.known_score == pytest.approx(1.0, abs=1e-7)
+    assert prediction.squared_distance == pytest.approx(0.0, abs=1e-7)
+    assert prediction.species == "A"
+    assert prediction.accepted is True
+
+
 def test_multi_dual_preserves_provisional_assistive_match_semantics():
     checkpoint = validate_checkpoint(make_multi_prototype_payload(threshold=-1.0))
     provisional = PrototypeRecord(
