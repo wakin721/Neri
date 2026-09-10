@@ -85,6 +85,7 @@ class SpeciesLearningState:
 @dataclass(frozen=True)
 class _EvidenceObservation:
     row_id: int
+    observation_id: str
     source_path: str
     camera_id: str
     captured_at: datetime | None
@@ -96,6 +97,7 @@ class _EvidenceEvent:
     key: str
     camera_id: str
     embedding: np.ndarray
+    observation_ids: tuple[str, ...]
 
 
 class HumanFeedbackStore:
@@ -556,7 +558,7 @@ class HumanFeedbackStore:
             raise ValueError("Unsupported feedback evidence column")
         rows = self._conn.execute(
             f"""
-            SELECT h.id,o.payload,o.embedding
+            SELECT h.id,h.observation_id,o.payload,o.embedding
             FROM human_feedback h
             JOIN observations o ON o.id=h.observation_id
             WHERE h.active=1 AND h.{column}=?
@@ -575,6 +577,7 @@ class HumanFeedbackStore:
             result.append(
                 _EvidenceObservation(
                     row_id=int(row["id"]),
+                    observation_id=str(row["observation_id"]),
                     source_path=str(payload.get("source_path") or ""),
                     camera_id=str(payload.get("camera_id") or "unknown"),
                     captured_at=captured_at,
@@ -614,6 +617,7 @@ class HumanFeedbackStore:
                         key=f"missing|{camera_id}|{identity}",
                         camera_id=camera_id,
                         embedding=embedding,
+                        observation_ids=tuple(item.observation_id for item in group),
                     )
                 )
 
@@ -655,6 +659,7 @@ class HumanFeedbackStore:
             key=f"timed|{camera_id}|{marker:.6f}|{first.row_id}",
             camera_id=camera_id,
             embedding=embedding,
+            observation_ids=tuple(item.observation_id for item in observations),
         )
 
     @staticmethod
@@ -1028,6 +1033,99 @@ class HumanFeedbackStore:
                 hard_negative_false_accept_rate=0.0,
             )
         return SpeciesLearningState(**json.loads(row["payload"]))
+
+    def cluster_details(
+        self,
+        species: str,
+        feature_center: np.ndarray,
+    ) -> list[dict[str, object]]:
+        """Describe current feedback clusters without exposing 768-D embeddings."""
+        positive_events = self._group_events(
+            self._evidence_observations(species, column="positive_species")
+        )
+        if not positive_events:
+            return []
+
+        center = feature_center
+        if hasattr(center, "numpy"):
+            center = center.numpy()
+        center = np.asarray(center, dtype=np.float32)
+        if center.shape != (DINO_DIM,) or not np.isfinite(center).all():
+            raise ValueError("Expected finite feature_center with shape (768,)")
+
+        state = self.learning_state(species)
+        active_generation = self._active_generation(species)
+        active = active_generation is not None
+        if active_generation is not None:
+            prototype_values = self._generation_prototypes(int(active_generation["id"]))
+            prototypes = np.stack(prototype_values).astype(np.float32, copy=False)
+        else:
+            centered = np.stack(
+                [event.embedding - center for event in positive_events]
+            ).astype(np.float32)
+            prototypes = deterministic_k_means(centered, max_k=1).astype(
+                np.float32,
+                copy=False,
+            )
+
+        event_vectors = np.stack(
+            [event.embedding - center for event in positive_events]
+        ).astype(np.float32)
+        deltas = event_vectors[:, None, :] - prototypes[None, :, :]
+        distances = np.einsum("nkd,nkd->nk", deltas, deltas, optimize=True)
+        labels = np.argmin(distances, axis=1)
+        result: list[dict[str, object]] = []
+        for prototype_index in range(len(prototypes)):
+            member_indices = np.flatnonzero(labels == prototype_index).tolist()
+            if not member_indices:
+                continue
+            ordered = sorted(
+                member_indices,
+                key=lambda index: (float(distances[index, prototype_index]), index),
+            )
+            refs: list[dict[str, object]] = []
+            seen: set[str] = set()
+            for event_index in ordered:
+                for observation_id in positive_events[event_index].observation_ids:
+                    if observation_id in seen:
+                        continue
+                    seen.add(observation_id)
+                    refs.append(
+                        {
+                            "kind": "observation",
+                            "observation_id": observation_id,
+                        }
+                    )
+                    if len(refs) >= 3:
+                        break
+                if len(refs) >= 3:
+                    break
+            member_distances = distances[member_indices, prototype_index]
+            result.append(
+                {
+                    "id": f"feedback:{species}:{prototype_index}",
+                    "label": (
+                        f"Feedback Cluster #{prototype_index + 1}"
+                        if active
+                        else "反馈证据（尚未形成 prototype）"
+                    ),
+                    "source": "feedback" if active else "feedback_evidence",
+                    "prototype_index": prototype_index,
+                    "event_count": len(member_indices),
+                    "camera_count": len(
+                        {positive_events[index].camera_id for index in member_indices}
+                    ),
+                    "sample_count": sum(
+                        len(positive_events[index].observation_ids)
+                        for index in member_indices
+                    ),
+                    "mean_squared_distance": float(np.mean(member_distances)),
+                    "active": active,
+                    "learning_status": state.status,
+                    "example_refs": refs,
+                }
+            )
+        return result
 
     def prototype_bank(self, feature_center: np.ndarray) -> PrototypeBank:
         del feature_center  # Prototypes are persisted in checkpoint-centered space.

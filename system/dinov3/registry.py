@@ -612,6 +612,76 @@ class SpeciesRegistry:
             )
         return result
 
+    def cluster_details(self, entry_id: int) -> list[dict[str, object]]:
+        """Assign Registry events to their nearest current prototype for inspection."""
+        detail = self.get(entry_id)
+        rows = self._event_rows(entry_id)
+        if not rows:
+            return []
+        embeddings = np.stack([_from_blob(row["embedding"]) for row in rows]).astype(
+            np.float32,
+            copy=False,
+        )
+        prototypes = self._prototypes(entry_id)
+        if len(prototypes) == 0:
+            prototypes = build_prototype(embeddings)[None, :]
+        deltas = embeddings[:, None, :] - prototypes[None, :, :]
+        distances = np.einsum("nkd,nkd->nk", deltas, deltas, optimize=True)
+        labels = np.argmin(distances, axis=1)
+
+        result: list[dict[str, object]] = []
+        for prototype_index in range(len(prototypes)):
+            member_indices = np.flatnonzero(labels == prototype_index).tolist()
+            if not member_indices:
+                continue
+            ordered = sorted(
+                member_indices,
+                key=lambda index: (float(distances[index, prototype_index]), int(rows[index]["id"])),
+            )
+            refs: list[dict[str, object]] = []
+            for event_index in ordered:
+                row = rows[event_index]
+                coordinates = (
+                    row["box_x1"],
+                    row["box_y1"],
+                    row["box_x2"],
+                    row["box_y2"],
+                )
+                if not str(row["source_path"]) or not all(
+                    value is not None for value in coordinates
+                ):
+                    continue
+                refs.append(
+                    {
+                        "kind": "registry",
+                        "registration_id": entry_id,
+                        "event_id": int(row["id"]),
+                    }
+                )
+                if len(refs) >= 3:
+                    break
+            member_distances = distances[member_indices, prototype_index]
+            result.append(
+                {
+                    "id": f"registry:{entry_id}:{prototype_index}",
+                    "label": f"Cluster #{prototype_index + 1}",
+                    "source": "registry",
+                    "prototype_index": prototype_index,
+                    "event_count": len(member_indices),
+                    "camera_count": len(
+                        {str(rows[index]["camera_id"]) for index in member_indices}
+                    ),
+                    "sample_count": sum(
+                        int(rows[index]["sample_count"]) for index in member_indices
+                    ),
+                    "mean_squared_distance": float(np.mean(member_distances)),
+                    "active": True,
+                    "learning_status": detail.status,
+                    "example_refs": refs,
+                }
+            )
+        return result
+
     def prototype_bank(self, feature_center: np.ndarray) -> PrototypeBank:
         center = np.asarray(feature_center, dtype=np.float32)
         if center.shape != (768,) or not np.isfinite(center).all():

@@ -253,25 +253,30 @@ class DinoV3Classifier:
     def _projection_y_axis(
         axis_x: np.ndarray,
         origin: np.ndarray,
-        current: np.ndarray,
         prototypes: Sequence[np.ndarray],
     ) -> np.ndarray:
-        residual = current - origin - float(np.dot(current - origin, axis_x)) * axis_x
-        norm = float(np.linalg.norm(residual))
-        if norm > 1e-8:
-            return residual / norm
-
-        best = None
-        best_norm = 0.0
+        residuals: list[np.ndarray] = []
         for prototype in prototypes:
             candidate = prototype - origin
             candidate = candidate - float(np.dot(candidate, axis_x)) * axis_x
-            candidate_norm = float(np.linalg.norm(candidate))
-            if candidate_norm > best_norm:
-                best = candidate
-                best_norm = candidate_norm
-        if best is not None and best_norm > 1e-8:
-            return best / best_norm
+            if float(np.linalg.norm(candidate)) > 1e-8:
+                residuals.append(candidate.astype(np.float32, copy=False))
+
+        if residuals:
+            matrix = np.stack(residuals).astype(np.float32, copy=False)
+            _u, _s, vh = np.linalg.svd(matrix, full_matrices=False)
+            axis_y = vh[0].astype(np.float32, copy=False)
+            axis_y = axis_y - float(np.dot(axis_y, axis_x)) * axis_x
+            axis_norm = float(np.linalg.norm(axis_y))
+            if axis_norm > 1e-8:
+                axis_y = axis_y / axis_norm
+                for residual in residuals:
+                    alignment = float(np.dot(residual, axis_y))
+                    if abs(alignment) <= 1e-8:
+                        continue
+                    if alignment < 0:
+                        axis_y = -axis_y
+                    return axis_y
 
         basis_index = int(np.argmin(np.abs(axis_x)))
         basis = np.zeros(DINO_FEATURE_DIM, dtype=np.float32)
@@ -286,8 +291,9 @@ class DinoV3Classifier:
         """Return a deterministic local 2-D explanation around the nearest two species.
 
         Classification still uses the full 768-dimensional centered feature space.
-        The x-axis joins the closest prototype of the two nearest species; the
-        y-axis is an orthogonal residual direction chosen deterministically.
+        The x-axis joins the prototype centroids of the two nearest species; the
+        y-axis is derived only from nearby prototype residuals. The current sample
+        is projected into this fixed local frame and never defines either axis.
         """
         value = np.asarray(feature, dtype=np.float32)
         if value.ndim != 1:
@@ -309,11 +315,17 @@ class DinoV3Classifier:
         if not selected_indices:
             raise ValueError("No nearby prototypes are available")
 
-        first_index = int(nearest_species[0]["nearest_prototype_index"])
-        first = records[first_index].embedding
+        species_prototypes = {
+            species: [
+                records[index].embedding
+                for index in selected_indices
+                if records[index].species == species
+            ]
+            for species in selected_species
+        }
+        first = np.stack(species_prototypes[selected_species[0]]).mean(axis=0)
         if len(nearest_species) > 1:
-            second_index = int(nearest_species[1]["nearest_prototype_index"])
-            second = records[second_index].embedding
+            second = np.stack(species_prototypes[selected_species[1]]).mean(axis=0)
             origin = (first + second) * 0.5
             axis_x = second - first
             axis_norm = float(np.linalg.norm(axis_x))
@@ -328,7 +340,7 @@ class DinoV3Classifier:
             axis_x[0] = 1.0
 
         selected_prototypes = [records[index].embedding for index in selected_indices]
-        axis_y = self._projection_y_axis(axis_x, origin, centered, selected_prototypes)
+        axis_y = self._projection_y_axis(axis_x, origin, selected_prototypes)
 
         def project(vector: np.ndarray) -> tuple[float, float]:
             delta = vector - origin

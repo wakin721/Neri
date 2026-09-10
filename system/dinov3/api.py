@@ -61,11 +61,55 @@ def _register_with_duplicate_guard(
     ).as_dict()
 
 
-def build_registry_catalog(checkpoint: Any, registry: Any) -> list[dict[str, Any]]:
-    """Merge immutable checkpoint classes with mutable local Registry entries."""
+def build_registry_catalog(
+    checkpoint: Any,
+    registry: Any,
+    *,
+    feedback: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Merge checkpoint, human-feedback, and local Registry state for inspection."""
     result: list[dict[str, Any]] = []
     counts = tuple(int(value) for value in checkpoint.prototypes_per_class)
+    raw_class_indices = checkpoint.prototype_class_indices
+    if hasattr(raw_class_indices, "tolist"):
+        class_indices = [int(value) for value in raw_class_indices.tolist()]
+    else:
+        class_indices = [int(value) for value in raw_class_indices]
+
     for index, species in enumerate(checkpoint.classes):
+        base_indices = [
+            prototype_index
+            for prototype_index, class_index in enumerate(class_indices)
+            if class_index == index
+        ]
+        clusters: list[dict[str, Any]] = [
+            {
+                "id": f"checkpoint:{index}:{local_index}",
+                "label": f"Base #{local_index + 1}",
+                "source": "checkpoint",
+                "prototype_index": prototype_index,
+                "event_count": 0,
+                "camera_count": 0,
+                "sample_count": 0,
+                "mean_squared_distance": None,
+                "active": True,
+                "learning_status": None,
+                "example_refs": [],
+            }
+            for local_index, prototype_index in enumerate(base_indices)
+        ]
+        feedback_event_count = 0
+        feedback_prototype_count = 0
+        learning_status = None
+        if feedback is not None:
+            state = feedback.learning_state(species)
+            if state.positive_events > 0:
+                feedback_event_count = int(state.positive_events)
+                feedback_prototype_count = int(state.prototype_count)
+                learning_status = str(state.status)
+                clusters.extend(
+                    feedback.cluster_details(species, checkpoint.feature_center)
+                )
         result.append(
             {
                 "id": -(index + 1),
@@ -81,10 +125,45 @@ def build_registry_catalog(checkpoint: Any, registry: Any) -> list[dict[str, Any
                 "conditions": {},
                 "can_register": False,
                 "display_name": species,
+                "feedback_event_count": feedback_event_count,
+                "feedback_prototype_count": feedback_prototype_count,
+                "learning_status": learning_status,
+                "clusters": clusters,
             }
         )
-    result.extend(entry.as_dict() for entry in registry.list())
+
+    for entry in registry.list():
+        data = entry.as_dict()
+        cluster_reader = getattr(registry, "cluster_details", None)
+        if callable(cluster_reader):
+            data.update(
+                {
+                    "feedback_event_count": 0,
+                    "feedback_prototype_count": 0,
+                    "learning_status": entry.status,
+                    "clusters": cluster_reader(entry.id),
+                }
+            )
+        result.append(data)
     return result
+
+
+def _catalog_with_feedback(checkpoint: Any, registry: Any) -> list[dict[str, Any]]:
+    from .feedback import HumanFeedbackStore, feedback_path_for_registry
+
+    feedback_path = feedback_path_for_registry(registry.path)
+    if not feedback_path.exists():
+        return build_registry_catalog(checkpoint, registry)
+    feedback = HumanFeedbackStore(
+        feedback_path,
+        model_fingerprint=checkpoint.fingerprint,
+        checkpoint_classes=checkpoint.classes,
+        threshold=checkpoint.threshold,
+    )
+    try:
+        return build_registry_catalog(checkpoint, registry, feedback=feedback)
+    finally:
+        feedback.close()
 
 
 def dinov3_registry_router() -> APIRouter:
@@ -107,7 +186,7 @@ def dinov3_registry_router() -> APIRouter:
         checkpoint = load_checkpoint_for_model(classification_model_path)
         return _run_with_registry(
             classification_model_path,
-            lambda registry: build_registry_catalog(checkpoint, registry),
+            lambda registry: _catalog_with_feedback(checkpoint, registry),
         )
 
     @router.get("/registry/{registration_id}", response_model=DinoV3RegistryEntryResponse)

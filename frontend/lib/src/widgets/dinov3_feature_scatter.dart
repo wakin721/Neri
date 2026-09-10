@@ -29,22 +29,9 @@ class DinoV3FeatureScatter extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  first,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-              ),
-              Expanded(
-                child: Text(
-                  second,
-                  textAlign: TextAlign.end,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
+          Text(
+            '局部特征投影',
+            style: TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant),
           ),
           const SizedBox(height: 6),
           Expanded(
@@ -58,6 +45,31 @@ class DinoV3FeatureScatter extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  first,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              Text(
+                '← 物种判别轴 →',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  second,
+                  textAlign: TextAlign.end,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [

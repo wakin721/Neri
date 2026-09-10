@@ -119,6 +119,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   final _scientificNameController = TextEditingController();
   List<DinoV3RegistryEntry> _entries = const [];
   DinoV3RegistryEntry? _selected;
+  DinoV3RegistryCluster? _selectedCluster;
+  List<Uint8List> _clusterExampleBytes = const <Uint8List>[];
   bool _loading = false;
   bool _saving = false;
   bool _examplesLoading = false;
@@ -132,7 +134,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     super.initState();
     _entries = widget.initialEntries ?? const [];
     if (_entries.isNotEmpty) _select(_entries.first, notify: false);
-    if (widget.initialEntries == null) unawaited(_load());
+    unawaited(_load(preferredId: _selected?.id));
   }
 
   @override
@@ -145,6 +147,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   void _select(DinoV3RegistryEntry entry, {bool notify = true}) {
     void update() {
       _selected = entry;
+      _selectedCluster = null;
+      _clusterExampleBytes = const <Uint8List>[];
       _commonNameController.text = entry.commonName;
       _scientificNameController.text = entry.scientificName;
       _events = const <DinoV3RegistryEvent>[];
@@ -165,21 +169,47 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  Future<void> _load({int? preferredId}) async {
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
-      final entries = await widget.apiClient.fetchDinoV3RegistryCatalog(
+      final fetched = await widget.apiClient.fetchDinoV3RegistryCatalog(
         widget.modelPath,
       );
       if (!mounted) return;
+      // A real DINOv3 catalog always contains checkpoint classes. Keeping the
+      // supplied snapshot only when a legacy/mock backend returns [] preserves
+      // backward compatibility while every normal dialog open still refreshes.
+      final entries = fetched.isEmpty && _entries.isNotEmpty
+          ? _entries
+          : fetched;
+      final wantedId = preferredId ?? _selected?.id;
       setState(() {
         _entries = entries;
         _loading = false;
       });
-      if (entries.isNotEmpty) _select(entries.first);
+      if (entries.isEmpty) {
+        setState(() {
+          _selected = null;
+          _selectedCluster = null;
+          _clusterExampleBytes = const <Uint8List>[];
+        });
+        return;
+      }
+      DinoV3RegistryEntry selected = entries.first;
+      if (wantedId != null) {
+        for (final entry in entries) {
+          if (entry.id == wantedId) {
+            selected = entry;
+            break;
+          }
+        }
+      }
+      _select(selected);
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -187,19 +217,6 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         _error = '读取注册状态失败：$error';
       });
     }
-  }
-
-  void _replaceEntry(DinoV3RegistryEntry entry) {
-    setState(() {
-      _entries = [
-        for (final current in _entries)
-          if (current.id == entry.id) entry else current,
-      ];
-      _selected = entry;
-      _commonNameController.text = entry.commonName;
-      _scientificNameController.text = entry.scientificName;
-      _error = null;
-    });
   }
 
   Future<void> _saveIdentity() async {
@@ -218,7 +235,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         commonName: commonName,
         scientificName: _scientificNameController.text.trim(),
       );
-      if (mounted) _replaceEntry(updated);
+      if (mounted) await _load(preferredId: updated.id);
     } catch (error) {
       if (mounted) setState(() => _error = '保存物种名称失败：$error');
     } finally {
@@ -235,12 +252,78 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         classificationModelPath: widget.modelPath,
         registrationId: selected.id,
       );
-      if (mounted) _replaceEntry(updated);
+      if (mounted) await _load(preferredId: updated.id);
     } catch (error) {
       if (mounted) setState(() => _error = '注册新物种失败：$error');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _loadClusterExamples(
+    DinoV3RegistryEntry entry,
+    DinoV3RegistryCluster cluster,
+  ) async {
+    final requestId = ++_examplesRequestId;
+    if (mounted &&
+        _selected?.id == entry.id &&
+        _selectedCluster?.id == cluster.id) {
+      setState(() {
+        _examplesLoading = true;
+        _clusterExampleBytes = const <Uint8List>[];
+      });
+    }
+    final loaded = <Uint8List>[];
+    for (final ref in cluster.exampleRefs.take(3)) {
+      try {
+        Uint8List? bytes;
+        if (ref.kind == 'registry' &&
+            ref.registrationId != null &&
+            ref.eventId != null) {
+          bytes = await widget.apiClient.fetchDinoV3RegistryExample(
+            widget.modelPath,
+            ref.registrationId!,
+            ref.eventId!,
+          );
+        } else if (ref.kind == 'observation' &&
+            (ref.observationId?.isNotEmpty ?? false)) {
+          bytes = await widget.apiClient.fetchDinoV3ObservationExample(
+            widget.modelPath,
+            ref.observationId!,
+          );
+        }
+        if (bytes != null && bytes.isNotEmpty) loaded.add(bytes);
+      } catch (_) {
+        // A deleted local source file must not hide other cluster examples.
+      }
+    }
+    if (!mounted ||
+        requestId != _examplesRequestId ||
+        _selected?.id != entry.id ||
+        _selectedCluster?.id != cluster.id) {
+      return;
+    }
+    setState(() {
+      _clusterExampleBytes = loaded;
+      _examplesLoading = false;
+    });
+  }
+
+  void _selectCluster(
+    DinoV3RegistryEntry entry,
+    DinoV3RegistryCluster cluster,
+  ) {
+    setState(() {
+      _selected = entry;
+      _selectedCluster = cluster;
+      _clusterExampleBytes = const <Uint8List>[];
+      _events = const <DinoV3RegistryEvent>[];
+      _exampleBytes = const <int, Uint8List>{};
+      _commonNameController.text = entry.commonName;
+      _scientificNameController.text = entry.scientificName;
+      _error = null;
+    });
+    unawaited(_loadClusterExamples(entry, cluster));
   }
 
   Future<void> _loadExamples(DinoV3RegistryEntry entry) async {
@@ -362,6 +445,56 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   Widget _buildExampleGallery() {
+    final selectedCluster = _selectedCluster;
+    if (selectedCluster != null) {
+      if (_examplesLoading) {
+        return const SizedBox(
+          height: 104,
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        );
+      }
+      if (_clusterExampleBytes.isEmpty) {
+        final label = selectedCluster.isCheckpoint
+            ? 'Checkpoint prototype 不包含原始训练图片'
+            : '该 Cluster 暂无可用裁切例图';
+        return SizedBox(
+          height: 72,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        );
+      }
+      return SizedBox(
+        height: 112,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: _clusterExampleBytes.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          itemBuilder: (context, index) {
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: SizedBox(
+                width: 112,
+                height: 112,
+                child: Image.memory(
+                  _clusterExampleBytes[index],
+                  key: ValueKey('dinov3-cluster-example-$index'),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) =>
+                      const Center(child: Icon(Icons.broken_image_outlined)),
+                ),
+              ),
+            );
+          },
+        ),
+      );
+    }
     if (_selected?.isCheckpoint == true) {
       return SizedBox(
         height: 72,
@@ -496,9 +629,35 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                 if (entry.isCheckpoint) ...[
                   const SizedBox(height: 8),
                   Text(
-                    '来自不可变 DINOv3 Checkpoint · ${entry.prototypeCount} 个 prototype。'
+                    '来自不可变 DINOv3 Checkpoint · ${entry.prototypeCount} 个 base prototype。'
                     '分类头保存特征中心而非原始训练影像。',
                   ),
+                  if (entry.hasFeedbackLearning)
+                    Text(
+                      '人工纠正学习：${entry.feedbackEventCount} 个事件 · '
+                      '${entry.feedbackPrototypeCount} 个 learned prototype · '
+                      '${entry.learningStatus ?? 'collecting'}',
+                    ),
+                ],
+                if (_selectedCluster != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _selectedCluster!.label,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    '来源 ${_selectedCluster!.source} · '
+                    '${_selectedCluster!.eventCount} 事件 · '
+                    '${_selectedCluster!.cameraCount} 相机 · '
+                    '${_selectedCluster!.sampleCount} 样本',
+                  ),
+                  if (_selectedCluster!.learningStatus != null)
+                    Text('学习状态：${_selectedCluster!.learningStatus}'),
+                  if (_selectedCluster!.meanSquaredDistance != null)
+                    Text(
+                      'Cluster 内平均距离² '
+                      '${_selectedCluster!.meanSquaredDistance!.toStringAsFixed(4)}',
+                    ),
                 ],
                 const SizedBox(height: 16),
                 TextField(
@@ -626,15 +785,57 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                                   itemCount: _entries.length,
                                   itemBuilder: (context, index) {
                                     final entry = _entries[index];
-                                    return ListTile(
-                                      selected: selected?.id == entry.id,
-                                      title: Text(entry.displayName),
-                                      subtitle: Text(
-                                        entry.isCheckpoint
-                                            ? '分类头基础物种 · ${entry.prototypeCount} prototypes'
-                                            : '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机',
+                                    final subtitle = entry.isCheckpoint
+                                        ? entry.hasFeedbackLearning
+                                              ? '分类头基础物种 · ${entry.prototypeCount} base · '
+                                                    '${entry.feedbackPrototypeCount} learned · '
+                                                    '${entry.learningStatus ?? 'collecting'}'
+                                              : '分类头基础物种 · ${entry.prototypeCount} base prototypes'
+                                        : '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机';
+                                    return ExpansionTile(
+                                      key: PageStorageKey<String>(
+                                        'dinov3-registry-species-${entry.id}',
                                       ),
-                                      onTap: () => _select(entry),
+                                      initiallyExpanded:
+                                          entry.clusters.isNotEmpty &&
+                                          (!entry.isCheckpoint ||
+                                              entry.hasFeedbackLearning),
+                                      title: Text(entry.displayName),
+                                      subtitle: Text(subtitle),
+                                      onExpansionChanged: (expanded) {
+                                        if (expanded) _select(entry);
+                                      },
+                                      children: [
+                                        for (final cluster in entry.clusters)
+                                          ListTile(
+                                            dense: true,
+                                            contentPadding:
+                                                const EdgeInsets.only(
+                                                  left: 28,
+                                                  right: 8,
+                                                ),
+                                            selected:
+                                                selected?.id == entry.id &&
+                                                _selectedCluster?.id ==
+                                                    cluster.id,
+                                            leading: Icon(
+                                              cluster.isCheckpoint
+                                                  ? Icons.lock_outline_rounded
+                                                  : Icons.scatter_plot_rounded,
+                                              size: 18,
+                                            ),
+                                            title: Text(cluster.label),
+                                            subtitle: Text(
+                                              cluster.isCheckpoint
+                                                  ? 'checkpoint prototype'
+                                                  : '${cluster.source} · ${cluster.eventCount} 事件 · '
+                                                        '${cluster.cameraCount} 相机'
+                                                        '${cluster.learningStatus == null ? '' : ' · ${cluster.learningStatus}'}',
+                                            ),
+                                            onTap: () =>
+                                                _selectCluster(entry, cluster),
+                                          ),
+                                      ],
                                     );
                                   },
                                 ),

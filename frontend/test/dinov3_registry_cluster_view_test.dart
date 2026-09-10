@@ -202,31 +202,36 @@ void main() {
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
         if (request.url.path == '/api/dinov3/registry/catalog') {
-          return http.Response(jsonEncode([_entryJson(
-            id: -1,
-            status: 'checkpoint',
-            name: '盘羊',
-            feedbackEventCount: 4,
-            feedbackPrototypeCount: 1,
-            learningStatus: 'provisional',
-            clusters: [
-              _clusterJson(
-                id: 'checkpoint:-1:0',
-                label: 'Base #1',
-                source: 'checkpoint',
-                prototypeIndex: 0,
+          return http.Response(
+            jsonEncode([
+              _entryJson(
+                id: -1,
+                status: 'checkpoint',
+                name: '盘羊',
+                feedbackEventCount: 4,
+                feedbackPrototypeCount: 1,
+                learningStatus: 'provisional',
+                clusters: [
+                  _clusterJson(
+                    id: 'checkpoint:-1:0',
+                    label: 'Base #1',
+                    source: 'checkpoint',
+                    prototypeIndex: 0,
+                  ),
+                  _clusterJson(
+                    id: 'feedback:盘羊:0',
+                    label: 'Feedback Cluster #1',
+                    source: 'feedback',
+                    prototypeIndex: 0,
+                    eventCount: 4,
+                    cameraCount: 2,
+                    meanSquaredDistance: 0.02,
+                  ),
+                ],
               ),
-              _clusterJson(
-                id: 'feedback:盘羊:0',
-                label: 'Feedback Cluster #1',
-                source: 'feedback',
-                prototypeIndex: 0,
-                eventCount: 4,
-                cameraCount: 2,
-                meanSquaredDistance: 0.02,
-              ),
-            ],
-          )]), 200);
+            ]),
+            200,
+          );
         }
         return http.Response('[]', 200);
       }),

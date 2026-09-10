@@ -49,6 +49,27 @@ class ModelClassInfo(BaseModel):
     display_name: str
 
 
+class DinoV3ClusterExampleRefResponse(BaseModel):
+    kind: Literal["registry", "observation"]
+    registration_id: int | None = None
+    event_id: int | None = None
+    observation_id: str | None = None
+
+
+class DinoV3RegistryClusterResponse(BaseModel):
+    id: str
+    label: str
+    source: str
+    prototype_index: int
+    event_count: int = 0
+    camera_count: int = 0
+    sample_count: int = 0
+    mean_squared_distance: float | None = None
+    active: bool = True
+    learning_status: str | None = None
+    example_refs: list[DinoV3ClusterExampleRefResponse] = Field(default_factory=list)
+
+
 class DinoV3RegistryEntryResponse(BaseModel):
     id: int
     candidate_number: int
@@ -63,6 +84,10 @@ class DinoV3RegistryEntryResponse(BaseModel):
     conditions: dict[str, bool] = Field(default_factory=dict)
     can_register: bool
     display_name: str
+    feedback_event_count: int = 0
+    feedback_prototype_count: int = 0
+    learning_status: str | None = None
+    clusters: list[DinoV3RegistryClusterResponse] = Field(default_factory=list)
 
 
 class DinoV3RegistryEventResponse(BaseModel):

@@ -1,3 +1,78 @@
+class DinoV3ClusterExampleRef {
+  const DinoV3ClusterExampleRef({
+    required this.kind,
+    this.registrationId,
+    this.eventId,
+    this.observationId,
+  });
+
+  factory DinoV3ClusterExampleRef.fromJson(Map<String, dynamic> json) {
+    return DinoV3ClusterExampleRef(
+      kind: json['kind']?.toString() ?? '',
+      registrationId: (json['registration_id'] as num?)?.toInt(),
+      eventId: (json['event_id'] as num?)?.toInt(),
+      observationId: json['observation_id']?.toString(),
+    );
+  }
+
+  final String kind;
+  final int? registrationId;
+  final int? eventId;
+  final String? observationId;
+}
+
+class DinoV3RegistryCluster {
+  const DinoV3RegistryCluster({
+    required this.id,
+    required this.label,
+    required this.source,
+    required this.prototypeIndex,
+    required this.eventCount,
+    required this.cameraCount,
+    required this.sampleCount,
+    required this.active,
+    required this.exampleRefs,
+    this.meanSquaredDistance,
+    this.learningStatus,
+  });
+
+  factory DinoV3RegistryCluster.fromJson(Map<String, dynamic> json) {
+    final rawRefs = json['example_refs'] as List<dynamic>? ?? const <dynamic>[];
+    return DinoV3RegistryCluster(
+      id: json['id']?.toString() ?? '',
+      label: json['label']?.toString() ?? 'Cluster',
+      source: json['source']?.toString() ?? '',
+      prototypeIndex: (json['prototype_index'] as num?)?.toInt() ?? 0,
+      eventCount: (json['event_count'] as num?)?.toInt() ?? 0,
+      cameraCount: (json['camera_count'] as num?)?.toInt() ?? 0,
+      sampleCount: (json['sample_count'] as num?)?.toInt() ?? 0,
+      meanSquaredDistance: (json['mean_squared_distance'] as num?)?.toDouble(),
+      active: json['active'] != false,
+      learningStatus: json['learning_status']?.toString(),
+      exampleRefs: rawRefs
+          .whereType<Map<String, dynamic>>()
+          .map(DinoV3ClusterExampleRef.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  final String id;
+  final String label;
+  final String source;
+  final int prototypeIndex;
+  final int eventCount;
+  final int cameraCount;
+  final int sampleCount;
+  final double? meanSquaredDistance;
+  final bool active;
+  final String? learningStatus;
+  final List<DinoV3ClusterExampleRef> exampleRefs;
+
+  bool get isCheckpoint => source == 'checkpoint';
+  bool get isFeedback => source == 'feedback' || source == 'feedback_evidence';
+  bool get isRegistry => source == 'registry';
+}
+
 class DinoV3RegistryEntry {
   const DinoV3RegistryEntry({
     required this.id,
@@ -13,11 +88,16 @@ class DinoV3RegistryEntry {
     required this.embeddingConsistency,
     required this.conditions,
     required this.canRegister,
+    this.feedbackEventCount = 0,
+    this.feedbackPrototypeCount = 0,
+    this.learningStatus,
+    this.clusters = const <DinoV3RegistryCluster>[],
   });
 
   factory DinoV3RegistryEntry.fromJson(Map<String, dynamic> json) {
     final rawConditions =
         json['conditions'] as Map<String, dynamic>? ?? const {};
+    final rawClusters = json['clusters'] as List<dynamic>? ?? const <dynamic>[];
     return DinoV3RegistryEntry(
       id: (json['id'] as num?)?.toInt() ?? 0,
       candidateNumber: (json['candidate_number'] as num?)?.toInt() ?? 0,
@@ -35,6 +115,14 @@ class DinoV3RegistryEntry {
         (key, value) => MapEntry(key, value == true),
       ),
       canRegister: json['can_register'] == true,
+      feedbackEventCount: (json['feedback_event_count'] as num?)?.toInt() ?? 0,
+      feedbackPrototypeCount:
+          (json['feedback_prototype_count'] as num?)?.toInt() ?? 0,
+      learningStatus: json['learning_status']?.toString(),
+      clusters: rawClusters
+          .whereType<Map<String, dynamic>>()
+          .map(DinoV3RegistryCluster.fromJson)
+          .toList(growable: false),
     );
   }
 
@@ -51,9 +139,14 @@ class DinoV3RegistryEntry {
   final double embeddingConsistency;
   final Map<String, bool> conditions;
   final bool canRegister;
+  final int feedbackEventCount;
+  final int feedbackPrototypeCount;
+  final String? learningStatus;
+  final List<DinoV3RegistryCluster> clusters;
 
   bool get isCandidate => status == 'candidate';
   bool get isCheckpoint => status.toLowerCase() == 'checkpoint';
+  bool get hasFeedbackLearning => feedbackEventCount > 0;
 
   bool get canDelete => const <String>{
     'candidate',
