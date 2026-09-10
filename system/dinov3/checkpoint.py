@@ -199,9 +199,13 @@ def _validate_multi_prototype(
         )
 
     selection_k = saved.get("selection_k")
-    if isinstance(selection_k, bool) or selection_k != DINO_SELECTION_K:
+    if (
+        isinstance(selection_k, bool)
+        or not isinstance(selection_k, int)
+        or selection_k <= 0
+    ):
         raise CheckpointValidationError(
-            f"selection_k must be {DINO_SELECTION_K} for Multi-prototype checkpoints"
+            "selection_k must be a positive integer for Multi-prototype checkpoints"
         )
     decision = str(saved.get("decision", ""))
     if decision != DINO_DECISION:

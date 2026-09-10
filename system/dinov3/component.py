@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -337,12 +338,23 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
             return False, "DINOv3 classifier 元数据缺失。"
         if classifier_meta.get("filename") != DINO_CLASSIFIER_FILENAME:
             return False, "DINOv3 classifier 文件名不匹配。"
-        if classifier_meta.get("sha256") != DINO_CLASSIFIER_SHA256:
-            return False, "DINOv3 classifier 元数据不匹配。"
+        classifier_sha256 = classifier_meta.get("sha256")
+        if (
+            not isinstance(classifier_sha256, str)
+            or len(classifier_sha256) != 64
+            or any(ch not in "0123456789abcdefABCDEF" for ch in classifier_sha256)
+        ):
+            return False, "DINOv3 classifier SHA-256 元数据无效。"
+        classifier_sha256 = classifier_sha256.lower()
         if classifier_meta.get("head_type") != "multi_prototype":
             return False, "DINOv3 classifier head_type 不匹配。"
-        if classifier_meta.get("selection_k") != 3:
-            return False, "DINOv3 classifier selection_k 不匹配。"
+        selection_k = classifier_meta.get("selection_k")
+        if (
+            isinstance(selection_k, bool)
+            or not isinstance(selection_k, int)
+            or selection_k <= 0
+        ):
+            return False, "DINOv3 classifier selection_k 必须是正整数。"
         if classifier_meta.get("manifest") != DINO_MODEL_MANIFEST_FILENAME:
             return False, "DINOv3 classifier manifest 不匹配。"
         _validate_file_inventory(paths, install_manifest)
@@ -355,20 +367,28 @@ def _component_health(paths: DinoV3ComponentPaths) -> tuple[bool, str]:
             return False, "DINOv3 模型 feature_dim 不匹配。"
         if model_manifest.get("checkpoint") != DINO_CLASSIFIER_FILENAME:
             return False, "DINOv3 模型 checkpoint 不匹配。"
+        manifest_selection_k = model_manifest.get("selection_k")
+        if manifest_selection_k not in (None, selection_k):
+            return False, "DINOv3 模型 manifest selection_k 与 install.json 不匹配。"
     except ValueError as exc:
         return False, str(exc)
 
     if _sha256_file(paths.backbone).lower() != DINO_BACKBONE_SHA256:
         return False, "DINOv3 backbone SHA-256 校验失败。"
-    if _sha256_file(paths.classifier).lower() != DINO_CLASSIFIER_SHA256:
+    if _sha256_file(paths.classifier).lower() != classifier_sha256:
         return False, "DINOv3 classifier SHA-256 校验失败。"
+    if importlib.util.find_spec("torch") is None:
+        return True, "DINOv3 组件文件完整；PyTorch 未安装，推理暂不可用。"
     try:
         checkpoint = load_checkpoint(paths.classifier)
     except (CheckpointValidationError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         return False, f"DINOv3 checkpoint 校验失败: {exc}"
-    if checkpoint.head_type != "multi_prototype" or checkpoint.selection_k != 3:
-        return False, "DINOv3 checkpoint 必须使用 K=3 Multi-prototype。"
-    return True, "DINOv3 ViT-B/16 Multi-prototype 已安装。"
+    if (
+        checkpoint.head_type != "multi_prototype"
+        or checkpoint.selection_k != selection_k
+    ):
+        return False, "DINOv3 checkpoint 与 install.json Multi-prototype 元数据不匹配。"
+    return True, f"DINOv3 ViT-B/16 Multi-prototype K={selection_k} 已安装。"
 
 
 def dinov3_component_status(*, root: Path | None = None) -> dict[str, object]:
@@ -376,10 +396,33 @@ def dinov3_component_status(*, root: Path | None = None) -> dict[str, object]:
     installed = paths.root.is_dir()
     healthy = False
     message = "DINOv3 未安装。"
+    classifier_filename: str | None = None
+    classifier_fingerprint: str | None = None
+    classifier_head_type: str | None = None
+    selection_k: int | None = None
     if installed:
         try:
             healthy, message = _component_health(paths)
-        except OSError as exc:
+            if healthy:
+                install_manifest = _read_json_object(paths.install_manifest)
+                classifier_meta = install_manifest.get("classifier")
+                if isinstance(classifier_meta, dict):
+                    raw_filename = classifier_meta.get("filename")
+                    if isinstance(raw_filename, str) and raw_filename:
+                        classifier_filename = raw_filename
+                    raw_head_type = classifier_meta.get("head_type")
+                    if isinstance(raw_head_type, str) and raw_head_type:
+                        classifier_head_type = raw_head_type
+                    raw_selection_k = classifier_meta.get("selection_k")
+                    if (
+                        isinstance(raw_selection_k, int)
+                        and not isinstance(raw_selection_k, bool)
+                        and raw_selection_k > 0
+                    ):
+                        selection_k = raw_selection_k
+                    classifier_fingerprint = _sha256_file(paths.classifier).lower()
+        except (OSError, ValueError) as exc:
+            healthy = False
             message = f"DINOv3 健康检查失败: {exc}"
     return {
         "installed": installed,
@@ -387,6 +430,10 @@ def dinov3_component_status(*, root: Path | None = None) -> dict[str, object]:
         "architecture": DINO_ARCHITECTURE,
         "component_version": DINO_COMPONENT_VERSION,
         "source_commit": DINO_SOURCE_COMMIT,
+        "classifier_filename": classifier_filename,
+        "classifier_fingerprint": classifier_fingerprint,
+        "classifier_head_type": classifier_head_type,
+        "selection_k": selection_k,
         "message": message,
     }
 
