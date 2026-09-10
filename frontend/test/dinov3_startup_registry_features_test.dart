@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +41,12 @@ DinoV3RegistryEntry registryEntry({
 }
 
 void main() {
+  test('NeriApp wires the persistent DINOv3 startup checker', () {
+    final source = File('lib/main.dart').readAsStringSync();
+    expect(source, contains('DinoV3StartupCheck()'));
+    expect(source, contains('dinoV3StartupCheck: _dinoV3StartupCheck'));
+  });
+
   test('startup check runs once per backend generation', () async {
     var statusRequests = 0;
     final messages = <String>[];
@@ -59,58 +66,51 @@ void main() {
     addTearDown(client.close);
     final check = DinoV3StartupCheck();
 
-    await check.run(
-      generation: 1,
-      apiClient: client,
-      onMessage: messages.add,
-    );
-    await check.run(
-      generation: 1,
-      apiClient: client,
-      onMessage: messages.add,
-    );
+    await check.run(generation: 1, apiClient: client, onMessage: messages.add);
+    await check.run(generation: 1, apiClient: client, onMessage: messages.add);
 
     expect(statusRequests, 1);
     expect(messages, <String>['DINOv3 尚未安装，可进入设置安装。']);
 
-    await check.run(
-      generation: 2,
-      apiClient: client,
-      onMessage: messages.add,
-    );
+    await check.run(generation: 2, apiClient: client, onMessage: messages.add);
     expect(statusRequests, 2);
     expect(messages.length, 2);
   });
 
-  test('startup status maps unhealthy and PyTorch states without healthy noise', () {
-    DinoV3ComponentStatus status(Map<String, dynamic> values) {
-      return DinoV3ComponentStatus.fromJson(<String, dynamic>{
-        'installed': true,
-        'healthy': false,
-        'message': '',
-        ...values,
-      });
-    }
+  test(
+    'startup status maps unhealthy and PyTorch states without healthy noise',
+    () {
+      DinoV3ComponentStatus status(Map<String, dynamic> values) {
+        return DinoV3ComponentStatus.fromJson(<String, dynamic>{
+          'installed': true,
+          'healthy': false,
+          'message': '',
+          ...values,
+        });
+      }
 
-    expect(
-      dinoV3StartupStatusMessage(
-        status(<String, dynamic>{'message': "No module named 'torch'"}),
-      ),
-      'DINOv3 已安装，但 PyTorch 未安装，当前不可推理',
-    );
-    expect(
-      dinoV3StartupStatusMessage(
-        status(<String, dynamic>{'message': 'checkpoint fingerprint mismatch'}),
-      ),
-      'DINOv3 安装异常：checkpoint fingerprint mismatch',
-    );
-    expect(
-      dinoV3StartupStatusMessage(
-        status(<String, dynamic>{'healthy': true, 'message': 'ok'}),
-      ),
-      isNull,
-    );
-  });
+      expect(
+        dinoV3StartupStatusMessage(
+          status(<String, dynamic>{'message': "No module named 'torch'"}),
+        ),
+        'DINOv3 已安装，但 PyTorch 未安装，当前不可推理',
+      );
+      expect(
+        dinoV3StartupStatusMessage(
+          status(<String, dynamic>{
+            'message': 'checkpoint fingerprint mismatch',
+          }),
+        ),
+        'DINOv3 安装异常：checkpoint fingerprint mismatch',
+      );
+      expect(
+        dinoV3StartupStatusMessage(
+          status(<String, dynamic>{'healthy': true, 'message': 'ok'}),
+        ),
+        isNull,
+      );
+    },
+  );
 
   testWidgets('registry dialog shows cropped examples and can delete a species', (
     tester,
@@ -177,7 +177,9 @@ void main() {
     expect(find.text('暂无候选或已注册物种'), findsOneWidget);
   });
 
-  testWidgets('checkpoint categories do not expose registry deletion', (tester) async {
+  testWidgets('checkpoint categories do not expose registry deletion', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final client = NeriApiClient(
@@ -235,13 +237,7 @@ void main() {
       ),
     ];
 
-    expect(
-      dinoV3FeedbackPanelTitle(boxes[0], boxes),
-      '#1 红腹锦鸡 · 检测框校验',
-    );
-    expect(
-      dinoV3FeedbackPanelTitle(boxes[1], boxes),
-      '#2 豹猫 · 检测框校验',
-    );
+    expect(dinoV3FeedbackPanelTitle(boxes[0], boxes), '#1 红腹锦鸡 · 检测框校验');
+    expect(dinoV3FeedbackPanelTitle(boxes[1], boxes), '#2 豹猫 · 检测框校验');
   });
 }

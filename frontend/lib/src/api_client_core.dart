@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -99,6 +100,35 @@ class NeriApiClient {
         .toList();
   }
 
+  Future<Uint8List> fetchDinoV3RegistryExample(
+    String classificationModelPath,
+    int registrationId,
+    int eventId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/registry/$registrationId/events/$eventId/example',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return response.bodyBytes;
+  }
+
+  Future<void> deleteDinoV3RegistryEntry(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.delete(uri);
+    _ensureSuccess(response);
+  }
+
   Future<DinoV3RegistryEntry> updateDinoV3RegistryIdentity({
     required String classificationModelPath,
     required int registrationId,
@@ -181,6 +211,7 @@ class NeriApiClient {
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
+
   Future<PrivacyStatus> fetchPrivacyStatus() async {
     final response = await _httpClient
         .get(_uri('/api/privacy'))

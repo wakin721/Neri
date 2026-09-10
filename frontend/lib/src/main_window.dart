@@ -13,6 +13,7 @@ import 'api_client.dart';
 import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
+import 'dinov3_startup_check.dart';
 import 'local_maintenance_status.dart';
 import 'models/close_behavior.dart';
 import 'models/job.dart';
@@ -47,11 +48,13 @@ class MainWindow extends StatefulWidget {
   const MainWindow({
     required this.apiClient,
     required this.themeNotifier,
+    this.dinoV3StartupCheck,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
+  final DinoV3StartupCheck? dinoV3StartupCheck;
 
   @override
   State<MainWindow> createState() => _MainWindowState();
@@ -111,6 +114,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final Set<int> _expectedBackendExitPids = <int>{};
   final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   final _appUpdater = AppUpdater();
+  late final DinoV3StartupCheck _dinoV3StartupCheck =
+      widget.dinoV3StartupCheck ?? DinoV3StartupCheck();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -126,6 +131,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _previewRefreshRequestId = 0;
   int _previewContentVersion = 0;
   int _modelSelectionRevision = 0;
+  int _backendStartupGeneration = 0;
   int _closeFlowId = 0;
   int _closeBehaviorRevision = 0;
   int _lastCloseActionRevision = 0;
@@ -712,6 +718,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         return;
       }
       _backendReady = true;
+      _backendStartupGeneration += 1;
       final privacyReady = await _loadPrivacyStatus();
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       if (!privacyReady) {
@@ -814,6 +821,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void> _refreshInitialPageData() async {
     await _refresh(includeJobResults: true, finishLoading: false);
     if (!mounted || _closeFlowBlocksBackendStartup) return;
+    unawaited(
+      _dinoV3StartupCheck.run(
+        generation: _backendStartupGeneration,
+        apiClient: widget.apiClient,
+        onMessage: _showSnackBar,
+      ),
+    );
     _scheduleStartupUpdateCheck();
     if (_inputController.text.trim().isEmpty) {
       _stopGlobalLoading();
@@ -2287,8 +2301,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   ModelInfo? _selectedClassificationModelInfo() {
     final selected = _selectedClassificationModelPath?.trim();
     if (selected == null || selected.isEmpty) return null;
-    for (final model in _settings?.availableClassificationModels ??
-        const <ModelInfo>[]) {
+    for (final model
+        in _settings?.availableClassificationModels ?? const <ModelInfo>[]) {
       if (model.path == selected || model.checkpointPath == selected) {
         return model;
       }
@@ -3348,7 +3362,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       videoMode: _effectiveVideoMode(),
       onVideoModeChanged: (value) {
         final classification = _selectedClassificationModelInfo();
-        final normalized = classification?.supportsVideoAll == false &&
+        final normalized =
+            classification?.supportsVideoAll == false &&
                 value == videoProcessingModeAll
             ? videoProcessingModeFast
             : value;
@@ -3472,11 +3487,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final hasDinoFilter = _dinov3ValidationPaths.isNotEmpty;
     final items = hasDinoFilter
         ? allItems
-            .where(
-              (item) =>
-                  _dinov3ValidationPaths.contains(_validationPathKey(item.path)),
-            )
-            .toList()
+              .where(
+                (item) => _dinov3ValidationPaths.contains(
+                  _validationPathKey(item.path),
+                ),
+              )
+              .toList()
         : allItems;
     final settings = _settingsOrEmpty();
     final quickMarkSpecies = _stringListSetting(

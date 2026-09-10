@@ -139,6 +139,46 @@ String dinoValidationLearningSkipSummary(
   return 'DINOv3 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
 }
 
+String dinoV3FeedbackPanelTitle(
+  DetectionBox box,
+  List<DetectionBox> visibleBoxes,
+) {
+  var numberedBoxes = visibleBoxes;
+  if (box.frameIndex != null) {
+    final sameFrame = visibleBoxes
+        .where((candidate) => candidate.frameIndex == box.frameIndex)
+        .toList(growable: false);
+    if (sameFrame.isNotEmpty) numberedBoxes = sameFrame;
+  } else if (box.timestamp != null) {
+    final sameTimestamp = visibleBoxes
+        .where(
+          (candidate) =>
+              candidate.timestamp != null &&
+              (candidate.timestamp! - box.timestamp!).abs() < 0.000001,
+        )
+        .toList(growable: false);
+    if (sameTimestamp.isNotEmpty) numberedBoxes = sameTimestamp;
+  }
+
+  final observationId = box.observationId?.trim() ?? '';
+  final boxIndex = numberedBoxes.indexWhere((candidate) {
+    final candidateObservationId = candidate.observationId?.trim() ?? '';
+    if (observationId.isNotEmpty && candidateObservationId == observationId) {
+      return true;
+    }
+    return identical(candidate, box);
+  });
+  final boxNumber = boxIndex >= 0 ? boxIndex + 1 : 1;
+  final predictedSpecies = box.predictedSpecies?.trim() ?? '';
+  final detectedSpecies = box.species.trim();
+  final species = predictedSpecies.isNotEmpty
+      ? predictedSpecies
+      : detectedSpecies.isNotEmpty
+      ? detectedSpecies
+      : 'Unknown';
+  return '#$boxNumber $species · 检测框校验';
+}
+
 const double _validationButtonHeight = 40;
 const _validationImageTypes = {
   'png',
@@ -623,7 +663,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
               Expanded(child: _buildImagePanel(selectedItem, visibleBoxes)),
               if (selectedDinoBox != null) ...[
                 const SizedBox(height: 10),
-                _buildDinoFeedbackPanel(selectedDinoBox),
+                _buildDinoFeedbackPanel(selectedDinoBox, visibleBoxes),
               ],
               const SizedBox(height: 10),
               _buildSummaryPanel(selectedItem, visibleBoxes),
@@ -653,7 +693,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         ),
         if (selectedDinoBox != null) ...[
           const SizedBox(height: 10),
-          _buildDinoFeedbackPanel(selectedDinoBox),
+          _buildDinoFeedbackPanel(selectedDinoBox, visibleBoxes),
         ],
         const SizedBox(height: 10),
         SizedBox(height: 260, child: _buildLeftLists(buckets, visibleRows)),
@@ -927,7 +967,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
   void _mergeDinoFeedbackItem(DetectionItem authoritative) {
     _currentBuckets();
-    final current = _bucketCacheItemByPath[authoritative.path] ??
+    final current =
+        _bucketCacheItemByPath[authoritative.path] ??
         widget.items.firstWhere(
           (candidate) => candidate.path == authoritative.path,
           orElse: () => authoritative,
@@ -965,7 +1006,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }) async {
     if (_marking || widget.items.isEmpty) return;
     final observationId = box.observationId?.trim() ?? '';
-    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    final classificationModelPath =
+        widget.classificationModelPath?.trim() ?? '';
     if (observationId.isEmpty || classificationModelPath.isEmpty) return;
     final item = widget.items.firstWhere(
       (candidate) => candidate.path == _selectedPath,
@@ -989,10 +1031,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final recordedOperationId = result.operationId.trim().isEmpty
           ? operationId
           : result.operationId.trim();
-      _recordMarkHistory(
-        <DetectionItem>[result.item],
-        feedbackOperationId: recordedOperationId,
-      );
+      _recordMarkHistory(<DetectionItem>[
+        result.item,
+      ], feedbackOperationId: recordedOperationId);
       unawaited(widget.onRefresh().catchError((_) {}));
       _showSnackBar('已记录检测框反馈');
     } catch (error) {
@@ -1025,30 +1066,41 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     if (!mounted || draft == null) return;
     final speciesName = draft.speciesName.trim();
     if (speciesName.isEmpty) return;
-    await _submitDinoBoxFeedback(
-      box,
-      'update',
-      speciesName: speciesName,
-    );
+    await _submitDinoBoxFeedback(box, 'update', speciesName: speciesName);
   }
 
-  Widget _buildDinoFeedbackPanel(DetectionBox box) {
-    const title = '检测框校验';
-    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+  Widget _buildDinoFeedbackPanel(
+    DetectionBox box,
+    List<DetectionBox> visibleBoxes,
+  ) {
+    final title = dinoV3FeedbackPanelTitle(box, visibleBoxes);
+    final classificationModelPath =
+        widget.classificationModelPath?.trim() ?? '';
     final observationId = box.observationId?.trim() ?? '';
     final canSubmit =
-        !_marking && classificationModelPath.isNotEmpty && observationId.isNotEmpty;
+        !_marking &&
+        classificationModelPath.isNotEmpty &&
+        observationId.isNotEmpty;
     return _ValidationPanel(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              child: DefaultTextStyle.merge(
                 style: const TextStyle(fontWeight: FontWeight.w600),
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        title.substring(0, title.length - '检测框校验'.length),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const Text('检测框校验'),
+                  ],
+                ),
               ),
             ),
             const SizedBox(width: 12),
@@ -2988,7 +3040,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   String? _newValidationFeedbackOperationId(String action) {
-    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    final classificationModelPath =
+        widget.classificationModelPath?.trim() ?? '';
     if (action == 'unverified' || classificationModelPath.isEmpty) return null;
     return _newFeedbackOperationId();
   }
@@ -3130,9 +3183,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
       final message = '已批量处理 ${items.length} 个文件';
       _showSnackBar(
-        learningSkipSummary.isEmpty
-            ? message
-            : '$message；$learningSkipSummary',
+        learningSkipSummary.isEmpty ? message : '$message；$learningSkipSummary',
       );
     } catch (error) {
       if (!mounted) return;
@@ -3392,9 +3443,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           ? '已撤回校验标记'
           : '已标记 ${updated.filename}';
       _showSnackBar(
-        learningSkipSummary.isEmpty
-            ? message
-            : '$message；$learningSkipSummary',
+        learningSkipSummary.isEmpty ? message : '$message；$learningSkipSummary',
       );
     } catch (error) {
       if (!mounted) return;

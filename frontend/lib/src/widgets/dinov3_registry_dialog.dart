@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -6,7 +7,8 @@ import '../api_client.dart';
 import '../models/dinov3_registry.dart';
 
 String dinov3RegistrySummary(List<DinoV3RegistryEntry> entries) {
-  int count(String status) => entries.where((entry) => entry.status == status).length;
+  int count(String status) =>
+      entries.where((entry) => entry.status == status).length;
   return 'Candidate ${count('candidate')} · '
       'Provisional ${count('provisional')} · '
       'Confirmed ${count('confirmed')} · '
@@ -53,7 +55,9 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
 
   Future<void> _refresh() async {
     try {
-      final entries = await widget.apiClient.fetchDinoV3Registry(widget.modelPath);
+      final entries = await widget.apiClient.fetchDinoV3Registry(
+        widget.modelPath,
+      );
       if (!mounted) return;
       setState(() {
         _entries = entries;
@@ -85,9 +89,7 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
       contentPadding: EdgeInsets.zero,
       leading: const Icon(Icons.hub_rounded),
       title: const Text('物种注册状态'),
-      subtitle: Text(
-        _loading ? '读取中…' : dinov3RegistrySummary(_entries),
-      ),
+      subtitle: Text(_loading ? '读取中…' : dinov3RegistrySummary(_entries)),
       trailing: const Icon(Icons.chevron_right_rounded),
       onTap: _open,
     );
@@ -119,6 +121,10 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   DinoV3RegistryEntry? _selected;
   bool _loading = false;
   bool _saving = false;
+  bool _examplesLoading = false;
+  int _examplesRequestId = 0;
+  List<DinoV3RegistryEvent> _events = const <DinoV3RegistryEvent>[];
+  Map<int, Uint8List> _exampleBytes = const <int, Uint8List>{};
   String? _error;
 
   @override
@@ -141,6 +147,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _selected = entry;
       _commonNameController.text = entry.commonName;
       _scientificNameController.text = entry.scientificName;
+      _events = const <DinoV3RegistryEvent>[];
+      _exampleBytes = const <int, Uint8List>{};
       _error = null;
     }
 
@@ -149,6 +157,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     } else {
       update();
     }
+    unawaited(_loadExamples(entry));
   }
 
   Future<void> _load() async {
@@ -157,7 +166,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      final entries = await widget.apiClient.fetchDinoV3Registry(widget.modelPath);
+      final entries = await widget.apiClient.fetchDinoV3Registry(
+        widget.modelPath,
+      );
       if (!mounted) return;
       setState(() {
         _entries = entries;
@@ -226,6 +237,168 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
+  Future<void> _loadExamples(DinoV3RegistryEntry entry) async {
+    final requestId = ++_examplesRequestId;
+    if (mounted && _selected?.id == entry.id) {
+      setState(() => _examplesLoading = true);
+    }
+    try {
+      final events = await widget.apiClient.fetchDinoV3RegistryEvents(
+        widget.modelPath,
+        entry.id,
+      );
+      final bytes = <int, Uint8List>{};
+      for (final event
+          in events
+              .where((event) => event.id > 0 && event.hasExample)
+              .take(3)) {
+        try {
+          final data = await widget.apiClient.fetchDinoV3RegistryExample(
+            widget.modelPath,
+            entry.id,
+            event.id,
+          );
+          if (data.isNotEmpty) bytes[event.id] = data;
+        } catch (_) {
+          // One stale source file must not hide the other representative crops.
+        }
+      }
+      if (!mounted ||
+          requestId != _examplesRequestId ||
+          _selected?.id != entry.id) {
+        return;
+      }
+      setState(() {
+        _events = events;
+        _exampleBytes = bytes;
+        _examplesLoading = false;
+      });
+    } catch (_) {
+      if (!mounted ||
+          requestId != _examplesRequestId ||
+          _selected?.id != entry.id) {
+        return;
+      }
+      setState(() {
+        _events = const <DinoV3RegistryEvent>[];
+        _exampleBytes = const <int, Uint8List>{};
+        _examplesLoading = false;
+      });
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    final selected = _selected;
+    if (selected == null || !selected.canDelete || _saving) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('删除“${selected.displayName}”？'),
+        content: const Text(
+          '将删除该物种的本地注册记录、事件关联和本地 prototypes。\n'
+          '此操作不可撤销。\n\n'
+          '历史 human-feedback / audit 数据将保留。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.apiClient.deleteDinoV3RegistryEntry(
+        widget.modelPath,
+        selected.id,
+      );
+      if (!mounted) return;
+      final remaining = _entries
+          .where((entry) => entry.id != selected.id)
+          .toList(growable: false);
+      ++_examplesRequestId;
+      setState(() {
+        _entries = remaining;
+        _selected = null;
+        _events = const <DinoV3RegistryEvent>[];
+        _exampleBytes = const <int, Uint8List>{};
+        _examplesLoading = false;
+        _commonNameController.clear();
+        _scientificNameController.clear();
+      });
+      if (remaining.isNotEmpty) _select(remaining.first);
+    } catch (error) {
+      if (mounted) setState(() => _error = '删除物种失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _buildExampleGallery() {
+    if (_examplesLoading) {
+      return const SizedBox(
+        height: 104,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    final examples = _events
+        .where(
+          (event) => event.hasExample && _exampleBytes.containsKey(event.id),
+        )
+        .take(3)
+        .toList(growable: false);
+    if (examples.isEmpty) {
+      return SizedBox(
+        height: 72,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            '暂无裁切例图',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      height: 112,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: examples.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (context, index) {
+          final event = examples[index];
+          final bytes = _exampleBytes[event.id]!;
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 112,
+              height: 112,
+              child: Image.memory(
+                bytes,
+                key: ValueKey('dinov3-registry-example-${event.id}'),
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const Center(child: Icon(Icons.broken_image_outlined)),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _continueValidation() async {
     final selected = _selected;
     if (selected == null) return;
@@ -283,7 +456,10 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(entry.displayName, style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  entry.displayName,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const SizedBox(height: 4),
                 Text('状态：${entry.status}'),
                 const SizedBox(height: 16),
@@ -321,10 +497,17 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                   'embedding consistency ${entry.embeddingConsistency.toStringAsFixed(3)}',
                 ),
                 const SizedBox(height: 14),
+                Text('裁切例图', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                _buildExampleGallery(),
+                const SizedBox(height: 14),
                 Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
                 _conditionRow('≥5 个独立事件', conditions['events'] == true),
                 _conditionRow('≥2 台相机', conditions['cameras'] == true),
-                _conditionRow('cluster purity ≥ threshold', conditions['cluster_purity'] == true),
+                _conditionRow(
+                  'cluster purity ≥ threshold',
+                  conditions['cluster_purity'] == true,
+                ),
                 _conditionRow(
                   'embedding consistency ≥ threshold',
                   conditions['embedding_consistency'] == true,
@@ -334,7 +517,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                   const SizedBox(height: 8),
                   Text(
                     _error!,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ],
               ],
@@ -342,9 +527,19 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
           ),
         ),
         const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 8,
           children: [
+            if (entry.canDelete) ...[
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _deleteSelected,
+                icon: const Icon(Icons.delete_outline_rounded),
+                label: const Text('删除物种'),
+              ),
+              const SizedBox(width: 8),
+            ],
             OutlinedButton.icon(
               onPressed: _saving ? null : _continueValidation,
               icon: const Icon(Icons.fact_check_outlined),
@@ -406,9 +601,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                   const VerticalDivider(width: 24),
                   Expanded(
                     child: selected == null
-                        ? Center(
-                            child: Text(_error ?? '选择一个候选物种查看详情'),
-                          )
+                        ? Center(child: Text(_error ?? '选择一个候选物种查看详情'))
                         : _detail(selected),
                   ),
                 ],

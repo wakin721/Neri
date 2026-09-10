@@ -10,6 +10,7 @@ import 'package:window_manager/window_manager.dart'; // 確保 import 放在所�
 import 'src/api_client.dart';
 import 'src/crash_reporter.dart';
 import 'src/crash_watchdog.dart';
+import 'src/dinov3_startup_check.dart';
 import 'src/models/theme_settings.dart';
 import 'src/main_window.dart';
 
@@ -255,6 +256,7 @@ class NeriApp extends StatefulWidget {
 class _NeriAppState extends State<NeriApp> {
   // MainWindow closes this client after shutting down the backend.
   final _apiClient = NeriApiClient();
+  final _dinoV3StartupCheck = DinoV3StartupCheck();
 
   @override
   Widget build(BuildContext context) {
@@ -291,6 +293,7 @@ class _NeriAppState extends State<NeriApp> {
               home: MainWindow(
                 apiClient: _apiClient,
                 themeNotifier: widget.themeNotifier,
+                dinoV3StartupCheck: _dinoV3StartupCheck,
               ),
             );
           },
