@@ -19,7 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply backend implementation
-        run: python tools/apply_dinov3_registry_explain_backend.py
+        shell: bash
+        run: |
+          sed -i 's/new_confirmed, count=2/new_confirmed, count=1/' tools/apply_dinov3_registry_explain_backend.py
+          sed -i 's/old_call, new_call, count=2/old_call, new_call, count=1/' tools/apply_dinov3_registry_explain_backend.py
+          python tools/apply_dinov3_registry_explain_backend.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
