@@ -79,6 +79,36 @@ class NeriApiClient extends core.NeriApiClient {
     );
   }
 
+  Future<void> mergeDinoV3RegistryCandidateIntoCheckpoint({
+    required String classificationModelPath,
+    required int registrationId,
+    required String checkpointSpecies,
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse(
+        '$baseUrl/api/dinov3/registry/$registrationId/merge-checkpoint',
+      ),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'checkpoint_species': checkpointSpecies,
+      }),
+    );
+    _ensureModelSyncSuccess(response);
+  }
+
+  Future<void> markDinoV3RegistryCandidateEmpty({
+    required String classificationModelPath,
+    required int registrationId,
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/dinov3/registry/$registrationId/empty'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'classification_model_path': classificationModelPath}),
+    );
+    _ensureModelSyncSuccess(response);
+  }
+
   void _ensureModelSyncSuccess(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return;
