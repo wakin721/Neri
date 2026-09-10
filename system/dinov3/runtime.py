@@ -129,34 +129,73 @@ def load_dinov3_model(
     created_feedback: HumanFeedbackStore | None = None
 
     try:
+        if rejection is not None:
+            from .dual_overlay import (
+                MultiDualHumanFeedbackStore,
+                MultiDualSpeciesRegistry,
+                multi_dual_feedback_path_for_registry,
+            )
+        else:
+            MultiDualHumanFeedbackStore = None
+            MultiDualSpeciesRegistry = None
+            multi_dual_feedback_path_for_registry = None
+
         if registry is None:
             root = (
                 Path(state_root).expanduser().resolve()
                 if state_root is not None
                 else default_dinov3_state_root()
             )
-            registry = SpeciesRegistry(
-                registry_path_for_fingerprint(root, checkpoint.fingerprint),
-                model_fingerprint=checkpoint.fingerprint,
-            )
+            registry_path = registry_path_for_fingerprint(root, checkpoint.fingerprint)
+            if rejection is None:
+                registry = SpeciesRegistry(
+                    registry_path,
+                    model_fingerprint=checkpoint.fingerprint,
+                )
+            else:
+                assert MultiDualSpeciesRegistry is not None
+                registry = MultiDualSpeciesRegistry(
+                    registry_path,
+                    model_fingerprint=checkpoint.fingerprint,
+                )
             created_registry = registry
-        elif registry.model_fingerprint != checkpoint.fingerprint:
-            raise ValueError("Registry model fingerprint does not match selected classifier")
+        else:
+            if registry.model_fingerprint != checkpoint.fingerprint:
+                raise ValueError("Registry model fingerprint does not match selected classifier")
+            if rejection is not None:
+                assert MultiDualSpeciesRegistry is not None
+                if not isinstance(registry, MultiDualSpeciesRegistry):
+                    raise TypeError(
+                        "Multi-dual runtime requires MultiDualSpeciesRegistry for an injected registry"
+                    )
 
         if feedback is None:
-            feedback = HumanFeedbackStore(
-                feedback_path_for_registry(registry.path),
-                model_fingerprint=checkpoint.fingerprint,
-                checkpoint_classes=checkpoint.classes,
-                threshold=(
-                    rejection.cosine_threshold
-                    if rejection is not None
-                    else checkpoint.threshold
-                ),
-            )
+            if rejection is None:
+                feedback = HumanFeedbackStore(
+                    feedback_path_for_registry(registry.path),
+                    model_fingerprint=checkpoint.fingerprint,
+                    checkpoint_classes=checkpoint.classes,
+                    threshold=checkpoint.threshold,
+                )
+            else:
+                assert MultiDualHumanFeedbackStore is not None
+                assert multi_dual_feedback_path_for_registry is not None
+                feedback = MultiDualHumanFeedbackStore(
+                    multi_dual_feedback_path_for_registry(registry.path, rejection),
+                    model_fingerprint=checkpoint.fingerprint,
+                    checkpoint_classes=checkpoint.classes,
+                    rejection=rejection,
+                )
             created_feedback = feedback
-        elif feedback.model_fingerprint != checkpoint.fingerprint:
-            raise ValueError("Feedback model fingerprint does not match selected classifier")
+        else:
+            if feedback.model_fingerprint != checkpoint.fingerprint:
+                raise ValueError("Feedback model fingerprint does not match selected classifier")
+            if rejection is not None:
+                assert MultiDualHumanFeedbackStore is not None
+                if not isinstance(feedback, MultiDualHumanFeedbackStore):
+                    raise TypeError(
+                        "Multi-dual runtime requires MultiDualHumanFeedbackStore for injected feedback"
+                    )
 
         factory = encoder_factory or DinoV3Encoder
         encoder = factory(
