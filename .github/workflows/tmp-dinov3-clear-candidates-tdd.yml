@@ -6,30 +6,50 @@ on:
       - feat/dinov3-startup-registry-ui
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  backend:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -q numpy pytest fastapi pydantic opencv-python-headless
-      - run: python -m pytest -q tests/test_dinov3_registry_clear_candidates.py
-
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-      - name: Resolve dependencies
+      - name: Install Python test dependencies
+        run: python -m pip install -q numpy pytest fastapi pydantic opencv-python-headless
+      - name: Apply production patch
+        run: python tools/apply_dinov3_clear_candidates.py
+      - name: Compile Python
+        run: python -m compileall -q system
+      - name: Run backend regression
+        run: python -m pytest -q tests/test_dinov3_registry_clear_candidates.py
+      - name: Resolve Flutter dependencies
         working-directory: frontend
         run: flutter pub get
-      - name: Run clear-candidates UI regression
+      - name: Format modified Flutter production files
+        run: dart format frontend/lib/src/api_client_core.dart frontend/lib/src/widgets/dinov3_registry_dialog.dart
+      - name: Run frontend regression
         working-directory: frontend
         run: flutter test test/dinov3_registry_clear_candidates_test.dart
+      - name: Analyze frontend
+        working-directory: frontend
+        run: flutter analyze
+      - name: Check diff
+        run: git diff --check
+      - name: Commit verified production changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add system/dinov3/registry.py system/dinov3/api.py frontend/lib/src/api_client_core.dart frontend/lib/src/widgets/dinov3_registry_dialog.dart
+          if git diff --cached --quiet; then
+            echo "No production changes to commit."
+          else
+            git commit -m "feat: clear unregistered DINOv3 candidates"
+            git push
+          fi
