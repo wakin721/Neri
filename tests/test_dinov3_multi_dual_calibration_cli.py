@@ -9,13 +9,16 @@ import numpy as np
 import torch
 
 
+ENCODER_SHA = "7" * 64
+
+
 def _unit(index: int, dim: int = 768) -> np.ndarray:
     value = np.zeros(dim, dtype=np.float32)
     value[index] = 1.0
     return value
 
 
-def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_path):
+def _write_fixture(tmp_path, *, source_fingerprint: str = "synthetic"):
     checkpoint = tmp_path / "head.pt"
     torch.save(
         {
@@ -30,6 +33,7 @@ def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_p
                 ]
             ),
             "data_fingerprint": "synthetic",
+            "encoder_sha256": ENCODER_SHA,
         },
         checkpoint,
     )
@@ -40,6 +44,16 @@ def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_p
                 "schema_version": 1,
                 "backend": "dinov3",
                 "checkpoint": "head.pt",
+                "feature_dim": 768,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "protocol.json").write_text(
+        json.dumps(
+            {
+                "data_fingerprint": source_fingerprint,
+                "encoder_sha256": ENCODER_SHA,
                 "feature_dim": 768,
             }
         ),
@@ -78,26 +92,35 @@ def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_p
         features=np.stack(features),
         image_ids=np.asarray([row["image_id"] for row in rows]),
     )
+    return checkpoint, manifest
 
-    output = tmp_path / "head.multi-dual.neri.json"
+
+def _command(tmp_path, checkpoint, manifest, output):
     script = Path(__file__).resolve().parents[1] / "scripts" / "calibrate_dinov3_multi_dual.py"
+    return [
+        sys.executable,
+        str(script),
+        "--checkpoint",
+        str(checkpoint),
+        "--manifest",
+        str(manifest),
+        "--source-run",
+        str(tmp_path),
+        "--out-manifest",
+        str(output),
+        "--max-known-frr",
+        "0.05",
+        "--grid-size",
+        "32",
+    ]
+
+
+def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_path):
+    checkpoint, manifest = _write_fixture(tmp_path)
+    output = tmp_path / "head.multi-dual.neri.json"
+
     subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--checkpoint",
-            str(checkpoint),
-            "--manifest",
-            str(manifest),
-            "--source-run",
-            str(tmp_path),
-            "--out-manifest",
-            str(output),
-            "--max-known-frr",
-            "0.05",
-            "--grid-size",
-            "32",
-        ],
+        _command(tmp_path, checkpoint, manifest, output),
         check=True,
         cwd=Path(__file__).resolve().parents[1],
     )
@@ -110,4 +133,25 @@ def test_calibration_cli_writes_derived_manifest_without_touching_original(tmp_p
     assert "squared_distance_threshold" in derived["rejection"]
     assert derived["rejection_calibration"]["known_validation_images"] == 8
     assert derived["rejection_calibration"]["proxy_unknown_images"] == 2
+    assert derived["rejection_calibration"]["source_data_fingerprint"] == "synthetic"
     assert derived["rejection_calibration"]["test_isolation"].startswith("test and unknown_test")
+
+
+def test_calibration_cli_rejects_source_run_from_different_dataset(tmp_path):
+    checkpoint, manifest = _write_fixture(
+        tmp_path,
+        source_fingerprint="different-dataset",
+    )
+    output = tmp_path / "head.multi-dual.neri.json"
+
+    result = subprocess.run(
+        _command(tmp_path, checkpoint, manifest, output),
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert "data_fingerprint" in result.stderr
+    assert not output.exists()
