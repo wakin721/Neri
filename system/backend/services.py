@@ -3166,7 +3166,7 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
                     request.action == "update"
                     and confirmed_species
                     and checkpoint_species is not None
-            and confirmed_species not in checkpoint_species
+                    and confirmed_species not in checkpoint_species
                 ):
                     _record_validation_registry_feedback(
                         request.classification_model_path,
