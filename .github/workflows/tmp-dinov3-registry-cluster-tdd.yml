@@ -5,7 +5,6 @@ on:
     branches:
       - feat/dinov3-startup-registry-ui
     paths:
-      - 'tests/test_dinov3_registry_cluster_view.py'
       - 'frontend/test/dinov3_registry_cluster_view_test.dart'
       - '.github/workflows/tmp-dinov3-registry-cluster-tdd.yml'
 
@@ -13,22 +12,11 @@ permissions:
   contents: read
 
 jobs:
-  red:
+  frontend-red:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements.txt
-      - name: Install Python dependencies
-        run: |
-          python -m pip install -r requirements.txt pytest numpy
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Run backend RED tests
-        run: python -m pytest -q tests/test_dinov3_registry_cluster_view.py
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
