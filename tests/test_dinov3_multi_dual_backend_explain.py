@@ -14,9 +14,7 @@ from tests.test_dinov3_feedback_store import make_observation
 from tests.test_dinov3_multi_dual_rejection import _write_runtime_fixture
 
 
-def test_backend_explanation_reopens_multi_dual_feedback_and_geometry(
-    monkeypatch, tmp_path
-):
+def _persist_dual_observation(tmp_path, observation_id: str):
     rejection = MultiDualRejectionConfig(
         cosine_threshold=0.42,
         squared_distance_threshold=0.55,
@@ -27,6 +25,48 @@ def test_backend_explanation_reopens_multi_dual_feedback_and_geometry(
     )
     checkpoint = load_checkpoint(checkpoint_path)
     state_root = tmp_path / "state"
+    registry_path = registry_path_for_fingerprint(state_root, checkpoint.fingerprint)
+    feedback = MultiDualHumanFeedbackStore(
+        multi_dual_feedback_path_for_registry(registry_path, rejection),
+        model_fingerprint=checkpoint.fingerprint,
+        checkpoint_classes=checkpoint.classes,
+        rejection=rejection,
+    )
+    try:
+        feedback.persist_observation(make_observation(observation_id))
+    finally:
+        feedback.close()
+    return manifest, state_root, rejection
+
+
+def test_backend_feedback_state_reopens_multi_dual_generation(monkeypatch, tmp_path):
+    manifest, state_root, _rejection = _persist_dual_observation(
+        tmp_path,
+        "obs-dual-state",
+    )
+    monkeypatch.setattr(
+        dinov3_feedback_service,
+        "default_dinov3_state_root",
+        lambda: state_root,
+    )
+
+    feedback, _feature_center = dinov3_feedback_service._open_feedback_state(
+        str(manifest)
+    )
+    try:
+        assert isinstance(feedback, MultiDualHumanFeedbackStore)
+        assert feedback.get_observation("obs-dual-state").id == "obs-dual-state"
+    finally:
+        feedback.close()
+
+
+def test_backend_explanation_reopens_multi_dual_feedback_and_geometry(
+    monkeypatch, tmp_path
+):
+    manifest, state_root, _rejection = _persist_dual_observation(
+        tmp_path,
+        "obs-dual-explain",
+    )
     monkeypatch.setattr(
         dinov3_feedback_service,
         "default_dinov3_state_root",
@@ -37,18 +77,6 @@ def test_backend_explanation_reopens_multi_dual_feedback_and_geometry(
         "default_dinov3_state_root",
         lambda: state_root,
     )
-
-    registry_path = registry_path_for_fingerprint(state_root, checkpoint.fingerprint)
-    feedback = MultiDualHumanFeedbackStore(
-        multi_dual_feedback_path_for_registry(registry_path, rejection),
-        model_fingerprint=checkpoint.fingerprint,
-        checkpoint_classes=checkpoint.classes,
-        rejection=rejection,
-    )
-    try:
-        feedback.persist_observation(make_observation("obs-dual-explain"))
-    finally:
-        feedback.close()
 
     explanation = dinov3_feedback_service.explain_feedback_observation(
         str(manifest),
