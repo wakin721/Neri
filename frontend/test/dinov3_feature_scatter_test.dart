@@ -230,7 +230,12 @@ void main() {
       ),
     );
 
-    final paintWidget = tester.widget<CustomPaint>(find.byType(CustomPaint));
+    final scatter = find.byKey(const ValueKey('dinov3-feature-scatter'));
+    final paintWidget = tester
+        .widgetList<CustomPaint>(
+          find.descendant(of: scatter, matching: find.byType(CustomPaint)),
+        )
+        .firstWhere((widget) => widget.painter != null);
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     paintWidget.painter!.paint(canvas, const Size(400, 200));
