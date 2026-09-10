@@ -7,16 +7,18 @@ on:
     paths:
       - 'tools/apply_dinov3_registry_cluster_backend.py'
       - 'tools/patch_dinov3_registry_cluster_backend_green.py'
+      - 'tools/apply_dinov3_registry_cluster_frontend.py'
       - 'tests/test_dinov3_registry_cluster_view.py'
+      - 'frontend/test/dinov3_registry_cluster_view_test.dart'
       - '.github/workflows/tmp-dinov3-registry-cluster-tdd.yml'
 
 permissions:
   contents: read
 
 jobs:
-  backend-green:
+  green:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Apply backend implementation
@@ -36,3 +38,24 @@ jobs:
         run: python -m compileall -q system tests/test_dinov3_registry_cluster_view.py
       - name: Run backend cluster tests
         run: python -m pytest -q tests/test_dinov3_registry_cluster_view.py tests/test_dinov3_registry_catalog_explain.py
+      - name: Apply frontend implementation
+        run: python tools/apply_dinov3_registry_cluster_frontend.py
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install Flutter dependencies
+        working-directory: frontend
+        run: flutter pub get
+      - name: Format changed Dart sources
+        working-directory: frontend
+        run: dart format lib/src/models/dinov3_registry.dart lib/src/widgets/dinov3_registry_dialog.dart lib/src/widgets/dinov3_feature_scatter.dart test/dinov3_registry_cluster_view_test.dart
+      - name: Run registry cluster Flutter tests
+        working-directory: frontend
+        run: flutter test test/dinov3_registry_cluster_view_test.dart
+      - name: Run existing DINOv3 frontend tests
+        working-directory: frontend
+        run: flutter test test/dinov3_startup_registry_features_test.dart test/dinov3_feature_scatter_test.dart
+      - name: Analyze Flutter frontend
+        working-directory: frontend
+        run: flutter analyze
