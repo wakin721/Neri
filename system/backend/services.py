@@ -2024,6 +2024,22 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
             "bbox": bbox,
             "candidates": candidates if isinstance(candidates, list) else [],
         }
+        candidate_metadata = None
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("observation_id"):
+                    candidate_metadata = candidate
+                    break
+        metadata_source = candidate_metadata or raw_box
+        observation_id = _value_from_keys(metadata_source, ("observation_id",))
+        registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))
+        predicted_species = _value_from_keys(metadata_source, ("predicted_species",))
+        if observation_id is not None:
+            box_data["observation_id"] = str(observation_id)
+        if registry_id is not None:
+            box_data["registry_id"] = registry_id
+        if predicted_species is not None:
+            box_data["predicted_species"] = str(predicted_species)
         if frame_index is not None:
             box_data["frame_index"] = frame_index
         if timestamp is not None:
