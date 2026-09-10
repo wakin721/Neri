@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'models/dinov3_feedback.dart';
 import 'models/dinov3_registry.dart';
 import 'models/export_result.dart';
 import 'models/job.dart';
@@ -134,6 +135,52 @@ class NeriApiClient {
     );
   }
 
+  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({
+    required String inputPath,
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String action,
+    String? speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/box'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'action': action,
+        if (speciesName != null && speciesName.trim().isNotEmpty)
+          'species_name': speciesName.trim(),
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3BoxFeedbackResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({
+    required String classificationModelPath,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/revert'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3FeedbackRevertResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
   Future<PrivacyStatus> fetchPrivacyStatus() async {
     final response = await _httpClient
         .get(_uri('/api/privacy'))
@@ -478,6 +525,8 @@ class NeriApiClient {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark'),
@@ -490,6 +539,12 @@ class NeriApiClient {
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
         if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
       }),
     );
     _ensureSuccess(response);
@@ -506,6 +561,8 @@ class NeriApiClient {
     String? speciesCount,
     String? speciesType,
     String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark/batch'),
@@ -518,6 +575,12 @@ class NeriApiClient {
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
         if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
       }),
     );
     try {
@@ -535,6 +598,8 @@ class NeriApiClient {
             speciesCount: speciesCount,
             speciesType: speciesType,
             remark: remark,
+            classificationModelPath: classificationModelPath,
+            feedbackOperationId: feedbackOperationId,
           ),
         );
       }

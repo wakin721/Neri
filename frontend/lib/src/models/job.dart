@@ -6,6 +6,10 @@ class DetectionBox {
     this.frameIndex,
     this.timestamp,
     this.trackId,
+    this.observationId,
+    this.registryId,
+    this.predictedSpecies,
+    this.feedbackStatus,
     this.candidates = const <Map<String, dynamic>>[],
   });
 
@@ -17,6 +21,10 @@ class DetectionBox {
       frameIndex: _intFromJson(json['frame_index']),
       timestamp: _doubleFromJson(json['timestamp']),
       trackId: _stringFromJson(json['track_id'] ?? json['trackId']),
+      observationId: _stringFromJson(json['observation_id']),
+      registryId: _intFromJson(json['registry_id']),
+      predictedSpecies: _stringFromJson(json['predicted_species']),
+      feedbackStatus: _stringFromJson(json['feedback_status']),
       bbox: rawBbox
           .map(
             (item) => item is num
@@ -36,6 +44,10 @@ class DetectionBox {
   final int? frameIndex;
   final double? timestamp;
   final String? trackId;
+  final String? observationId;
+  final int? registryId;
+  final String? predictedSpecies;
+  final String? feedbackStatus;
   final List<double> bbox;
   final List<Map<String, dynamic>> candidates;
 

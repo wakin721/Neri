@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-import pytest
+from dataclasses import replace
 
-from system.dinov3.checkpoint import CheckpointValidationError, validate_checkpoint
+import pytest
+import torch
+
+from system.dinov3.checkpoint import (
+    DINO_FEATURE_DIM,
+    CheckpointValidationError,
+    validate_checkpoint,
+)
+from system.dinov3.classifier import DinoV3Classifier
 from tests.dinov3_multi_prototype_fixtures import make_multi_prototype_payload
 
 
@@ -29,3 +37,34 @@ def test_multi_prototype_checkpoint_rejects_non_k3_contract():
 
     with pytest.raises(CheckpointValidationError):
         validate_checkpoint(payload)
+
+
+def test_checkpoint_validator_rejects_legacy_linear_head():
+    payload = make_multi_prototype_payload()
+    classes = payload["classes"]
+    assert isinstance(classes, list)
+    class_count = len(classes)
+    payload["head_type"] = "linear"
+    payload["head_state"] = {
+        "weight": torch.zeros((class_count, DINO_FEATURE_DIM)),
+        "bias": torch.zeros(class_count),
+    }
+    payload["prototypes"] = torch.zeros((class_count, DINO_FEATURE_DIM))
+    for index in range(class_count):
+        payload["prototypes"][index, index] = 1.0
+
+    with pytest.raises(CheckpointValidationError, match="multi_prototype"):
+        validate_checkpoint(payload)
+
+
+def test_classifier_rejects_direct_legacy_linear_checkpoint():
+    checkpoint = validate_checkpoint(make_multi_prototype_payload())
+    legacy = replace(
+        checkpoint,
+        head_type="linear",
+        head_weight=torch.zeros((len(checkpoint.classes), DINO_FEATURE_DIM)),
+        head_bias=torch.zeros(len(checkpoint.classes)),
+    )
+
+    with pytest.raises(ValueError, match="multi_prototype"):
+        DinoV3Classifier(legacy)

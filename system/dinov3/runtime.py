@@ -14,6 +14,7 @@ from .checkpoint import (
     DinoV3Checkpoint,
     load_checkpoint,
 )
+from .feedback import HumanFeedbackStore, feedback_path_for_registry
 from .registry import SpeciesRegistry, registry_path_for_fingerprint
 from .state import default_dinov3_state_root
 
@@ -31,7 +32,16 @@ class DinoV3Runtime:
     checkpoint: DinoV3Checkpoint
     classifier: "DinoV3Classifier"
     registry: SpeciesRegistry
+    feedback: HumanFeedbackStore
     owns_registry: bool
+    owns_feedback: bool
+
+    def close(self) -> None:
+        """Close stores owned by this runtime without touching injected stores."""
+        if self.owns_feedback:
+            self.feedback.close()
+        if self.owns_registry:
+            self.registry.close()
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -89,6 +99,7 @@ def load_dinov3_model(
     model_path: str | Path,
     *,
     registry: SpeciesRegistry | None = None,
+    feedback: HumanFeedbackStore | None = None,
     state_root: str | Path | None = None,
     encoder_factory: Callable[..., Any] | None = None,
     device: str | None = None,
@@ -104,27 +115,61 @@ def load_dinov3_model(
     _validate_manifest_contract(payload, checkpoint)
 
     owns_registry = registry is None
-    if registry is None:
-        root = Path(state_root).expanduser().resolve() if state_root is not None else default_dinov3_state_root()
-        registry = SpeciesRegistry(
-            registry_path_for_fingerprint(root, checkpoint.fingerprint),
-            model_fingerprint=checkpoint.fingerprint,
-        )
-    elif registry.model_fingerprint != checkpoint.fingerprint:
-        raise ValueError("Registry model fingerprint does not match selected classifier")
+    owns_feedback = feedback is None
+    created_registry: SpeciesRegistry | None = None
+    created_feedback: HumanFeedbackStore | None = None
 
-    factory = encoder_factory or DinoV3Encoder
-    encoder = factory(
-        checkpoint,
-        search_roots=(manifest_path.parent,),
-        device=device,
-        use_fp16=use_fp16,
-    )
-    classifier = DinoV3Classifier(checkpoint, encoder=encoder, registry=registry)
-    return DinoV3Runtime(
-        manifest_path=manifest_path,
-        checkpoint=checkpoint,
-        classifier=classifier,
-        registry=registry,
-        owns_registry=owns_registry,
-    )
+    try:
+        if registry is None:
+            root = (
+                Path(state_root).expanduser().resolve()
+                if state_root is not None
+                else default_dinov3_state_root()
+            )
+            registry = SpeciesRegistry(
+                registry_path_for_fingerprint(root, checkpoint.fingerprint),
+                model_fingerprint=checkpoint.fingerprint,
+            )
+            created_registry = registry
+        elif registry.model_fingerprint != checkpoint.fingerprint:
+            raise ValueError("Registry model fingerprint does not match selected classifier")
+
+        if feedback is None:
+            feedback = HumanFeedbackStore(
+                feedback_path_for_registry(registry.path),
+                model_fingerprint=checkpoint.fingerprint,
+                checkpoint_classes=checkpoint.classes,
+                threshold=checkpoint.threshold,
+            )
+            created_feedback = feedback
+        elif feedback.model_fingerprint != checkpoint.fingerprint:
+            raise ValueError("Feedback model fingerprint does not match selected classifier")
+
+        factory = encoder_factory or DinoV3Encoder
+        encoder = factory(
+            checkpoint,
+            search_roots=(manifest_path.parent,),
+            device=device,
+            use_fp16=use_fp16,
+        )
+        classifier = DinoV3Classifier(
+            checkpoint,
+            encoder=encoder,
+            feedback=feedback,
+            registry=registry,
+        )
+        return DinoV3Runtime(
+            manifest_path=manifest_path,
+            checkpoint=checkpoint,
+            classifier=classifier,
+            registry=registry,
+            feedback=feedback,
+            owns_registry=owns_registry,
+            owns_feedback=owns_feedback,
+        )
+    except Exception:
+        if created_feedback is not None:
+            created_feedback.close()
+        if created_registry is not None:
+            created_registry.close()
+        raise

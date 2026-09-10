@@ -7,7 +7,7 @@ import os
 import subprocess
 from typing import Any, Sequence
 
-from system.dinov3.component import install_dinov3_component, remove_dinov3_component
+from system.dinov3 import install_dinov3_component, remove_dinov3_component
 
 from . import maintenance as _maintenance
 

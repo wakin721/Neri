@@ -39,15 +39,13 @@ class DinoV3Checkpoint:
     preprocessing: str
     event_aggregation: str
     fingerprint: str
-    # New Multi-prototype fields are defaulted so older helpers that construct
-    # this value object directly keep working during the migration.
-    head_type: str = "linear"
+    head_type: str = DINO_MULTI_PROTOTYPE_HEAD
     feature_center: Any | None = None
     prototype_class_indices: Any | None = None
     prototypes_per_class: tuple[int, ...] = ()
-    selection_k: int = 1
-    decision: str = "linear_head_with_prototype_consistency"
-    rejection_score: str = "cosine_similarity_to_nearest_prototype"
+    selection_k: int = DINO_SELECTION_K
+    decision: str = DINO_DECISION
+    rejection_score: str = DINO_REJECTION_SCORE
     encoder_code_commit: str = ""
 
 
@@ -119,12 +117,7 @@ def _common_metadata(saved: Mapping[str, Any]) -> tuple[str, str, str, str]:
 
 
 def _payload_fingerprint(payload: Mapping[str, Any]) -> str:
-    """Generate deterministic fingerprints for in-memory test checkpoints.
-
-    Real files use the checkpoint file SHA-256 in ``load_checkpoint``. The
-    legacy branch preserves the previous fingerprint algorithm so existing
-    development registries are not gratuitously invalidated during migration.
-    """
+    """Generate a deterministic fingerprint for an in-memory checkpoint."""
 
     torch = _require_torch()
     digest = hashlib.sha256()
@@ -134,29 +127,18 @@ def _payload_fingerprint(payload: Mapping[str, Any]) -> str:
         digest.update(str(name).encode("utf-8"))
         digest.update(b"\0")
 
-    if str(payload.get("head_type", "")).strip() == DINO_MULTI_PROTOTYPE_HEAD:
-        for field in ("feature_center", "prototypes", "prototype_class_indices"):
-            value = payload.get(field)
-            if isinstance(value, torch.Tensor):
-                digest.update(value.detach().cpu().contiguous().numpy().tobytes())
-        for value in payload.get("prototypes_per_class", ()):
-            digest.update(str(value).encode("ascii"))
-            digest.update(b"\0")
-        digest.update(str(payload.get("selection_k", "")).encode("ascii"))
-        digest.update(str(payload.get("decision", "")).encode("utf-8"))
-        digest.update(str(payload.get("rejection_score", "")).encode("utf-8"))
-        digest.update(str(payload.get("encoder_code_commit", "")).encode("ascii"))
-    else:
-        head_state = payload.get("head_state")
-        if isinstance(head_state, Mapping):
-            for field in ("weight", "bias"):
-                value = head_state.get(field)
-                if isinstance(value, torch.Tensor):
-                    digest.update(value.detach().cpu().contiguous().numpy().tobytes())
-        prototypes = payload.get("prototypes")
-        if isinstance(prototypes, torch.Tensor):
-            digest.update(prototypes.detach().cpu().contiguous().numpy().tobytes())
-
+    for field in ("feature_center", "prototypes", "prototype_class_indices"):
+        value = payload.get(field)
+        if isinstance(value, torch.Tensor):
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    for value in payload.get("prototypes_per_class", ()):
+        digest.update(str(value).encode("ascii"))
+        digest.update(b"\0")
+    digest.update(str(payload.get("head_type", "")).encode("utf-8"))
+    digest.update(str(payload.get("selection_k", "")).encode("ascii"))
+    digest.update(str(payload.get("decision", "")).encode("utf-8"))
+    digest.update(str(payload.get("rejection_score", "")).encode("utf-8"))
+    digest.update(str(payload.get("encoder_code_commit", "")).encode("ascii"))
     digest.update(repr(payload.get("threshold")).encode("ascii"))
     digest.update(str(payload.get("encoder_sha256", "")).encode("ascii"))
     return digest.hexdigest()
@@ -164,7 +146,7 @@ def _payload_fingerprint(payload: Mapping[str, Any]) -> str:
 
 def _validate_multi_prototype(
     saved: Mapping[str, Any], classes: tuple[str, ...]
-) -> tuple[Any, Any, Any, tuple[int, ...], int, str, str, str]:
+) -> tuple[Any, Any, tuple[int, ...], int, str, str, str]:
     torch = _require_torch()
     if saved.get("schema_version") != 1:
         raise CheckpointValidationError("Unsupported Multi-prototype schema_version")
@@ -176,7 +158,11 @@ def _validate_multi_prototype(
         )
 
     prototypes = _tensor(saved.get("prototypes"), "prototypes")
-    if prototypes.ndim != 2 or prototypes.shape[1] != DINO_FEATURE_DIM or len(prototypes) == 0:
+    if (
+        prototypes.ndim != 2
+        or prototypes.shape[1] != DINO_FEATURE_DIM
+        or len(prototypes) == 0
+    ):
         raise CheckpointValidationError(
             "Invalid prototype shape; expected (M, 768) with M > 0"
         )
@@ -190,7 +176,9 @@ def _validate_multi_prototype(
             "prototype_class_indices must have one index per prototype"
         )
     if bool(torch.any(indices < 0)) or bool(torch.any(indices >= len(classes))):
-        raise CheckpointValidationError("prototype_class_indices contains an invalid class index")
+        raise CheckpointValidationError(
+            "prototype_class_indices contains an invalid class index"
+        )
 
     raw_counts = saved.get("prototypes_per_class")
     if not isinstance(raw_counts, (list, tuple)) or len(raw_counts) != len(classes):
@@ -217,7 +205,9 @@ def _validate_multi_prototype(
         )
     decision = str(saved.get("decision", ""))
     if decision != DINO_DECISION:
-        raise CheckpointValidationError(f"Unsupported decision rule: {decision or '<missing>'}")
+        raise CheckpointValidationError(
+            f"Unsupported decision rule: {decision or '<missing>'}"
+        )
     rejection_score = str(saved.get("rejection_score", ""))
     if rejection_score != DINO_REJECTION_SCORE:
         raise CheckpointValidationError(
@@ -225,47 +215,18 @@ def _validate_multi_prototype(
         )
     encoder_code_commit = str(saved.get("encoder_code_commit", "")).strip().lower()
     if encoder_code_commit != DINO_ENCODER_CODE_COMMIT:
-        raise CheckpointValidationError("encoder_code_commit does not match DINOv3 runtime")
+        raise CheckpointValidationError(
+            "encoder_code_commit does not match DINOv3 runtime"
+        )
 
     return (
-        None,
-        None,
         feature_center,
+        indices,
         tuple(counts),
         int(selection_k),
         decision,
         rejection_score,
         encoder_code_commit,
-    )
-
-
-def _validate_legacy_linear(
-    saved: Mapping[str, Any], classes: tuple[str, ...]
-) -> tuple[Any, Any, Any, Any, tuple[int, ...], int, str, str, str]:
-    torch = _require_torch()
-    head_state = saved.get("head_state")
-    if not isinstance(head_state, Mapping):
-        raise CheckpointValidationError("head_state must be a mapping")
-    weight = _tensor(head_state.get("weight"), "head_state.weight")
-    bias = _tensor(head_state.get("bias"), "head_state.bias")
-    expected = (len(classes), DINO_FEATURE_DIM)
-    if tuple(weight.shape) != expected or tuple(bias.shape) != (len(classes),):
-        raise CheckpointValidationError(
-            f"Invalid head shape; expected {expected} and {(len(classes),)}"
-        )
-    prototypes = _tensor(saved.get("prototypes"), "prototypes")
-    if tuple(prototypes.shape) != expected:
-        raise CheckpointValidationError(f"Invalid prototype shape; expected {expected}")
-    return (
-        weight,
-        bias,
-        torch.zeros(DINO_FEATURE_DIM, dtype=torch.float32),
-        torch.arange(len(classes), dtype=torch.int64),
-        (1,) * len(classes),
-        1,
-        "linear_head_with_prototype_consistency",
-        "cosine_similarity_to_nearest_prototype",
-        str(saved.get("encoder_code_commit", "")).strip().lower(),
     )
 
 
@@ -296,50 +257,32 @@ def validate_checkpoint(
     ):
         raise CheckpointValidationError("Invalid class mapping")
 
+    head_type = str(saved.get("head_type", "")).strip().lower()
+    if head_type != DINO_MULTI_PROTOTYPE_HEAD:
+        raise CheckpointValidationError(
+            "DINOv3 requires head_type=multi_prototype; Linear Head checkpoints are no longer supported"
+        )
+
     threshold = _threshold(saved)
     preprocessing, aggregation, encoder_weights, encoder_sha256 = _common_metadata(saved)
-    head_type = str(saved.get("head_type", "")).strip().lower()
-
-    if head_type == DINO_MULTI_PROTOTYPE_HEAD:
-        (
-            weight,
-            bias,
-            feature_center,
-            counts,
-            selection_k,
-            decision,
-            rejection_score,
-            encoder_code_commit,
-        ) = _validate_multi_prototype(saved, classes)
-        prototypes = _tensor(saved.get("prototypes"), "prototypes")
-        indices = _index_tensor(
-            saved.get("prototype_class_indices"),
-            "prototype_class_indices",
-        )
-    elif head_type in {"", "linear", "linear_head", "joint_linear_head"}:
-        head_type = "linear"
-        (
-            weight,
-            bias,
-            feature_center,
-            indices,
-            counts,
-            selection_k,
-            decision,
-            rejection_score,
-            encoder_code_commit,
-        ) = _validate_legacy_linear(saved, classes)
-        prototypes = _tensor(saved.get("prototypes"), "prototypes")
-    else:
-        raise CheckpointValidationError(f"Unsupported DINOv3 head_type: {head_type}")
+    (
+        feature_center,
+        indices,
+        counts,
+        selection_k,
+        decision,
+        rejection_score,
+        encoder_code_commit,
+    ) = _validate_multi_prototype(saved, classes)
+    prototypes = _tensor(saved.get("prototypes"), "prototypes")
 
     return DinoV3Checkpoint(
         path=path,
         backbone=backbone,
         feature_dim=DINO_FEATURE_DIM,
         classes=classes,
-        head_weight=weight,
-        head_bias=bias,
+        head_weight=None,
+        head_bias=None,
         prototypes=prototypes,
         threshold=threshold,
         encoder_weights=encoder_weights,
@@ -347,7 +290,7 @@ def validate_checkpoint(
         preprocessing=preprocessing,
         event_aggregation=aggregation,
         fingerprint=fingerprint or _payload_fingerprint(saved),
-        head_type=head_type,
+        head_type=DINO_MULTI_PROTOTYPE_HEAD,
         feature_center=feature_center,
         prototype_class_indices=indices,
         prototypes_per_class=counts,

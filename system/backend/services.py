@@ -1268,11 +1268,11 @@ class ProcessingJobManager:
         finally:
             if detector is not None:
                 runtime = getattr(detector, "dinov3_runtime", None)
-                if runtime is not None and getattr(runtime, "owns_registry", False):
+                if runtime is not None:
                     try:
-                        runtime.registry.close()
+                        runtime.close()
                     except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
-                        logger.warning("DINOv3 registry cleanup failed: %s", exc)
+                        logger.warning("DINOv3 runtime cleanup failed: %s", exc)
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
@@ -1603,47 +1603,21 @@ def _persist_dinov3_observations(
     input_path: Path,
     *,
     source_paths: list[Path] | None = None,
+    frame_indices: list[int | None] | None = None,
+    timestamp_seconds: list[float | None] | None = None,
 ) -> None:
-    registry = getattr(detector, "dinov3_registry", None)
-    drain = getattr(detector, "drain_dinov3_observations", None)
-    if registry is None or not callable(drain):
-        return
-    observations = drain()
-    if not observations:
-        return
-    roots = source_paths or paths
-    from system.dinov3.events import camera_id_for_path
+    from .dinov3_feedback_service import persist_runtime_observations
 
-    camera_root = input_path if input_path.is_dir() else input_path.parent
-    for observation in observations:
-        try:
-            index = int(observation.result_index)
-            if index < 0 or index >= len(paths) or index >= len(items) or index >= len(roots):
-                logger.warning("Ignoring out-of-range DINOv3 observation index: %s", index)
-                continue
-            source_path = Path(roots[index])
-            item = items[index]
-            captured_at = _parse_dinov3_capture_time(item.date_taken)
-            camera_id = camera_id_for_path(source_path, camera_root)
-            if observation.source == "checkpoint" and observation.accepted:
-                continue
-            if observation.registry_id is not None:
-                registry.record_observation(
-                    int(observation.registry_id),
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                )
-            else:
-                registry.record_unknown(
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                )
-        except Exception as exc:  # noqa: BLE001 - registry persistence is non-fatal
-            logger.warning("Failed to persist DINOv3 observation: %s", exc)
+    persist_runtime_observations(
+        detector,
+        paths,
+        items,
+        input_path,
+        source_paths=source_paths,
+        frame_indices=frame_indices,
+        timestamp_seconds=timestamp_seconds,
+    )
+
 
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
     from system.image_processor import ImageProcessor
@@ -1669,6 +1643,7 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
             runtime = load_dinov3_model(resolved_classification_path)
             detector.load_dinov3_classifier(runtime.classifier)
             detector.dinov3_registry = runtime.registry
+            detector.dinov3_feedback = runtime.feedback
             detector.dinov3_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
@@ -2049,6 +2024,22 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
             "bbox": bbox,
             "candidates": candidates if isinstance(candidates, list) else [],
         }
+        candidate_metadata = None
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("observation_id"):
+                    candidate_metadata = candidate
+                    break
+        metadata_source = candidate_metadata or raw_box
+        observation_id = _value_from_keys(metadata_source, ("observation_id",))
+        registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))
+        predicted_species = _value_from_keys(metadata_source, ("predicted_species",))
+        if observation_id is not None:
+            box_data["observation_id"] = str(observation_id)
+        if registry_id is not None:
+            box_data["registry_id"] = registry_id
+        if predicted_species is not None:
+            box_data["predicted_species"] = str(predicted_species)
         if frame_index is not None:
             box_data["frame_index"] = frame_index
         if timestamp is not None:
@@ -2540,12 +2531,22 @@ def _detect_video_fast_batch(
             inference_elapsed += time.perf_counter() - inference_started
             frame_items = [items[record["video_index"]] for record in frame_batch]
             original_video_paths = [paths[record["video_index"]] for record in frame_batch]
+            frame_indices = [int(record["frame_index"]) for record in frame_batch]
+            frame_timestamps = []
+            for record in frame_batch:
+                video_info = video_infos[record["video_index"]] or {}
+                fps = video_info.get("fps") or 25
+                frame_timestamps.append(
+                    float(record["frame_index"]) / float(fps) if fps else None
+                )
             _persist_dinov3_observations(
                 detector,
                 [Path(record["path"]) for record in frame_batch],
                 frame_items,
                 input_path,
                 source_paths=original_video_paths,
+                frame_indices=frame_indices,
+                timestamp_seconds=frame_timestamps,
             )
             _raise_if_cancelled(cancelled)
             frame_serialize_started = time.perf_counter()
@@ -2964,6 +2965,69 @@ def _update_species_database(species_name_str: str, species_type_str: str) -> No
         print(f"Failed to auto-update species_database.db: {e}")
 
 
+def _learnable_observations_for_file(
+    classification_model_path: str,
+    file_path: Path,
+):
+    """Return persisted DINOv3 observations belonging to one media file."""
+    from .dinov3_feedback_service import _open_feedback_state, _path_identity
+
+    feedback, _feature_center = _open_feedback_state(classification_model_path)
+    try:
+        target = _path_identity(file_path)
+        rows = feedback._conn.execute(  # noqa: SLF001 - same feedback-store boundary
+            "SELECT id,payload FROM observations ORDER BY id"
+        ).fetchall()
+        observations = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if _path_identity(payload.get("source_path", "")) != target:
+                continue
+            observation_id = str(row["id"] or "")
+            if not observation_id:
+                continue
+            observations.append(feedback.get_observation(observation_id))
+        return observations
+    finally:
+        feedback.close()
+
+
+def _eligible_auto_feedback(observations):
+    learnable = [observation for observation in observations if getattr(observation, "id", "")]
+    return learnable[0] if len(learnable) == 1 else None
+
+
+def _record_validation_feedback(
+    classification_model_path: str,
+    observation,
+    operation_id: str,
+    action: str,
+    confirmed_species: str | None,
+):
+    """Record one conservative file-level validation feedback event."""
+    from .dinov3_feedback_service import (
+        _affected_learning_species,
+        _open_feedback_state,
+    )
+
+    feedback, feature_center = _open_feedback_state(classification_model_path)
+    try:
+        record = feedback.record_feedback(
+            observation.id,
+            operation_id=operation_id,
+            action=action,
+            confirmed_species=confirmed_species,
+        )
+        for species in sorted(_affected_learning_species(record)):
+            feedback.recompute_species(species, feature_center)
+        return record
+    finally:
+        feedback.close()
+
+
 def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
     items = mark_validation_items(
         ValidationBatchMarkRequest(
@@ -2974,6 +3038,8 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
             species_count=request.species_count,
             species_type=request.species_type,
             remark=request.remark,
+            classification_model_path=request.classification_model_path,
+            feedback_operation_id=request.feedback_operation_id,
         )
     )
     if not items:
@@ -3044,6 +3110,32 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
     _persist_validation_updates(updates, input_path)
     for species_name, species_type in species_database_updates:
         _update_species_database(species_name, species_type)
+
+    if request.classification_model_path and request.action != "unverified":
+        operation_id = request.feedback_operation_id or uuid.uuid4().hex
+        confirmed_species = (
+            (request.species_name or "").strip() or None
+            if request.action == "update"
+            else None
+        )
+        try:
+            for path in paths:
+                observations = _learnable_observations_for_file(
+                    request.classification_model_path,
+                    path,
+                )
+                observation = _eligible_auto_feedback(observations)
+                if observation is None:
+                    continue
+                _record_validation_feedback(
+                    request.classification_model_path,
+                    observation,
+                    operation_id,
+                    request.action,
+                    confirmed_species,
+                )
+        except Exception as exc:
+            raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
 
     # Only journal after the user's local decision is saved. Compression/network run
     # on an independent worker; this optional feature must never break annotation.

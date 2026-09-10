@@ -29,6 +29,8 @@ class DetectionMediaViewer extends StatelessWidget {
     required this.onOpenExternal,
     this.isFavorite = false,
     this.onToggleFavorite,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
     super.key,
   });
 
@@ -38,6 +40,8 @@ class DetectionMediaViewer extends StatelessWidget {
   final VoidCallback onOpenExternal;
   final bool isFavorite;
   final VoidCallback? onToggleFavorite;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   bool get _isImage {
     return _viewerImageTypes.contains(item.fileType.toLowerCase());
@@ -62,6 +66,8 @@ class DetectionMediaViewer extends StatelessWidget {
                 visibleBoxes: visibleBoxes,
                 showDetections: showDetections,
                 onOpenExternal: onOpenExternal,
+                selectedObservationId: selectedObservationId,
+                onDetectionBoxSelected: onDetectionBoxSelected,
               ),
               Positioned(
                 top: 12,
@@ -111,12 +117,16 @@ class _MediaContent extends StatelessWidget {
     required this.visibleBoxes,
     required this.showDetections,
     required this.onOpenExternal,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final DetectionItem item;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
   final VoidCallback onOpenExternal;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   bool get isVideo {
     return _viewerVideoTypes.contains(item.fileType.toLowerCase());
@@ -131,12 +141,26 @@ class _MediaContent extends StatelessWidget {
         showDetections: showDetections,
         detectionData: item.detectionData,
         onOpenExternal: onOpenExternal,
+        selectedObservationId: selectedObservationId,
+        onDetectionBoxSelected: onDetectionBoxSelected,
       );
     } else {
+      final itemWidth = item.width;
+      final itemHeight = item.height;
+      final mediaSizeHint =
+          itemWidth != null &&
+              itemWidth > 0 &&
+              itemHeight != null &&
+              itemHeight > 0
+          ? Size(itemWidth.toDouble(), itemHeight.toDouble())
+          : null;
       return _ImageMediaViewer(
         path: item.path,
         visibleBoxes: visibleBoxes,
         showDetections: showDetections,
+        mediaSizeHint: mediaSizeHint,
+        selectedObservationId: selectedObservationId,
+        onDetectionBoxSelected: onDetectionBoxSelected,
       );
     }
   }
@@ -147,11 +171,17 @@ class _ImageMediaViewer extends StatefulWidget {
     required this.path,
     required this.visibleBoxes,
     required this.showDetections,
+    this.mediaSizeHint,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final String path;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
+  final Size? mediaSizeHint;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   @override
   State<_ImageMediaViewer> createState() => _ImageMediaViewerState();
@@ -172,7 +202,8 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
   @override
   void didUpdateWidget(covariant _ImageMediaViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path) {
+    if (oldWidget.path != widget.path ||
+        oldWidget.mediaSizeHint != widget.mediaSizeHint) {
       _resolveImageSize();
     }
   }
@@ -195,7 +226,7 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
 
   void _resolveImageSize() {
     _removeImageStreamListener();
-    _imageSize = null;
+    _imageSize = widget.mediaSizeHint;
     _imageError = null;
     final file = File(widget.path);
     if (!file.existsSync()) {
@@ -235,24 +266,45 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
     if (_imageError != null) {
       return _MissingImagePlaceholder(path: widget.path);
     }
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Image.file(
-          File(widget.path),
-          key: ValueKey(widget.path),
-          fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) =>
-              _MissingImagePlaceholder(path: widget.path),
-        ),
-        if (widget.showDetections && _imageSize != null)
-          CustomPaint(
-            painter: _DetectionOverlayPainter(
-              boxes: widget.visibleBoxes,
-              mediaSize: _imageSize!,
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: widget.onDetectionBoxSelected == null || _imageSize == null
+              ? null
+              : (details) {
+                  final selected = widget.showDetections
+                      ? _hitTestDinoBox(
+                          details.localPosition,
+                          viewport,
+                          _imageSize!,
+                          widget.visibleBoxes,
+                        )
+                      : null;
+                  widget.onDetectionBoxSelected!(selected);
+                },
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.file(
+                File(widget.path),
+                key: ValueKey(widget.path),
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) =>
+                    _MissingImagePlaceholder(path: widget.path),
+              ),
+              if (widget.showDetections && _imageSize != null)
+                CustomPaint(
+                  painter: _DetectionOverlayPainter(
+                    boxes: widget.visibleBoxes,
+                    mediaSize: _imageSize!,
+                  ),
+                ),
+            ],
           ),
-      ],
+        );
+      },
     );
   }
 }
@@ -296,6 +348,218 @@ class _MissingImagePlaceholder extends StatelessWidget {
   }
 }
 
+List<DetectionBox> currentVideoDetectionBoxes({
+  required List<DetectionBox> boxes,
+  required Duration position,
+  required Duration duration,
+  required Map<String, dynamic> detectionData,
+}) {
+  int? intData(String key) {
+    final value = detectionData[key];
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  int? totalFrameHint() {
+    final processedFrames = intData('total_frames_processed');
+    final stride = math.max(1, intData('vid_stride') ?? 1);
+    final maxBoxFrame = boxes
+        .map((box) => box.frameIndex)
+        .whereType<int>()
+        .fold<int?>(null, (maxFrame, frame) {
+          if (maxFrame == null || frame > maxFrame) return frame;
+          return maxFrame;
+        });
+    final processedHint = processedFrames == null
+        ? null
+        : math.max(1, processedFrames * stride);
+    if (processedHint == null) {
+      return maxBoxFrame == null ? null : maxBoxFrame + 1;
+    }
+    if (maxBoxFrame == null) return processedHint;
+    return math.max(processedHint, maxBoxFrame + 1);
+  }
+
+  int? currentFrameIndexEstimate() {
+    if (duration <= Duration.zero || position < Duration.zero) {
+      return null;
+    }
+    final totalFrames = totalFrameHint();
+    if (totalFrames == null || totalFrames <= 0) return null;
+    final progress = (position.inMilliseconds / duration.inMilliseconds).clamp(
+      0.0,
+      1.0,
+    );
+    return (progress * totalFrames).round();
+  }
+
+  int frameTolerance() {
+    final stride = math.max(1, intData('vid_stride') ?? 1);
+    final totalFrames = totalFrameHint();
+    if (duration > Duration.zero && totalFrames != null && totalFrames > 0) {
+      final fps = totalFrames / duration.inMilliseconds * 1000;
+      return math.max(stride, (fps * 0.25).ceil());
+    }
+    return math.max(stride, 6);
+  }
+
+  int trackSortIndex(DetectionBox box, int fallback) {
+    final trackId = box.trackId;
+    if (trackId == null || trackId.isEmpty) return fallback;
+    return int.tryParse(trackId) ?? fallback;
+  }
+
+  _TimedBoxMatch? matchForBox(
+    DetectionBox box,
+    int index,
+    int? currentFrame,
+    int currentFrame25,
+    int currentFrame30,
+    int currentFrame60,
+    double currentSeconds,
+    int toleranceFrames,
+    double toleranceSeconds,
+  ) {
+    if (box.frameIndex != null) {
+      final distance = currentFrame == null
+          ? [
+              (box.frameIndex! - currentFrame25).abs(),
+              (box.frameIndex! - currentFrame30).abs(),
+              (box.frameIndex! - currentFrame60).abs(),
+            ].reduce((a, b) => a < b ? a : b)
+          : (box.frameIndex! - currentFrame).abs();
+      if (distance <= toleranceFrames) {
+        return _TimedBoxMatch(
+          box: box,
+          distance: distance.toDouble(),
+          sortIndex: trackSortIndex(box, index),
+        );
+      }
+      return null;
+    }
+    if (box.timestamp != null) {
+      final distance = (box.timestamp! - currentSeconds).abs();
+      if (distance <= toleranceSeconds) {
+        return _TimedBoxMatch(
+          box: box,
+          distance: distance,
+          sortIndex: trackSortIndex(box, index),
+        );
+      }
+    }
+    return null;
+  }
+
+  final currentMs = position.inMilliseconds;
+  final currentSeconds = currentMs / 1000;
+  final currentFrame = currentFrameIndexEstimate();
+  final toleranceFrames = frameTolerance();
+  const toleranceSeconds = 0.25;
+
+  final currentFrame25 = (currentMs / 1000 * 25).round();
+  final currentFrame30 = (currentMs / 1000 * 30).round();
+  final currentFrame60 = (currentMs / 1000 * 60).round();
+
+  final anyBoxHasTime = boxes.any(
+    (box) => box.frameIndex != null || box.timestamp != null,
+  );
+  if (!anyBoxHasTime) return boxes;
+
+  final selectedByTrack = <String, _TimedBoxMatch>{};
+  final untrackedBoxes = <_TimedBoxMatch>[];
+  for (var index = 0; index < boxes.length; index++) {
+    final box = boxes[index];
+    final match = matchForBox(
+      box,
+      index,
+      currentFrame,
+      currentFrame25,
+      currentFrame30,
+      currentFrame60,
+      currentSeconds,
+      toleranceFrames,
+      toleranceSeconds,
+    );
+    if (match == null) continue;
+    final trackId = box.trackId?.trim();
+    if (trackId == null || trackId.isEmpty) {
+      untrackedBoxes.add(match);
+      continue;
+    }
+    final previous = selectedByTrack[trackId];
+    if (previous == null || match.distance < previous.distance) {
+      selectedByTrack[trackId] = match;
+    }
+  }
+
+  final matches = <_TimedBoxMatch>[
+    ...selectedByTrack.values,
+    ...untrackedBoxes,
+  ]..sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+  return matches.map((match) => match.box).toList();
+}
+
+class DinoVideoDetectionOverlay extends StatelessWidget {
+  const DinoVideoDetectionOverlay({
+    required this.boxes,
+    required this.mediaSize,
+    required this.position,
+    required this.duration,
+    required this.detectionData,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
+    this.onBackgroundTap,
+    super.key,
+  });
+
+  final List<DetectionBox> boxes;
+  final Size mediaSize;
+  final Duration position;
+  final Duration duration;
+  final Map<String, dynamic> detectionData;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
+  final VoidCallback? onBackgroundTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final currentBoxes = currentVideoDetectionBoxes(
+      boxes: boxes,
+      position: position,
+      duration: duration,
+      detectionData: detectionData,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: onDetectionBoxSelected == null && onBackgroundTap == null
+              ? null
+              : (details) {
+                  final selected = _hitTestDinoBox(
+                    details.localPosition,
+                    viewport,
+                    mediaSize,
+                    currentBoxes,
+                  );
+                  onDetectionBoxSelected?.call(selected);
+                  if (selected == null) onBackgroundTap?.call();
+                },
+          child: CustomPaint(
+            painter: _DetectionOverlayPainter(
+              boxes: currentBoxes,
+              mediaSize: mediaSize,
+            ),
+            child: const SizedBox.expand(),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _ValidationVideoPlayer extends StatefulWidget {
   const _ValidationVideoPlayer({
     required this.path,
@@ -303,6 +567,8 @@ class _ValidationVideoPlayer extends StatefulWidget {
     required this.showDetections,
     required this.detectionData,
     required this.onOpenExternal,
+    this.selectedObservationId,
+    this.onDetectionBoxSelected,
   });
 
   final String path;
@@ -310,6 +576,8 @@ class _ValidationVideoPlayer extends StatefulWidget {
   final bool showDetections;
   final Map<String, dynamic> detectionData;
   final VoidCallback onOpenExternal;
+  final String? selectedObservationId;
+  final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
   @override
   State<_ValidationVideoPlayer> createState() => _ValidationVideoPlayerState();
@@ -470,158 +738,6 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     super.dispose();
   }
 
-  List<DetectionBox> _currentBoxes(Duration position) {
-    final currentMs = position.inMilliseconds;
-    final currentSeconds = currentMs / 1000;
-    final currentFrame = _currentFrameIndexEstimate(position);
-    final toleranceFrames = _frameTolerance();
-    final toleranceSeconds = _timeTolerance();
-
-    final currentFrame25 = (currentMs / 1000 * 25).round();
-    final currentFrame30 = (currentMs / 1000 * 30).round();
-    final currentFrame60 = (currentMs / 1000 * 60).round();
-
-    final anyBoxHasTime = widget.visibleBoxes.any(
-      (b) => b.frameIndex != null || b.timestamp != null,
-    );
-
-    if (!anyBoxHasTime) {
-      return widget.visibleBoxes;
-    }
-
-    final selectedByTrack = <String, _TimedBoxMatch>{};
-    final untrackedBoxes = <_TimedBoxMatch>[];
-    for (var index = 0; index < widget.visibleBoxes.length; index++) {
-      final box = widget.visibleBoxes[index];
-      final match = _matchForBox(
-        box,
-        index,
-        currentFrame,
-        currentFrame25,
-        currentFrame30,
-        currentFrame60,
-        currentSeconds,
-        toleranceFrames,
-        toleranceSeconds,
-      );
-      if (match == null) continue;
-      final trackId = box.trackId?.trim();
-      if (trackId == null || trackId.isEmpty) {
-        untrackedBoxes.add(match);
-        continue;
-      }
-      final previous = selectedByTrack[trackId];
-      if (previous == null || match.distance < previous.distance) {
-        selectedByTrack[trackId] = match;
-      }
-    }
-
-    final matches = <_TimedBoxMatch>[
-      ...selectedByTrack.values,
-      ...untrackedBoxes,
-    ]..sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
-    return matches.map((match) => match.box).toList();
-  }
-
-  _TimedBoxMatch? _matchForBox(
-    DetectionBox box,
-    int index,
-    int? currentFrame,
-    int currentFrame25,
-    int currentFrame30,
-    int currentFrame60,
-    double currentSeconds,
-    int toleranceFrames,
-    double toleranceSeconds,
-  ) {
-    if (box.frameIndex != null) {
-      final distance = currentFrame == null
-          ? [
-              (box.frameIndex! - currentFrame25).abs(),
-              (box.frameIndex! - currentFrame30).abs(),
-              (box.frameIndex! - currentFrame60).abs(),
-            ].reduce((a, b) => a < b ? a : b)
-          : (box.frameIndex! - currentFrame).abs();
-      if (distance <= toleranceFrames) {
-        return _TimedBoxMatch(
-          box: box,
-          distance: distance.toDouble(),
-          sortIndex: _trackSortIndex(box, index),
-        );
-      }
-      return null;
-    }
-    if (box.timestamp != null) {
-      final distance = (box.timestamp! - currentSeconds).abs();
-      if (distance <= toleranceSeconds) {
-        return _TimedBoxMatch(
-          box: box,
-          distance: distance,
-          sortIndex: _trackSortIndex(box, index),
-        );
-      }
-    }
-    return null;
-  }
-
-  int? _currentFrameIndexEstimate(Duration position) {
-    if (_duration <= Duration.zero || position < Duration.zero) {
-      return null;
-    }
-    final totalFrames = _totalFrameHint();
-    if (totalFrames == null || totalFrames <= 0) return null;
-    final progress = (position.inMilliseconds / _duration.inMilliseconds).clamp(
-      0.0,
-      1.0,
-    );
-    return (progress * totalFrames).round();
-  }
-
-  int _frameTolerance() {
-    final stride = math.max(1, _intData('vid_stride') ?? 1);
-    final totalFrames = _totalFrameHint();
-    if (_duration > Duration.zero && totalFrames != null && totalFrames > 0) {
-      final fps = totalFrames / _duration.inMilliseconds * 1000;
-      return math.max(stride, (fps * 0.25).ceil());
-    }
-    return math.max(stride, 6);
-  }
-
-  double _timeTolerance() => 0.25;
-
-  int? _totalFrameHint() {
-    final processedFrames = _intData('total_frames_processed');
-    final stride = math.max(1, _intData('vid_stride') ?? 1);
-    final maxBoxFrame = widget.visibleBoxes
-        .map((box) => box.frameIndex)
-        .whereType<int>()
-        .fold<int?>(null, (maxFrame, frame) {
-          if (maxFrame == null || frame > maxFrame) return frame;
-          return maxFrame;
-        });
-    final processedHint = processedFrames == null
-        ? null
-        : math.max(1, processedFrames * stride);
-    if (processedHint == null) {
-      return maxBoxFrame == null ? null : maxBoxFrame + 1;
-    }
-    if (maxBoxFrame == null) return processedHint;
-    return math.max(processedHint, maxBoxFrame + 1);
-  }
-
-  int? _intData(String key) {
-    final value = widget.detectionData[key];
-    if (value is int) return value;
-    if (value is num) return value.round();
-    return int.tryParse(value?.toString() ?? '');
-  }
-
-  int _trackSortIndex(DetectionBox box, int fallback) {
-    final trackId = box.trackId;
-    if (trackId == null || trackId.isEmpty) return fallback;
-    return int.tryParse(trackId) ?? fallback;
-  }
-
   String _formatDuration(Duration d) {
     final hours = d.inHours;
     final mins = (d.inMinutes % 60).toString().padLeft(2, '0');
@@ -677,13 +793,15 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
               valueListenable: _positionNotifier,
               builder: (context, position, child) {
                 return RepaintBoundary(
-                  child: IgnorePointer(
-                    child: CustomPaint(
-                      painter: _DetectionOverlayPainter(
-                        boxes: _currentBoxes(position),
-                        mediaSize: _videoSize!,
-                      ),
-                    ),
+                  child: DinoVideoDetectionOverlay(
+                    boxes: widget.visibleBoxes,
+                    mediaSize: _videoSize!,
+                    position: position,
+                    duration: _duration,
+                    detectionData: widget.detectionData,
+                    selectedObservationId: widget.selectedObservationId,
+                    onDetectionBoxSelected: widget.onDetectionBoxSelected,
+                    onBackgroundTap: _togglePlayPause,
                   ),
                 );
               },
@@ -826,6 +944,63 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 }
 
+Rect _fittedMediaRect(Size viewport, Size media) {
+  if (viewport.isEmpty || media.isEmpty) return Rect.zero;
+  final scale = math.min(
+    viewport.width / media.width,
+    viewport.height / media.height,
+  );
+  final fittedSize = Size(media.width * scale, media.height * scale);
+  return Rect.fromLTWH(
+    (viewport.width - fittedSize.width) / 2,
+    (viewport.height - fittedSize.height) / 2,
+    fittedSize.width,
+    fittedSize.height,
+  );
+}
+
+Rect? _renderRectForBox(
+  DetectionBox box,
+  Size viewport,
+  Size mediaSize,
+) {
+  if (box.bbox.length < 4 || viewport.isEmpty || mediaSize.isEmpty) {
+    return null;
+  }
+  final fitted = _fittedMediaRect(viewport, mediaSize);
+  if (fitted.isEmpty) return null;
+
+  final xmin = box.bbox[0];
+  final ymin = box.bbox[1];
+  final xmax = box.bbox[2];
+  final ymax = box.bbox[3];
+  final isNormalized = xmax <= 1.5 && ymax <= 1.5;
+  final scaleX = fitted.width / mediaSize.width;
+  final scaleY = fitted.height / mediaSize.height;
+
+  return Rect.fromLTRB(
+    fitted.left + (isNormalized ? xmin * fitted.width : xmin * scaleX),
+    fitted.top + (isNormalized ? ymin * fitted.height : ymin * scaleY),
+    fitted.left + (isNormalized ? xmax * fitted.width : xmax * scaleX),
+    fitted.top + (isNormalized ? ymax * fitted.height : ymax * scaleY),
+  );
+}
+
+DetectionBox? _hitTestDinoBox(
+  Offset localPosition,
+  Size viewport,
+  Size mediaSize,
+  List<DetectionBox> boxes,
+) {
+  for (final box in boxes.reversed) {
+    final observationId = box.observationId?.trim();
+    if (observationId == null || observationId.isEmpty) continue;
+    final rect = _renderRectForBox(box, viewport, mediaSize);
+    if (rect != null && rect.contains(localPosition)) return box;
+  }
+  return null;
+}
+
 class _TimedBoxMatch {
   const _TimedBoxMatch({
     required this.box,
@@ -854,25 +1029,6 @@ class _DetectionOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (mediaSize.isEmpty || boxes.isEmpty) return;
 
-    final mediaRatio = mediaSize.width / mediaSize.height;
-    final canvasRatio = size.width / size.height;
-    double w, h, dx, dy;
-
-    if (mediaRatio > canvasRatio) {
-      w = size.width;
-      h = w / mediaRatio;
-      dx = 0;
-      dy = (size.height - h) / 2;
-    } else {
-      h = size.height;
-      w = h * mediaRatio;
-      dx = (size.width - w) / 2;
-      dy = 0;
-    }
-
-    final scaleX = w / mediaSize.width;
-    final scaleY = h / mediaSize.height;
-
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.5;
@@ -883,32 +1039,9 @@ class _DetectionOverlayPainter extends CustomPainter {
       final box = boxes[index];
       if (box.bbox.length < 4) continue;
 
-      final xmin = box.bbox[0];
-      final ymin = box.bbox[1];
-      final xmax = box.bbox[2];
-      final ymax = box.bbox[3];
-
-      final isNormalized = xmax <= 1.5 && ymax <= 1.5;
-
-      double renderXMin, renderYMin, renderXMax, renderYMax;
-      if (isNormalized) {
-        renderXMin = dx + xmin * w;
-        renderYMin = dy + ymin * h;
-        renderXMax = dx + xmax * w;
-        renderYMax = dy + ymax * h;
-      } else {
-        renderXMin = dx + xmin * scaleX;
-        renderYMin = dy + ymin * scaleY;
-        renderXMax = dx + xmax * scaleX;
-        renderYMax = dy + ymax * scaleY;
-      }
-
-      final rect = Rect.fromLTRB(
-        renderXMin,
-        renderYMin,
-        renderXMax,
-        renderYMax,
-      );
+      final rect = _renderRectForBox(box, size, mediaSize);
+      if (rect == null) continue;
+      final fitted = _fittedMediaRect(size, mediaSize);
       final color = _getColorForSpecies(box.species);
       paint.color = color;
 
@@ -929,7 +1062,10 @@ class _DetectionOverlayPainter extends CustomPainter {
       );
       textPainter.layout();
 
-      final textY = math.max(dy, rect.top - textPainter.height - 2);
+      final textY = math.max(
+        fitted.top,
+        rect.top - textPainter.height - 2,
+      );
 
       final bgRect = Rect.fromLTWH(
         rect.left,

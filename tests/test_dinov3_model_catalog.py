@@ -34,23 +34,47 @@ def test_manifest_exposes_dinov3_capabilities(tmp_path):
     assert resolve_saved_model_path(str(head.resolve()), models) == str(manifest.resolve())
 
 
-def test_healthy_installed_component_is_added_to_classification_catalog(tmp_path, monkeypatch):
+def test_healthy_installed_component_uses_only_declared_manifest(tmp_path, monkeypatch):
     layout = get_model_layout(tmp_path)
     root = layout.dinov3_root
     root.mkdir(parents=True)
-    head = root / 'dinov3_classifier_merged_reviewed_20260908.pt'
-    head.write_bytes(b'head')
-    manifest = root / 'dinov3_classifier_merged_reviewed_20260908.neri.json'
-    manifest.write_text(
+
+    active_head = root / 'multi_prototype.pt'
+    active_head.write_bytes(b'head')
+    active_manifest = root / 'active-multi.neri.json'
+    active_manifest.write_text(
         json.dumps({
             'backend': 'dinov3',
-            'display_name': 'DINOv3 ViT-B/16 · 17 species',
-            'checkpoint': head.name,
+            'display_name': 'DINOv3 ViT-B/16 · Multi-prototype',
+            'checkpoint': active_head.name,
             'architecture': 'dinov3_vitb16',
             'feature_dim': 768,
             'requires_detector': True,
             'supports_video_fast': True,
             'supports_video_all': False,
+        }),
+        encoding='utf-8',
+    )
+
+    decoy_head = root / 'decoy.pt'
+    decoy_head.write_bytes(b'decoy')
+    decoy_manifest = root / 'decoy.neri.json'
+    decoy_manifest.write_text(
+        json.dumps({
+            'backend': 'dinov3',
+            'display_name': 'must not be discovered',
+            'checkpoint': decoy_head.name,
+            'architecture': 'dinov3_vitb16',
+            'feature_dim': 768,
+        }),
+        encoding='utf-8',
+    )
+    (root / 'install.json').write_text(
+        json.dumps({
+            'classifier': {
+                'filename': active_head.name,
+                'manifest': active_manifest.name,
+            }
         }),
         encoding='utf-8',
     )
@@ -62,9 +86,10 @@ def test_healthy_installed_component_is_added_to_classification_catalog(tmp_path
     )
 
     models = discover_models(layout, 'cls')
+    installed = [model for model in models if model.path.startswith(str(root.resolve()))]
 
-    installed = [model for model in models if model.path == str(manifest.resolve())]
     assert len(installed) == 1
+    assert installed[0].path == str(active_manifest.resolve())
     assert installed[0].backend == 'dinov3'
 
 

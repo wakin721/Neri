@@ -80,6 +80,13 @@ class DirectRequest(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class DinoV3DirectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    manifest_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv3/.+")
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 def _budget_secret(config: DistributionConfig) -> bytes:
     return hashlib.sha256(
         b"neri-model-budget-v1\0" + config.openlist_token.encode("utf-8")
@@ -121,14 +128,8 @@ def create_app(
         budget.check_request(client_ip)
         return client_ip
 
-    @app.get("/health")
-    def health():
-        return {"status": "ok", "schema_version": 1}
-
-    @app.get("/v1/manifest")
-    def manifest(request: Request):
-        consume_request_budget(request)
-        snapshot = service.manifest()
+    @staticmethod
+    def snapshot_payload(snapshot):
         return {
             "schema_version": 1,
             "manifest_id": snapshot.manifest_id,
@@ -138,10 +139,33 @@ def create_app(
             ],
         }
 
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "schema_version": 1}
+
+    @app.get("/v1/manifest")
+    def manifest(request: Request):
+        consume_request_budget(request)
+        return snapshot_payload(service.manifest())
+
     @app.post("/v1/direct")
     def direct(payload: DirectRequest, request: Request):
         consume_request_budget(request)
         return service.direct(payload.manifest_id, payload.path, payload.sha256)
+
+    @app.get("/v1/dinov3/manifest")
+    def dinov3_manifest(request: Request):
+        consume_request_budget(request)
+        return snapshot_payload(service.dinov3_manifest())
+
+    @app.post("/v1/dinov3/direct")
+    def dinov3_direct(payload: DinoV3DirectRequest, request: Request):
+        consume_request_budget(request)
+        return service.dinov3_direct(
+            payload.manifest_id,
+            payload.path,
+            payload.sha256,
+        )
 
     @app.get("/v1/proxy/{token}")
     def proxy(token: str, request: Request):

@@ -85,6 +85,25 @@ class DinoV3RegisterRequest(BaseModel):
     classification_model_path: str = Field(..., min_length=1)
 
 
+class DinoV3BoxFeedbackRequest(BaseModel):
+    """Explicit human feedback for one persisted DINOv3 detection box."""
+
+    input_path: str = Field(..., min_length=1)
+    file_path: str = Field(..., min_length=1)
+    classification_model_path: str = Field(..., min_length=1)
+    observation_id: str = Field(..., min_length=1)
+    action: Literal["correct", "update", "empty", "unverified"]
+    species_name: str | None = None
+    feedback_operation_id: str = Field(..., min_length=1)
+
+
+class DinoV3FeedbackRevertRequest(BaseModel):
+    """Revert one previously recorded DINOv3 feedback operation."""
+
+    classification_model_path: str = Field(..., min_length=1)
+    feedback_operation_id: str = Field(..., min_length=1)
+
+
 class SettingsResponse(BaseModel):
     """Subset of desktop settings useful to the mobile/desktop frontend."""
 
@@ -355,6 +374,8 @@ class ValidationMarkRequest(BaseModel):
     species_count: str | None = None
     species_type: str | None = None
     remark: str | None = None
+    classification_model_path: str | None = None
+    feedback_operation_id: str | None = None
 
 
 class ValidationBatchMarkRequest(BaseModel):
@@ -367,6 +388,8 @@ class ValidationBatchMarkRequest(BaseModel):
     species_count: str | None = None
     species_type: str | None = None
     remark: str | None = None
+    classification_model_path: str | None = None
+    feedback_operation_id: str | None = None
 
 
 class ValidationExportRequest(BaseModel):

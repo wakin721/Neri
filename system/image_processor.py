@@ -5,6 +5,7 @@ import logging
 import concurrent.futures
 import gc
 import time
+import uuid
 from typing import Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
 from ultralytics import YOLO
@@ -624,10 +625,17 @@ class ImageProcessor:
                                     "DINOv3 classifier returned a different number of predictions than crops"
                                 )
                             for prediction, (r_idx, b_idx) in zip(predictions, crop_map_info):
-                                det_conf = float(det_results[r_idx].boxes[b_idx].conf.item())
+                                box = det_results[r_idx].boxes[b_idx]
+                                det_conf = float(box.conf.item())
+                                bbox = tuple(float(value) for value in box.xyxy.tolist()[0])
+                                observation_id = uuid.uuid4().hex
                                 candidate = prediction.as_candidate(
                                     detection_confidence=det_conf
                                 )
+                                candidate.update({
+                                    "observation_id": observation_id,
+                                    "predicted_species": prediction.species,
+                                })
                                 batch_candidates_maps[r_idx][b_idx] = [candidate]
                                 batch_selected_candidate_maps[r_idx][b_idx] = (
                                     candidate if prediction.accepted else None
@@ -645,6 +653,9 @@ class ImageProcessor:
                                         known_score=prediction.known_score,
                                         threshold=prediction.threshold,
                                         detection_confidence=det_conf,
+                                        observation_id=observation_id,
+                                        best_known_species=prediction.best_known_species,
+                                        bbox=bbox,
                                     )
                                 )
                         else:

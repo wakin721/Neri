@@ -11,18 +11,27 @@ def test_dinov3_environment_status_endpoint(monkeypatch):
         dinov3_environment,
         "dinov3_component_status",
         lambda: {
-            "installed": False,
-            "healthy": False,
+            "installed": True,
+            "healthy": True,
             "architecture": "DINOv3 ViT-B/16",
-            "component_version": 1,
+            "component_version": 2,
             "source_commit": "6876159a11b4df116f30f667f8c9888617df0751",
-            "message": "DINOv3 未安装。",
+            "classifier_filename": "multi_prototype.pt",
+            "classifier_fingerprint": "a" * 64,
+            "classifier_head_type": "multi_prototype",
+            "selection_k": 3,
+            "message": "DINOv3 ViT-B/16 Multi-prototype 已安装。",
         },
     )
     with TestClient(backend_main.app) as client:
         response = client.get("/api/environment/dinov3-status")
     assert response.status_code == 200
-    assert response.json()["healthy"] is False
+    payload = response.json()
+    assert payload["healthy"] is True
+    assert payload["classifier_filename"] == "multi_prototype.pt"
+    assert payload["classifier_fingerprint"] == "a" * 64
+    assert payload["classifier_head_type"] == "multi_prototype"
+    assert payload["selection_k"] == 3
 
 
 def test_dinov3_environment_install_endpoint(monkeypatch):

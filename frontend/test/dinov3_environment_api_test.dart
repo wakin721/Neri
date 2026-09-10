@@ -10,16 +10,23 @@ void main() {
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
         expect(request.url.path, '/api/environment/dinov3-status');
-        return http.Response(
-          jsonEncode({
-            'installed': true,
-            'healthy': false,
-            'architecture': 'DINOv3 ViT-B/16',
-            'component_version': 1,
-            'source_commit': '6876159a11b4df116f30f667f8c9888617df0751',
-            'message': '需要修复',
-          }),
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'installed': true,
+              'healthy': true,
+              'architecture': 'DINOv3 ViT-B/16',
+              'component_version': 2,
+              'source_commit': '6876159a11b4df116f30f667f8c9888617df0751',
+              'classifier_filename': 'multi_prototype.pt',
+              'classifier_fingerprint': 'a' * 64,
+              'classifier_head_type': 'multi_prototype',
+              'selection_k': 3,
+              'message': 'DINOv3 ViT-B/16 Multi-prototype 已安装。',
+            }),
+          ),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         );
       }),
     );
@@ -27,9 +34,14 @@ void main() {
     final status = await client.fetchDinoV3ComponentStatus();
 
     expect(status.installed, isTrue);
-    expect(status.healthy, isFalse);
+    expect(status.healthy, isTrue);
     expect(status.architecture, 'DINOv3 ViT-B/16');
-    expect(status.message, '需要修复');
+    expect(status.componentVersion, 2);
+    expect(status.classifierFilename, 'multi_prototype.pt');
+    expect(status.classifierFingerprint, 'a' * 64);
+    expect(status.classifierHeadType, 'multi_prototype');
+    expect(status.selectionK, 3);
+    expect(status.message, 'DINOv3 ViT-B/16 Multi-prototype 已安装。');
   });
 
   test('starts DINOv3 install with selected environment source', () async {

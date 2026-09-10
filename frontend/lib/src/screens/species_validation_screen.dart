@@ -33,6 +33,28 @@ typedef MarkValidationItems =
       String? remark,
     });
 
+typedef MarkValidationItemWithFeedback =
+    Future<DetectionItem> Function(
+      DetectionItem item,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+    });
+
+typedef MarkValidationItemsWithFeedback =
+    Future<List<DetectionItem>> Function(
+      List<DetectionItem> items,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+    });
+
 typedef RedetectValidationItems =
     Future<void> Function(
       List<DetectionItem> items, {
@@ -82,6 +104,41 @@ const validationQuantityButtons = <String>[
   '50',
 ];
 
+List<DetectionItem> dinoValidationEffectiveItems(
+  Iterable<DetectionItem> items,
+  Map<String, DetectionItem> authoritativeByPath,
+) {
+  return [
+    for (final item in items)
+      authoritativeByPath[item.path] == null
+          ? item
+          : item.mergeValidationUpdate(authoritativeByPath[item.path]!),
+  ];
+}
+
+String dinoValidationLearningSkipSummary(
+  Iterable<DetectionItem> items, {
+  required bool learningRequested,
+}) {
+  if (!learningRequested) return '';
+  final targets = items.toList(growable: false);
+  if (targets.isEmpty) return '';
+
+  var skipped = 0;
+  for (final item in targets) {
+    final observationIds = item.detectionBoxes
+        .map((box) => box.observationId?.trim() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (observationIds.length != 1) skipped += 1;
+  }
+  if (skipped == 0) return '';
+  if (targets.length == 1) {
+    return 'DINOv3 学习已跳过：该文件需恰好 1 个可学习检测框';
+  }
+  return 'DINOv3 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
+}
+
 const double _validationButtonHeight = 40;
 const _validationImageTypes = {
   'png',
@@ -108,6 +165,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   const SpeciesValidationScreen({
     required this.apiClient,
     required this.inputPath,
+    this.classificationModelPath,
     required this.items,
     required this.loading,
     required this.refreshVersion,
@@ -146,6 +204,7 @@ class SpeciesValidationScreen extends StatefulWidget {
 
   final NeriApiClient apiClient;
   final String inputPath;
+  final String? classificationModelPath;
   final List<DetectionItem> items;
   final bool loading;
   final int refreshVersion;
@@ -190,6 +249,7 @@ enum _ValidationListFocus { species, photos }
 class _MarkHistoryEntry {
   _MarkHistoryEntry(
     Iterable<DetectionItem> items, {
+    this.feedbackOperationId,
     Iterable<String>? quickMarkSpecies,
   }) : items = items.toList(),
        quickMarkSpecies = List<String>.from(
@@ -198,6 +258,7 @@ class _MarkHistoryEntry {
 
   final List<DetectionItem> items;
   final List<String> quickMarkSpecies;
+  final String? feedbackOperationId;
 }
 
 class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
@@ -266,6 +327,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   // 临时状态（标记中、导出中不需要跨界面保存）
   bool _marking = false;
   bool _exporting = false;
+  String? _selectedObservationId;
+  int _feedbackOperationSequence = 0;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   final List<String> _pendingSpeciesNames = <String>[];
   final List<String> _pendingQuantities = <String>[];
@@ -542,6 +605,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
+    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     // 将 220.0 修改为 200.0，与预览界面保持完全一致
     final listWidth = (availableWidth * 0.20).clamp(200.0, 300.0).toDouble();
     return Row(
@@ -557,6 +621,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(child: _buildImagePanel(selectedItem, visibleBoxes)),
+              if (selectedDinoBox != null) ...[
+                const SizedBox(height: 10),
+                _buildDinoFeedbackPanel(selectedDinoBox),
+              ],
               const SizedBox(height: 10),
               _buildSummaryPanel(selectedItem, visibleBoxes),
               const SizedBox(height: 10),
@@ -576,12 +644,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
+    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     return ListView(
       children: [
         SizedBox(
           height: 330,
           child: _buildImagePanel(selectedItem, visibleBoxes),
         ),
+        if (selectedDinoBox != null) ...[
+          const SizedBox(height: 10),
+          _buildDinoFeedbackPanel(selectedDinoBox),
+        ],
         const SizedBox(height: 10),
         SizedBox(height: 260, child: _buildLeftLists(buckets, visibleRows)),
         const SizedBox(height: 10),
@@ -826,10 +899,188 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         visibleBoxes: visibleBoxes,
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
+        selectedObservationId: _selectedObservationId,
+        onDetectionBoxSelected: (box) {
+          setState(() => _selectedObservationId = box?.observationId);
+        },
         isFavorite: _isFavoritePhoto(item),
         onToggleFavorite: _isImage(item) || _isVideo(item)
             ? () => unawaited(_toggleFavoritePhoto(item))
             : null,
+      ),
+    );
+  }
+
+  DetectionBox? _selectedDinoBox(List<DetectionBox> visibleBoxes) {
+    final observationId = _selectedObservationId?.trim();
+    if (observationId == null || observationId.isEmpty) return null;
+    for (final box in visibleBoxes) {
+      if (box.observationId?.trim() == observationId) return box;
+    }
+    return null;
+  }
+
+  String _newFeedbackOperationId() {
+    _feedbackOperationSequence += 1;
+    return 'feedback-${DateTime.now().microsecondsSinceEpoch}-$_feedbackOperationSequence';
+  }
+
+  void _mergeDinoFeedbackItem(DetectionItem authoritative) {
+    _currentBuckets();
+    final current = _bucketCacheItemByPath[authoritative.path] ??
+        widget.items.firstWhere(
+          (candidate) => candidate.path == authoritative.path,
+          orElse: () => authoritative,
+        );
+    final merged = dinoValidationEffectiveItems(
+      <DetectionItem>[current],
+      <String, DetectionItem>{authoritative.path: authoritative},
+    ).single;
+
+    _bucketCacheItemByPath = <String, DetectionItem>{
+      ..._bucketCacheItemByPath,
+      merged.path: merged,
+    };
+    for (final bucket in _bucketCache) {
+      for (var index = 0; index < bucket.items.length; index++) {
+        if (bucket.items[index].path == merged.path) {
+          bucket.items[index] = merged;
+        }
+      }
+      for (final group in bucket.groups) {
+        for (var index = 0; index < group.items.length; index++) {
+          if (group.items[index].path == merged.path) {
+            group.items[index] = merged;
+          }
+        }
+      }
+    }
+    _groupSpeciesLabelCache.clear();
+  }
+
+  Future<void> _submitDinoBoxFeedback(
+    DetectionBox box,
+    String action, {
+    String? speciesName,
+  }) async {
+    if (_marking || widget.items.isEmpty) return;
+    final observationId = box.observationId?.trim() ?? '';
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    if (observationId.isEmpty || classificationModelPath.isEmpty) return;
+    final item = widget.items.firstWhere(
+      (candidate) => candidate.path == _selectedPath,
+      orElse: () => widget.items.first,
+    );
+    final operationId = _newFeedbackOperationId();
+
+    _setMarking(true);
+    try {
+      final result = await widget.apiClient.markDinoV3BoxFeedback(
+        inputPath: widget.inputPath,
+        filePath: item.path,
+        classificationModelPath: classificationModelPath,
+        observationId: observationId,
+        action: action,
+        speciesName: speciesName,
+        feedbackOperationId: operationId,
+      );
+      if (!mounted) return;
+      setState(() => _mergeDinoFeedbackItem(result.item));
+      final recordedOperationId = result.operationId.trim().isEmpty
+          ? operationId
+          : result.operationId.trim();
+      _recordMarkHistory(
+        <DetectionItem>[result.item],
+        feedbackOperationId: recordedOperationId,
+      );
+      unawaited(widget.onRefresh().catchError((_) {}));
+      _showSnackBar('已记录检测框反馈');
+    } catch (error) {
+      if (!mounted) return;
+      _showSnackBar('检测框反馈失败：$error');
+    } finally {
+      _setMarking(false);
+    }
+  }
+
+  Future<void> _showDinoBoxSpeciesDialog(DetectionBox box) async {
+    if (_marking) return;
+    final predictedSpecies = box.predictedSpecies?.trim() ?? '';
+    final initialSpecies = predictedSpecies.isNotEmpty
+        ? predictedSpecies
+        : box.species.trim();
+    final draft = await showDialog<_OtherSpeciesDraft>(
+      context: context,
+      builder: (context) {
+        return _OtherSpeciesDialog(
+          initialSpecies: initialSpecies,
+          initialCount: '1',
+          initialType: widget.speciesTypes[initialSpecies] ?? '',
+          initialRemark: '',
+          speciesTypes: widget.speciesTypes,
+          speciesUsageCounts: _speciesUsageCounts(),
+        );
+      },
+    );
+    if (!mounted || draft == null) return;
+    final speciesName = draft.speciesName.trim();
+    if (speciesName.isEmpty) return;
+    await _submitDinoBoxFeedback(
+      box,
+      'update',
+      speciesName: speciesName,
+    );
+  }
+
+  Widget _buildDinoFeedbackPanel(DetectionBox box) {
+    const title = '检测框校验';
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    final observationId = box.observationId?.trim() ?? '';
+    final canSubmit =
+        !_marking && classificationModelPath.isNotEmpty && observationId.isNotEmpty;
+    return _ValidationPanel(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(width: 12),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_submitDinoBoxFeedback(box, 'correct'))
+                  : null,
+              child: const Text('正确'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_showDinoBoxSpeciesDialog(box))
+                  : null,
+              child: const Text('修改物种'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_submitDinoBoxFeedback(box, 'empty'))
+                  : null,
+              child: const Text('空 / 误检'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: canSubmit
+                  ? () => unawaited(_submitDinoBoxFeedback(box, 'unverified'))
+                  : null,
+              child: const Text('不参与学习'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2174,6 +2425,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           timestamp: box.timestamp,
           trackId: box.trackId,
           candidates: box.candidates,
+          observationId: box.observationId,
+          registryId: box.registryId,
+          predictedSpecies: box.predictedSpecies,
+          feedbackStatus: box.feedbackStatus,
         );
       }
       return null;
@@ -2732,6 +2987,76 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     }
   }
 
+  String? _newValidationFeedbackOperationId(String action) {
+    final classificationModelPath = widget.classificationModelPath?.trim() ?? '';
+    if (action == 'unverified' || classificationModelPath.isEmpty) return null;
+    return _newFeedbackOperationId();
+  }
+
+  Future<DetectionItem> _callMarkItem(
+    DetectionItem item,
+    String action, {
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? feedbackOperationId,
+  }) {
+    final callback = widget.onMarkItem;
+    if (feedbackOperationId != null &&
+        callback is MarkValidationItemWithFeedback) {
+      return callback(
+        item,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+      );
+    }
+    return callback(
+      item,
+      action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+    );
+  }
+
+  Future<List<DetectionItem>> _callMarkItems(
+    List<DetectionItem> items,
+    String action, {
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? feedbackOperationId,
+  }) {
+    final callback = widget.onMarkItems;
+    if (feedbackOperationId != null &&
+        callback is MarkValidationItemsWithFeedback) {
+      return callback(
+        items,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+      );
+    }
+    return callback(
+      items,
+      action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+    );
+  }
+
   Future<void> _markBatch(
     List<DetectionItem> items,
     String action, {
@@ -2744,16 +3069,22 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
+    final feedbackOperationId = _newValidationFeedbackOperationId(action);
+    final learningSkipSummary = dinoValidationLearningSkipSummary(
+      items,
+      learningRequested: feedbackOperationId != null,
+    );
 
     _setMarking(true);
     try {
-      final updatedItems = await widget.onMarkItems(
+      final updatedItems = await _callMarkItems(
         items,
         action,
         speciesName: speciesName,
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        feedbackOperationId: feedbackOperationId,
       );
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
@@ -2770,6 +3101,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
           _recordMarkHistory(
             updatedItems,
             quickMarkSpeciesName: usedQuickSpecies,
+            feedbackOperationId: feedbackOperationId,
           );
         }
         final nextSelection = nextPath ?? lastUpdated?.path;
@@ -2796,7 +3128,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (usedQuickSpecies != null) {
         _notifyQuickMarkUsed(usedQuickSpecies);
       }
-      _showSnackBar('已批量处理 ${items.length} 个文件');
+      final message = '已批量处理 ${items.length} 个文件';
+      _showSnackBar(
+        learningSkipSummary.isEmpty
+            ? message
+            : '$message；$learningSkipSummary',
+      );
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('批量标记失败：$error');
@@ -2808,6 +3145,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   void _recordMarkHistory(
     Iterable<DetectionItem> items, {
     String? quickMarkSpeciesName,
+    String? feedbackOperationId,
   }) {
     final itemsByPath = <String, DetectionItem>{};
     for (final item in items) {
@@ -2819,6 +3157,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _markHistory.add(
       _MarkHistoryEntry(
         itemsByPath.values,
+        feedbackOperationId: feedbackOperationId,
         quickMarkSpecies: quickMarkSpeciesName == null
             ? const <String>[]
             : _splitSpeciesNames(quickMarkSpeciesName),
@@ -2882,6 +3221,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final quickMarkSpeciesToUndo = List<String>.from(
       _markHistory.last.quickMarkSpecies,
     );
+    final feedbackOperationId = _markHistory.last.feedbackOperationId?.trim();
 
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, targets);
@@ -2890,6 +3230,17 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _setMarking(true);
     try {
       final updatedItems = await widget.onMarkItems(targets, 'unverified');
+      if (feedbackOperationId != null && feedbackOperationId.isNotEmpty) {
+        final classificationModelPath =
+            widget.classificationModelPath?.trim() ?? '';
+        if (classificationModelPath.isEmpty) {
+          throw StateError('缺少 DINOv3 分类模型路径，无法撤回学习反馈。');
+        }
+        await widget.apiClient.revertDinoV3Feedback(
+          classificationModelPath: classificationModelPath,
+          feedbackOperationId: feedbackOperationId,
+        );
+      }
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
       final targetPaths = targets.map((item) => item.path).toSet();
@@ -2976,15 +3327,21 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     );
     _deferRegroupForItems(<DetectionItem>[item]);
 
+    final feedbackOperationId = _newValidationFeedbackOperationId(action);
+    final learningSkipSummary = dinoValidationLearningSkipSummary(
+      <DetectionItem>[item],
+      learningRequested: feedbackOperationId != null,
+    );
     _setMarking(true);
     try {
-      final updated = await widget.onMarkItem(
+      final updated = await _callMarkItem(
         item,
         action,
         speciesName: speciesName,
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
+        feedbackOperationId: feedbackOperationId,
       );
       if (!mounted) return;
       final usedQuickSpecies =
@@ -3003,9 +3360,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         if (action == 'unverified') {
           _discardMarkHistoryForPaths({item.path});
         } else {
-          _recordMarkHistory(<DetectionItem>[
-            updated,
-          ], quickMarkSpeciesName: usedQuickSpecies);
+          _recordMarkHistory(
+            <DetectionItem>[updated],
+            quickMarkSpeciesName: usedQuickSpecies,
+            feedbackOperationId: feedbackOperationId,
+          );
         }
         final targetPath = targetItem.path;
         _selectedPath = targetPath;
@@ -3032,7 +3391,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final message = action == 'unverified'
           ? '已撤回校验标记'
           : '已标记 ${updated.filename}';
-      _showSnackBar(message);
+      _showSnackBar(
+        learningSkipSummary.isEmpty
+            ? message
+            : '$message；$learningSkipSummary',
+      );
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('标记失败：$error');
