@@ -104,6 +104,29 @@ const validationQuantityButtons = <String>[
   '50',
 ];
 
+String dinoValidationLearningSkipSummary(
+  Iterable<DetectionItem> items, {
+  required bool learningRequested,
+}) {
+  if (!learningRequested) return '';
+  final targets = items.toList(growable: false);
+  if (targets.isEmpty) return '';
+
+  var skipped = 0;
+  for (final item in targets) {
+    final observationIds = item.detectionBoxes
+        .map((box) => box.observationId?.trim() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (observationIds.length != 1) skipped += 1;
+  }
+  if (skipped == 0) return '';
+  if (targets.length == 1) {
+    return 'DINOv3 学习已跳过：该文件需恰好 1 个可学习检测框';
+  }
+  return 'DINOv3 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
+}
+
 const double _validationButtonHeight = 40;
 const _validationImageTypes = {
   'png',
@@ -3000,6 +3023,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
     final feedbackOperationId = _newValidationFeedbackOperationId(action);
+    final learningSkipSummary = dinoValidationLearningSkipSummary(
+      items,
+      learningRequested: feedbackOperationId != null,
+    );
 
     _setMarking(true);
     try {
@@ -3054,7 +3081,12 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       if (usedQuickSpecies != null) {
         _notifyQuickMarkUsed(usedQuickSpecies);
       }
-      _showSnackBar('已批量处理 ${items.length} 个文件');
+      final message = '已批量处理 ${items.length} 个文件';
+      _showSnackBar(
+        learningSkipSummary.isEmpty
+            ? message
+            : '$message；$learningSkipSummary',
+      );
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('批量标记失败：$error');
@@ -3249,6 +3281,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _deferRegroupForItems(<DetectionItem>[item]);
 
     final feedbackOperationId = _newValidationFeedbackOperationId(action);
+    final learningSkipSummary = dinoValidationLearningSkipSummary(
+      <DetectionItem>[item],
+      learningRequested: feedbackOperationId != null,
+    );
     _setMarking(true);
     try {
       final updated = await _callMarkItem(
@@ -3308,7 +3344,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final message = action == 'unverified'
           ? '已撤回校验标记'
           : '已标记 ${updated.filename}';
-      _showSnackBar(message);
+      _showSnackBar(
+        learningSkipSummary.isEmpty
+            ? message
+            : '$message；$learningSkipSummary',
+      );
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('标记失败：$error');
