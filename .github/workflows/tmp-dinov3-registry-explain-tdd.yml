@@ -1,31 +1,59 @@
-name: Temporary DINOv3 registry explain TDD
+name: Temporary DINOv3 registry explain final verification
 
 on:
   push:
     branches:
       - feat/dinov3-startup-registry-ui
     paths:
-      - 'frontend/**'
       - '.github/workflows/tmp-dinov3-registry-explain-tdd.yml'
 
 permissions:
   contents: write
 
 concurrency:
-  group: tmp-dinov3-registry-explain-${{ github.ref }}
+  group: tmp-dinov3-registry-explain-final-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frontend-green:
+  verify:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Apply frontend implementation
+      - name: Normalize touched backend formatting
         run: |
-          python tools/apply_dinov3_registry_explain_frontend.py
-          python tools/patch_dinov3_frontend_catalog_compat.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('system/backend/services.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''                    and checkpoint_species is not None
+            and confirmed_species not in checkpoint_species
+'''
+          new = '''                    and checkpoint_species is not None
+                    and confirmed_species not in checkpoint_species
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding='utf-8')
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest httpx numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Compile DINOv3 Python sources
+        run: python -m compileall -q system tests/test_dinov3_registry_catalog_explain.py
+      - name: Run DINOv3 Python regression tests
+        shell: bash
+        run: |
+          mapfile -t tests < <(find tests -maxdepth 1 -type f -name 'test_*dinov3*.py' -print | sort)
+          python -m pytest -q "${tests[@]}"
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -33,9 +61,6 @@ jobs:
       - name: Install Flutter dependencies
         working-directory: frontend
         run: flutter pub get
-      - name: Format changed Dart sources
-        working-directory: frontend
-        run: dart format lib/src/api_client_core.dart lib/src/models/dinov3_registry.dart lib/src/models/dinov3_explanation.dart lib/src/widgets/dinov3_registry_dialog.dart lib/src/widgets/dinov3_feature_scatter.dart lib/src/screens/species_validation_screen.dart test/dinov3_feature_scatter_test.dart
       - name: Run feature scatter tests
         working-directory: frontend
         run: flutter test test/dinov3_feature_scatter_test.dart
@@ -48,21 +73,19 @@ jobs:
       - name: Run full Flutter tests
         working-directory: frontend
         run: flutter test
-      - name: Commit verified frontend implementation
+      - name: Commit final formatting and remove temporary tooling
         shell: bash
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            frontend/lib/src/api_client_core.dart \
-            frontend/lib/src/models/dinov3_registry.dart \
-            frontend/lib/src/models/dinov3_explanation.dart \
-            frontend/lib/src/widgets/dinov3_registry_dialog.dart \
-            frontend/lib/src/widgets/dinov3_feature_scatter.dart \
-            frontend/lib/src/screens/species_validation_screen.dart \
-            frontend/test/dinov3_feature_scatter_test.dart
+          git add system/backend/services.py
+          git rm -f --ignore-unmatch \
+            .github/workflows/tmp-dinov3-registry-explain-tdd.yml \
+            tools/apply_dinov3_registry_explain_backend.py \
+            tools/apply_dinov3_registry_explain_frontend.py \
+            tools/patch_dinov3_frontend_catalog_compat.py
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "feat: add DINOv3 registry catalog and local feature scatter UI"
+          git commit -m "chore: finalize DINOv3 registry explanation"
           git push origin HEAD:feat/dinov3-startup-registry-ui
