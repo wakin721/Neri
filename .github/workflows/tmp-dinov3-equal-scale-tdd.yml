@@ -1,0 +1,26 @@
+name: Temporary DINOv3 equal-scale TDD
+
+on:
+  push:
+    branches:
+      - feat/dinov3-startup-registry-ui
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve dependencies
+        working-directory: frontend
+        run: flutter pub get
+      - name: Run equal-scale regression
+        working-directory: frontend
+        run: flutter test test/dinov3_feature_scatter_test.dart
