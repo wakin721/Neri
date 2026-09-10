@@ -176,7 +176,8 @@ def _path_identity(value: str | Path) -> str:
 def _open_feedback_state(classification_model_path: str):
     """Open checkpoint-scoped feedback state without loading the DINO encoder."""
     from system.dinov3.checkpoint import load_checkpoint
-    from system.dinov3.runtime import resolve_dinov3_manifest
+    from system.dinov3.rejection import parse_multi_dual_rejection
+    from system.dinov3.runtime import DinoV3ManifestError, resolve_dinov3_manifest
 
     manifest = resolve_dinov3_manifest(classification_model_path)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -184,15 +185,34 @@ def _open_feedback_state(classification_model_path: str):
     if not isinstance(checkpoint_name, str) or not checkpoint_name.strip():
         raise ValueError("DINOv3 manifest checkpoint is missing")
     checkpoint = load_checkpoint(manifest.parent / checkpoint_name)
+    try:
+        rejection = parse_multi_dual_rejection(payload.get("rejection"))
+    except ValueError as exc:
+        raise DinoV3ManifestError(f"Invalid DINOv3 rejection config: {exc}") from exc
+
     registry_path = registry_path_for_fingerprint(
         default_dinov3_state_root(), checkpoint.fingerprint
     )
-    feedback = HumanFeedbackStore(
-        feedback_path_for_registry(registry_path),
-        model_fingerprint=checkpoint.fingerprint,
-        checkpoint_classes=checkpoint.classes,
-        threshold=checkpoint.threshold,
-    )
+    if rejection is None:
+        feedback = HumanFeedbackStore(
+            feedback_path_for_registry(registry_path),
+            model_fingerprint=checkpoint.fingerprint,
+            checkpoint_classes=checkpoint.classes,
+            threshold=checkpoint.threshold,
+        )
+    else:
+        from system.dinov3.dual_overlay import (
+            MultiDualHumanFeedbackStore,
+            multi_dual_feedback_path_for_registry,
+        )
+
+        feedback = MultiDualHumanFeedbackStore(
+            multi_dual_feedback_path_for_registry(registry_path, rejection),
+            model_fingerprint=checkpoint.fingerprint,
+            checkpoint_classes=checkpoint.classes,
+            rejection=rejection,
+        )
+
     feature_center = checkpoint.feature_center
     if feature_center is None:
         feedback.close()
@@ -270,15 +290,18 @@ def explain_feedback_observation(
     classification_model_path: str,
     observation_id: str,
 ) -> dict:
-    from system.dinov3.classifier import DinoV3Classifier
-    from .dinov3_registry_service import load_checkpoint_for_model, open_registry_for_model
+    from system.dinov3.runtime import load_dinov3_model
 
-    feedback, _feature_center = _open_feedback_state(classification_model_path)
-    registry = open_registry_for_model(classification_model_path)
+    runtime = load_dinov3_model(
+        classification_model_path,
+        state_root=default_dinov3_state_root(),
+        encoder_factory=lambda *_args, **_kwargs: None,
+    )
+    feedback = runtime.feedback
+    registry = runtime.registry
+    classifier = runtime.classifier
     try:
         observation = feedback.get_observation(observation_id)
-        checkpoint = load_checkpoint_for_model(classification_model_path)
-        classifier = DinoV3Classifier(checkpoint, feedback=feedback, registry=registry)
         result = classifier.explain_feature(observation.embedding)
         result["current_example_available"] = bool(
             observation.source_path and Path(observation.source_path).expanduser().is_file()
@@ -314,8 +337,7 @@ def explain_feedback_observation(
         result["nearest_example"] = nearest_example
         return result
     finally:
-        registry.close()
-        feedback.close()
+        runtime.close()
 
 
 def render_feedback_observation_example(
