@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  red:
+  green:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,4 +17,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -q numpy pytest fastapi pydantic opencv-python-headless
-      - run: python -m pytest -q tests/test_dinov3_registry_named_candidate_migration.py
+      - name: Apply production patch
+        run: python tools/apply_dinov3_named_candidate_merge.py
+      - name: Compile modified sources
+        run: python -m compileall -q system tests/test_dinov3_registry_named_candidate_migration.py
+      - name: Run migration regression
+        run: python -m pytest -q tests/test_dinov3_registry_named_candidate_migration.py
+      - name: Check diff
+        run: git diff --check
