@@ -18,6 +18,61 @@ jobs:
       - name: Apply implementation
         run: python tools/apply_dinov3_startup_registry_ui.py
 
+      - name: Apply compatibility and responsive fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          feedback = Path('frontend/lib/src/screens/species_validation_screen.dart')
+          source = feedback.read_text(encoding='utf-8')
+          old = """            Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+          """
+          new = """            Expanded(
+                        child: DefaultTextStyle.merge(
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  title.substring(
+                                    0,
+                                    title.length - '检测框校验'.length,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const Text('检测框校验'),
+                            ],
+                          ),
+                        ),
+                      ),
+          """
+          assert source.count(old) == 1, source.count(old)
+          feedback.write_text(source.replace(old, new, 1), encoding='utf-8')
+
+          dialog = Path('frontend/lib/src/widgets/dinov3_registry_dialog.dart')
+          source = dialog.read_text(encoding='utf-8')
+          old = """        Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+          """
+          new = """        Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+          """
+          assert source.count(old) == 1, source.count(old)
+          dialog.write_text(source.replace(old, new, 1), encoding='utf-8')
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
