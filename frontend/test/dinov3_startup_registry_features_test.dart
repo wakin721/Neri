@@ -12,6 +12,11 @@ import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 import 'package:neri_flutter/src/widgets/dinov3_registry_dialog.dart';
 
+Future<void> pumpBrief(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
+}
+
 void main() {
   test('NeriApp wires a DINOv3 startup status check', () {
     final source = File('lib/main.dart').readAsStringSync();
@@ -79,17 +84,17 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await pumpBrief(tester);
 
     expect(find.text('裁切例图'), findsOneWidget);
     expect(find.byKey(const ValueKey('dinov3-registry-example-9')), findsOneWidget);
     expect(find.text('删除物种'), findsOneWidget);
 
     await tester.tap(find.text('删除物种'));
-    await tester.pumpAndSettle();
+    await pumpBrief(tester);
     expect(find.textContaining('删除“未知物种 #1”'), findsOneWidget);
     await tester.tap(find.text('确认删除'));
-    await tester.pumpAndSettle();
+    await pumpBrief(tester);
 
     expect(deleted, isTrue);
     expect(find.text('暂无候选或已注册物种'), findsOneWidget);
@@ -186,16 +191,16 @@ void main() {
             onFavoritePhotoPathsChanged: (_) async {},
             onFavoritePhotoExportModeChanged: (_) async {},
             onEmptyPhotoDeleteModeChanged: (_) async {},
-            onAutoGroupInferredBurstSizeChanged: (_) async {},
+            onAutoGroupInferredBurstSizeChanged: (_) {},
           ),
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await pumpBrief(tester);
 
     final viewer = find.byType(DetectionMediaViewer);
     await tester.tapAt(tester.getCenter(viewer));
-    await tester.pumpAndSettle();
+    await pumpBrief(tester);
 
     expect(find.text('#1 盘羊 · '), findsOneWidget);
     expect(find.text('检测框校验'), findsOneWidget);
