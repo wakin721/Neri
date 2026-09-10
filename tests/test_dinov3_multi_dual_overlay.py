@@ -10,6 +10,7 @@ from system.dinov3.dual_overlay import (
     multi_dual_feedback_path_for_registry,
 )
 from system.dinov3.feedback import _EvidenceEvent
+from system.dinov3.rejection import MultiDualRejectionConfig
 
 
 FP = "e" * 64
@@ -20,6 +21,13 @@ def _unit(index: int = 0) -> np.ndarray:
     value = np.zeros(768, dtype=np.float32)
     value[index] = 1.0
     return value
+
+
+def _rejection() -> MultiDualRejectionConfig:
+    return MultiDualRejectionConfig(
+        cosine_threshold=0.3,
+        squared_distance_threshold=0.5,
+    )
 
 
 def test_dual_registry_overlay_prototypes_use_full_cl2n(tmp_path):
@@ -63,7 +71,7 @@ def test_dual_feedback_candidate_prototypes_use_full_cl2n(tmp_path):
         tmp_path / "feedback.sqlite3",
         model_fingerprint=FP,
         checkpoint_classes=("A", "B"),
-        threshold=0.3,
+        rejection=_rejection(),
     )
     positive = [
         _EvidenceEvent(
@@ -92,6 +100,21 @@ def test_dual_feedback_candidate_prototypes_use_full_cl2n(tmp_path):
     store.close()
 
 
-def test_dual_feedback_uses_separate_store_path():
-    path = multi_dual_feedback_path_for_registry("/tmp/registry.sqlite3")
-    assert path.name == "feedback_multi_dual.sqlite3"
+def test_dual_feedback_uses_separate_store_path_and_calibration_scope():
+    generic = multi_dual_feedback_path_for_registry("/tmp/registry.sqlite3")
+    first = multi_dual_feedback_path_for_registry(
+        "/tmp/registry.sqlite3",
+        _rejection(),
+    )
+    second = multi_dual_feedback_path_for_registry(
+        "/tmp/registry.sqlite3",
+        MultiDualRejectionConfig(
+            cosine_threshold=0.31,
+            squared_distance_threshold=0.5,
+        ),
+    )
+
+    assert generic.name == "feedback_multi_dual.sqlite3"
+    assert first.name.startswith("feedback_multi_dual_")
+    assert first.suffix == ".sqlite3"
+    assert first != second
