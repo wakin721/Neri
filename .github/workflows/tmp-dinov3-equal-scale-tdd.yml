@@ -1,4 +1,4 @@
-name: Temporary DINOv3 equal-scale TDD
+name: Temporary DINOv3 equal-scale final verification
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -21,6 +21,9 @@ jobs:
       - name: Resolve dependencies
         working-directory: frontend
         run: flutter pub get
-      - name: Run equal-scale regression
+      - name: Analyze frontend
         working-directory: frontend
-        run: flutter test test/dinov3_feature_scatter_test.dart
+        run: flutter analyze
+      - name: Run full Flutter tests
+        working-directory: frontend
+        run: flutter test
