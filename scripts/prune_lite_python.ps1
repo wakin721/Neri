@@ -41,17 +41,6 @@ foreach ($pattern in $metadataPatterns) {
         }
 }
 
-$remaining = @(
-    Get-ChildItem -LiteralPath $sitePackages -Force |
-        Where-Object {
-            ($exactArtifacts -contains $_.Name) -or
-            ($metadataPatterns | Where-Object { $_ -and $_.Length -gt 0 -and $args[0].Name -like $_ })
-        }
-)
-
-# The nested Where-Object form above cannot reliably access the outer pipeline
-# object through $args on all PowerShell editions, so perform an explicit
-# verification pass as the packaging safety boundary.
 $remaining = @()
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
     if ($exactArtifacts -contains $item.Name) {
