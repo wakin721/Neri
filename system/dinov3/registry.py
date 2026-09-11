@@ -16,12 +16,17 @@ for _name in dir(_impl):
 
 class SpeciesRegistry(_impl.SpeciesRegistry):
     def set_identity(self, entry_id, *, common_name, scientific_name=""):
-        """Save an identity and immediately collapse duplicate named Candidates."""
+        """Save an identity and collapse only duplicate non-registerable Candidates."""
         updated = super().set_identity(
             entry_id,
             common_name=common_name,
             scientific_name=scientific_name,
         )
+        # A registration-ready Candidate must remain addressable long enough to
+        # be promoted to provisional. Legacy/low-evidence named Candidates can
+        # still be collapsed immediately so duplicate Registry slots disappear.
+        if updated.can_register:
+            return updated
         merge = self.merge_duplicate_named_candidates()
         redirects = merge.get("redirects", {})
         survivor_id = int(redirects.get(int(entry_id), updated.id))
