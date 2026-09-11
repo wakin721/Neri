@@ -89,6 +89,62 @@ void main() {
     expect(selected?.observationId, 'obs-1');
   });
 
+  testWidgets(
+    'clicking a visible box without observation id still selects it',
+    (tester) async {
+      DetectionBox? selected;
+      final box = DetectionBox(
+        species: '盘羊',
+        confidence: 0.82,
+        bbox: const <double>[0.2, 0.2, 0.8, 0.8],
+      );
+      final item = DetectionItem(
+        filename: 'frame.png',
+        path: imageFile.path,
+        fileType: 'png',
+        width: 10,
+        height: 10,
+        detectionBoxes: <DetectionBox>[box],
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Center(
+            child: SizedBox(
+              width: 400,
+              height: 300,
+              child: DetectionMediaViewer(
+                item: item,
+                visibleBoxes: <DetectionBox>[box],
+                showDetections: true,
+                selectedObservationId: null,
+                onOpenExternal: () {},
+                onDetectionBoxSelected: (value) => selected = value,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final viewer = find.byType(DetectionMediaViewer);
+      final imageGesture = find.descendant(
+        of: viewer,
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is GestureDetector &&
+              widget.behavior == HitTestBehavior.translucent,
+        ),
+      );
+      expect(imageGesture, findsOneWidget);
+
+      await tester.tapAt(tester.getCenter(imageGesture));
+      await tester.pump();
+
+      expect(selected, same(box));
+    },
+  );
+
   test('video box filtering keeps only the current-frame DINO observation', () {
     final current = DetectionBox(
       species: '盘羊',

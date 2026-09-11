@@ -493,10 +493,8 @@ List<DetectionBox> currentVideoDetectionBoxes({
     }
   }
 
-  final matches = <_TimedBoxMatch>[
-    ...selectedByTrack.values,
-    ...untrackedBoxes,
-  ]..sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+  final matches = <_TimedBoxMatch>[...selectedByTrack.values, ...untrackedBoxes]
+    ..sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
   return matches.map((match) => match.box).toList();
 }
 
@@ -959,11 +957,7 @@ Rect _fittedMediaRect(Size viewport, Size media) {
   );
 }
 
-Rect? _renderRectForBox(
-  DetectionBox box,
-  Size viewport,
-  Size mediaSize,
-) {
+Rect? _renderRectForBox(DetectionBox box, Size viewport, Size mediaSize) {
   if (box.bbox.length < 4 || viewport.isEmpty || mediaSize.isEmpty) {
     return null;
   }
@@ -993,8 +987,6 @@ DetectionBox? _hitTestDinoBox(
   List<DetectionBox> boxes,
 ) {
   for (final box in boxes.reversed) {
-    final observationId = box.observationId?.trim();
-    if (observationId == null || observationId.isEmpty) continue;
     final rect = _renderRectForBox(box, viewport, mediaSize);
     if (rect != null && rect.contains(localPosition)) return box;
   }
@@ -1062,10 +1054,7 @@ class _DetectionOverlayPainter extends CustomPainter {
       );
       textPainter.layout();
 
-      final textY = math.max(
-        fitted.top,
-        rect.top - textPainter.height - 2,
-      );
+      final textY = math.max(fitted.top, rect.top - textPainter.height - 2);
 
       final bgRect = Rect.fromLTWH(
         rect.left,
