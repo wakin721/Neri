@@ -30,3 +30,16 @@ def test_register_refuses_failed_conditions(tmp_path):
     reg=SpeciesRegistry(tmp_path/'r.db',model_fingerprint=FP);entry=reg.record_unknown(vector(),camera_id='cam',captured_at=BASE,source_path='a.jpg')
     with pytest.raises(RegistrationConditionError):reg.register(entry.id)
     reg.close()
+
+def test_unnamed_candidates_are_listed_by_event_count_descending(tmp_path):
+    reg=SpeciesRegistry(tmp_path/'r.db',model_fingerprint=FP)
+    first=reg.record_unknown(vector(100),camera_id='cam-a',captured_at=BASE,source_path='a-0.jpg')
+    second=reg.record_unknown(vector(101),camera_id='cam-b',captured_at=BASE,source_path='b-0.jpg')
+    third=reg.record_unknown(vector(102),camera_id='cam-c',captured_at=BASE,source_path='c-0.jpg')
+    reg.record_observation(second.id,vector(101),camera_id='cam-b',captured_at=BASE+timedelta(hours=1),source_path='b-1.jpg')
+    reg.record_observation(second.id,vector(101),camera_id='cam-b',captured_at=BASE+timedelta(hours=2),source_path='b-2.jpg')
+    reg.record_observation(third.id,vector(102),camera_id='cam-c',captured_at=BASE+timedelta(hours=1),source_path='c-1.jpg')
+    unnamed=[entry for entry in reg.list() if entry.status=='candidate' and not entry.common_name]
+    assert [entry.id for entry in unnamed]==[second.id,third.id,first.id]
+    assert [entry.event_count for entry in unnamed]==[3,2,1]
+    reg.close()
