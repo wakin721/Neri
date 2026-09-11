@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'api_client_core.dart' as core;
+import 'dino_validation_selection.dart';
+import 'models/job.dart';
 import 'models/model_sync_status.dart';
 
 export 'api_client_core.dart' hide NeriApiClient;
@@ -107,6 +109,56 @@ class NeriApiClient extends core.NeriApiClient {
       body: jsonEncode({'classification_model_path': classificationModelPath}),
     );
     _ensureModelSyncSuccess(response);
+  }
+
+  @override
+  Future<DetectionItem> markValidationItem({
+    required String inputPath,
+    required String filePath,
+    required String action,
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
+  }) async {
+    var updated = await super.markValidationItem(
+      inputPath: inputPath,
+      filePath: filePath,
+      action: action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+      classificationModelPath: classificationModelPath,
+      feedbackOperationId: feedbackOperationId,
+    );
+
+    final selection = dinoValidationBoxSelectionFor(filePath);
+    final modelPath = classificationModelPath?.trim() ?? '';
+    final operationId = feedbackOperationId?.trim() ?? '';
+    final confirmedSpecies = speciesName?.trim() ?? '';
+    final shouldUseSelectedBox =
+        action == 'update' &&
+        confirmedSpecies.isNotEmpty &&
+        modelPath.isNotEmpty &&
+        operationId.isNotEmpty &&
+        selection != null &&
+        selection.learnableObservationCount > 1;
+    if (!shouldUseSelectedBox) return updated;
+
+    final result = await super.markDinoV3BoxFeedback(
+      inputPath: inputPath,
+      filePath: filePath,
+      classificationModelPath: modelPath,
+      observationId: selection.observationId,
+      action: action,
+      speciesName: confirmedSpecies,
+      feedbackOperationId: operationId,
+    );
+    updated = updated.mergeValidationUpdate(result.item);
+    return updated;
   }
 
   void _ensureModelSyncSuccess(http.Response response) {

@@ -1,18 +1,625 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:http/http.dart' as http;
 
-import 'api_client_core_impl.dart' as impl;
-import 'dino_validation_selection.dart';
+import 'models/dinov3_explanation.dart';
+import 'models/dinov3_feedback.dart';
+import 'models/dinov3_registry.dart';
+import 'models/export_result.dart';
 import 'models/job.dart';
+import 'models/settings.dart';
+import 'models/video_processing_mode.dart';
+import 'privacy/privacy_status.dart';
+import 'privacy/training_upload_diagnostics.dart';
 
-export 'api_client_core_impl.dart' hide NeriApiClient;
-
-class NeriApiClient extends impl.NeriApiClient {
+class NeriApiClient {
   NeriApiClient({
     http.Client? httpClient,
-    String baseUrl = 'http://127.0.0.1:721',
-  }) : super(httpClient: httpClient, baseUrl: baseUrl);
+    this.baseUrl = 'http://127.0.0.1:721',
+  }) : _httpClient = httpClient ?? http.Client();
 
-  @override
+  final http.Client _httpClient;
+  final String baseUrl;
+
+  Uri _uri(String path) => Uri.parse('$baseUrl$path');
+
+  Future<bool> health() async {
+    final response = await _httpClient.get(_uri('/api/health'));
+    return response.statusCode == 200;
+  }
+
+  Future<void> shutdownBackend() async {
+    final response = await _httpClient.post(_uri('/api/shutdown'));
+    _ensureSuccess(response);
+  }
+
+  Future<NeriSettings> fetchSettings() async {
+    final response = await _httpClient.get(_uri('/api/settings'));
+    _ensureSuccess(response);
+    return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<NeriSettings> saveSettings(Map<String, dynamic> settings) async {
+    final response = await _httpClient.put(
+      _uri('/api/settings'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'settings': settings}),
+    );
+    _ensureSuccess(response);
+    return NeriSettings.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DinoV3RegistryEntry>> fetchDinoV3Registry(
+    String classificationModelPath, {
+    String? status,
+  }) async {
+    final uri = _uri('/api/dinov3/registry').replace(
+      queryParameters: {
+        'classification_model_path': classificationModelPath,
+        if (status != null && status.isNotEmpty) 'status': status,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEntry.fromJson)
+        .toList();
+  }
+
+  Future<List<DinoV3RegistryEntry>> fetchDinoV3RegistryCatalog(
+    String classificationModelPath,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/catalog').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List<dynamic>) {
+      // Compatibility with older backends and existing mocked clients that do
+      // not expose the unified catalog endpoint yet.
+      return fetchDinoV3Registry(classificationModelPath);
+    }
+    return decoded
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEntry.fromJson)
+        .toList();
+  }
+
+  Future<DinoV3RegistryEntry> fetchDinoV3RegistryEntry(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DinoV3RegistryEvent>> fetchDinoV3RegistryEvents(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId/events').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryEvent.fromJson)
+        .toList();
+  }
+
+  Future<Uint8List> fetchDinoV3RegistryExample(
+    String classificationModelPath,
+    int registrationId,
+    int eventId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/registry/$registrationId/events/$eventId/example',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return response.bodyBytes;
+  }
+
+  Future<void> deleteDinoV3RegistryEntry(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.delete(uri);
+    _ensureSuccess(response);
+  }
+
+  Future<int> clearDinoV3UnregisteredCandidates(
+    String classificationModelPath,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/candidates').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.delete(uri);
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      return (decoded['deleted'] as num?)?.toInt() ?? 0;
+    }
+    return 0;
+  }
+
+  Future<DinoV3RegistryEntry> updateDinoV3RegistryIdentity({
+    required String classificationModelPath,
+    required int registrationId,
+    required String commonName,
+    String scientificName = '',
+  }) async {
+    final response = await _httpClient.patch(
+      _uri('/api/dinov3/registry/$registrationId/identity'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'common_name': commonName,
+        'scientific_name': scientificName,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3RegistryEntry> registerDinoV3Species({
+    required String classificationModelPath,
+    required int registrationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/registry/$registrationId/register'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'classification_model_path': classificationModelPath}),
+    );
+    _ensureSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3BoxFeedbackResult> markDinoV3BoxFeedback({
+    required String inputPath,
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String action,
+    String? speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/box'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'action': action,
+        if (speciesName != null && speciesName.trim().isNotEmpty)
+          'species_name': speciesName.trim(),
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3BoxFeedbackResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DinoV3FeatureExplanation> fetchDinoV3FeatureExplanation(
+    String classificationModelPath,
+    String observationId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/feedback/observations/${Uri.encodeComponent(observationId)}/explain',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DinoV3FeatureExplanation.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<Uint8List> fetchDinoV3ObservationExample(
+    String classificationModelPath,
+    String observationId,
+  ) async {
+    final uri =
+        _uri(
+          '/api/dinov3/feedback/observations/${Uri.encodeComponent(observationId)}/example',
+        ).replace(
+          queryParameters: {
+            'classification_model_path': classificationModelPath,
+          },
+        );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return response.bodyBytes;
+  }
+
+  Future<DinoV3FeedbackRevertResult> revertDinoV3Feedback({
+    required String classificationModelPath,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/dinov3/feedback/revert'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureSuccess(response);
+    return DinoV3FeedbackRevertResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> fetchPrivacyStatus() async {
+    final response = await _httpClient
+        .get(_uri('/api/privacy'))
+        .timeout(const Duration(seconds: 10));
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> savePrivacyStatus({
+    required bool trainingEnabled,
+  }) async {
+    final response = await _httpClient.put(
+      _uri('/api/privacy'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'agreement_version': privacyAgreementVersion,
+        'training_enabled': trainingEnabled,
+      }),
+    );
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrivacyStatus> clearPrivacyQueue() async {
+    final response = await _httpClient.delete(_uri('/api/privacy/queue'));
+    _ensureSuccess(response);
+    return PrivacyStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PackageSourceResolution> resolvePackageSource([
+    String source = 'auto',
+  ]) async {
+    final uri = _uri(
+      '/api/environment/package-source',
+    ).replace(queryParameters: {'source': source});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return PackageSourceResolution.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<bool> shouldUseMainlandUpdateSource([String source = 'auto']) async {
+    switch (source.trim().toLowerCase()) {
+      case 'domestic':
+        return true;
+      case 'github':
+        return false;
+    }
+    final response = await _httpClient.get(
+      _uri('/api/environment/update-source'),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('更新源地区响应格式无效');
+    }
+    return decoded['mainland_china'] == true;
+  }
+
+  Future<List<ModelClassInfo>> fetchModelClasses(String modelPath) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/models/classes',
+    ).replace(queryParameters: {'model_path': modelPath});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(ModelClassInfo.fromJson)
+        .toList();
+  }
+
+  Future<MaintenanceStartResponse> installPytorch(
+    String envChoice, {
+    String packageSource = 'auto',
+    bool installIntelDriver = false,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/environment/install-pytorch'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'env_choice': envChoice,
+        'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
+      }),
+    );
+    _ensureSuccess(response);
+    return MaintenanceStartResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<MaintenanceStartResponse> installYoloDependencies({
+    required String envChoice,
+    String packageSource = 'auto',
+    bool installIntelDriver = false,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/environment/install-yolo-dependencies'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'env_choice': envChoice,
+        'package_source': packageSource,
+        'install_intel_driver': installIntelDriver,
+      }),
+    );
+    _ensureSuccess(response);
+    return MaintenanceStartResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<MaintenanceStartResponse> reinstallPythonPackage(
+    String packageSpec,
+    String packageSource,
+  ) async {
+    final response = await _httpClient.post(
+      _uri('/api/environment/reinstall-package'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'package': packageSpec,
+        'package_source': packageSource,
+      }),
+    );
+    _ensureSuccess(response);
+    return MaintenanceStartResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<MaintenanceStatus> fetchMaintenanceStatus() async {
+    final response = await _httpClient.get(
+      _uri('/api/environment/maintenance-status'),
+    );
+    _ensureSuccess(response);
+    return MaintenanceStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<InstalledPackageInfo>> fetchInstalledPackages() async {
+    final response = await _httpClient.get(_uri('/api/debug/packages'));
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(InstalledPackageInfo.fromJson)
+        .toList();
+  }
+
+  Future<RuntimeDiagnostics> fetchRuntimeDiagnostics() async {
+    final response = await _httpClient.get(_uri('/api/debug/runtime'));
+    _ensureSuccess(response);
+    return RuntimeDiagnostics.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<TrainingUploadDiagnostics> fetchTrainingUploadDiagnostics() async {
+    final response = await _httpClient
+        .get(_uri('/api/debug/training-upload'))
+        .timeout(const Duration(seconds: 10));
+    _ensureSuccess(response);
+    return TrainingUploadDiagnostics.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<void> simulateBackendCrash() async {
+    final response = await _httpClient.post(_uri('/api/debug/simulate-crash'));
+    _ensureSuccess(response);
+  }
+
+  Future<List<DebugLogInfo>> fetchDebugLogs() async {
+    final response = await _httpClient.get(_uri('/api/debug/logs'));
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DebugLogInfo.fromJson)
+        .toList();
+  }
+
+  Future<DebugLogContent> fetchDebugLogContent(
+    String path, {
+    int maxBytes = 32000,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/debug/logs/content').replace(
+      queryParameters: {'path': path, 'max_bytes': maxBytes.toString()},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DebugLogContent.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ClearCacheResult> clearCache({
+    required bool clearLogs,
+    required bool clearSoftwareCache,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/debug/clear-cache'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'clear_logs': clearLogs,
+        'clear_software_cache': clearSoftwareCache,
+      }),
+    );
+    _ensureSuccess(response);
+    return ClearCacheResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PytorchInstallPlan> fetchPytorchInstallPlan(String envChoice) async {
+    final uri = Uri.parse(
+      '$baseUrl/api/environment/pytorch-install-plan',
+    ).replace(queryParameters: {'env_choice': envChoice});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return PytorchInstallPlan.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ProcessingJob> createJob({
+    String? inputDir,
+    List<String> inputPaths = const <String>[],
+    String? outputDir,
+    String? modelPath,
+    String? classificationModelPath,
+    required double confidence,
+    required double iou,
+    required bool useFp16,
+    bool useAugment = true,
+    bool useAgnosticNms = true,
+    String confidencePriority = 'classification',
+    int batchSize = 16,
+    int threadCount = 4,
+    int imageSize = 1920,
+    int vidStride = defaultVideoSampleCount,
+    String videoMode = defaultVideoProcessingMode,
+    required bool enableDetection,
+    List<String> selectedSpeciesNames = const <String>[],
+  }) async {
+    final cleanInputDir = inputDir?.trim();
+    final cleanInputPaths = inputPaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList();
+    if ((cleanInputDir == null || cleanInputDir.isEmpty) &&
+        cleanInputPaths.isEmpty) {
+      throw ArgumentError('inputDir 或 inputPaths 至少需要提供一个。');
+    }
+
+    final response = await _httpClient.post(
+      _uri('/api/jobs'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        if (cleanInputDir != null && cleanInputDir.isNotEmpty)
+          'input_dir': cleanInputDir,
+        if (cleanInputPaths.isNotEmpty) 'input_paths': cleanInputPaths,
+        'output_dir': (outputDir?.isEmpty ?? true) ? null : outputDir,
+        'options': {
+          'model_path': (modelPath?.isEmpty ?? true) ? null : modelPath,
+          'classification_model_path':
+              (classificationModelPath?.isEmpty ?? true)
+              ? null
+              : classificationModelPath,
+          'confidence': confidence,
+          'iou': iou,
+          'use_fp16': useFp16,
+          'use_augment': useAugment,
+          'use_agnostic_nms': useAgnosticNms,
+          'confidence_priority': confidencePriority,
+          'batch_size': batchSize,
+          'thread_count': threadCount,
+          'imgsz': imageSize,
+          'vid_stride': vidStride,
+          'video_mode': videoMode,
+          'enable_detection': enableDetection,
+          if (selectedSpeciesNames.isNotEmpty)
+            'selected_species_names': selectedSpeciesNames,
+        },
+      }),
+    );
+    _ensureSuccess(response);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<DetectionItem>> fetchPreviewItems({
+    required String inputPath,
+    String? outputDir,
+    bool includeCached = true,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/preview').replace(
+      queryParameters: {
+        'input_path': inputPath,
+        'include_cached': includeCached.toString(),
+        if (outputDir != null && outputDir.isNotEmpty) 'output_dir': outputDir,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DetectionItem.fromJson)
+        .toList();
+  }
+
+  Future<DetectionItem> fetchPreviewItem({
+    required String filePath,
+    String? inputPath,
+    String? outputDir,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/preview/item').replace(
+      queryParameters: {
+        'file_path': filePath,
+        if (inputPath != null && inputPath.isNotEmpty) 'input_path': inputPath,
+        if (outputDir != null && outputDir.isNotEmpty) 'output_dir': outputDir,
+      },
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return DetectionItem.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   Future<DetectionItem> markValidationItem({
     required String inputPath,
     required String filePath,
@@ -24,41 +631,494 @@ class NeriApiClient extends impl.NeriApiClient {
     String? classificationModelPath,
     String? feedbackOperationId,
   }) async {
-    var updated = await super.markValidationItem(
-      inputPath: inputPath,
-      filePath: filePath,
-      action: action,
-      speciesName: speciesName,
-      speciesCount: speciesCount,
-      speciesType: speciesType,
-      remark: remark,
-      classificationModelPath: classificationModelPath,
-      feedbackOperationId: feedbackOperationId,
+    final response = await _httpClient.post(
+      _uri('/api/validation/mark'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_path': filePath,
+        'action': action,
+        if (speciesName != null) 'species_name': speciesName,
+        if (speciesCount != null) 'species_count': speciesCount,
+        if (speciesType != null) 'species_type': speciesType,
+        if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
+      }),
     );
-
-    final selection = dinoValidationBoxSelectionFor(filePath);
-    final modelPath = classificationModelPath?.trim() ?? '';
-    final operationId = feedbackOperationId?.trim() ?? '';
-    final confirmedSpecies = speciesName?.trim() ?? '';
-    final shouldUseSelectedBox =
-        action == 'update' &&
-        confirmedSpecies.isNotEmpty &&
-        modelPath.isNotEmpty &&
-        operationId.isNotEmpty &&
-        selection != null &&
-        selection.learnableObservationCount > 1;
-    if (!shouldUseSelectedBox) return updated;
-
-    final result = await super.markDinoV3BoxFeedback(
-      inputPath: inputPath,
-      filePath: filePath,
-      classificationModelPath: modelPath,
-      observationId: selection.observationId,
-      action: action,
-      speciesName: confirmedSpecies,
-      feedbackOperationId: operationId,
+    _ensureSuccess(response);
+    return DetectionItem.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
     );
-    updated = updated.mergeValidationUpdate(result.item);
-    return updated;
   }
+
+  Future<List<DetectionItem>> markValidationItems({
+    required String inputPath,
+    required List<String> filePaths,
+    required String action,
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/validation/mark/batch'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_paths': filePaths,
+        'action': action,
+        if (speciesName != null) 'species_name': speciesName,
+        if (speciesCount != null) 'species_count': speciesCount,
+        if (speciesType != null) 'species_type': speciesType,
+        if (remark != null) 'remark': remark,
+        if (classificationModelPath != null &&
+            classificationModelPath.trim().isNotEmpty)
+          'classification_model_path': classificationModelPath.trim(),
+        if (feedbackOperationId != null &&
+            feedbackOperationId.trim().isNotEmpty)
+          'feedback_operation_id': feedbackOperationId.trim(),
+      }),
+    );
+    try {
+      _ensureSuccess(response);
+    } on ApiException catch (error) {
+      if (error.statusCode != 404) rethrow;
+      final updatedItems = <DetectionItem>[];
+      for (final filePath in filePaths) {
+        updatedItems.add(
+          await markValidationItem(
+            inputPath: inputPath,
+            filePath: filePath,
+            action: action,
+            speciesName: speciesName,
+            speciesCount: speciesCount,
+            speciesType: speciesType,
+            remark: remark,
+            classificationModelPath: classificationModelPath,
+            feedbackOperationId: feedbackOperationId,
+          ),
+        );
+      }
+      return updatedItems;
+    }
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DetectionItem.fromJson)
+        .toList();
+  }
+
+  Future<ValidationExportResult> exportValidationData({
+    required String inputPath,
+    required String fileFormat,
+    String? outputPath,
+    List<String>? columnsToExport,
+    Map<String, double>? confidenceSettings,
+    bool exportFavoritePhotos = false,
+    List<String>? favoritePhotoPaths,
+    bool deleteEmptyPhotos = false,
+    List<String>? emptyPhotoPaths,
+    double minFrameRatio = 0,
+  }) async {
+    final response = await _httpClient.post(
+      _uri('/api/validation/export'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'input_path': inputPath,
+        'file_format': fileFormat,
+        if (outputPath != null && outputPath.isNotEmpty)
+          'output_path': outputPath,
+        if (columnsToExport != null) 'columns_to_export': columnsToExport,
+        'export_favorite_photos': exportFavoritePhotos,
+        if (favoritePhotoPaths != null)
+          'favorite_photo_paths': favoritePhotoPaths,
+        'delete_empty_photos': deleteEmptyPhotos,
+        if (emptyPhotoPaths != null) 'empty_photo_paths': emptyPhotoPaths,
+        'confidence_settings': confidenceSettings ?? {'global': 0.25},
+        'min_frame_ratio': minFrameRatio,
+      }),
+    );
+    _ensureSuccess(response);
+    return ValidationExportResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<ProcessingJob>> listJobs({bool includeResults = true}) async {
+    final uri = includeResults
+        ? _uri('/api/jobs')
+        : _uri(
+            '/api/jobs',
+          ).replace(queryParameters: const {'include_results': 'false'});
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(ProcessingJob.fromJson)
+        .toList();
+  }
+
+  Future<ProcessingJob> fetchJob(String id) async {
+    final response = await _httpClient.get(_uri('/api/jobs/$id'));
+    _ensureSuccess(response);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ProcessingJob> cancelJob(String id) async {
+    final response = await _httpClient.post(_uri('/api/jobs/$id/cancel'));
+    _ensureSuccess(response);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ProcessingJob> resumeJob(String id) async {
+    final response = await _httpClient.post(_uri('/api/jobs/$id/resume'));
+    _ensureSuccess(response);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<void> deleteJob(String id) async {
+    final response = await _httpClient.delete(_uri('/api/jobs/$id'));
+    _ensureSuccess(response);
+  }
+
+  Future<void> clearJobs() async {
+    final response = await _httpClient.delete(_uri('/api/jobs'));
+    _ensureSuccess(response);
+  }
+
+  void close() => _httpClient.close();
+
+  void _ensureSuccess(http.Response response) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      String message = 'HTTP ${response.statusCode}: ${response.body}';
+      String? code;
+      List<String> missingDependencies = const <String>[];
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map<String, dynamic>) {
+          final detail = decoded['detail'];
+          if (detail is Map<String, dynamic>) {
+            code = detail['code']?.toString();
+            final detailMessage = detail['message']?.toString();
+            if (detailMessage != null && detailMessage.isNotEmpty) {
+              message = detailMessage;
+            }
+            final missing = detail['missing'];
+            if (missing is List) {
+              missingDependencies = missing
+                  .map((item) => item.toString())
+                  .where((item) => item.isNotEmpty)
+                  .toList();
+            }
+          } else if (detail is String && detail.isNotEmpty) {
+            message = detail;
+          }
+        }
+      } catch (_) {}
+      throw ApiException(
+        message,
+        statusCode: response.statusCode,
+        code: code,
+        missingDependencies: missingDependencies,
+      );
+    }
+  }
+}
+
+class ApiException implements Exception {
+  const ApiException(
+    this.message, {
+    this.statusCode,
+    this.code,
+    this.missingDependencies = const <String>[],
+  });
+
+  final String message;
+  final int? statusCode;
+  final String? code;
+  final List<String> missingDependencies;
+
+  bool get isMissingYoloDependencies =>
+      statusCode == 409 && code == 'missing_yolo_dependencies';
+
+  @override
+  String toString() => message;
+}
+
+class MaintenanceStartResponse {
+  const MaintenanceStartResponse({
+    required this.accepted,
+    required this.operation,
+    required this.message,
+    required this.progress,
+    this.statusPath,
+    this.maintenancePid,
+  });
+
+  factory MaintenanceStartResponse.fromJson(Map<String, dynamic> json) {
+    return MaintenanceStartResponse(
+      accepted: json['accepted'] as bool? ?? false,
+      operation: json['operation'] as String? ?? '',
+      message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
+    );
+  }
+
+  final bool accepted;
+  final String operation;
+  final String message;
+  final int progress;
+  final String? statusPath;
+  final int? maintenancePid;
+}
+
+class PackageSourceResolution {
+  const PackageSourceResolution({required this.source, required this.label});
+
+  factory PackageSourceResolution.fromJson(Map<String, dynamic> json) {
+    final source = json['source'] as String? ?? 'official';
+    final label = json['label'] as String?;
+    return PackageSourceResolution(
+      source: source,
+      label: label == null || label.isEmpty ? _fallbackLabel(source) : label,
+    );
+  }
+
+  final String source;
+  final String label;
+
+  static String _fallbackLabel(String source) {
+    return switch (source) {
+      'aliyun' => '阿里源',
+      'tsinghua' => '清华源',
+      'nju' => '南京大学源',
+      _ => '官方源',
+    };
+  }
+}
+
+class PytorchInstallPlan {
+  const PytorchInstallPlan({
+    required this.envChoice,
+    required this.actualEnv,
+    required this.indexUrl,
+    required this.isXpu,
+    required this.needsIntelDriver,
+    required this.intelDriverPageUrl,
+    required this.intelDriverDownloadUrl,
+    required this.intelDriver,
+  });
+
+  factory PytorchInstallPlan.fromJson(Map<String, dynamic> json) {
+    return PytorchInstallPlan(
+      envChoice: json['env_choice'] as String? ?? '',
+      actualEnv: json['actual_env'] as String? ?? '',
+      indexUrl: json['index_url'] as String? ?? '',
+      isXpu: json['is_xpu'] as bool? ?? false,
+      needsIntelDriver: json['needs_intel_driver'] as bool? ?? false,
+      intelDriverPageUrl: json['intel_driver_page_url'] as String? ?? '',
+      intelDriverDownloadUrl:
+          json['intel_driver_download_url'] as String? ?? '',
+      intelDriver: Map<String, dynamic>.from(
+        json['intel_driver'] as Map<String, dynamic>? ?? const {},
+      ),
+    );
+  }
+
+  final String envChoice;
+  final String actualEnv;
+  final String indexUrl;
+  final bool isXpu;
+  final bool needsIntelDriver;
+  final String intelDriverPageUrl;
+  final String intelDriverDownloadUrl;
+  final Map<String, dynamic> intelDriver;
+
+  String get intelDeviceName =>
+      intelDriver['device_name']?.toString() ??
+      intelDriver['driver_name']?.toString() ??
+      '';
+}
+
+class MaintenanceStatus {
+  const MaintenanceStatus({
+    required this.state,
+    required this.message,
+    required this.progress,
+    this.operation,
+    this.logPath,
+    this.statusPath,
+    this.maintenancePid,
+    this.error,
+  });
+
+  factory MaintenanceStatus.fromJson(Map<String, dynamic> json) {
+    return MaintenanceStatus(
+      operation: json['operation'] as String?,
+      state: json['state'] as String? ?? 'idle',
+      message: json['message'] as String? ?? '',
+      progress: ((json['progress'] as num?)?.toInt() ?? 0)
+          .clamp(0, 100)
+          .toInt(),
+      logPath: json['log_path'] as String?,
+      statusPath: json['status_path'] as String?,
+      maintenancePid: (json['maintenance_pid'] as num?)?.toInt(),
+      error: json['error'] as String?,
+    );
+  }
+
+  final String? operation;
+  final String state;
+  final String message;
+  final int progress;
+  final String? logPath;
+  final String? statusPath;
+  final int? maintenancePid;
+  final String? error;
+}
+
+class InstalledPackageInfo {
+  const InstalledPackageInfo({required this.name, required this.version});
+
+  factory InstalledPackageInfo.fromJson(Map<String, dynamic> json) {
+    return InstalledPackageInfo(
+      name: json['name'] as String? ?? '',
+      version: json['version'] as String? ?? '',
+    );
+  }
+
+  final String name;
+  final String version;
+}
+
+class RuntimeDiagnostics {
+  const RuntimeDiagnostics({
+    required this.pytorchInstalled,
+    required this.gpuAvailable,
+    this.backendVersion = '',
+    this.pytorchVersion,
+    this.pytorchCudaVersion,
+    this.gpuDevices = const <String>[],
+    this.hardwareGpus = const <String>[],
+    this.error,
+  });
+
+  factory RuntimeDiagnostics.fromJson(Map<String, dynamic> json) {
+    return RuntimeDiagnostics(
+      backendVersion: json['backend_version'] as String? ?? '',
+      pytorchInstalled: json['pytorch_installed'] as bool? ?? false,
+      pytorchVersion: json['pytorch_version'] as String?,
+      pytorchCudaVersion: json['pytorch_cuda_version'] as String?,
+      gpuAvailable: json['gpu_available'] as bool? ?? false,
+      gpuDevices: (json['gpu_devices'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList(),
+      hardwareGpus:
+          (json['hardware_gpus'] as List<dynamic>? ?? const <dynamic>[])
+              .map((item) => item.toString())
+              .where((item) => item.isNotEmpty)
+              .toList(),
+      error: json['error'] as String?,
+    );
+  }
+
+  final bool pytorchInstalled;
+  final String backendVersion;
+  final String? pytorchVersion;
+  final String? pytorchCudaVersion;
+  final bool gpuAvailable;
+  final List<String> gpuDevices;
+  final List<String> hardwareGpus;
+  final String? error;
+}
+
+class DebugLogInfo {
+  const DebugLogInfo({
+    required this.name,
+    required this.path,
+    required this.sizeBytes,
+    this.modifiedAt,
+  });
+
+  factory DebugLogInfo.fromJson(Map<String, dynamic> json) {
+    return DebugLogInfo(
+      name: json['name'] as String? ?? '',
+      path: json['path'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int? ?? 0,
+      modifiedAt: json['modified_at'] as String?,
+    );
+  }
+
+  final String name;
+  final String path;
+  final int sizeBytes;
+  final String? modifiedAt;
+}
+
+class DebugLogContent extends DebugLogInfo {
+  const DebugLogContent({
+    required super.name,
+    required super.path,
+    required super.sizeBytes,
+    required this.content,
+    super.modifiedAt,
+    this.truncated = false,
+  });
+
+  factory DebugLogContent.fromJson(Map<String, dynamic> json) {
+    return DebugLogContent(
+      name: json['name'] as String? ?? '',
+      path: json['path'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int? ?? 0,
+      modifiedAt: json['modified_at'] as String?,
+      content: json['content'] as String? ?? '',
+      truncated: json['truncated'] as bool? ?? false,
+    );
+  }
+
+  final String content;
+  final bool truncated;
+}
+
+class ClearCacheResult {
+  const ClearCacheResult({
+    required this.clearedFiles,
+    required this.clearedDirectories,
+    required this.reclaimedBytes,
+    required this.skipped,
+  });
+
+  factory ClearCacheResult.fromJson(Map<String, dynamic> json) {
+    return ClearCacheResult(
+      clearedFiles: json['cleared_files'] as int? ?? 0,
+      clearedDirectories: json['cleared_directories'] as int? ?? 0,
+      reclaimedBytes: json['reclaimed_bytes'] as int? ?? 0,
+      skipped: (json['skipped'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList(),
+    );
+  }
+
+  final int clearedFiles;
+  final int clearedDirectories;
+  final int reclaimedBytes;
+  final List<String> skipped;
 }
