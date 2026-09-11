@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -24,6 +26,16 @@ def _box_payload(*, action: str, species_name: str | None = None) -> dict:
     if species_name is not None:
         payload["species_name"] = species_name
     return payload
+
+
+def _selection_payload(*, species_name: str = "骆驼") -> dict:
+    return {
+        "file_path": "C:/camera/a.jpg",
+        "classification_model_path": "model.neri.json",
+        "observation_id": "obs-2",
+        "species_name": species_name,
+        "feedback_operation_id": "op-selection",
+    }
 
 
 def _contains_embedding(value) -> bool:
@@ -110,6 +122,84 @@ def test_box_feedback_actions_return_public_payload_without_embedding(monkeypatc
         ("correct", None, "op-correct"),
         ("update", "Other", "op-update"),
         ("empty", None, "op-empty"),
+    ]
+
+
+def test_selection_feedback_route_returns_registry_assignment_without_embedding(monkeypatch):
+    import system.backend.dinov3_feedback_api as api
+
+    calls = []
+
+    def apply(request):
+        calls.append(
+            (
+                request.file_path,
+                request.observation_id,
+                request.species_name,
+                request.feedback_operation_id,
+            )
+        )
+        return {
+            "operation_id": request.feedback_operation_id,
+            "affected_species": [],
+            "registry_id": 42,
+        }
+
+    monkeypatch.setattr(api, "apply_selected_observation_feedback", apply)
+    response = _client().post(
+        "/api/dinov3/feedback/selection",
+        json=_selection_payload(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "operation_id": "op-selection",
+        "affected_species": [],
+        "registry_id": 42,
+    }
+    assert calls == [
+        ("C:/camera/a.jpg", "obs-2", "骆驼", "op-selection")
+    ]
+    assert _contains_embedding(response.json()) is False
+
+
+def test_selection_feedback_new_species_uses_registry_without_ecological_rewrite(monkeypatch):
+    import system.backend.dinov3_feedback_api as api
+
+    observation = SimpleNamespace(id="obs-2", source_path="C:/camera/a.jpg")
+
+    class Feedback:
+        checkpoint_classes = ("Known",)
+
+        def get_observation(self, observation_id):
+            assert observation_id == "obs-2"
+            return observation
+
+        def close(self):
+            pass
+
+    feedback = Feedback()
+    monkeypatch.setattr(api, "_open_feedback_state", lambda _model: (feedback, object()))
+    assigned = []
+
+    def assign(store, model, selected, *, operation_id, confirmed_species):
+        assigned.append(
+            (store, model, selected.id, operation_id, confirmed_species)
+        )
+        return SimpleNamespace(id=77)
+
+    monkeypatch.setattr(api, "_assign_registry_species", assign)
+    request = api.DinoV3SelectedObservationFeedbackRequest(**_selection_payload())
+
+    result = api.apply_selected_observation_feedback(request)
+
+    assert result == {
+        "operation_id": "op-selection",
+        "affected_species": [],
+        "registry_id": 77,
+    }
+    assert assigned == [
+        (feedback, "model.neri.json", "obs-2", "op-selection", "骆驼")
     ]
 
 

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'api_client_core.dart' as core;
+import 'dino_validation_selection.dart';
+import 'models/job.dart';
 import 'models/model_sync_status.dart';
 
 export 'api_client_core.dart' hide NeriApiClient;
@@ -105,6 +107,74 @@ class NeriApiClient extends core.NeriApiClient {
       Uri.parse('$baseUrl/api/dinov3/registry/$registrationId/empty'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({'classification_model_path': classificationModelPath}),
+    );
+    _ensureModelSyncSuccess(response);
+  }
+
+  @override
+  Future<DetectionItem> markValidationItem({
+    required String inputPath,
+    required String filePath,
+    required String action,
+    String? speciesName,
+    String? speciesCount,
+    String? speciesType,
+    String? remark,
+    String? classificationModelPath,
+    String? feedbackOperationId,
+  }) async {
+    final updated = await super.markValidationItem(
+      inputPath: inputPath,
+      filePath: filePath,
+      action: action,
+      speciesName: speciesName,
+      speciesCount: speciesCount,
+      speciesType: speciesType,
+      remark: remark,
+      classificationModelPath: classificationModelPath,
+      feedbackOperationId: feedbackOperationId,
+    );
+
+    final selection = dinoValidationBoxSelectionFor(filePath);
+    final modelPath = classificationModelPath?.trim() ?? '';
+    final operationId = feedbackOperationId?.trim() ?? '';
+    final confirmedSpecies = speciesName?.trim() ?? '';
+    final shouldUseSelectedBox =
+        action == 'update' &&
+        confirmedSpecies.isNotEmpty &&
+        modelPath.isNotEmpty &&
+        operationId.isNotEmpty &&
+        selection != null &&
+        selection.learnableObservationCount > 1;
+    if (!shouldUseSelectedBox) return updated;
+
+    await _recordDinoV3SelectedObservationFeedback(
+      filePath: filePath,
+      classificationModelPath: modelPath,
+      observationId: selection.observationId,
+      speciesName: confirmedSpecies,
+      feedbackOperationId: operationId,
+    );
+    return updated;
+  }
+
+  Future<void> _recordDinoV3SelectedObservationFeedback({
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/dinov3/feedback/selection'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'species_name': speciesName,
+        'feedback_operation_id': feedbackOperationId,
+      }),
     );
     _ensureModelSyncSuccess(response);
   }
