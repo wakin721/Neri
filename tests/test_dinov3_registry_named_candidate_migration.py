@@ -9,6 +9,7 @@ from system.dinov3.feedback import (
     HumanFeedbackStore,
     feedback_path_for_registry,
 )
+from system.dinov3 import registry_impl
 from system.dinov3.registry import SpeciesRegistry
 
 
@@ -35,7 +36,11 @@ def _legacy_named_candidate(
         captured_at=BASE + timedelta(hours=index),
         source_path=f"legacy-{index}.jpg",
     )
-    return registry.set_identity(
+    # Reproduce a pre-live-merge Registry database explicitly. Calling the
+    # current facade here would immediately collapse these low-evidence entries
+    # and would no longer exercise the legacy reopen migration below.
+    return registry_impl.SpeciesRegistry.set_identity(
+        registry,
         entry.id,
         common_name=common_name,
         scientific_name=scientific_name,
