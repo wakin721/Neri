@@ -2081,6 +2081,19 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     String pathSignature,
     String groupingSignature,
   ) {
+    final expandedGroupPaths = <Set<String>>[];
+    for (final signature in _expandedGroupSignatures) {
+      final group = _bucketCacheGroupBySignature[signature];
+      if (group == null) continue;
+      expandedGroupPaths.add(group.items.map((item) => item.path).toSet());
+    }
+    final selectedGroup = _selectedGroupSignature == null
+        ? null
+        : _bucketCacheGroupBySignature[_selectedGroupSignature!];
+    final selectedGroupPaths = selectedGroup?.items
+        .map((item) => item.path)
+        .toSet();
+
     _bucketCacheAutoGroup = widget.autoGroup;
     _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
@@ -2097,7 +2110,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _bucketCache = _buildBuckets(groups);
     _rebuildBucketLookups();
     _deferredRegroupGroupSignatures.clear();
-    _trimExpandedGroupSignatures();
+    _restoreGroupUiStateAfterRegroup(
+      expandedGroupPaths: expandedGroupPaths,
+      selectedGroupPaths: selectedGroupPaths,
+    );
     return _bucketCache;
   }
 
@@ -2113,22 +2129,44 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return _bucketCacheGroupIndexBySignature[signature] ?? fallback;
   }
 
-  void _trimExpandedGroupSignatures() {
-    final currentSignatures = <String>{};
+  void _restoreGroupUiStateAfterRegroup({
+    required List<Set<String>> expandedGroupPaths,
+    required Set<String>? selectedGroupPaths,
+  }) {
+    final nextExpandedSignatures = <String>{};
+    final selectedPath = _selectedPath;
+    String? selectedPathGroupSignature;
+    String? selectedOverlapGroupSignature;
+
     for (final bucket in _bucketCache) {
       for (final group in bucket.groups) {
-        currentSignatures.add(_groupSignature(group));
+        final signature = _groupSignature(group);
+        final overlapsExpandedGroup = expandedGroupPaths.any(
+          (previousPaths) =>
+              group.items.any((item) => previousPaths.contains(item.path)),
+        );
+        if (overlapsExpandedGroup) {
+          nextExpandedSignatures.add(signature);
+        }
+
+        if (selectedGroupPaths == null) continue;
+        if (selectedPathGroupSignature == null &&
+            selectedPath != null &&
+            group.items.any((item) => item.path == selectedPath)) {
+          selectedPathGroupSignature = signature;
+        }
+        if (selectedOverlapGroupSignature == null &&
+            group.items.any((item) => selectedGroupPaths.contains(item.path))) {
+          selectedOverlapGroupSignature = signature;
+        }
       }
     }
-    if (_expandedGroupSignatures.isNotEmpty) {
-      _expandedGroupSignatures.removeWhere(
-        (signature) => !currentSignatures.contains(signature),
-      );
-    }
-    if (_selectedGroupSignature != null &&
-        !currentSignatures.contains(_selectedGroupSignature)) {
-      _selectedGroupSignature = null;
-    }
+
+    _expandedGroupSignatures
+      ..clear()
+      ..addAll(nextExpandedSignatures);
+    _selectedGroupSignature =
+        selectedPathGroupSignature ?? selectedOverlapGroupSignature;
   }
 
   String _itemsPathSignature(List<DetectionItem> items) {
