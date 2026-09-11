@@ -5,9 +5,12 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 
 from system.backend.dinov3_registry_service import (
+    discard_registry_candidate_as_empty,
     load_checkpoint_for_model,
+    merge_registry_candidate_into_checkpoint,
     open_registry_for_model,
     render_registry_example,
 )
@@ -20,6 +23,11 @@ from system.backend.models import (
 from .checkpoint import CheckpointValidationError
 from .registry import RegistrationConditionError, RegistryEntryNotFound
 from .runtime import DinoV3ManifestError
+
+
+class _DinoV3MergeCheckpointRequest(BaseModel):
+    classification_model_path: str = Field(..., min_length=1)
+    checkpoint_species: str = Field(..., min_length=1)
 
 
 def _run_with_registry(classification_model_path: str, action: Callable[[Any], Any]) -> Any:
@@ -263,6 +271,32 @@ def dinov3_registry_router() -> APIRouter:
                 common_name=request.common_name,
                 scientific_name=request.scientific_name,
             ).as_dict(),
+        )
+
+    @router.post("/registry/{registration_id}/merge-checkpoint")
+    def merge_candidate_into_checkpoint(
+        registration_id: int,
+        request: _DinoV3MergeCheckpointRequest,
+    ):
+        return _run_with_registry(
+            request.classification_model_path,
+            lambda registry: merge_registry_candidate_into_checkpoint(
+                registry,
+                request.classification_model_path,
+                registration_id,
+                request.checkpoint_species,
+            ),
+        )
+
+    @router.post("/registry/{registration_id}/empty")
+    def mark_candidate_empty(registration_id: int, request: DinoV3RegisterRequest):
+        return _run_with_registry(
+            request.classification_model_path,
+            lambda registry: discard_registry_candidate_as_empty(
+                registry,
+                request.classification_model_path,
+                registration_id,
+            ),
         )
 
     @router.post("/registry/{registration_id}/register", response_model=DinoV3RegistryEntryResponse)

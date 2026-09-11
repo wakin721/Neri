@@ -219,6 +219,17 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
+  DinoV3RegistryEntry? _matchingCheckpoint(String commonName) {
+    final wanted = commonName.trim().toLowerCase();
+    if (wanted.isEmpty) return null;
+    for (final entry in _entries) {
+      if (entry.isCheckpoint && entry.commonName.trim().toLowerCase() == wanted) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
   Future<void> _saveIdentity() async {
     final selected = _selected;
     if (selected?.isCheckpoint == true) return;
@@ -227,7 +238,11 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       setState(() => _error = '请填写人工确认物种名称。');
       return;
     }
-    setState(() => _saving = true);
+    final checkpoint = _matchingCheckpoint(commonName);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     try {
       final updated = await widget.apiClient.updateDinoV3RegistryIdentity(
         classificationModelPath: widget.modelPath,
@@ -235,9 +250,87 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         commonName: commonName,
         scientificName: _scientificNameController.text.trim(),
       );
+      if (!mounted) return;
+
+      if (checkpoint != null) {
+        final shouldMerge = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Checkpoint 已存在“${checkpoint.commonName}”'),
+            content: Text(
+              '当前 Candidate 与 Checkpoint 物种“${checkpoint.commonName}”同名。\n\n'
+              '是否将当前候选的 ${selected.eventCount} 个独立事件合并到已有物种？'
+              'Checkpoint 文件本身不会被修改，这些事件会加入人工纠正学习和 learned prototypes。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('合并到已有物种'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted) return;
+        if (shouldMerge == true) {
+          await widget.apiClient.mergeDinoV3RegistryCandidateIntoCheckpoint(
+            classificationModelPath: widget.modelPath,
+            registrationId: selected.id,
+            checkpointSpecies: checkpoint.commonName,
+          );
+          if (mounted) await _load(preferredId: checkpoint.id);
+          return;
+        }
+      }
       if (mounted) await _load(preferredId: updated.id);
     } catch (error) {
       if (mounted) setState(() => _error = '保存物种名称失败：$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _markEmpty() async {
+    final selected = _selected;
+    if (selected == null || !selected.isCandidate || _saving) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('标记为空/误检？'),
+        content: Text(
+          '将把“${selected.displayName}”的 ${selected.eventCount} 个独立事件标记为'
+          '空/误检，并移除这个 Candidate。\n\n'
+          '这些事件不会作为任何物种的正样本学习，Checkpoint 不会被修改。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认空/误检'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.apiClient.markDinoV3RegistryCandidateEmpty(
+        classificationModelPath: widget.modelPath,
+        registrationId: selected.id,
+      );
+      if (mounted) await _load();
+    } catch (error) {
+      if (mounted) setState(() => _error = '标记为空/误检失败：$error');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -726,9 +819,20 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                   const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerRight,
-                    child: TextButton(
-                      onPressed: _saving ? null : _saveIdentity,
-                      child: const Text('保存物种名称'),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        TextButton.icon(
+                          onPressed: _saving ? null : _markEmpty,
+                          icon: const Icon(Icons.block_outlined),
+                          label: const Text('空/误检'),
+                        ),
+                        TextButton(
+                          onPressed: _saving ? null : _saveIdentity,
+                          child: const Text('保存物种名称'),
+                        ),
+                      ],
                     ),
                   ),
                 ],
