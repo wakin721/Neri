@@ -123,7 +123,7 @@ class NeriApiClient extends core.NeriApiClient {
     String? classificationModelPath,
     String? feedbackOperationId,
   }) async {
-    var updated = await super.markValidationItem(
+    final updated = await super.markValidationItem(
       inputPath: inputPath,
       filePath: filePath,
       action: action,
@@ -148,17 +148,35 @@ class NeriApiClient extends core.NeriApiClient {
         selection.learnableObservationCount > 1;
     if (!shouldUseSelectedBox) return updated;
 
-    final result = await super.markDinoV3BoxFeedback(
-      inputPath: inputPath,
+    await _recordDinoV3SelectedObservationFeedback(
       filePath: filePath,
       classificationModelPath: modelPath,
       observationId: selection.observationId,
-      action: action,
       speciesName: confirmedSpecies,
       feedbackOperationId: operationId,
     );
-    updated = updated.mergeValidationUpdate(result.item);
     return updated;
+  }
+
+  Future<void> _recordDinoV3SelectedObservationFeedback({
+    required String filePath,
+    required String classificationModelPath,
+    required String observationId,
+    required String speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/dinov3/feedback/selection'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'file_path': filePath,
+        'classification_model_path': classificationModelPath,
+        'observation_id': observationId,
+        'species_name': speciesName,
+        'feedback_operation_id': feedbackOperationId,
+      }),
+    );
+    _ensureModelSyncSuccess(response);
   }
 
   void _ensureModelSyncSuccess(http.Response response) {
