@@ -84,7 +84,7 @@ void main() {
     );
   });
 
-  test('file validation uses the selected box as DINO feedback fallback', () async {
+  test('file validation learns only the explicitly selected box', () async {
     final item = itemWithBoxes(const <DetectionBox>[
       DetectionBox(
         species: 'Unknown',
@@ -100,7 +100,7 @@ void main() {
     recordDinoValidationBoxSelection(item, item.detectionBoxes[1]);
 
     final requestedPaths = <String>[];
-    Map<String, dynamic>? boxFeedbackBody;
+    Map<String, dynamic>? selectionFeedbackBody;
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
         requestedPaths.add(request.url.path);
@@ -117,19 +117,14 @@ void main() {
             headers: const {'content-type': 'application/json'},
           );
         }
-        if (request.url.path == '/api/dinov3/feedback/box') {
-          boxFeedbackBody = jsonDecode(request.body) as Map<String, dynamic>;
+        if (request.url.path == '/api/dinov3/feedback/selection') {
+          selectionFeedbackBody =
+              jsonDecode(request.body) as Map<String, dynamic>;
           return http.Response(
             jsonEncode(<String, dynamic>{
-              'item': <String, dynamic>{
-                'filename': 'camera.jpg',
-                'path': item.path,
-                'file_type': 'jpg',
-                'species': <String>['骆驼'],
-                'validated': true,
-              },
               'operation_id': 'op-1',
-              'affected_species': <String>['骆驼'],
+              'affected_species': <String>[],
+              'registry_id': 7,
             }),
             200,
             headers: const {'content-type': 'application/json'},
@@ -140,7 +135,7 @@ void main() {
     );
     addTearDown(client.close);
 
-    await client.markValidationItem(
+    final updated = await client.markValidationItem(
       inputPath: 'C:/camera',
       filePath: item.path,
       action: 'update',
@@ -151,10 +146,11 @@ void main() {
 
     expect(requestedPaths, <String>[
       '/api/validation/mark',
-      '/api/dinov3/feedback/box',
+      '/api/dinov3/feedback/selection',
     ]);
-    expect(boxFeedbackBody?['observation_id'], 'obs-2');
-    expect(boxFeedbackBody?['species_name'], '骆驼');
-    expect(boxFeedbackBody?['feedback_operation_id'], 'op-1');
+    expect(selectionFeedbackBody?['observation_id'], 'obs-2');
+    expect(selectionFeedbackBody?['species_name'], '骆驼');
+    expect(selectionFeedbackBody?['feedback_operation_id'], 'op-1');
+    expect(updated.species, <String>['骆驼']);
   });
 }
