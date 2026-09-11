@@ -43,3 +43,15 @@ def test_unnamed_candidates_are_listed_by_event_count_descending(tmp_path):
     assert [entry.id for entry in unnamed]==[second.id,third.id,first.id]
     assert [entry.event_count for entry in unnamed]==[3,2,1]
     reg.close()
+
+def test_set_identity_immediately_merges_same_named_candidates(tmp_path):
+    reg=SpeciesRegistry(tmp_path/'r.db',model_fingerprint=FP)
+    first=reg.record_unknown(vector(200),camera_id='cam-a',captured_at=BASE,source_path='camel-a.jpg')
+    second=reg.record_unknown(vector(201),camera_id='cam-b',captured_at=BASE+timedelta(hours=1),source_path='camel-b.jpg')
+    first=reg.set_identity(first.id,common_name='骆驼')
+    merged=reg.set_identity(second.id,common_name='骆驼')
+    named=[entry for entry in reg.list() if entry.common_name=='骆驼']
+    assert merged.id==first.id
+    assert [entry.id for entry in named]==[first.id]
+    assert named[0].event_count==2
+    reg.close()
