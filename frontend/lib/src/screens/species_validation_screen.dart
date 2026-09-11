@@ -180,6 +180,34 @@ String dinoV3FeedbackPanelTitle(
   return '#$boxNumber $species · 检测框校验';
 }
 
+bool _sameDetectionBoxSelection(DetectionBox left, DetectionBox right) {
+  final leftObservationId = left.observationId?.trim() ?? '';
+  final rightObservationId = right.observationId?.trim() ?? '';
+  if (leftObservationId.isNotEmpty || rightObservationId.isNotEmpty) {
+    return leftObservationId.isNotEmpty &&
+        leftObservationId == rightObservationId;
+  }
+  if (left.frameIndex != right.frameIndex ||
+      (left.trackId?.trim() ?? '') != (right.trackId?.trim() ?? '')) {
+    return false;
+  }
+  final leftTimestamp = left.timestamp;
+  final rightTimestamp = right.timestamp;
+  if ((leftTimestamp == null) != (rightTimestamp == null)) return false;
+  if (leftTimestamp != null &&
+      rightTimestamp != null &&
+      (leftTimestamp - rightTimestamp).abs() > 0.000001) {
+    return false;
+  }
+  if (left.bbox.length < 4 || right.bbox.length < 4) return false;
+  for (var index = 0; index < 4; index++) {
+    if ((left.bbox[index] - right.bbox[index]).abs() > 0.000001) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const double _validationButtonHeight = 40;
 const _validationImageTypes = {
   'png',
@@ -369,6 +397,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   bool _marking = false;
   bool _exporting = false;
   String? _selectedObservationId;
+  DetectionBox? _selectedDetectionBox;
+  String? _selectedDetectionPath;
   int _feedbackOperationSequence = 0;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   final List<String> _pendingSpeciesNames = <String>[];
@@ -942,7 +972,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         onOpenExternal: () => widget.onOpenExternal(item.path),
         selectedObservationId: _selectedObservationId,
         onDetectionBoxSelected: (box) {
-          setState(() => _selectedObservationId = box?.observationId);
+          setState(() {
+            _selectedObservationId = box?.observationId;
+            _selectedDetectionBox = box;
+            _selectedDetectionPath = box == null ? null : item.path;
+          });
         },
         isFavorite: _isFavoritePhoto(item),
         onToggleFavorite: _isImage(item) || _isVideo(item)
@@ -953,10 +987,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   DetectionBox? _selectedDinoBox(List<DetectionBox> visibleBoxes) {
-    final observationId = _selectedObservationId?.trim();
-    if (observationId == null || observationId.isEmpty) return null;
+    if (_selectedDetectionPath != _selectedPath) return null;
+    final selectedBox = _selectedDetectionBox;
+    if (selectedBox == null) return null;
     for (final box in visibleBoxes) {
-      if (box.observationId?.trim() == observationId) return box;
+      if (_sameDetectionBoxSelection(box, selectedBox)) return box;
     }
     return null;
   }
@@ -1082,6 +1117,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         !_marking &&
         classificationModelPath.isNotEmpty &&
         observationId.isNotEmpty;
+    final bboxSummary = box.bbox
+        .take(4)
+        .map((value) => value.toStringAsFixed(1))
+        .join(', ');
+    final candidateSummary = box.candidates
+        .take(3)
+        .map((candidate) {
+          final name = candidate['name']?.toString().trim() ?? '';
+          if (name.isEmpty) return '';
+          final confidence = candidateConfidence(candidate);
+          return '$name ${(confidence * 100).toStringAsFixed(1)}%';
+        })
+        .where((value) => value.isNotEmpty)
+        .join(' / ');
     return _ValidationPanel(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1138,6 +1187,50 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            Container(
+              key: const ValueKey('detection-box-details'),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.42),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Wrap(
+                spacing: 16,
+                runSpacing: 6,
+                children: [
+                  Text(
+                    '物种：${box.species.trim().isEmpty ? 'Unknown' : box.species.trim()}',
+                  ),
+                  if (box.confidence != null)
+                    Text('置信度：${box.confidence!.toStringAsFixed(3)}'),
+                  if (bboxSummary.isNotEmpty) Text('边界框：$bboxSummary'),
+                  if (box.frameIndex != null) Text('帧：${box.frameIndex}'),
+                  if (box.timestamp != null)
+                    Text('时间：${box.timestamp!.toStringAsFixed(3)} s'),
+                  if ((box.trackId?.trim() ?? '').isNotEmpty)
+                    Text('Track：${box.trackId!.trim()}'),
+                  if ((box.predictedSpecies?.trim() ?? '').isNotEmpty)
+                    Text('DINOv3：${box.predictedSpecies!.trim()}'),
+                ],
+              ),
+            ),
+            if (candidateSummary.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text('候选：$candidateSummary'),
+            ],
+            if (observationId.isEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                '该检测框没有 DINOv3 observation ID：可查看检测详情，但不能提交学习反馈。',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
             if (classificationModelPath.isNotEmpty &&
                 observationId.isNotEmpty) ...[
               const SizedBox(height: 6),
