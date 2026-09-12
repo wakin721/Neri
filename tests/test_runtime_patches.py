@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 from system.backend.runtime_patches import (
     REJECTED_UNKNOWN_LABEL,
-    install_runtime_patches,
     preserve_dinov3_rejections,
 )
 
@@ -86,6 +85,8 @@ def test_does_not_relabel_normal_low_confidence_classifier_filter_as_unknown():
 
 
 def test_install_runtime_patches_is_idempotent_and_wraps_serializer():
+    from system.backend.runtime_patches import install_runtime_patches
+
     calls = []
 
     def original_serializer(detector, detection):
@@ -115,9 +116,33 @@ def test_install_runtime_patches_is_idempotent_and_wraps_serializer():
         },
         classification_filtered_boxes={0},
     )
-    payload = services._serialize_detector_output(
-        object(),
-        {'detect_results': [result]},
-    )
+    payload = services._serialize_detector_output(object(), {'detect_results': [result]})
     assert payload['物种名称'] == REJECTED_UNKNOWN_LABEL
     assert len(calls) == 1
+
+
+def test_mixed_known_and_rejected_boxes_keep_species_counts_aligned():
+    rejected = {
+        'name': 'Unknown',
+        'accepted': False,
+        'observation_id': 'obs-mixed',
+        'predicted_species': 'Unknown',
+    }
+    result = SimpleNamespace(
+        boxes=[FakeBox()],
+        candidates_data={0: [rejected]},
+        classification_filtered_boxes={0},
+    )
+    payload = {
+        '物种名称': '豹猫',
+        '物种数量': '2',
+        '检测框': [
+            {'物种': '豹猫', '置信度': 0.9, '边界框': [1, 1, 2, 2], '候选项': []},
+            {'物种': '豹猫', '置信度': 0.8, '边界框': [2, 2, 3, 3], '候选项': []},
+        ],
+    }
+
+    updated = preserve_dinov3_rejections(payload, {'detect_results': [result]})
+
+    assert updated['物种名称'] == '豹猫,拒识/Unknown'
+    assert updated['物种数量'] == '2,1'
