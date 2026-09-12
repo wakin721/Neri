@@ -117,7 +117,8 @@ def preserve_dinov3_rejections(
     boxes.extend(rejected_boxes)
 
     species = _split_species(payload.get('物种名称'))
-    if REJECTED_UNKNOWN_LABEL not in species:
+    had_rejected_label = REJECTED_UNKNOWN_LABEL in species
+    if not had_rejected_label:
         species.append(REJECTED_UNKNOWN_LABEL)
     payload['物种名称'] = ','.join(species)
     payload['拒识数量'] = len(rejected_boxes)
@@ -125,6 +126,16 @@ def preserve_dinov3_rejections(
     count = str(payload.get('物种数量') or '').strip()
     if not count or count == '空':
         payload['物种数量'] = str(len(rejected_boxes))
+    elif not had_rejected_label:
+        count_parts = [
+            part.strip()
+            for part in count.replace('，', ',').replace('、', ',').split(',')
+            if part.strip()
+        ]
+        known_species_count = len(species) - 1
+        if len(count_parts) == known_species_count:
+            count_parts.append(str(len(rejected_boxes)))
+            payload['物种数量'] = ','.join(count_parts)
 
     return payload
 
@@ -133,17 +144,10 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
     """Install compatibility-preserving backend patches before main_core imports."""
 
     serializer = getattr(services_module, '_serialize_detector_output', None)
-    if callable(serializer) and not getattr(
-        serializer,
-        '_neri_preserves_open_set_rejections',
-        False,
-    ):
+    if callable(serializer) and not getattr(serializer, '_neri_preserves_open_set_rejections', False):
         original_serializer = serializer
 
-        def patched_serializer(
-            detector: Any,
-            detection: dict[str, Any],
-        ) -> dict[str, Any]:
+        def patched_serializer(detector: Any, detection: dict[str, Any]) -> dict[str, Any]:
             payload = original_serializer(detector, detection)
             return preserve_dinov3_rejections(payload, detection)
 
