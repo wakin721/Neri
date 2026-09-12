@@ -129,6 +129,93 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   Map<int, Uint8List> _exampleBytes = const <int, Uint8List>{};
   String? _error;
 
+  List<DinoV3RegistryEntry> get _displayEntries {
+    final entries = List<DinoV3RegistryEntry>.of(_entries);
+    entries.sort((left, right) {
+      final leftNamed = left.commonName.trim().isNotEmpty;
+      final rightNamed = right.commonName.trim().isNotEmpty;
+      if (leftNamed != rightNamed) return leftNamed ? -1 : 1;
+      final evidenceOrder = right.eventCount.compareTo(left.eventCount);
+      if (evidenceOrder != 0) return evidenceOrder;
+      final candidateOrder = left.candidateNumber.compareTo(
+        right.candidateNumber,
+      );
+      if (candidateOrder != 0) return candidateOrder;
+      return left.id.compareTo(right.id);
+    });
+    return entries;
+  }
+
+  static bool _sameSpeciesName(String left, String right) {
+    final leftName = left.trim().toLowerCase();
+    final rightName = right.trim().toLowerCase();
+    return leftName.isNotEmpty && leftName == rightName;
+  }
+
+  String _displayNameForEntry(DinoV3RegistryEntry entry) {
+    if (entry.isCheckpoint || entry.commonName.trim().isEmpty) {
+      return entry.displayName;
+    }
+    final matches =
+        _entries
+            .where(
+              (other) =>
+                  !other.isCheckpoint &&
+                  _sameSpeciesName(other.commonName, entry.commonName),
+            )
+            .toList()
+          ..sort((left, right) {
+            final numberOrder = left.candidateNumber.compareTo(
+              right.candidateNumber,
+            );
+            return numberOrder != 0 ? numberOrder : left.id.compareTo(right.id);
+          });
+    final checkpointExists = _entries.any(
+      (other) =>
+          other.isCheckpoint &&
+          _sameSpeciesName(other.commonName, entry.commonName),
+    );
+    if (matches.length <= 1 && !checkpointExists) return entry.displayName;
+    final index = matches.indexWhere((candidate) => candidate.id == entry.id);
+    if (index < 0) return entry.displayName;
+    return '${entry.commonName.trim()} #${index + 1}';
+  }
+
+  int _registryMergePriority(DinoV3RegistryEntry entry) {
+    return switch (entry.status) {
+      'mature' => 0,
+      'confirmed' => 1,
+      'provisional' => 2,
+      _ => 3,
+    };
+  }
+
+  DinoV3RegistryEntry? _matchingRegistryEntry(
+    String commonName,
+    int selectedId,
+  ) {
+    final matches =
+        _entries
+            .where(
+              (entry) =>
+                  !entry.isCheckpoint &&
+                  entry.id != selectedId &&
+                  _sameSpeciesName(entry.commonName, commonName),
+            )
+            .toList()
+          ..sort((left, right) {
+            final statusOrder = _registryMergePriority(
+              left,
+            ).compareTo(_registryMergePriority(right));
+            if (statusOrder != 0) return statusOrder;
+            final numberOrder = left.candidateNumber.compareTo(
+              right.candidateNumber,
+            );
+            return numberOrder != 0 ? numberOrder : left.id.compareTo(right.id);
+          });
+    return matches.isEmpty ? null : matches.first;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -223,7 +310,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     final wanted = commonName.trim().toLowerCase();
     if (wanted.isEmpty) return null;
     for (final entry in _entries) {
-      if (entry.isCheckpoint && entry.commonName.trim().toLowerCase() == wanted) {
+      if (entry.isCheckpoint &&
+          entry.commonName.trim().toLowerCase() == wanted) {
         return entry;
       }
     }
@@ -239,6 +327,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       return;
     }
     final checkpoint = _matchingCheckpoint(commonName);
+    final registryMatch = _matchingRegistryEntry(commonName, selected.id);
     setState(() {
       _saving = true;
       _error = null;
@@ -282,6 +371,39 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
             checkpointSpecies: checkpoint.commonName,
           );
           if (mounted) await _load(preferredId: checkpoint.id);
+          return;
+        }
+      } else if (selected.isCandidate && registryMatch != null) {
+        final shouldMerge = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('已存在同名物种“${registryMatch.commonName}”'),
+            content: Text(
+              '当前 Candidate 有 ${selected.eventCount} 个独立事件，已有条目有 '
+              '${registryMatch.eventCount} 个独立事件。\n\n'
+              '是否将当前 Candidate 合并到已有条目？选择“不合并”后，界面将以 '
+              '“${commonName} #1”“${commonName} #2”区分显示，真实物种名称不会改变。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('不合并'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('合并'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted) return;
+        if (shouldMerge == true) {
+          await widget.apiClient.mergeDinoV3RegistryCandidate(
+            classificationModelPath: widget.modelPath,
+            registrationId: selected.id,
+            targetRegistrationId: registryMatch.id,
+          );
+          if (mounted) await _load(preferredId: registryMatch.id);
           return;
         }
       }
@@ -934,9 +1056,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                           child: _entries.isEmpty
                               ? const Center(child: Text('暂无候选或已注册物种'))
                               : ListView.builder(
-                                  itemCount: _entries.length,
+                                  itemCount: _displayEntries.length,
                                   itemBuilder: (context, index) {
-                                    final entry = _entries[index];
+                                    final entry = _displayEntries[index];
                                     final subtitle = entry.isCheckpoint
                                         ? entry.hasFeedbackLearning
                                               ? '分类头基础物种 · ${entry.prototypeCount} base · '
@@ -948,11 +1070,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                                       key: PageStorageKey<String>(
                                         'dinov3-registry-species-${entry.id}',
                                       ),
-                                      initiallyExpanded:
-                                          entry.clusters.isNotEmpty &&
-                                          (!entry.isCheckpoint ||
-                                              entry.hasFeedbackLearning),
-                                      title: Text(entry.displayName),
+                                      initiallyExpanded: false,
+                                      title: Text(_displayNameForEntry(entry)),
                                       subtitle: Text(subtitle),
                                       onExpansionChanged: (expanded) {
                                         if (expanded) _select(entry);

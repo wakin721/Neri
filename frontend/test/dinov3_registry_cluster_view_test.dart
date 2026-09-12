@@ -167,7 +167,7 @@ void main() {
     expect(find.text('旧目录'), findsNothing);
   });
 
-  testWidgets('species row exposes child clusters in registry list', (
+  testWidgets('species rows start collapsed and expose clusters after expansion', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
@@ -254,6 +254,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     expect(find.text('盘羊'), findsWidgets);
+    expect(find.text('Base #1'), findsNothing);
+    expect(find.text('Feedback Cluster #1'), findsNothing);
+
+    await tester.tap(find.text('盘羊').first);
+    await tester.pumpAndSettle();
+
     expect(find.text('Base #1'), findsOneWidget);
     expect(find.text('Feedback Cluster #1'), findsOneWidget);
     expect(find.textContaining('4 事件'), findsWidgets);

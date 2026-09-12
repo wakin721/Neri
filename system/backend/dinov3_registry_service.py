@@ -21,6 +21,12 @@ from system.dinov3.registry import (
     SpeciesRegistry,
     registry_path_for_fingerprint,
 )
+from system.dinov3.registry_examples import (
+    persist_feedback_observation_example,
+    persist_registry_event_example,
+    read_registry_event_example,
+    store_feedback_observation_example,
+)
 from system.dinov3.runtime import DinoV3ManifestError, resolve_dinov3_manifest
 from system.dinov3.state import default_dinov3_state_root
 
@@ -184,6 +190,23 @@ def merge_registry_candidate_into_checkpoint(
     try:
         for observation in observations:
             feedback.persist_observation(observation)
+            event_id = int(observation.id.rsplit(":", 1)[1])
+            cached_example = read_registry_event_example(registry.path, event_id)
+            if cached_example is not None:
+                store_feedback_observation_example(
+                    feedback.path,
+                    observation.id,
+                    cached_example,
+                )
+            else:
+                persist_feedback_observation_example(
+                    feedback.path,
+                    observation.id,
+                    source_path=observation.source_path,
+                    bbox=observation.bbox,
+                    frame_index=observation.frame_index,
+                    timestamp_seconds=observation.timestamp_seconds,
+                )
             feedback.record_feedback(
                 observation.id,
                 operation_id=operation_id,
@@ -357,15 +380,36 @@ def render_media_example(
 def render_registry_example(
     registry: SpeciesRegistry, registration_id: int, event_id: int
 ) -> bytes:
+    cached = read_registry_event_example(registry.path, event_id)
+    if cached is not None:
+        return cached
     event = next(
         (item for item in registry.list_events(registration_id) if item["id"] == event_id),
         None,
     )
     if event is None:
         raise FileNotFoundError("DINOv3 registry event not found")
+    bbox = event.get("bbox")
+    persist_registry_event_example(
+        registry.path,
+        event_id,
+        source_path=str(event.get("source_path") or ""),
+        bbox=bbox or (),
+        frame_index=(
+            int(event["frame_index"]) if event.get("frame_index") is not None else None
+        ),
+        timestamp_seconds=(
+            float(event["timestamp_seconds"])
+            if event.get("timestamp_seconds") is not None
+            else None
+        ),
+    )
+    cached = read_registry_event_example(registry.path, event_id)
+    if cached is not None:
+        return cached
     return render_media_example(
         source_path=str(event.get("source_path") or ""),
-        bbox=event.get("bbox"),
+        bbox=bbox,
         frame_index=(
             int(event["frame_index"]) if event.get("frame_index") is not None else None
         ),

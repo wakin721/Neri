@@ -30,6 +30,11 @@ class _DinoV3MergeCheckpointRequest(BaseModel):
     checkpoint_species: str = Field(..., min_length=1)
 
 
+class _DinoV3MergeCandidateRequest(BaseModel):
+    classification_model_path: str = Field(..., min_length=1)
+    target_registration_id: int
+
+
 def _run_with_registry(classification_model_path: str, action: Callable[[Any], Any]) -> Any:
     try:
         registry = open_registry_for_model(classification_model_path)
@@ -286,6 +291,22 @@ def dinov3_registry_router() -> APIRouter:
                 registration_id,
                 request.checkpoint_species,
             ),
+        )
+
+    @router.post(
+        "/registry/{registration_id}/merge-candidate",
+        response_model=DinoV3RegistryEntryResponse,
+    )
+    def merge_candidate_into_registry(
+        registration_id: int,
+        request: _DinoV3MergeCandidateRequest,
+    ):
+        return _run_with_registry(
+            request.classification_model_path,
+            lambda registry: registry.merge_candidate_into(
+                registration_id,
+                request.target_registration_id,
+            ).as_dict(),
         )
 
     @router.post("/registry/{registration_id}/empty")
