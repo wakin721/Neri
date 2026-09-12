@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import 'api_client_core.dart' as core;
 import 'dino_validation_selection.dart';
+import 'models/dinov3_registry.dart';
 import 'models/job.dart';
 import 'models/model_sync_status.dart';
 
@@ -19,7 +20,7 @@ class NeriApiClient extends core.NeriApiClient {
   }
 
   NeriApiClient._(this._modelSyncHttpClient, String baseUrl)
-      : super(httpClient: _modelSyncHttpClient, baseUrl: baseUrl);
+    : super(httpClient: _modelSyncHttpClient, baseUrl: baseUrl);
 
   final http.Client _modelSyncHttpClient;
 
@@ -97,6 +98,25 @@ class NeriApiClient extends core.NeriApiClient {
       }),
     );
     _ensureModelSyncSuccess(response);
+  }
+
+  Future<DinoV3RegistryEntry> mergeDinoV3RegistryCandidate({
+    required String classificationModelPath,
+    required int registrationId,
+    required int targetRegistrationId,
+  }) async {
+    final response = await _modelSyncHttpClient.post(
+      Uri.parse('$baseUrl/api/dinov3/registry/$registrationId/merge-candidate'),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({
+        'classification_model_path': classificationModelPath,
+        'target_registration_id': targetRegistrationId,
+      }),
+    );
+    _ensureModelSyncSuccess(response);
+    return DinoV3RegistryEntry.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<void> markDinoV3RegistryCandidateEmpty({

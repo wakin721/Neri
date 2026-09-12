@@ -18,6 +18,11 @@ from system.dinov3.feedback import (
 )
 from system.dinov3.events import camera_id_for_path
 from system.dinov3.registry import registry_path_for_fingerprint
+from system.dinov3.registry_examples import (
+    persist_feedback_observation_example,
+    read_feedback_observation_example,
+    store_feedback_observation_example,
+)
 from system.dinov3.state import default_dinov3_state_root
 
 logger = logging.getLogger(__name__)
@@ -134,6 +139,14 @@ def persist_runtime_observations(
                         threshold=float(observation.threshold),
                         embedding=observation.embedding,
                     )
+                )
+                persist_feedback_observation_example(
+                    feedback.path,
+                    observation_id,
+                    source_path=str(source_path),
+                    bbox=tuple(float(value) for value in observation.bbox),
+                    frame_index=(int(frame_index) if frame_index is not None else None),
+                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),
                 )
 
             if registry is None:
@@ -304,7 +317,11 @@ def explain_feedback_observation(
         observation = feedback.get_observation(observation_id)
         result = classifier.explain_feature(observation.embedding)
         result["current_example_available"] = bool(
-            observation.source_path and Path(observation.source_path).expanduser().is_file()
+            read_feedback_observation_example(feedback.path, observation_id)
+            or (
+                observation.source_path
+                and Path(observation.source_path).expanduser().is_file()
+            )
         )
         nearest_example = None
         nearest = result.get("nearest_species") or []
@@ -348,15 +365,21 @@ def render_feedback_observation_example(
 
     feedback, _feature_center = _open_feedback_state(classification_model_path)
     try:
+        cached = read_feedback_observation_example(feedback.path, observation_id)
+        if cached is not None:
+            return cached
         observation = feedback.get_observation(observation_id)
-        return render_media_example(
+        content = render_media_example(
             source_path=observation.source_path,
             bbox=observation.bbox,
             frame_index=observation.frame_index,
             timestamp_seconds=observation.timestamp_seconds,
         )
+        store_feedback_observation_example(feedback.path, observation_id, content)
+        return content
     finally:
         feedback.close()
+
 
 def _raw_box_for_observation(detection_data: dict, observation_id: str) -> dict:
     boxes = detection_data.get("检测框")

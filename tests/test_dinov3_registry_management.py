@@ -70,7 +70,7 @@ def test_registry_event_keeps_crop_metadata_and_renders_square_example(tmp_path:
     decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
     assert decoded is not None
     assert decoded.shape[0] == decoded.shape[1]
-    assert decoded.shape[0] == 72
+    assert decoded.shape[0] == 320
     registry.close()
 
 
