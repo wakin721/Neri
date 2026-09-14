@@ -11,7 +11,40 @@ import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/utils/validation_cache_delta.dart';
 
+const _widgetItemCount = 60;
+
 void main() {
+  late Directory tempDir;
+  late NeriApiClient apiClient;
+
+  setUp(() async {
+    tempDir = await Directory.systemTemp.createTemp(
+      'neri_validation_incremental_',
+    );
+    final pngBytes = base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',
+    );
+    for (var index = 0; index < _widgetItemCount; index++) {
+      await File('${tempDir.path}/image-$index.jpg').writeAsBytes(pngBytes);
+    }
+    apiClient = NeriApiClient(
+      httpClient: MockClient(
+        (_) async => http.Response(
+          '{}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        ),
+      ),
+    );
+  });
+
+  tearDown(() async {
+    apiClient.close();
+    if (await tempDir.exists()) {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
   test('pending echo checks only pending item paths', () {
     final items = <_Item>[
       for (var index = 0; index < 10000; index++) _Item('path-$index'),
@@ -79,36 +112,11 @@ void main() {
   testWidgets('one mark does not rescan grouping data for every item', (
     tester,
   ) async {
-    debugPrint('[validation-perf] fixture:start');
+    debugPrint('[validation-perf] widget:start');
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-
-    final tempDir = await Directory.systemTemp.createTemp(
-      'neri_validation_incremental_',
-    );
-    addTearDown(() async {
-      if (await tempDir.exists()) await tempDir.delete(recursive: true);
-    });
-    final pngBytes = base64Decode(
-      'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',
-    );
-    for (var index = 0; index < 60; index++) {
-      await File('${tempDir.path}/image-$index.jpg').writeAsBytes(pngBytes);
-    }
-    debugPrint('[validation-perf] fixture:files-ready');
-
-    final apiClient = NeriApiClient(
-      httpClient: MockClient(
-        (_) async => http.Response(
-          '{}',
-          200,
-          headers: const {'content-type': 'application/json; charset=utf-8'},
-        ),
-      ),
-    );
-    addTearDown(apiClient.close);
 
     final key = GlobalKey<_IncrementalHarnessState>();
     debugPrint('[validation-perf] pumpWidget:start');
@@ -138,7 +146,7 @@ void main() {
       lessThan(200),
       reason:
           'A single parent echo should inspect only the affected auto-group, '
-          'not recompute the grouping signature for all 60 items.',
+          'not recompute the grouping signature for all $_widgetItemCount items.',
     );
   });
 }
@@ -199,7 +207,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
   void initState() {
     super.initState();
     _items = <DetectionItem>[
-      for (var index = 0; index < 60; index++)
+      for (var index = 0; index < _widgetItemCount; index++)
         DetectionItem(
           filename: 'image-$index.jpg',
           path: '${widget.tempDir.path}/image-$index.jpg',
