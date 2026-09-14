@@ -10,6 +10,7 @@ on:
       - "frontend/test/species_validation_incremental_cache_test.dart"
       - "frontend/test/species_validation_group_expansion_test.dart"
       - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "tests/test_validation_cache_wiring.py"
   pull_request:
     paths:
       - ".github/workflows/validation-performance.yml"
@@ -18,12 +19,13 @@ on:
       - "frontend/test/species_validation_incremental_cache_test.dart"
       - "frontend/test/species_validation_group_expansion_test.dart"
       - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "tests/test_validation_cache_wiring.py"
 
 permissions:
   contents: read
 
 concurrency:
-  group: validation-performance-portable-v2-${{ github.ref }}
+  group: validation-performance-portable-v3-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,6 +36,9 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v6
+
+      - name: Verify incremental cache wiring
+        run: python tests/test_validation_cache_wiring.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -46,6 +51,6 @@ jobs:
         working-directory: frontend
         run: flutter pub get
 
-      - name: Run incremental validation RED test
+      - name: Run incremental validation behavior test
         working-directory: frontend
         run: flutter test test/species_validation_incremental_cache_test.dart
