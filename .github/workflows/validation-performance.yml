@@ -1,24 +1,44 @@
 name: Validation performance verification
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - ".github/workflows/validation-performance.yml"
+      - "frontend/lib/src/screens/species_validation_screen.dart"
+      - "frontend/lib/src/utils/validation_cache_delta.dart"
+      - "frontend/test/species_validation_incremental_cache_test.dart"
+      - "frontend/test/species_validation_group_expansion_test.dart"
+      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "tests/test_validation_cache_wiring.py"
+  pull_request:
+    paths:
+      - ".github/workflows/validation-performance.yml"
+      - "frontend/lib/src/screens/species_validation_screen.dart"
+      - "frontend/lib/src/utils/validation_cache_delta.dart"
+      - "frontend/test/species_validation_incremental_cache_test.dart"
+      - "frontend/test/species_validation_group_expansion_test.dart"
+      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "tests/test_validation_cache_wiring.py"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: validation-performance-final-green-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  format-validation-cache:
+  flutter-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout feature branch
+      - name: Checkout project
         uses: actions/checkout@v6
-        with:
-          ref: fix/validation-rejection-preview-cache
-          fetch-depth: 0
+
+      - name: Verify incremental cache wiring
+        run: python tests/test_validation_cache_wiring.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -27,25 +47,14 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Format validation cache files
+      - name: Get Flutter dependencies
         working-directory: frontend
-        run: dart format lib/src/screens/species_validation_screen.dart lib/src/utils/validation_cache_delta.dart test/species_validation_incremental_cache_test.dart
+        run: flutter pub get
 
-      - name: Verify structural wiring
-        run: python tests/test_validation_cache_wiring.py
+      - name: Check Dart formatting
+        working-directory: frontend
+        run: dart format --output=none --set-exit-if-changed lib/src/screens/species_validation_screen.dart lib/src/utils/validation_cache_delta.dart test/species_validation_incremental_cache_test.dart
 
-      - name: Check diff cleanliness
-        run: git diff --check
-
-      - name: Commit formatting
-        shell: bash
-        run: |
-          if git diff --quiet; then
-            echo "No formatting changes required."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add frontend/lib/src/screens/species_validation_screen.dart frontend/lib/src/utils/validation_cache_delta.dart frontend/test/species_validation_incremental_cache_test.dart
-          git commit -m "style: format validation cache changes"
-          git push origin HEAD:fix/validation-rejection-preview-cache
+      - name: Run focused validation tests
+        working-directory: frontend
+        run: flutter test test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
