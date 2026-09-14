@@ -1,0 +1,51 @@
+name: Validation performance verification
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/validation-performance.yml"
+      - "frontend/lib/src/screens/species_validation_screen.dart"
+      - "frontend/lib/src/utils/validation_cache_delta.dart"
+      - "frontend/test/species_validation_incremental_cache_test.dart"
+      - "frontend/test/species_validation_group_expansion_test.dart"
+      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+  pull_request:
+    paths:
+      - ".github/workflows/validation-performance.yml"
+      - "frontend/lib/src/screens/species_validation_screen.dart"
+      - "frontend/lib/src/utils/validation_cache_delta.dart"
+      - "frontend/test/species_validation_incremental_cache_test.dart"
+      - "frontend/test/species_validation_group_expansion_test.dart"
+      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - name: Get Flutter dependencies
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Run focused validation tests
+        working-directory: frontend
+        run: |
+          flutter test \
+            test/species_validation_incremental_cache_test.dart \
+            test/species_validation_group_expansion_test.dart \
+            test/dinov3_validation_selected_box_learning_test.dart
