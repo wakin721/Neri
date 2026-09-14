@@ -24,28 +24,19 @@ def _in_clause(size: int) -> str:
     return ','.join('?' for _ in range(size))
 
 
-def load_preview_indexes(
+def load_detection_index_for_filenames(
     db_paths: Iterable[Path],
     filenames: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, bool]]:
-    """Load only rows needed by the current preview file list.
-
-    The detections table already has ``idx_det_imgfile`` on image_filename, so
-    filtering in SQL avoids transferring and parsing every historical mark on
-    each validation-page refresh.
-    """
-
+) -> dict[str, dict[str, Any]]:
+    """Load detection payloads only for the requested media filenames."""
     if not filenames:
-        return {}, {}
+        return {}
 
     ordered_filenames = sorted(filenames)
     detection_index: dict[str, dict[str, Any]] = {}
-    validation_index: dict[str, bool] = {}
-
     for raw_db_path in db_paths:
-        db_path = Path(raw_db_path)
         try:
-            with sqlite3.connect(str(db_path)) as conn:
+            with sqlite3.connect(str(Path(raw_db_path))) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
@@ -53,7 +44,7 @@ def load_preview_indexes(
                         f'FROM detections WHERE image_filename IN ({placeholders})',
                         chunk,
                     ).fetchall()
-                    for base_name, image_filename, detection_json in rows:
+                    for base_name, _image_filename, detection_json in rows:
                         key = str(base_name)
                         if key in detection_index:
                             continue
@@ -63,7 +54,24 @@ def load_preview_indexes(
                             continue
                         if isinstance(data, dict):
                             detection_index[key] = data
+        except (OSError, sqlite3.Error):
+            continue
+    return detection_index
 
+
+def load_validation_index_for_filenames(
+    db_paths: Iterable[Path],
+    filenames: set[str],
+) -> dict[str, bool]:
+    """Load validation flags only for the requested media filenames."""
+    if not filenames:
+        return {}
+
+    ordered_filenames = sorted(filenames)
+    validation_index: dict[str, bool] = {}
+    for raw_db_path in db_paths:
+        try:
+            with sqlite3.connect(str(Path(raw_db_path))) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
@@ -72,12 +80,25 @@ def load_preview_indexes(
                         chunk,
                     ).fetchall()
                     for image_filename, is_validated in rows:
-                        key = str(image_filename)
-                        validation_index.setdefault(key, bool(is_validated))
+                        validation_index.setdefault(
+                            str(image_filename),
+                            bool(is_validated),
+                        )
         except (OSError, sqlite3.Error):
             continue
+    return validation_index
 
-    return detection_index, validation_index
+
+def load_preview_indexes(
+    db_paths: Iterable[Path],
+    filenames: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, bool]]:
+    """Load only rows needed by the current preview file list."""
+    paths = tuple(Path(path) for path in db_paths)
+    return (
+        load_detection_index_for_filenames(paths, filenames),
+        load_validation_index_for_filenames(paths, filenames),
+    )
 
 
 def make_preview_media_items(services_module: Any):
