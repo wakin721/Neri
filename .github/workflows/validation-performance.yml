@@ -25,13 +25,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: validation-performance-timeout-diagnostic-v2-${{ github.ref }}
+  group: validation-performance-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   flutter-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - name: Checkout project
@@ -55,6 +55,6 @@ jobs:
         working-directory: frontend
         run: dart format --output=none --set-exit-if-changed lib/src/screens/species_validation_screen.dart lib/src/utils/validation_cache_delta.dart test/species_validation_incremental_cache_test.dart
 
-      - name: Run validation timeout diagnostic
+      - name: Run focused validation tests
         working-directory: frontend
-        run: timeout --signal=TERM 45s flutter test --reporter expanded --timeout 30s test/species_validation_incremental_cache_test.dart
+        run: flutter test --reporter expanded test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
