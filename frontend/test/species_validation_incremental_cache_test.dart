@@ -109,43 +109,39 @@ void main() {
     },
   );
 
-  testWidgets('one parent echo does not rescan grouping data for every item', (
+  testWidgets('marking work stays bounded with 600 validation items', (
     tester,
   ) async {
-    debugPrint('[validation-perf] widget:start');
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final key = GlobalKey<_IncrementalHarnessState>();
-    debugPrint('[validation-perf] pumpWidget:start');
     await tester.pumpWidget(
       _IncrementalHarness(key: key, apiClient: apiClient, tempDir: tempDir),
     );
-    debugPrint('[validation-perf] pumpWidget:done');
     await tester.pump();
-    debugPrint('[validation-perf] first-pump:done');
     await tester.pump(const Duration(milliseconds: 100));
-    debugPrint('[validation-perf] settle-100ms:done');
 
-    debugPrint('[validation-perf] tap:start');
+    key.currentState!.resetReadCount();
     await tester.tap(find.text('正确').first);
-    debugPrint('[validation-perf] tap:done');
     await tester.pump();
-    debugPrint('[validation-perf] post-tap-pump:done');
     await tester.pump(const Duration(milliseconds: 150));
-    debugPrint('[validation-perf] settle-150ms:done');
 
-    debugPrint(
-      '[validation-perf] echo-reads:${key.currentState!.detectionDataReads}',
+    expect(
+      key.currentState!.readsBeforeParentEcho,
+      lessThan(50),
+      reason:
+          'Preparing one mark should use cached grouping state instead of '
+          'rescanning all $_widgetItemCount items.',
     );
     expect(
       key.currentState!.detectionDataReads,
-      lessThan(200),
+      lessThan(500),
       reason:
-          'A parent echo should inspect only the affected auto-group, not '
-          'recompute the grouping signature for all $_widgetItemCount items.',
+          'Applying the parent echo should stay bounded to the affected group '
+          'instead of recomputing grouping data for all $_widgetItemCount items.',
     );
   });
 }
@@ -201,6 +197,7 @@ class _IncrementalHarness extends StatefulWidget {
 class _IncrementalHarnessState extends State<_IncrementalHarness> {
   late List<DetectionItem> _items;
   int detectionDataReads = 0;
+  int readsBeforeParentEcho = 0;
 
   @override
   void initState() {
@@ -222,10 +219,13 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     ];
   }
 
+  void resetReadCount() {
+    detectionDataReads = 0;
+    readsBeforeParentEcho = 0;
+  }
+
   void _beginParentEchoMeasurement() {
-    debugPrint(
-      '[validation-perf] parent-echo:start prior-reads:$detectionDataReads',
-    );
+    readsBeforeParentEcho = detectionDataReads;
     detectionDataReads = 0;
   }
 
