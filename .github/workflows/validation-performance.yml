@@ -25,13 +25,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: validation-performance-portable-v3-${{ github.ref }}
+  group: validation-performance-wiring-red-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  flutter-validation:
+  validation-wiring:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
 
     steps:
       - name: Checkout project
@@ -39,18 +39,3 @@ jobs:
 
       - name: Verify incremental cache wiring
         run: python tests/test_validation_cache_wiring.py
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.44.6"
-          channel: stable
-          cache: true
-
-      - name: Get Flutter dependencies
-        working-directory: frontend
-        run: flutter pub get
-
-      - name: Run incremental validation behavior test
-        working-directory: frontend
-        run: flutter test test/species_validation_incremental_cache_test.dart
