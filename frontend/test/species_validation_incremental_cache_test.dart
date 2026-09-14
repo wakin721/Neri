@@ -11,7 +11,7 @@ import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/utils/validation_cache_delta.dart';
 
-const _widgetItemCount = 60;
+const _widgetItemCount = 600;
 
 void main() {
   late Directory tempDir;
