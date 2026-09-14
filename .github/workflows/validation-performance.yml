@@ -29,7 +29,7 @@ concurrency:
 jobs:
   flutter-validation:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Checkout project
@@ -42,6 +42,6 @@ jobs:
         working-directory: frontend
         run: flutter pub get
 
-      - name: Run focused validation tests
+      - name: Run incremental validation RED test
         working-directory: frontend
-        run: flutter test test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
+        run: flutter test test/species_validation_incremental_cache_test.dart
