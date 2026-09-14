@@ -1,5 +1,6 @@
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from system.backend import validation_fast
 
@@ -129,6 +130,7 @@ def test_batch_registry_assignment_reuses_open_feedback_store(
 class _Request:
     def __init__(
         self,
+        input_path,
         paths,
         *,
         model='model.json',
@@ -136,58 +138,79 @@ class _Request:
         species=None,
         operation_id='op-3',
     ):
+        self.input_path = str(input_path)
         self.file_paths = [str(path) for path in paths]
         self.classification_model_path = model
         self.action = action
         self.species_name = species
         self.feedback_operation_id = operation_id
+        self.species_type = None
+
+
+class _Item:
+    def __init__(self, path, validated=None):
+        self.path = str(path)
+        self.validated = validated
 
     def model_copy(self, update):
-        clone = _Request(
-            [],
-            model=self.classification_model_path,
-            action=self.action,
-            species=self.species_name,
-            operation_id=self.feedback_operation_id,
-        )
-        clone.file_paths = list(self.file_paths)
-        for key, value in update.items():
-            setattr(clone, key, value)
-        return clone
+        return _Item(self.path, validated=update.get('validated', self.validated))
 
 
-def test_mark_wrapper_suppresses_legacy_per_file_feedback_and_runs_one_batch(
+def test_fast_mark_preserves_persist_feedback_queue_order_without_legacy_loop(
     monkeypatch,
     tmp_path,
 ):
     first = tmp_path / 'a.jpg'
     second = tmp_path / 'b.jpg'
-    original_requests = []
+    first.write_bytes(b'x')
+    second.write_bytes(b'x')
+    events = []
+
+    def legacy(_request):
+        events.append('legacy')
+        raise AssertionError('legacy DINO marking path must not execute')
+
     services = SimpleNamespace(
-        mark_validation_items=lambda request: (
-            original_requests.append(request) or ['saved']
-        )
+        mark_validation_items=legacy,
+        _preview_detection_db_roots=lambda input_path, output, paths: [input_path],
+        _unique_existing_dirs=lambda roots: list(roots),
+        _load_detection_index=lambda roots, recursive=False, filenames=None: {},
+        _build_validation_update=lambda request, path, data: (
+            {'物种名称': '豹猫'},
+            True,
+        ),
+        _build_fast_metadata_item=lambda path: _Item(path),
+        _apply_detection_data=lambda item, data: item,
+        _persist_validation_updates=lambda updates, input_path: events.append(
+            'persist'
+        ),
+        _update_species_database=lambda name, kind: events.append('species-db'),
     )
     calls = []
     monkeypatch.setattr(
         validation_fast,
         'apply_validation_feedback_batch',
         lambda model, paths, **kwargs: (
-            calls.append((model, list(paths), kwargs)) or 2
+            events.append('feedback')
+            or calls.append((model, list(paths), kwargs))
+            or 2
         ),
     )
-    monkeypatch.setattr(
-        validation_fast,
-        '_checkpoint_species_for_model',
-        lambda _path: {'豹猫'},
-    )
+
+    training = ModuleType('system.training')
+
+    class _Queue:
+        def enqueue(self, *args, **kwargs):
+            events.append('queue')
+
+    training.get_queue = lambda: _Queue()
+    monkeypatch.setitem(sys.modules, 'system.training', training)
 
     wrapped = validation_fast.make_mark_validation_items(services)
-    result = wrapped(_Request([first, second], action='correct'))
+    result = wrapped(_Request(tmp_path, [first, second], action='correct'))
 
-    assert result == ['saved']
-    assert len(original_requests) == 1
-    assert original_requests[0].classification_model_path is None
+    assert len(result) == 2
+    assert events == ['persist', 'feedback', 'queue', 'queue']
     assert len(calls) == 1
     assert calls[0][0] == 'model.json'
     assert calls[0][1] == [first.resolve(), second.resolve()]
