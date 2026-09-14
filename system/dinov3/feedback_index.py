@@ -69,7 +69,7 @@ def persist_observations(
     store: Any,
     observations: Iterable[Any],
 ) -> tuple[str, ...]:
-    """Persist an observation batch with one SQLite commit."""
+    """Persist an observation batch with one atomic SQLite commit."""
     rows: list[tuple[str, str, str, bytes]] = []
     ids: list[str] = []
     for observation in observations:
@@ -93,12 +93,16 @@ def persist_observations(
 
     if not rows:
         return ()
-    store._conn.executemany(  # noqa: SLF001 - same SQLite ownership boundary
-        'INSERT OR REPLACE INTO observations(id,source_path,payload,embedding) '
-        'VALUES(?,?,?,?)',
-        rows,
-    )
-    store._conn.commit()  # noqa: SLF001
+    try:
+        store._conn.executemany(  # noqa: SLF001 - same SQLite ownership boundary
+            'INSERT OR REPLACE INTO observations(id,source_path,payload,embedding) '
+            'VALUES(?,?,?,?)',
+            rows,
+        )
+        store._conn.commit()  # noqa: SLF001
+    except Exception:
+        store._conn.rollback()  # noqa: SLF001
+        raise
     return tuple(ids)
 
 
