@@ -68,7 +68,9 @@ def preserve_dinov3_rejections(
         if boxes is None:
             continue
         candidates_data = getattr(result, 'candidates_data', {}) or {}
-        filtered_indices = getattr(result, 'classification_filtered_boxes', set()) or set()
+        filtered_indices = (
+            getattr(result, 'classification_filtered_boxes', set()) or set()
+        )
         for index in filtered_indices:
             try:
                 box = boxes[index]
@@ -83,12 +85,8 @@ def preserve_dinov3_rejections(
 
             rejected_box: dict[str, Any] = {
                 '物种': REJECTED_UNKNOWN_LABEL,
-                # Intentionally null: the frontend confidence threshold is a
-                # closed-set filter and must not turn a rejection back into 空.
                 '置信度': None,
                 '边界框': bbox,
-                # Do not feed open-set alternatives back into the generic
-                # closed-set candidate filter. Preserve DINO metadata directly.
                 '候选项': [],
             }
             for key in (
@@ -144,10 +142,17 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
     """Install compatibility-preserving backend patches before main_core imports."""
 
     serializer = getattr(services_module, '_serialize_detector_output', None)
-    if callable(serializer) and not getattr(serializer, '_neri_preserves_open_set_rejections', False):
+    if callable(serializer) and not getattr(
+        serializer,
+        '_neri_preserves_open_set_rejections',
+        False,
+    ):
         original_serializer = serializer
 
-        def patched_serializer(detector: Any, detection: dict[str, Any]) -> dict[str, Any]:
+        def patched_serializer(
+            detector: Any,
+            detection: dict[str, Any],
+        ) -> dict[str, Any]:
             payload = original_serializer(detector, detection)
             return preserve_dinov3_rejections(payload, detection)
 
@@ -156,8 +161,72 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
 
     if not patch_preview:
         return
+
+    detection_loader = getattr(services_module, '_load_detection_index', None)
+    if callable(detection_loader) and not getattr(
+        detection_loader,
+        '_neri_filtered_detection_sql',
+        False,
+    ):
+        original_detection_loader = detection_loader
+
+        def patched_detection_loader(
+            roots,
+            recursive=False,
+            filenames=None,
+        ):
+            if filenames is None:
+                return original_detection_loader(
+                    roots,
+                    recursive=recursive,
+                    filenames=None,
+                )
+            from .preview_fast import load_detection_index_for_filenames
+
+            db_paths = services_module._candidate_detection_dbs_for_roots(
+                roots,
+                recursive=recursive,
+            )
+            return load_detection_index_for_filenames(db_paths, set(filenames))
+
+        setattr(patched_detection_loader, '_neri_filtered_detection_sql', True)
+        services_module._load_detection_index = patched_detection_loader
+
+    validation_loader = getattr(services_module, '_load_validation_index', None)
+    if callable(validation_loader) and not getattr(
+        validation_loader,
+        '_neri_filtered_validation_sql',
+        False,
+    ):
+        original_validation_loader = validation_loader
+
+        def patched_validation_loader(
+            roots,
+            recursive=False,
+            filenames=None,
+        ):
+            if filenames is None:
+                return original_validation_loader(
+                    roots,
+                    recursive=recursive,
+                )
+            from .preview_fast import load_validation_index_for_filenames
+
+            db_paths = services_module._candidate_detection_dbs_for_roots(
+                roots,
+                recursive=recursive,
+            )
+            return load_validation_index_for_filenames(db_paths, set(filenames))
+
+        setattr(patched_validation_loader, '_neri_filtered_validation_sql', True)
+        services_module._load_validation_index = patched_validation_loader
+
     preview = getattr(services_module, 'preview_media_items', None)
-    if callable(preview) and not getattr(preview, '_neri_filtered_preview_sql', False):
+    if callable(preview) and not getattr(
+        preview,
+        '_neri_filtered_preview_sql',
+        False,
+    ):
         from .preview_fast import make_preview_media_items
 
         services_module.preview_media_items = make_preview_media_items(services_module)
