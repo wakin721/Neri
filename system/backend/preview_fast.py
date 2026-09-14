@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 _SQLITE_IN_CHUNK = 400
+logger = logging.getLogger(__name__)
 
 
 def _chunks(values: Iterable[str], size: int = _SQLITE_IN_CHUNK):
@@ -32,11 +35,13 @@ def load_detection_index_for_filenames(
     if not filenames:
         return {}
 
+    paths = tuple(Path(path) for path in db_paths)
+    started = time.perf_counter()
     ordered_filenames = sorted(filenames)
     detection_index: dict[str, dict[str, Any]] = {}
-    for raw_db_path in db_paths:
+    for raw_db_path in paths:
         try:
-            with sqlite3.connect(str(Path(raw_db_path))) as conn:
+            with sqlite3.connect(str(raw_db_path)) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
@@ -56,6 +61,12 @@ def load_detection_index_for_filenames(
                             detection_index[key] = data
         except (OSError, sqlite3.Error):
             continue
+    logger.info(
+        'Indexed detection lookup: filenames=%d dbs=%d elapsed=%.3fs',
+        len(filenames),
+        len(paths),
+        time.perf_counter() - started,
+    )
     return detection_index
 
 
@@ -67,11 +78,13 @@ def load_validation_index_for_filenames(
     if not filenames:
         return {}
 
+    paths = tuple(Path(path) for path in db_paths)
+    started = time.perf_counter()
     ordered_filenames = sorted(filenames)
     validation_index: dict[str, bool] = {}
-    for raw_db_path in db_paths:
+    for raw_db_path in paths:
         try:
-            with sqlite3.connect(str(Path(raw_db_path))) as conn:
+            with sqlite3.connect(str(raw_db_path)) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
@@ -86,6 +99,12 @@ def load_validation_index_for_filenames(
                         )
         except (OSError, sqlite3.Error):
             continue
+    logger.info(
+        'Indexed validation lookup: filenames=%d dbs=%d elapsed=%.3fs',
+        len(filenames),
+        len(paths),
+        time.perf_counter() - started,
+    )
     return validation_index
 
 
