@@ -152,3 +152,86 @@ def make_preview_media_items(services_module: Any):
 
     setattr(preview_media_items, '_neri_filtered_preview_sql', True)
     return preview_media_items
+
+
+def make_preview_media_item(services_module: Any):
+    """Build a single-item preview loader with targeted validation SQL."""
+
+    def preview_media_item(
+        file_path: str,
+        input_dir: str | None = None,
+        output_dir: str | None = None,
+    ):
+        path = Path(file_path).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            raise ValueError(f'文件不存在: {path}')
+        supported = tuple(
+            getattr(services_module, 'SUPPORTED_IMAGE_EXTENSIONS', ())
+        ) + tuple(getattr(services_module, 'SUPPORTED_VIDEO_EXTENSIONS', ()))
+        if supported and path.suffix.lower() not in supported:
+            raise ValueError(f'不支持的媒体文件: {path}')
+
+        item = services_module._build_metadata_item(path)
+        roots: list[Path] = [path.parent]
+        if input_dir:
+            input_path = Path(input_dir).expanduser()
+            roots.extend(
+                services_module._detection_db_search_roots(
+                    input_path,
+                    output_dir,
+                )
+            )
+        db_paths = services_module._candidate_detection_dbs_for_roots(
+            roots,
+            recursive=False,
+        )
+        validation_index = load_validation_index_for_filenames(
+            db_paths,
+            {path.name},
+        )
+        data = services_module._load_detection_data_for_path(
+            path,
+            roots,
+            recursive=False,
+        )
+        if data:
+            item = services_module._apply_detection_data(item, data)
+        return services_module._apply_validation_state(
+            item,
+            path.name,
+            validation_index,
+        )
+
+    setattr(preview_media_item, '_neri_filtered_single_preview_sql', True)
+    return preview_media_item
+
+
+def make_reload_validation_item(services_module: Any):
+    """Build a validation reload helper that avoids a full validation scan."""
+
+    def reload_validation_item(path: Path, input_path: Path):
+        roots = services_module._detection_db_search_roots(input_path, None)
+        item = services_module._build_metadata_item(path)
+        data = services_module._load_detection_data_for_path(path, roots)
+        if data:
+            item = services_module._apply_detection_data(item, data)
+        db_paths = services_module._candidate_detection_dbs_for_roots(
+            roots,
+            recursive=True,
+        )
+        validation_index = load_validation_index_for_filenames(
+            db_paths,
+            {path.name},
+        )
+        return services_module._apply_validation_state(
+            item,
+            path.name,
+            validation_index,
+        )
+
+    setattr(
+        reload_validation_item,
+        '_neri_filtered_validation_reload_sql',
+        True,
+    )
+    return reload_validation_item
