@@ -27,3 +27,7 @@ def test_incremental_validation_cache_is_wired_before_global_signatures():
     assert source.index("_pendingValidationEchoPaths.add(updated.path)", mark_selected) > mark_selected
     assert source.index("_pendingValidationEchoPaths.addAll(", mark_batch) > mark_batch
     assert source.index("_pendingValidationEchoPaths.addAll(", undo_marks) > undo_marks
+
+
+if __name__ == "__main__":
+    test_incremental_validation_cache_is_wired_before_global_signatures()
