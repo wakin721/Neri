@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from types import SimpleNamespace
 
 from system.backend.runtime_patches import (
@@ -119,6 +121,85 @@ def test_install_runtime_patches_is_idempotent_and_wraps_serializer():
     payload = services._serialize_detector_output(object(), {'detect_results': [result]})
     assert payload['物种名称'] == REJECTED_UNKNOWN_LABEL
     assert len(calls) == 1
+
+
+def test_loader_patches_use_targeted_sql_and_keep_legacy_full_fallback(tmp_path):
+    from system.backend.runtime_patches import install_runtime_patches
+
+    db_path = tmp_path / 'detections.db'
+    conn = sqlite3.connect(db_path)
+    conn.executescript('''
+        CREATE TABLE detections (
+            base_name TEXT PRIMARY KEY,
+            image_filename TEXT NOT NULL,
+            detection_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_det_imgfile ON detections(image_filename);
+        CREATE TABLE validation (
+            image_filename TEXT PRIMARY KEY,
+            is_validated INTEGER NOT NULL
+        );
+    ''')
+    conn.execute(
+        'INSERT INTO detections(base_name,image_filename,detection_json) VALUES(?,?,?)',
+        ('a', 'a.jpg', json.dumps({'物种名称': '豹猫'})),
+    )
+    conn.execute(
+        'INSERT INTO validation(image_filename,is_validated) VALUES(?,?)',
+        ('a.jpg', 1),
+    )
+    conn.commit()
+    conn.close()
+
+    legacy_calls = []
+
+    def legacy_detection(roots, recursive=False, filenames=None):
+        legacy_calls.append(('detection', filenames))
+        return {'legacy': {'物种名称': 'legacy'}}
+
+    def legacy_validation(roots, recursive=False):
+        legacy_calls.append(('validation', None))
+        return {'legacy.jpg': True}
+
+    services = SimpleNamespace(
+        _serialize_detector_output=lambda *_args: {
+            '物种名称': '空',
+            '物种数量': '空',
+            '检测框': [],
+        },
+        preview_media_items=lambda *args, **kwargs: [],
+        _load_detection_index=legacy_detection,
+        _load_validation_index=legacy_validation,
+        _candidate_detection_dbs_for_roots=lambda roots, recursive=False: [db_path],
+    )
+
+    install_runtime_patches(services)
+
+    targeted_detection = services._load_detection_index(
+        [tmp_path],
+        recursive=False,
+        filenames={'a.jpg'},
+    )
+    targeted_validation = services._load_validation_index(
+        [tmp_path],
+        recursive=False,
+        filenames={'a.jpg'},
+    )
+    assert targeted_detection['a']['物种名称'] == '豹猫'
+    assert targeted_validation == {'a.jpg': True}
+    assert legacy_calls == []
+
+    assert services._load_detection_index(
+        [tmp_path],
+        recursive=False,
+        filenames=None,
+    ) == {'legacy': {'物种名称': 'legacy'}}
+    assert services._load_validation_index(
+        [tmp_path],
+        recursive=False,
+        filenames=None,
+    ) == {'legacy.jpg': True}
+    assert legacy_calls == [('detection', None), ('validation', None)]
 
 
 def test_mixed_known_and_rejected_boxes_keep_species_counts_aligned():
