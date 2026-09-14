@@ -2,7 +2,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from system.backend.preview_fast import load_preview_indexes
+from system.backend.preview_fast import (
+    load_detection_index_for_filenames,
+    load_preview_indexes,
+    load_validation_index_for_filenames,
+)
 
 
 def _make_db(path: Path):
@@ -78,7 +82,50 @@ def test_preview_index_queries_only_requested_filenames(tmp_path, monkeypatch):
     )
 
 
-def test_preview_index_chunks_large_filename_sets(tmp_path):
+def test_targeted_helpers_preserve_first_database_wins(tmp_path):
+    first_db = tmp_path / 'first.db'
+    second_db = tmp_path / 'second.db'
+    first = _make_db(first_db)
+    second = _make_db(second_db)
+    first.execute(
+        'INSERT INTO detections(base_name,image_filename,detection_json) VALUES(?,?,?)',
+        ('same', 'same.jpg', json.dumps({'物种名称': 'first'})),
+    )
+    first.execute(
+        'INSERT INTO validation(image_filename,is_validated) VALUES(?,?)',
+        ('same.jpg', 1),
+    )
+    second.executemany(
+        'INSERT INTO detections(base_name,image_filename,detection_json) VALUES(?,?,?)',
+        [
+            ('same', 'same.jpg', json.dumps({'物种名称': 'second'})),
+            ('other', 'other.jpg', json.dumps({'物种名称': 'other'})),
+        ],
+    )
+    second.executemany(
+        'INSERT INTO validation(image_filename,is_validated) VALUES(?,?)',
+        [('same.jpg', 0), ('other.jpg', 1)],
+    )
+    first.commit()
+    second.commit()
+    first.close()
+    second.close()
+
+    detections = load_detection_index_for_filenames(
+        [first_db, second_db],
+        {'same.jpg', 'other.jpg'},
+    )
+    validations = load_validation_index_for_filenames(
+        [first_db, second_db],
+        {'same.jpg', 'other.jpg'},
+    )
+
+    assert detections['same']['物种名称'] == 'first'
+    assert detections['other']['物种名称'] == 'other'
+    assert validations == {'same.jpg': True, 'other.jpg': True}
+
+
+def test_targeted_helpers_chunk_large_filename_sets(tmp_path):
     db_path = tmp_path / 'detections.db'
     conn = _make_db(db_path)
     rows = [
@@ -89,15 +136,19 @@ def test_preview_index_chunks_large_filename_sets(tmp_path):
         'INSERT INTO detections(base_name, image_filename, detection_json) VALUES(?,?,?)',
         rows,
     )
+    conn.executemany(
+        'INSERT INTO validation(image_filename, is_validated) VALUES(?,?)',
+        [(f'image{i}.jpg', i % 2) for i in range(1200)],
+    )
     conn.commit()
     conn.close()
 
-    detections, _ = load_preview_indexes(
-        [db_path],
-        {f'image{i}.jpg' for i in range(1200)},
-    )
+    filenames = {f'image{i}.jpg' for i in range(1200)}
+    detections = load_detection_index_for_filenames([db_path], filenames)
+    validations = load_validation_index_for_filenames([db_path], filenames)
 
     assert len(detections) == 1200
+    assert len(validations) == 1200
 
 
 class _FakeItem:
