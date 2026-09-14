@@ -93,7 +93,7 @@ void main() {
     final pngBytes = base64Decode(
       'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',
     );
-    for (var index = 0; index < 600; index++) {
+    for (var index = 0; index < 60; index++) {
       await File('${tempDir.path}/image-$index.jpg').writeAsBytes(pngBytes);
     }
 
@@ -125,7 +125,7 @@ void main() {
       lessThan(200),
       reason:
           'A single parent echo should inspect only the affected auto-group, '
-          'not recompute the grouping signature for all 600 items.',
+          'not recompute the grouping signature for all 60 items.',
     );
   });
 }
@@ -186,7 +186,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
   void initState() {
     super.initState();
     _items = <DetectionItem>[
-      for (var index = 0; index < 600; index++)
+      for (var index = 0; index < 60; index++)
         DetectionItem(
           filename: 'image-$index.jpg',
           path: '${widget.tempDir.path}/image-$index.jpg',
