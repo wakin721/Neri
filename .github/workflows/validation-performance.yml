@@ -57,4 +57,4 @@ jobs:
 
       - name: Run focused validation tests
         working-directory: frontend
-        run: flutter test test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
+        run: flutter test --reporter expanded --timeout 60s test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
