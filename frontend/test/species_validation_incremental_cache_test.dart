@@ -143,6 +143,8 @@ void main() {
           'Applying the parent echo should stay bounded to the affected group '
           'instead of recomputing grouping data for all $_widgetItemCount items.',
     );
+
+    await tester.pump(const Duration(seconds: 5));
   });
 }
 
