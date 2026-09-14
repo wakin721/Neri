@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from system.dinov3.feedback_index import (
     install_feedback_store_patches,
@@ -163,4 +164,41 @@ def test_persist_observations_writes_batch_and_source_projection(tmp_path):
         tmp_path / '0.JPG'
     )
     assert json.loads(rows[0]['payload'])['source_path'] == str(tmp_path / '0.JPG')
+    store._conn.close()
+
+
+def test_persist_observations_rolls_back_partial_batch_on_sql_error(tmp_path):
+    install_feedback_store_patches(_LegacyStore)
+    store = _LegacyStore(tmp_path / 'feedback.sqlite3')
+    store._conn.execute('''
+        CREATE TRIGGER reject_bad_observation
+        BEFORE INSERT ON observations
+        WHEN NEW.id='bad'
+        BEGIN
+            SELECT RAISE(ABORT, 'bad observation');
+        END;
+    ''')
+    store._conn.commit()
+    observations = [
+        SimpleNamespace(
+            id='good',
+            source_path=str(tmp_path / 'good.jpg'),
+            captured_at=None,
+            embedding=np.array([1.0], dtype=np.float32),
+        ),
+        SimpleNamespace(
+            id='bad',
+            source_path=str(tmp_path / 'bad.jpg'),
+            captured_at=None,
+            embedding=np.array([1.0], dtype=np.float32),
+        ),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError, match='bad observation'):
+        store.persist_observations(observations)
+
+    assert store._conn.in_transaction is False
+    assert store._conn.execute(
+        'SELECT COUNT(*) FROM observations'
+    ).fetchone()[0] == 0
     store._conn.close()
