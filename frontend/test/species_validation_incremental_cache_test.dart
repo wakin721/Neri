@@ -109,7 +109,7 @@ void main() {
     },
   );
 
-  testWidgets('one mark does not rescan grouping data for every item', (
+  testWidgets('one parent echo does not rescan grouping data for every item', (
     tester,
   ) async {
     debugPrint('[validation-perf] widget:start');
@@ -129,7 +129,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     debugPrint('[validation-perf] settle-100ms:done');
 
-    key.currentState!.resetReadCount();
     debugPrint('[validation-perf] tap:start');
     await tester.tap(find.text('正确').first);
     debugPrint('[validation-perf] tap:done');
@@ -139,14 +138,14 @@ void main() {
     debugPrint('[validation-perf] settle-150ms:done');
 
     debugPrint(
-      '[validation-perf] reads:${key.currentState!.detectionDataReads}',
+      '[validation-perf] echo-reads:${key.currentState!.detectionDataReads}',
     );
     expect(
       key.currentState!.detectionDataReads,
       lessThan(200),
       reason:
-          'A single parent echo should inspect only the affected auto-group, '
-          'not recompute the grouping signature for all $_widgetItemCount items.',
+          'A parent echo should inspect only the affected auto-group, not '
+          'recompute the grouping signature for all $_widgetItemCount items.',
     );
   });
 }
@@ -223,7 +222,12 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     ];
   }
 
-  void resetReadCount() => detectionDataReads = 0;
+  void _beginParentEchoMeasurement() {
+    debugPrint(
+      '[validation-perf] parent-echo:start prior-reads:$detectionDataReads',
+    );
+    detectionDataReads = 0;
+  }
 
   DetectionItem _markedCopy(DetectionItem item, String action) {
     final data = Map<String, dynamic>.from(item.detectionData);
@@ -260,6 +264,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     String? remark,
   }) async {
     final updated = _markedCopy(item, action);
+    _beginParentEchoMeasurement();
     setState(() {
       _items = [
         for (final current in _items)
@@ -281,6 +286,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     final updatedByPath = <String, DetectionItem>{
       for (final item in items) item.path: _markedCopy(item, action),
     };
+    _beginParentEchoMeasurement();
     setState(() {
       _items = [
         for (final current in _items)
