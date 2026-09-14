@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: validation-performance-portable-${{ github.ref }}
+  group: validation-performance-portable-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
