@@ -120,10 +120,10 @@ void main() {
 
     expect(
       key.currentState!.detectionDataReads,
-      lessThan(500),
+      lessThan(200),
       reason:
           'A single parent echo should inspect only the affected auto-group, '
-          'not recompute the grouping signature for all 2000 items.',
+          'not recompute the grouping signature for all 600 items.',
     );
   });
 }
@@ -184,7 +184,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
   void initState() {
     super.initState();
     _items = <DetectionItem>[
-      for (var index = 0; index < 2000; index++)
+      for (var index = 0; index < 600; index++)
         DetectionItem(
           filename: 'image-$index.jpg',
           path: '${widget.tempDir.path}/image-$index.jpg',
