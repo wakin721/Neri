@@ -202,6 +202,51 @@ def test_loader_patches_use_targeted_sql_and_keep_legacy_full_fallback(tmp_path)
     assert legacy_calls == [('detection', None), ('validation', None)]
 
 
+def test_installer_activates_all_performance_fast_paths():
+    from system.backend import dinov3_feedback_service
+    from system.backend.runtime_patches import install_runtime_patches
+
+    services = SimpleNamespace(
+        _serialize_detector_output=lambda *_args: {},
+        _load_detection_index=lambda *args, **kwargs: {},
+        _load_validation_index=lambda *args, **kwargs: {},
+        _candidate_detection_dbs_for_roots=lambda *args, **kwargs: [],
+        preview_media_items=lambda *args, **kwargs: [],
+        preview_media_item=lambda *args, **kwargs: None,
+        _reload_validation_item=lambda *args, **kwargs: None,
+        mark_validation_items=lambda *args, **kwargs: [],
+        _learnable_observations_for_file=lambda *args, **kwargs: [],
+    )
+
+    install_runtime_patches(services)
+
+    assert getattr(
+        services.preview_media_item,
+        '_neri_filtered_single_preview_sql',
+        False,
+    )
+    assert getattr(
+        services._reload_validation_item,
+        '_neri_filtered_validation_reload_sql',
+        False,
+    )
+    assert getattr(
+        services.mark_validation_items,
+        '_neri_batched_dinov3_feedback',
+        False,
+    )
+    assert getattr(
+        services._learnable_observations_for_file,
+        '_neri_indexed_observation_lookup',
+        False,
+    )
+    assert getattr(
+        dinov3_feedback_service.persist_runtime_observations,
+        '_neri_batched_runtime_persistence',
+        False,
+    )
+
+
 def test_mixed_known_and_rejected_boxes_keep_species_counts_aligned():
     rejected = {
         'name': 'Unknown',
