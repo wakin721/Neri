@@ -79,6 +79,7 @@ void main() {
   testWidgets('one mark does not rescan grouping data for every item', (
     tester,
   ) async {
+    debugPrint('[validation-perf] fixture:start');
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -96,6 +97,7 @@ void main() {
     for (var index = 0; index < 60; index++) {
       await File('${tempDir.path}/image-$index.jpg').writeAsBytes(pngBytes);
     }
+    debugPrint('[validation-perf] fixture:files-ready');
 
     final apiClient = NeriApiClient(
       httpClient: MockClient(
@@ -109,17 +111,28 @@ void main() {
     addTearDown(apiClient.close);
 
     final key = GlobalKey<_IncrementalHarnessState>();
+    debugPrint('[validation-perf] pumpWidget:start');
     await tester.pumpWidget(
       _IncrementalHarness(key: key, apiClient: apiClient, tempDir: tempDir),
     );
+    debugPrint('[validation-perf] pumpWidget:done');
     await tester.pump();
+    debugPrint('[validation-perf] first-pump:done');
     await tester.pump(const Duration(milliseconds: 100));
+    debugPrint('[validation-perf] settle-100ms:done');
 
     key.currentState!.resetReadCount();
+    debugPrint('[validation-perf] tap:start');
     await tester.tap(find.text('正确').first);
+    debugPrint('[validation-perf] tap:done');
     await tester.pump();
+    debugPrint('[validation-perf] post-tap-pump:done');
     await tester.pump(const Duration(milliseconds: 150));
+    debugPrint('[validation-perf] settle-150ms:done');
 
+    debugPrint(
+      '[validation-perf] reads:${key.currentState!.detectionDataReads}',
+    );
     expect(
       key.currentState!.detectionDataReads,
       lessThan(200),
