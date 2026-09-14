@@ -422,8 +422,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   Map<String, int> _bucketCacheItemIndexByPath = const <String, int>{};
   Map<String, _SpeciesBucket> _bucketCacheBucketByPath =
       const <String, _SpeciesBucket>{};
-  Map<String, int> _bucketCacheBucketItemIndexByPath =
-      const <String, int>{};
+  Map<String, int> _bucketCacheBucketItemIndexByPath = const <String, int>{};
   final Set<String> _pendingValidationEchoPaths = <String>{};
   List<_SpeciesBucket> _bucketCache = const <_SpeciesBucket>[];
   Map<String, DetectionItem> _bucketCacheItemByPath =
@@ -2303,7 +2302,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       final nextGroup = _ValidationMediaGroup(<DetectionItem>[
         for (final item in group.items) replacements[item.path] ?? item,
       ]);
-      if (_primarySpeciesForGroup(group) != _primarySpeciesForGroup(nextGroup)) {
+      if (_primarySpeciesForGroup(group) !=
+          _primarySpeciesForGroup(nextGroup)) {
         return false;
       }
       final wasComplete = _groupComplete(group);
@@ -3442,9 +3442,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       );
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
-      _pendingValidationEchoPaths.addAll(
-        updatedItems.map((item) => item.path),
-      );
+      _pendingValidationEchoPaths.addAll(updatedItems.map((item) => item.path));
       final usedQuickSpecies =
           action == 'update' &&
               speciesName != null &&

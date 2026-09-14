@@ -39,44 +39,46 @@ void main() {
     expect(pathReads, 1);
   });
 
-  test('pending echo falls back when structural preconditions are uncertain', () {
-    final items = <_Item>[_Item('a'), _Item('b')];
-    final indexes = <String, int>{'a': 0, 'b': 1};
+  test(
+    'pending echo falls back when structural preconditions are uncertain',
+    () {
+      final items = <_Item>[_Item('a'), _Item('b')];
+      final indexes = <String, int>{'a': 0, 'b': 1};
 
-    bool evaluate({
-      List<_Item>? nextItems,
-      int? cachedLength,
-      Map<String, int>? cachedIndexByPath,
-      Set<String>? pendingPaths,
-      bool groupingSettingsUnchanged = true,
-      bool refreshVersionUnchanged = true,
-    }) {
-      return ValidationCacheDelta.canAdoptPendingEcho<_Item>(
-        nextItems: nextItems ?? items,
-        cachedLength: cachedLength ?? items.length,
-        cachedIndexByPath: cachedIndexByPath ?? indexes,
-        pendingPaths: pendingPaths ?? const <String>{'a'},
-        pathOf: (item) => item.path,
-        groupingSettingsUnchanged: groupingSettingsUnchanged,
-        refreshVersionUnchanged: refreshVersionUnchanged,
+      bool evaluate({
+        List<_Item>? nextItems,
+        int? cachedLength,
+        Map<String, int>? cachedIndexByPath,
+        Set<String>? pendingPaths,
+        bool groupingSettingsUnchanged = true,
+        bool refreshVersionUnchanged = true,
+      }) {
+        return ValidationCacheDelta.canAdoptPendingEcho<_Item>(
+          nextItems: nextItems ?? items,
+          cachedLength: cachedLength ?? items.length,
+          cachedIndexByPath: cachedIndexByPath ?? indexes,
+          pendingPaths: pendingPaths ?? const <String>{'a'},
+          pathOf: (item) => item.path,
+          groupingSettingsUnchanged: groupingSettingsUnchanged,
+          refreshVersionUnchanged: refreshVersionUnchanged,
+        );
+      }
+
+      expect(evaluate(cachedLength: 3), isFalse);
+      expect(evaluate(cachedIndexByPath: const <String, int>{'b': 1}), isFalse);
+      expect(
+        evaluate(nextItems: <_Item>[_Item('changed'), _Item('b')]),
+        isFalse,
       );
-    }
+      expect(evaluate(groupingSettingsUnchanged: false), isFalse);
+      expect(evaluate(refreshVersionUnchanged: false), isFalse);
+      expect(evaluate(pendingPaths: const <String>{}), isFalse);
+    },
+  );
 
-    expect(evaluate(cachedLength: 3), isFalse);
-    expect(
-      evaluate(cachedIndexByPath: const <String, int>{'b': 1}),
-      isFalse,
-    );
-    expect(
-      evaluate(nextItems: <_Item>[_Item('changed'), _Item('b')]),
-      isFalse,
-    );
-    expect(evaluate(groupingSettingsUnchanged: false), isFalse);
-    expect(evaluate(refreshVersionUnchanged: false), isFalse);
-    expect(evaluate(pendingPaths: const <String>{}), isFalse);
-  });
-
-  testWidgets('one mark does not rescan grouping data for every item', (tester) async {
+  testWidgets('one mark does not rescan grouping data for every item', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -192,10 +194,10 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           modifiedAt: '2026-09-14T00:00:00Z',
           species: const <String>['豹猫'],
           confidence: 0.95,
-          detectionData: _CountingMap(
-            const <String, dynamic>{'物种名称': '豹猫', '物种数量': '1'},
-            () => detectionDataReads += 1,
-          ),
+          detectionData: _CountingMap(const <String, dynamic>{
+            '物种名称': '豹猫',
+            '物种数量': '1',
+          }, () => detectionDataReads += 1),
         ),
     ];
   }
@@ -261,7 +263,10 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     setState(() {
       _items = [
         for (final current in _items)
-          if (targets.contains(current.path)) updatedByPath[current.path]! else current,
+          if (targets.contains(current.path))
+            updatedByPath[current.path]!
+          else
+            current,
       ];
     });
     return [for (final item in items) updatedByPath[item.path]!];
