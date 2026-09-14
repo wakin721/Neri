@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import logging
-import time
-import uuid
 from pathlib import Path
+import time
 from typing import Any, Sequence
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def apply_validation_feedback_batch(
             learnable = [
                 observation
                 for observation in observations
-                if getattr(observation, 'id', '')
+                if getattr(observation, "id", "")
             ]
             if len(learnable) != 1:
                 continue
@@ -78,37 +78,93 @@ def _checkpoint_species_for_model(
 
 
 def make_mark_validation_items(services_module: Any):
-    """Wrap legacy marking while replacing only its per-file DINO feedback loop."""
+    """Replace DINO-backed marking while preserving legacy operation ordering."""
     original = services_module.mark_validation_items
 
     def mark_validation_items(request):
         model_path = request.classification_model_path
-        if not model_path or request.action == 'unverified':
+        if not model_path or request.action == "unverified":
             return original(request)
 
-        operation_id = request.feedback_operation_id or uuid.uuid4().hex
-        stripped = request.model_copy(
-            update={
-                'classification_model_path': None,
-                'feedback_operation_id': None,
-            }
-        )
         started = time.perf_counter()
-        items = original(stripped)
-        persisted_elapsed = time.perf_counter() - started
+        input_path = Path(request.input_path).expanduser().resolve()
+        if not input_path.exists():
+            raise ValueError(f"输入路径不存在: {input_path}")
 
+        paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for raw_path in request.file_paths:
+            path = Path(raw_path).expanduser().resolve()
+            if not path.exists() or not path.is_file():
+                raise ValueError(f"文件不存在: {path}")
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            paths.append(path)
+        if not paths:
+            return []
+
+        roots = services_module._preview_detection_db_roots(input_path, None, paths)
+        detection_indexes: dict[Path, dict[str, dict[str, Any]]] = {}
+        filenames = {path.name for path in paths}
+
+        def detection_data_for(path: Path) -> dict[str, Any]:
+            for root in services_module._unique_existing_dirs([path.parent, *roots]):
+                index = detection_indexes.get(root)
+                if index is None:
+                    index = services_module._load_detection_index(
+                        [root],
+                        recursive=False,
+                        filenames=filenames,
+                    )
+                    detection_indexes[root] = index
+                data = index.get(path.stem)
+                if isinstance(data, dict):
+                    return dict(data)
+            return {}
+
+        updates: list[tuple[Path, dict[str, Any], bool | None]] = []
+        updated_items = []
+        species_database_updates: set[tuple[str, str]] = set()
+        for path in paths:
+            detection_data, validated = services_module._build_validation_update(
+                request,
+                path,
+                detection_data_for(path),
+            )
+            updates.append((path, detection_data, validated))
+
+            item = services_module._build_fast_metadata_item(path)
+            if detection_data:
+                item = services_module._apply_detection_data(item, detection_data)
+            item = item.model_copy(update={"validated": validated})
+            updated_items.append(item)
+
+            if request.species_type is not None:
+                species_type = request.species_type.strip()
+                species_name = str(detection_data.get("物种名称") or "").strip()
+                if species_name and species_type:
+                    species_database_updates.add((species_name, species_type))
+
+        persistence_started = time.perf_counter()
+        services_module._persist_validation_updates(updates, input_path)
+        for species_name, species_type in species_database_updates:
+            services_module._update_species_database(species_name, species_type)
+        persisted_elapsed = time.perf_counter() - persistence_started
+
+        operation_id = request.feedback_operation_id or uuid.uuid4().hex
         confirmed_species = (
-            (request.species_name or '').strip() or None
-            if request.action == 'update'
+            (request.species_name or "").strip() or None
+            if request.action == "update"
             else None
         )
         checkpoint_species = (
             _checkpoint_species_for_model(model_path)
-            if request.action == 'update' and confirmed_species
+            if request.action == "update" and confirmed_species
             else set()
         )
         assign_registry_species = bool(
-            request.action == 'update'
+            request.action == "update"
             and confirmed_species
             and checkpoint_species is not None
             and confirmed_species not in checkpoint_species
@@ -118,27 +174,41 @@ def make_mark_validation_items(services_module: Any):
         try:
             applied = apply_validation_feedback_batch(
                 model_path,
-                [Path(path).expanduser().resolve() for path in request.file_paths],
+                paths,
                 operation_id=operation_id,
                 action=request.action,
                 confirmed_species=confirmed_species,
                 assign_registry_species=assign_registry_species,
             )
         except Exception as exc:
-            raise RuntimeError(f'DINOv3 自动反馈失败: {exc}') from exc
+            raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
         feedback_elapsed = time.perf_counter() - feedback_started
+
+        try:
+            from system.training import get_queue
+
+            contribution_queue = get_queue()
+            for path, detection_data, validated in updates:
+                contribution_queue.enqueue(
+                    path,
+                    detection_data,
+                    validated=validated is True,
+                )
+        except Exception as error:
+            logger.warning("Training queue unavailable (%s)", type(error).__name__)
+
         logger.info(
             (
-                'Validation mark timing: targets=%d persisted=%.3fs '
-                'dino_feedback=%.3fs total=%.3fs applied=%d'
+                "Validation mark timing: targets=%d persisted=%.3fs "
+                "dino_feedback=%.3fs total=%.3fs applied=%d"
             ),
-            len(request.file_paths),
+            len(paths),
             persisted_elapsed,
             feedback_elapsed,
             time.perf_counter() - started,
             applied,
         )
-        return items
+        return updated_items
 
-    setattr(mark_validation_items, '_neri_batched_dinov3_feedback', True)
+    setattr(mark_validation_items, "_neri_batched_dinov3_feedback", True)
     return mark_validation_items
