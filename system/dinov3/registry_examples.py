@@ -10,6 +10,8 @@ from typing import Iterable
 import cv2
 import numpy as np
 
+from system.config import SUPPORTED_VIDEO_EXTENSIONS
+
 _EXAMPLE_SIZE = 320
 _JPEG_QUALITY = 90
 _STILL_FRAME_CACHE: ContextVar[dict[str, np.ndarray] | None] = ContextVar(
@@ -59,13 +61,14 @@ def _read_frame(
         return None
 
     cache = _STILL_FRAME_CACHE.get()
+    is_video = source.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
     cache_key = _source_cache_key(source)
-    if cache is not None and cache_key in cache:
+    if cache is not None and not is_video and cache_key in cache:
         return cache[cache_key]
 
     frame = cv2.imread(str(source))
     if frame is not None:
-        if cache is not None:
+        if cache is not None and not is_video:
             cache[cache_key] = frame
         return frame
 
