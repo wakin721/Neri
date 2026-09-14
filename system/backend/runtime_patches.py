@@ -162,6 +162,10 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
     if not patch_preview:
         return
 
+    from system.dinov3.feedback_index import install_feedback_store_patches
+
+    install_feedback_store_patches()
+
     detection_loader = getattr(services_module, '_load_detection_index', None)
     if callable(detection_loader) and not getattr(
         detection_loader,
@@ -230,3 +234,85 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
         from .preview_fast import make_preview_media_items
 
         services_module.preview_media_items = make_preview_media_items(services_module)
+
+    preview_item = getattr(services_module, 'preview_media_item', None)
+    if callable(preview_item) and not getattr(
+        preview_item,
+        '_neri_filtered_single_preview_sql',
+        False,
+    ):
+        from .preview_fast import make_preview_media_item
+
+        services_module.preview_media_item = make_preview_media_item(services_module)
+
+    reload_item = getattr(services_module, '_reload_validation_item', None)
+    if callable(reload_item) and not getattr(
+        reload_item,
+        '_neri_filtered_validation_reload_sql',
+        False,
+    ):
+        from .preview_fast import make_reload_validation_item
+
+        services_module._reload_validation_item = make_reload_validation_item(
+            services_module
+        )
+
+    mark_items = getattr(services_module, 'mark_validation_items', None)
+    if callable(mark_items) and not getattr(
+        mark_items,
+        '_neri_batched_dinov3_feedback',
+        False,
+    ):
+        from .validation_fast import make_mark_validation_items
+
+        services_module.mark_validation_items = make_mark_validation_items(
+            services_module
+        )
+
+    learnable = getattr(services_module, '_learnable_observations_for_file', None)
+    if callable(learnable) and not getattr(
+        learnable,
+        '_neri_indexed_observation_lookup',
+        False,
+    ):
+
+        def indexed_learnable_observations(
+            classification_model_path,
+            file_path,
+        ):
+            from .dinov3_feedback_service import _open_feedback_state
+
+            feedback, _feature_center = _open_feedback_state(
+                classification_model_path
+            )
+            try:
+                return feedback.observations_for_source_path(file_path)
+            finally:
+                feedback.close()
+
+        setattr(
+            indexed_learnable_observations,
+            '_neri_indexed_observation_lookup',
+            True,
+        )
+        services_module._learnable_observations_for_file = (
+            indexed_learnable_observations
+        )
+
+    from . import dinov3_feedback_service
+
+    persistence = getattr(
+        dinov3_feedback_service,
+        'persist_runtime_observations',
+        None,
+    )
+    if callable(persistence) and not getattr(
+        persistence,
+        '_neri_batched_runtime_persistence',
+        False,
+    ):
+        from .dinov3_persistence_fast import persist_runtime_observations
+
+        dinov3_feedback_service.persist_runtime_observations = (
+            persist_runtime_observations
+        )
