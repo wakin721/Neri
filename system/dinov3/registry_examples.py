@@ -1,6 +1,8 @@
 """Persistent cropped examples for DINOv3 registry and feedback evidence."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 from pathlib import Path
 from typing import Iterable
@@ -8,8 +10,14 @@ from typing import Iterable
 import cv2
 import numpy as np
 
+from system.config import SUPPORTED_VIDEO_EXTENSIONS
+
 _EXAMPLE_SIZE = 320
 _JPEG_QUALITY = 90
+_STILL_FRAME_CACHE: ContextVar[dict[str, np.ndarray] | None] = ContextVar(
+    "neri_example_still_frame_cache",
+    default=None,
+)
 
 
 def _examples_root(store_path: str | Path) -> Path:
@@ -28,6 +36,20 @@ def feedback_observation_example_path(
     return _examples_root(feedback_path) / "observations" / f"{digest}.jpg"
 
 
+def _source_cache_key(source: Path) -> str:
+    return str(source).replace("\\", "/").casefold()
+
+
+@contextmanager
+def example_frame_cache():
+    """Reuse decoded still frames within one explicit persistence operation."""
+    token = _STILL_FRAME_CACHE.set({})
+    try:
+        yield
+    finally:
+        _STILL_FRAME_CACHE.reset(token)
+
+
 def _read_frame(
     source_path: str | Path,
     *,
@@ -37,9 +59,19 @@ def _read_frame(
     source = Path(source_path).expanduser().resolve()
     if not source.is_file():
         return None
+
+    cache = _STILL_FRAME_CACHE.get()
+    is_video = source.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+    cache_key = _source_cache_key(source)
+    if cache is not None and not is_video and cache_key in cache:
+        return cache[cache_key]
+
     frame = cv2.imread(str(source))
     if frame is not None:
+        if cache is not None and not is_video:
+            cache[cache_key] = frame
         return frame
+
     capture = cv2.VideoCapture(str(source))
     try:
         if frame_index is not None:

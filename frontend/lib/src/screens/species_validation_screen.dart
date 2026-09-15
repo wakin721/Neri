@@ -7,6 +7,7 @@ import '../api_client.dart';
 import '../models/job.dart';
 import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
+import '../utils/validation_cache_delta.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/dinov3_feature_scatter.dart';
@@ -418,6 +419,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String? _bucketCacheGroupingSignature;
   int? _bucketCacheRefreshVersion;
   List<DetectionItem>? _bucketCacheItemsIdentity;
+  Map<String, int> _bucketCacheItemIndexByPath = const <String, int>{};
+  Map<String, _SpeciesBucket> _bucketCacheBucketByPath =
+      const <String, _SpeciesBucket>{};
+  Map<String, int> _bucketCacheBucketItemIndexByPath = const <String, int>{};
+  final Set<String> _pendingValidationEchoPaths = <String>{};
   List<_SpeciesBucket> _bucketCache = const <_SpeciesBucket>[];
   Map<String, DetectionItem> _bucketCacheItemByPath =
       const <String, DetectionItem>{};
@@ -474,6 +480,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.inputPath != widget.inputPath) {
       _markHistory.clear();
+      _pendingValidationEchoPaths.clear();
     }
     if (oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.collapseGroups != widget.collapseGroups ||
@@ -482,6 +489,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         oldWidget.autoGroupGapSeconds != widget.autoGroupGapSeconds) {
       _expandedGroupSignatures.clear();
       _selectedGroupSignature = null;
+      _pendingValidationEchoPaths.clear();
+    }
+    if (oldWidget.refreshVersion != widget.refreshVersion) {
+      _pendingValidationEchoPaths.clear();
     }
     if (widget.items.isEmpty) {
       _notifyAutoGroupInferredBurstSize(null);
@@ -501,6 +512,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       _bucketCacheGroupingSignature = null;
       _bucketCacheRefreshVersion = null;
       _bucketCacheItemsIdentity = null;
+      _bucketCacheItemIndexByPath = const <String, int>{};
+      _bucketCacheBucketByPath = const <String, _SpeciesBucket>{};
+      _bucketCacheBucketItemIndexByPath = const <String, int>{};
+      _pendingValidationEchoPaths.clear();
       _bucketCache = const <_SpeciesBucket>[];
       _bucketCacheItemByPath = const <String, DetectionItem>{};
       _bucketCacheGroupByPath = const <String, _ValidationGroupIndexEntry>{};
@@ -2048,6 +2063,13 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
     }
 
+    if (hasSameGroupingSettings &&
+        _tryAdoptValidationEchoWithoutGlobalSignatures()) {
+      if (!_hasCompletedDeferredGroup()) {
+        return _bucketCache;
+      }
+    }
+
     final pathSignature = _itemsPathSignature(widget.items);
     final groupingSignature = _itemsGroupingSignature(widget.items);
     final canReuseCache =
@@ -2109,6 +2131,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _rebuildGlobalGroupIndexes(groups);
     _bucketCache = _buildBuckets(groups);
     _rebuildBucketLookups();
+    _pendingValidationEchoPaths.clear();
     _deferredRegroupGroupSignatures.clear();
     _restoreGroupUiStateAfterRegroup(
       expandedGroupPaths: expandedGroupPaths,
@@ -2194,6 +2217,123 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     return group.signature;
   }
 
+  bool _sameGroupingBoundaryMetadata(
+    DetectionItem previous,
+    DetectionItem next,
+  ) {
+    return previous.path == next.path &&
+        previous.filename == next.filename &&
+        previous.fileType == next.fileType &&
+        previous.dateTaken == next.dateTaken &&
+        previous.modifiedAt == next.modifiedAt &&
+        previous.error == next.error &&
+        previous.detectionData['拍摄时间']?.toString() ==
+            next.detectionData['拍摄时间']?.toString();
+  }
+
+  bool _tryAdoptValidationEchoWithoutGlobalSignatures() {
+    if (_pendingValidationEchoPaths.isEmpty) return false;
+    final previousItems = _bucketCacheItemsIdentity;
+    if (previousItems == null || previousItems.length != widget.items.length) {
+      return false;
+    }
+    if (!ValidationCacheDelta.canAdoptPendingEcho<DetectionItem>(
+      nextItems: widget.items,
+      cachedLength: _bucketCacheItemIndexByPath.length,
+      cachedIndexByPath: _bucketCacheItemIndexByPath,
+      pendingPaths: _pendingValidationEchoPaths,
+      pathOf: (item) => item.path,
+      groupingSettingsUnchanged: true,
+      refreshVersionUnchanged: true,
+    )) {
+      return false;
+    }
+
+    final pendingIndexes = <int>{};
+    for (final path in _pendingValidationEchoPaths) {
+      final index = _bucketCacheItemIndexByPath[path];
+      if (index == null) return false;
+      pendingIndexes.add(index);
+    }
+    for (var index = 0; index < widget.items.length; index++) {
+      if (pendingIndexes.contains(index)) continue;
+      if (!identical(previousItems[index], widget.items[index])) return false;
+    }
+
+    final replacements = <String, DetectionItem>{};
+    final groupItemIndexByPath = <String, int>{};
+    final affectedGroups = <String, _ValidationMediaGroup>{};
+
+    for (final path in _pendingValidationEchoPaths) {
+      final globalIndex = _bucketCacheItemIndexByPath[path];
+      final previous = _bucketCacheItemByPath[path];
+      final groupEntry = _bucketCacheGroupByPath[path];
+      final bucket = _bucketCacheBucketByPath[path];
+      final bucketIndex = _bucketCacheBucketItemIndexByPath[path];
+      if (globalIndex == null ||
+          previous == null ||
+          groupEntry == null ||
+          bucket == null ||
+          bucketIndex == null ||
+          globalIndex < 0 ||
+          globalIndex >= widget.items.length ||
+          bucketIndex < 0 ||
+          bucketIndex >= bucket.items.length) {
+        return false;
+      }
+
+      final next = widget.items[globalIndex];
+      if (!_sameGroupingBoundaryMetadata(previous, next) ||
+          bucket.items[bucketIndex].path != path) {
+        return false;
+      }
+      final groupItemIndex = groupEntry.group.items.indexWhere(
+        (item) => item.path == path,
+      );
+      if (groupItemIndex < 0) return false;
+
+      replacements[path] = next;
+      groupItemIndexByPath[path] = groupItemIndex;
+      affectedGroups[groupEntry.signature] = groupEntry.group;
+    }
+
+    for (final entry in affectedGroups.entries) {
+      final group = entry.value;
+      final nextGroup = _ValidationMediaGroup(<DetectionItem>[
+        for (final item in group.items) replacements[item.path] ?? item,
+      ]);
+      if (_primarySpeciesForGroup(group) !=
+          _primarySpeciesForGroup(nextGroup)) {
+        return false;
+      }
+      final wasComplete = _groupComplete(group);
+      final isComplete = _groupComplete(nextGroup);
+      if (wasComplete != isComplete) return false;
+      if (_deferredRegroupGroupSignatures.contains(entry.key) && isComplete) {
+        return false;
+      }
+    }
+
+    for (final entry in replacements.entries) {
+      final path = entry.key;
+      final next = entry.value;
+      final groupEntry = _bucketCacheGroupByPath[path]!;
+      final bucket = _bucketCacheBucketByPath[path]!;
+      final bucketIndex = _bucketCacheBucketItemIndexByPath[path]!;
+      final groupItemIndex = groupItemIndexByPath[path]!;
+      groupEntry.group.items[groupItemIndex] = next;
+      bucket.items[bucketIndex] = next;
+      _bucketCacheItemByPath[path] = next;
+    }
+    for (final signature in affectedGroups.keys) {
+      _groupSpeciesLabelCache.remove(signature);
+    }
+    _pendingValidationEchoPaths.removeAll(replacements.keys);
+    _bucketCacheItemsIdentity = widget.items;
+    _bucketCacheGroupingSignature = null;
+    return true;
+  }
+
   void _updateCachedBucketItems() {
     _bucketCacheItemsIdentity = widget.items;
     final latestByPath = <String, DetectionItem>{
@@ -2214,18 +2354,30 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
     }
     _rebuildBucketLookups();
+    _pendingValidationEchoPaths.clear();
   }
 
   void _rebuildBucketLookups() {
     _bucketCacheItemByPath = <String, DetectionItem>{
       for (final item in widget.items) item.path: item,
     };
+    _bucketCacheItemIndexByPath = <String, int>{
+      for (var index = 0; index < widget.items.length; index++)
+        widget.items[index].path: index,
+    };
     _mediaTimestampCache.removeWhere(
       (path, _) => !_bucketCacheItemByPath.containsKey(path),
     );
+    final bucketByPath = <String, _SpeciesBucket>{};
+    final bucketItemIndexByPath = <String, int>{};
     final groupByPath = <String, _ValidationGroupIndexEntry>{};
     final groupBySignature = <String, _ValidationMediaGroup>{};
     for (final bucket in _bucketCache) {
+      for (var itemIndex = 0; itemIndex < bucket.items.length; itemIndex++) {
+        final item = bucket.items[itemIndex];
+        bucketByPath[item.path] = bucket;
+        bucketItemIndexByPath[item.path] = itemIndex;
+      }
       for (var index = 0; index < bucket.groups.length; index++) {
         final group = bucket.groups[index];
         final signature = _groupSignature(group);
@@ -2240,6 +2392,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         }
       }
     }
+    _bucketCacheBucketByPath = bucketByPath;
+    _bucketCacheBucketItemIndexByPath = bucketItemIndexByPath;
     _bucketCacheGroupByPath = groupByPath;
     _bucketCacheGroupBySignature = groupBySignature;
   }
@@ -3288,6 +3442,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       );
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
+      _pendingValidationEchoPaths.addAll(updatedItems.map((item) => item.path));
       final usedQuickSpecies =
           action == 'update' &&
               speciesName != null &&
@@ -3441,6 +3596,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       }
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
+      _pendingValidationEchoPaths.addAll(
+        (updatedItems.isEmpty ? targets : updatedItems).map(
+          (item) => item.path,
+        ),
+      );
       final targetPaths = targets.map((item) => item.path).toSet();
       setState(() {
         _discardMarkHistoryForPaths(targetPaths);
@@ -3542,6 +3702,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         feedbackOperationId: feedbackOperationId,
       );
       if (!mounted) return;
+      _pendingValidationEchoPaths.add(updated.path);
       final usedQuickSpecies =
           action == 'update' &&
               speciesName != null &&
