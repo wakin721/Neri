@@ -86,6 +86,18 @@ def make_mark_validation_items(services_module: Any):
         if not model_path or request.action == "unverified":
             return original(request)
 
+        # The batched implementation depends on the indexed observation lookup
+        # installed by runtime_patches. If a caller/test/extension overrides that
+        # service seam, preserve the historical dynamic service behavior instead
+        # of bypassing the override and opening a real model feedback store.
+        observation_lookup = getattr(
+            services_module,
+            "_learnable_observations_for_file",
+            None,
+        )
+        if not getattr(observation_lookup, "_neri_indexed_observation_lookup", False):
+            return original(request)
+
         started = time.perf_counter()
         input_path = Path(request.input_path).expanduser().resolve()
         if not input_path.exists():

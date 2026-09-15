@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import logging
 import sqlite3
@@ -41,7 +42,7 @@ def load_detection_index_for_filenames(
     detection_index: dict[str, dict[str, Any]] = {}
     for raw_db_path in paths:
         try:
-            with sqlite3.connect(str(raw_db_path)) as conn:
+            with closing(sqlite3.connect(str(raw_db_path))) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
@@ -84,7 +85,7 @@ def load_validation_index_for_filenames(
     validation_index: dict[str, bool] = {}
     for raw_db_path in paths:
         try:
-            with sqlite3.connect(str(raw_db_path)) as conn:
+            with closing(sqlite3.connect(str(raw_db_path))) as conn:
                 for chunk in _chunks(ordered_filenames):
                     placeholders = _in_clause(len(chunk))
                     rows = conn.execute(
