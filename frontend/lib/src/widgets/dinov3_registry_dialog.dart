@@ -253,6 +253,27 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       if (notify && mounted) setState(() => _examplesLoading = false);
     } else {
       unawaited(_loadExamples(entry));
+      unawaited(_loadClusters(entry));
+    }
+  }
+
+  Future<void> _loadClusters(DinoV3RegistryEntry entry) async {
+    try {
+      final clusters = await widget.apiClient.fetchDinoV3RegistryClusters(
+        widget.modelPath,
+        entry.id,
+      );
+      if (!mounted || _selected?.id != entry.id) return;
+      final updated = entry.withClusters(clusters);
+      setState(() {
+        _selected = updated;
+        _entries = [
+          for (final current in _entries)
+            if (current.id == updated.id) updated else current,
+        ];
+      });
+    } catch (_) {
+      // Cluster details are optional; event browsing remains usable on failure.
     }
   }
 
@@ -488,8 +509,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         _clusterExampleBytes = const <Uint8List>[];
       });
     }
-    final loaded = <Uint8List>[];
-    for (final ref in cluster.exampleRefs.take(3)) {
+    Future<Uint8List?> loadRef(DinoV3ClusterExampleRef ref) async {
       try {
         Uint8List? bytes;
         if (ref.kind == 'registry' &&
@@ -507,11 +527,14 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
             ref.observationId!,
           );
         }
-        if (bytes != null && bytes.isNotEmpty) loaded.add(bytes);
+        return bytes != null && bytes.isNotEmpty ? bytes : null;
       } catch (_) {
         // A deleted local source file must not hide other cluster examples.
+        return null;
       }
     }
+    final results = await Future.wait(cluster.exampleRefs.take(3).map(loadRef));
+    final loaded = results.whereType<Uint8List>().toList(growable: false);
     if (!mounted ||
         requestId != _examplesRequestId ||
         _selected?.id != entry.id ||
@@ -562,22 +585,31 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         widget.modelPath,
         entry.id,
       );
-      final bytes = <int, Uint8List>{};
-      for (final event
-          in events
-              .where((event) => event.id > 0 && event.hasExample)
-              .take(3)) {
+      Future<MapEntry<int, Uint8List>?> loadEvent(
+        DinoV3RegistryEvent event,
+      ) async {
         try {
           final data = await widget.apiClient.fetchDinoV3RegistryExample(
             widget.modelPath,
             entry.id,
             event.id,
           );
-          if (data.isNotEmpty) bytes[event.id] = data;
+          return data.isNotEmpty ? MapEntry(event.id, data) : null;
         } catch (_) {
           // One stale source file must not hide the other representative crops.
+          return null;
         }
       }
+      final loaded = await Future.wait(
+        events
+            .where((event) => event.id > 0 && event.hasExample)
+            .take(3)
+            .map(loadEvent),
+      );
+      final bytes = <int, Uint8List>{
+        for (final item in loaded.whereType<MapEntry<int, Uint8List>>())
+          item.key: item.value,
+      };
       if (!mounted ||
           requestId != _examplesRequestId ||
           _selected?.id != entry.id) {

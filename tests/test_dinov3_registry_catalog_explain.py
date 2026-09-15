@@ -151,6 +151,46 @@ def test_registry_catalog_contains_checkpoint_and_local_registry_entries():
     assert registry_rows == [local]
 
 
+def test_registry_catalog_defers_local_cluster_details_until_requested():
+    import system.dinov3.api as api
+
+    checkpoint = validate_checkpoint(make_multi_prototype_payload(threshold=-1.0))
+    local = {
+        "id": 7,
+        "candidate_number": 3,
+        "status": "candidate",
+        "common_name": "",
+        "scientific_name": "",
+        "event_count": 4,
+        "camera_count": 2,
+        "prototype_count": 1,
+        "cluster_purity": 1.0,
+        "embedding_consistency": 1.0,
+        "conditions": {},
+        "can_register": False,
+        "display_name": "未知物种 #3",
+    }
+    calls = []
+    entry = SimpleNamespace(
+        id=7,
+        status="candidate",
+        as_dict=lambda: local,
+    )
+    registry = SimpleNamespace(
+        list=lambda status=None: [entry],
+        get=lambda entry_id: entry if entry_id == 7 else None,
+        cluster_details=lambda entry_id: calls.append(entry_id) or [{"id": "c1"}],
+    )
+
+    catalog = api.build_registry_catalog(checkpoint, registry)
+
+    registry_row = next(item for item in catalog if item["id"] == 7)
+    assert registry_row["clusters"] == []
+    assert calls == []
+    assert api.build_registry_clusters(registry, 7) == [{"id": "c1"}]
+    assert calls == [7]
+
+
 def test_feature_explanation_projects_nearest_two_species_without_embeddings():
     checkpoint = validate_checkpoint(make_multi_prototype_payload(threshold=-1.0))
     classifier = DinoV3Classifier(checkpoint)
@@ -251,5 +291,6 @@ def test_registry_and_feedback_routers_expose_catalog_and_observation_explain():
     feedback_paths = {route.path for route in dinov3_feedback_router().routes}
 
     assert "/api/dinov3/registry/catalog" in registry_paths
+    assert "/api/dinov3/registry/{registration_id}/clusters" in registry_paths
     assert "/api/dinov3/feedback/observations/{observation_id}/explain" in feedback_paths
     assert "/api/dinov3/feedback/observations/{observation_id}/example" in feedback_paths

@@ -99,6 +99,7 @@ def test_registry_cluster_details_group_events_under_current_prototypes(tmp_path
     registry = SpeciesRegistry(
         tmp_path / "registry.sqlite3",
         model_fingerprint="b" * 64,
+        purity_threshold=0.0,
         consistency_threshold=0.0,
     )
     try:

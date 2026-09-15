@@ -78,6 +78,7 @@ class DinoV3RegistryEntry {
     required this.id,
     required this.candidateNumber,
     required this.status,
+    this.candidateKind = 'candidate',
     required this.displayName,
     required this.commonName,
     required this.scientificName,
@@ -102,6 +103,7 @@ class DinoV3RegistryEntry {
       id: (json['id'] as num?)?.toInt() ?? 0,
       candidateNumber: (json['candidate_number'] as num?)?.toInt() ?? 0,
       status: json['status']?.toString() ?? 'candidate',
+      candidateKind: json['candidate_kind']?.toString() ?? 'candidate',
       displayName: json['display_name']?.toString() ?? '',
       commonName: json['common_name']?.toString() ?? '',
       scientificName: json['scientific_name']?.toString() ?? '',
@@ -129,6 +131,7 @@ class DinoV3RegistryEntry {
   final int id;
   final int candidateNumber;
   final String status;
+  final String candidateKind;
   final String displayName;
   final String commonName;
   final String scientificName;
@@ -143,6 +146,29 @@ class DinoV3RegistryEntry {
   final int feedbackPrototypeCount;
   final String? learningStatus;
   final List<DinoV3RegistryCluster> clusters;
+
+  DinoV3RegistryEntry withClusters(List<DinoV3RegistryCluster> value) {
+    return DinoV3RegistryEntry(
+      id: id,
+      candidateNumber: candidateNumber,
+      status: status,
+      candidateKind: candidateKind,
+      displayName: displayName,
+      commonName: commonName,
+      scientificName: scientificName,
+      eventCount: eventCount,
+      cameraCount: cameraCount,
+      prototypeCount: prototypeCount,
+      clusterPurity: clusterPurity,
+      embeddingConsistency: embeddingConsistency,
+      conditions: conditions,
+      canRegister: canRegister,
+      feedbackEventCount: feedbackEventCount,
+      feedbackPrototypeCount: feedbackPrototypeCount,
+      learningStatus: learningStatus,
+      clusters: List.unmodifiable(value),
+    );
+  }
 
   bool get isCandidate => status == 'candidate';
   bool get isCheckpoint => status.toLowerCase() == 'checkpoint';

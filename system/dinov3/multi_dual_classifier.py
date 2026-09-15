@@ -82,6 +82,10 @@ class MultiDualDinoV3Classifier(DinoV3Classifier):
                         registration_status=formal.registration_status,
                         nearest_prototype_index=formal_index,
                         squared_distance=formal_distance,
+                        registry_action=self.rejection.route(
+                            cosine_score=formal_score,
+                            squared_distance=formal_distance,
+                        ),
                     )
                 )
                 continue
@@ -112,6 +116,10 @@ class MultiDualDinoV3Classifier(DinoV3Classifier):
                             assistive_match=True,
                             nearest_prototype_index=len(bank.formal) + provisional_index,
                             squared_distance=provisional_distance,
+                            registry_action=self.rejection.route(
+                                cosine_score=provisional_score,
+                                squared_distance=provisional_distance,
+                            ),
                         )
                     )
                     continue
@@ -133,6 +141,10 @@ class MultiDualDinoV3Classifier(DinoV3Classifier):
                     registration_status=formal.registration_status,
                     nearest_prototype_index=formal_index,
                     squared_distance=formal_distance,
+                    registry_action=self.rejection.route(
+                        cosine_score=formal_score,
+                        squared_distance=formal_distance,
+                    ),
                 )
             )
         return results

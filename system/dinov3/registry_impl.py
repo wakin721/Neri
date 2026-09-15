@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Any, Callable
 
 import numpy as np
@@ -19,6 +20,25 @@ from .simple_shot import (
     deterministic_k_means,
     normalize_embedding,
 )
+
+
+_PATH_LOCKS: dict[Path, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(path, threading.RLock())
+
+
+def _serialized_write(method):
+    def wrapped(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+
+    wrapped.__name__ = method.__name__
+    wrapped.__doc__ = method.__doc__
+    return wrapped
 
 
 class RegistryEntryNotFound(KeyError):
@@ -34,6 +54,7 @@ class RegistryEntry:
     id: int
     candidate_number: int
     status: str
+    candidate_kind: str
     common_name: str
     scientific_name: str
     event_count: int
@@ -88,12 +109,16 @@ class SpeciesRegistry:
         self.purity_threshold = float(purity_threshold)
         self.consistency_threshold = float(consistency_threshold)
         self.event_gap_seconds = int(event_gap_seconds)
+        self._write_lock = _path_lock(self.path)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._init()
-        self._run_legacy_named_candidate_merge_migration()
+        with self._write_lock:
+            self._init()
+            self._run_legacy_named_candidate_merge_migration()
 
     def _init(self) -> None:
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(
             """
             PRAGMA foreign_keys=ON;
@@ -105,6 +130,7 @@ class SpeciesRegistry:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 candidate_number INTEGER NOT NULL UNIQUE,
                 status TEXT NOT NULL DEFAULT 'candidate',
+                candidate_kind TEXT NOT NULL DEFAULT 'candidate',
                 common_name TEXT NOT NULL DEFAULT '',
                 scientific_name TEXT NOT NULL DEFAULT '',
                 cluster_purity REAL NOT NULL DEFAULT 1.0,
@@ -132,6 +158,8 @@ class SpeciesRegistry:
                 event_count INTEGER NOT NULL,
                 PRIMARY KEY(registration_id,prototype_index)
             );
+            CREATE INDEX IF NOT EXISTS idx_events_registry_camera_time
+                ON events(registration_id,camera_id,started_at,ended_at);
             """
         )
         existing_event_columns = {
@@ -150,6 +178,15 @@ class SpeciesRegistry:
                 self._conn.execute(
                     f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"
                 )
+        existing_registration_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(registrations)").fetchall()
+        }
+        if "candidate_kind" not in existing_registration_columns:
+            self._conn.execute(
+                "ALTER TABLE registrations ADD COLUMN candidate_kind TEXT "
+                "NOT NULL DEFAULT 'candidate'"
+            )
         row = self._conn.execute(
             "SELECT value FROM metadata WHERE key='model_fingerprint'"
         ).fetchone()
@@ -181,6 +218,7 @@ class SpeciesRegistry:
         )
         self._conn.commit()
 
+    @_serialized_write
     def merge_duplicate_named_candidates(self) -> dict[str, object]:
         """Merge legacy same-name Candidate entries without touching formal states."""
         rows = self._conn.execute(
@@ -323,19 +361,53 @@ class SpeciesRegistry:
             raise RegistryEntryNotFound(entry_id)
         return row
 
-    def _create(self) -> int:
-        number = int(
-            self._conn.execute(
-                "SELECT COALESCE(MAX(candidate_number),0)+1 FROM registrations"
-            ).fetchone()[0]
-        )
-        now = _now()
-        cursor = self._conn.execute(
-            "INSERT INTO registrations(candidate_number,created_at,updated_at) VALUES(?,?,?)",
-            (number, now, now),
-        )
-        self._conn.commit()
-        return int(cursor.lastrowid)
+    @_serialized_write
+    def _create(self, *, candidate_kind: str = "candidate") -> int:
+        kind = str(candidate_kind).strip().lower()
+        if kind not in {"candidate", "new_mode_candidate"}:
+            raise ValueError("Unsupported Registry candidate kind")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            number = int(
+                self._conn.execute(
+                    "SELECT COALESCE(MAX(candidate_number),0)+1 FROM registrations"
+                ).fetchone()[0]
+            )
+            now = _now()
+            cursor = self._conn.execute(
+                "INSERT INTO registrations(candidate_number,candidate_kind,created_at,updated_at) "
+                "VALUES(?,?,?,?)",
+                (number, kind, now, now),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _event_neighbors(self, entry_id, camera, captured):
+        if captured is None:
+            return []
+        rows = self._conn.execute(
+            "SELECT id,event_key,started_at,ended_at,embedding_sum,sample_count "
+            "FROM events WHERE registration_id=? AND camera_id=? "
+            "AND started_at IS NOT NULL AND ended_at IS NOT NULL "
+            "ORDER BY started_at,id",
+            (entry_id, camera),
+        ).fetchall()
+        neighbors = []
+        for row in rows:
+            started = datetime.fromisoformat(row["started_at"])
+            ended = datetime.fromisoformat(row["ended_at"])
+            if captured < started:
+                gap = (started - captured).total_seconds()
+            elif captured > ended:
+                gap = (captured - ended).total_seconds()
+            else:
+                gap = 0.0
+            if gap < self.event_gap_seconds:
+                neighbors.append(row)
+        return neighbors
 
     def _event_key(self, entry_id, camera, captured, source):
         if captured is None:
@@ -348,16 +420,19 @@ class SpeciesRegistry:
                 1,
             )
         text = captured.isoformat()
-        previous = self._conn.execute(
-            "SELECT event_key,started_at,ended_at FROM events "
-            "WHERE registration_id=? AND camera_id=? AND ended_at IS NOT NULL "
-            "ORDER BY ended_at DESC LIMIT 1",
-            (entry_id, camera),
-        ).fetchone()
-        if previous is not None:
-            gap = (captured - datetime.fromisoformat(previous["ended_at"])).total_seconds()
-            if 0 <= gap < self.event_gap_seconds:
-                return previous["event_key"], previous["started_at"], text, 0
+        neighbors = self._event_neighbors(entry_id, camera, captured)
+        if neighbors:
+            starts = [captured]
+            ends = [captured]
+            for row in neighbors:
+                starts.append(datetime.fromisoformat(row["started_at"]))
+                ends.append(datetime.fromisoformat(row["ended_at"]))
+            return (
+                neighbors[0]["event_key"],
+                min(starts).isoformat(),
+                max(ends).isoformat(),
+                0,
+            )
         return (
             hashlib.sha256(f"{entry_id}|{camera}|{text}".encode()).hexdigest(),
             text,
@@ -365,6 +440,7 @@ class SpeciesRegistry:
             0,
         )
 
+    @_serialized_write
     def record_unknown(
         self,
         embedding,
@@ -375,10 +451,21 @@ class SpeciesRegistry:
         bbox=None,
         frame_index=None,
         timestamp_seconds=None,
+        exclude_entry_ids=(),
+        candidate_kind="candidate",
     ):
         vector = normalize_embedding(embedding)
-        matched = self.match(vector)
-        entry_id = int(matched["id"]) if matched else self._create()
+        matched = self.match(
+            vector,
+            statuses={"candidate"},
+            exclude_entry_ids=exclude_entry_ids,
+            candidate_kinds={str(candidate_kind).strip().lower()},
+        )
+        entry_id = (
+            int(matched["id"])
+            if matched
+            else self._create(candidate_kind=candidate_kind)
+        )
         return self.record_observation(
             entry_id,
             vector,
@@ -390,6 +477,7 @@ class SpeciesRegistry:
             timestamp_seconds=timestamp_seconds,
         )
 
+    @_serialized_write
     def record_observation(
         self,
         entry_id,
@@ -422,6 +510,7 @@ class SpeciesRegistry:
             captured_at,
             source_path,
         )
+        neighbors = self._event_neighbors(entry_id, camera_id, captured_at)
         old = self._conn.execute(
             "SELECT id,embedding_sum,sample_count FROM events "
             "WHERE registration_id=? AND event_key=?",
@@ -450,27 +539,43 @@ class SpeciesRegistry:
                 ),
             )
         else:
-            total = np.frombuffer(old["embedding_sum"], dtype="<f4").copy() + vector
+            merged_rows = neighbors or [old]
+            total = vector.copy()
+            sample_count = 1
+            for merged in merged_rows:
+                total += np.frombuffer(merged["embedding_sum"], dtype="<f4")
+                sample_count += int(merged["sample_count"])
             aggregate = normalize_embedding(total)
             self._conn.execute(
-                "UPDATE events SET ended_at=COALESCE(?,ended_at),source_path=?,"
+                "UPDATE events SET started_at=COALESCE(?,started_at),"
+                "ended_at=COALESCE(?,ended_at),source_path=?,"
                 "embedding_sum=?,embedding=?,sample_count=?,"
                 "box_x1=COALESCE(?,box_x1),box_y1=COALESCE(?,box_y1),"
                 "box_x2=COALESCE(?,box_x2),box_y2=COALESCE(?,box_y2),"
                 "frame_index=COALESCE(?,frame_index),"
                 "timestamp_seconds=COALESCE(?,timestamp_seconds) WHERE id=?",
                 (
+                    start,
                     end,
                     source_path,
                     total.astype("<f4").tobytes(),
                     aggregate.astype("<f4").tobytes(),
-                    int(old["sample_count"]) + 1,
+                    sample_count,
                     *(bbox_values or (None, None, None, None)),
                     frame_value,
                     timestamp_value,
                     int(old["id"]),
                 ),
             )
+            duplicate_ids = [
+                int(row["id"]) for row in merged_rows if int(row["id"]) != int(old["id"])
+            ]
+            if duplicate_ids:
+                placeholders = ",".join("?" for _ in duplicate_ids)
+                self._conn.execute(
+                    f"DELETE FROM events WHERE id IN ({placeholders})",
+                    tuple(duplicate_ids),
+                )
         self._conn.execute(
             "UPDATE registrations SET updated_at=? WHERE id=?",
             (_now(), entry_id),
@@ -479,6 +584,7 @@ class SpeciesRegistry:
         self._refresh(entry_id)
         return self.get(entry_id)
 
+    @_serialized_write
     def set_identity(self, entry_id, *, common_name, scientific_name=""):
         self._row(entry_id)
         common = common_name.strip()
@@ -491,6 +597,7 @@ class SpeciesRegistry:
         self._conn.commit()
         return self.get(entry_id)
 
+    @_serialized_write
     def restore_identity(self, entry_id, *, common_name="", scientific_name=""):
         self._row(entry_id)
         self._conn.execute(
@@ -500,6 +607,7 @@ class SpeciesRegistry:
         self._conn.commit()
         return self.get(entry_id)
 
+    @_serialized_write
     def record_human_species(
         self,
         embedding,
@@ -577,6 +685,7 @@ class SpeciesRegistry:
         )
         return updated, before.common_name, before.scientific_name
 
+    @_serialized_write
     def set_cluster_purity(self, entry_id, value):
         self._row(entry_id)
         value = float(value)
@@ -589,11 +698,13 @@ class SpeciesRegistry:
         self._conn.commit()
         return self.get(entry_id)
 
+    @_serialized_write
     def delete(self, entry_id: int) -> None:
         self._row(entry_id)
         self._conn.execute("DELETE FROM registrations WHERE id=?", (entry_id,))
         self._conn.commit()
 
+    @_serialized_write
     def delete_candidates(self) -> int:
         """Delete every unregistered Candidate and its cascaded local evidence."""
         count = int(
@@ -640,7 +751,6 @@ class SpeciesRegistry:
                 "INSERT INTO prototypes VALUES(?,?,?,?)",
                 (entry_id, index, _blob(prototype), event_count),
             )
-        self._conn.commit()
 
     @staticmethod
     def _status_prototype_limit(status: str) -> int:
@@ -676,14 +786,25 @@ class SpeciesRegistry:
             embeddings,
             max_k=self._status_prototype_limit(status),
         )
+        normalized_prototypes = np.stack(
+            [normalize_embedding(prototype) for prototype in raw_prototypes]
+        )
+        coverage = np.max(embeddings @ normalized_prototypes.T, axis=1)
+        cluster_purity = float(np.mean(coverage >= self.join_threshold))
         self._replace_prototypes(entry_id, raw_prototypes, count)
+
+        if cluster_purity != float(row["cluster_purity"]):
+            self._conn.execute(
+                "UPDATE registrations SET cluster_purity=?,updated_at=? WHERE id=?",
+                (cluster_purity, _now(), entry_id),
+            )
 
         if status != row["status"]:
             self._conn.execute(
                 "UPDATE registrations SET status=?,updated_at=? WHERE id=?",
                 (status, _now(), entry_id),
             )
-            self._conn.commit()
+        self._conn.commit()
 
     def get(self, entry_id) -> RegistryEntry:
         row = self._row(entry_id)
@@ -716,7 +837,15 @@ class SpeciesRegistry:
             "identity": bool(common),
         }
         display = (
-            (common if common else f"未知物种 #{row['candidate_number']}")
+            (
+                common
+                if common
+                else (
+                    f"新模式候选 #{row['candidate_number']}"
+                    if str(row["candidate_kind"]) == "new_mode_candidate"
+                    else f"未知物种 #{row['candidate_number']}"
+                )
+            )
             if status == "candidate"
             else (
                 f"{common}（临时注册，待确认）"
@@ -728,6 +857,7 @@ class SpeciesRegistry:
             int(row["id"]),
             int(row["candidate_number"]),
             status,
+            str(row["candidate_kind"]),
             common,
             str(row["scientific_name"]),
             events,
@@ -742,12 +872,112 @@ class SpeciesRegistry:
 
     def list(self, *, status=None) -> list[RegistryEntry]:
         rows = self._conn.execute(
-            "SELECT id FROM registrations"
-            + (" WHERE status=?" if status else "")
-            + " ORDER BY candidate_number",
+            """
+            WITH event_stats AS (
+                SELECT registration_id,COUNT(*) AS event_count,
+                       COUNT(DISTINCT camera_id) AS camera_count
+                FROM events GROUP BY registration_id
+            ), prototype_stats AS (
+                SELECT registration_id,COUNT(*) AS prototype_count
+                FROM prototypes GROUP BY registration_id
+            )
+            SELECT r.*,COALESCE(e.event_count,0) AS event_count,
+                   COALESCE(e.camera_count,0) AS camera_count,
+                   COALESCE(p.prototype_count,0) AS prototype_count
+            FROM registrations r
+            LEFT JOIN event_stats e ON e.registration_id=r.id
+            LEFT JOIN prototype_stats p ON p.registration_id=r.id
+            """
+            + (" WHERE r.status=?" if status else "")
+            + " ORDER BY r.candidate_number",
             (status,) if status else (),
         ).fetchall()
-        return [self.get(int(row[0])) for row in rows]
+        if not rows:
+            return []
+
+        entry_ids = {int(row["id"]) for row in rows}
+        event_embeddings: dict[int, list[np.ndarray]] = {
+            entry_id: [] for entry_id in entry_ids
+        }
+        for row in self._conn.execute(
+            "SELECT registration_id,embedding FROM events ORDER BY registration_id,id"
+        ).fetchall():
+            entry_id = int(row["registration_id"])
+            if entry_id in event_embeddings:
+                event_embeddings[entry_id].append(_from_blob(row["embedding"]))
+
+        prototype_embeddings: dict[int, list[np.ndarray]] = {
+            entry_id: [] for entry_id in entry_ids
+        }
+        for row in self._conn.execute(
+            "SELECT registration_id,embedding FROM prototypes "
+            "ORDER BY registration_id,prototype_index"
+        ).fetchall():
+            entry_id = int(row["registration_id"])
+            if entry_id in prototype_embeddings:
+                prototype_embeddings[entry_id].append(_from_blob(row["embedding"]))
+
+        result = []
+        for row in rows:
+            entry_id = int(row["id"])
+            embeddings = event_embeddings[entry_id]
+            prototypes = prototype_embeddings[entry_id]
+            consistency = (
+                float(
+                    np.quantile(
+                        np.max(np.stack(embeddings) @ np.stack(prototypes).T, axis=1),
+                        0.1,
+                    )
+                )
+                if embeddings and prototypes
+                else 0.0
+            )
+            purity = float(row["cluster_purity"])
+            common = str(row["common_name"]).strip()
+            entry_status = str(row["status"])
+            events = int(row["event_count"])
+            conditions = {
+                "events": events >= 4,
+                "cluster_purity": purity >= self.purity_threshold,
+                "embedding_consistency": consistency >= self.consistency_threshold,
+                "identity": bool(common),
+            }
+            display = (
+                (
+                    common
+                    if common
+                    else (
+                        f"新模式候选 #{row['candidate_number']}"
+                        if str(row["candidate_kind"]) == "new_mode_candidate"
+                        else f"未知物种 #{row['candidate_number']}"
+                    )
+                )
+                if entry_status == "candidate"
+                else (
+                    f"{common}（临时注册，待确认）"
+                    if entry_status == "provisional"
+                    else (common or f"未知物种 #{row['candidate_number']}")
+                )
+            )
+            result.append(
+                RegistryEntry(
+                    entry_id,
+                    int(row["candidate_number"]),
+                    entry_status,
+                    str(row["candidate_kind"]),
+                    common,
+                    str(row["scientific_name"]),
+                    events,
+                    int(row["camera_count"]),
+                    int(row["prototype_count"]),
+                    purity,
+                    consistency,
+                    conditions,
+                    entry_status == "candidate" and all(conditions.values()),
+                    display,
+                )
+            )
+        return result
 
     def list_events(self, entry_id):
         self._row(entry_id)
@@ -912,6 +1142,7 @@ class SpeciesRegistry:
             return species
         return None
 
+    @_serialized_write
     def register(
         self,
         entry_id,
@@ -940,32 +1171,90 @@ class SpeciesRegistry:
         self._refresh(entry_id)
         return self.get(entry_id)
 
-    def match(self, embedding):
+    def match(
+        self,
+        embedding,
+        *,
+        statuses=None,
+        exclude_entry_ids=(),
+        candidate_kinds=None,
+    ):
         vector = normalize_embedding(embedding)
         best = None
-        for entry in self.list():
-            prototypes = self._prototypes(entry.id)
-            if len(prototypes) == 0:
-                events = self._embeddings(entry.id)
-                if len(events) == 0:
+        excluded = {int(entry_id) for entry_id in exclude_entry_ids}
+        entries = self._conn.execute(
+            "SELECT id,candidate_number,status,candidate_kind,common_name FROM registrations"
+        ).fetchall()
+        prototype_rows = self._conn.execute(
+            "SELECT registration_id,embedding FROM prototypes "
+            "ORDER BY registration_id,prototype_index"
+        ).fetchall()
+        event_rows = self._conn.execute(
+            "SELECT registration_id,embedding FROM events ORDER BY registration_id,id"
+        ).fetchall()
+        prototypes_by_entry: dict[int, list[np.ndarray]] = {}
+        for row in prototype_rows:
+            prototypes_by_entry.setdefault(int(row["registration_id"]), []).append(
+                _from_blob(row["embedding"])
+            )
+        events_by_entry: dict[int, list[np.ndarray]] = {}
+        for row in event_rows:
+            events_by_entry.setdefault(int(row["registration_id"]), []).append(
+                _from_blob(row["embedding"])
+            )
+
+        for row in entries:
+            entry_id = int(row["id"])
+            entry_status = str(row["status"])
+            if entry_id in excluded or (
+                statuses is not None and entry_status not in statuses
+            ) or (
+                candidate_kinds is not None
+                and str(row["candidate_kind"]) not in candidate_kinds
+            ):
+                continue
+            values = prototypes_by_entry.get(entry_id, [])
+            if values:
+                prototypes = np.stack(values)
+            else:
+                events = events_by_entry.get(entry_id, [])
+                if not events:
                     continue
-                prototypes = build_prototype(events)[None, :]
+                prototypes = build_prototype(np.stack(events))[None, :]
             score = float(np.max(cosine_similarity(vector, prototypes)))
             threshold = (
                 self.join_threshold
-                if entry.status == "candidate"
+                if entry_status == "candidate"
                 else self.registration_threshold
             )
             if score >= threshold and (best is None or score > best[0]):
-                best = (score, entry, threshold)
+                common = str(row["common_name"]).strip()
+                display = (
+                    (
+                        common
+                        if common
+                        else (
+                            f"新模式候选 #{row['candidate_number']}"
+                            if str(row["candidate_kind"]) == "new_mode_candidate"
+                            else f"未知物种 #{row['candidate_number']}"
+                        )
+                    )
+                    if entry_status == "candidate"
+                    else (
+                        f"{common}（临时注册，待确认）"
+                        if entry_status == "provisional"
+                        else (common or f"未知物种 #{row['candidate_number']}")
+                    )
+                )
+                best = (score, entry_id, entry_status, display, threshold)
         if best is None:
             return None
-        score, entry, threshold = best
+        score, entry_id, entry_status, display, threshold = best
         return {
-            "id": entry.id,
-            "display_name": entry.display_name,
-            "status": entry.status,
+            "id": entry_id,
+            "display_name": display,
+            "status": entry_status,
             "score": score,
             "threshold": threshold,
-            "accepted": entry.status in {"confirmed", "mature"},
+            "accepted": entry_status in {"confirmed", "mature"},
         }

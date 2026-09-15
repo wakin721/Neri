@@ -62,6 +62,7 @@ class SpeciesRegistry(_impl.SpeciesRegistry):
         frame_index=None,
         timestamp_seconds=None,
     ):
+        neighbors = self._event_neighbors(entry_id, camera_id, captured_at)
         event_key, *_ = self._event_key(
             entry_id,
             camera_id,
@@ -78,11 +79,11 @@ class SpeciesRegistry(_impl.SpeciesRegistry):
             frame_index=frame_index,
             timestamp_seconds=timestamp_seconds,
         )
+        row = self._conn.execute(
+            "SELECT id FROM events WHERE registration_id=? AND event_key=?",
+            (entry_id, event_key),
+        ).fetchone()
         if bbox is not None:
-            row = self._conn.execute(
-                "SELECT id FROM events WHERE registration_id=? AND event_key=?",
-                (entry_id, event_key),
-            ).fetchone()
             if row is not None:
                 persist_registry_event_example(
                     self.path,
@@ -92,6 +93,14 @@ class SpeciesRegistry(_impl.SpeciesRegistry):
                     frame_index=frame_index,
                     timestamp_seconds=timestamp_seconds,
                 )
+        if row is not None:
+            surviving_id = int(row["id"])
+            for merged in neighbors:
+                merged_id = int(merged["id"])
+                if merged_id != surviving_id:
+                    registry_event_example_path(self.path, merged_id).unlink(
+                        missing_ok=True
+                    )
         return updated
 
     def merge_candidate_into(self, source_id: int, target_id: int):

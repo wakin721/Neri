@@ -74,6 +74,7 @@ class DinoV3RegistryEntryResponse(BaseModel):
     id: int
     candidate_number: int
     status: str
+    candidate_kind: str = "candidate"
     common_name: str = ""
     scientific_name: str = ""
     event_count: int

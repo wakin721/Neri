@@ -151,29 +151,26 @@ def persist_runtime_observations(
 
             if registry is None:
                 continue
-            if observation.source == "checkpoint" and observation.accepted:
+            if observation.accepted:
                 continue
-            if observation.registry_id is not None:
-                registry.record_observation(
-                    int(observation.registry_id),
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                    bbox=tuple(float(value) for value in observation.bbox),
-                    frame_index=(int(frame_index) if frame_index is not None else None),
-                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),
-                )
-            else:
-                registry.record_unknown(
-                    observation.embedding,
-                    camera_id=camera_id,
-                    captured_at=captured_at,
-                    source_path=str(source_path),
-                    bbox=tuple(float(value) for value in observation.bbox),
-                    frame_index=(int(frame_index) if frame_index is not None else None),
-                    timestamp_seconds=(float(timestamp) if timestamp is not None else None),
-                )
+            # Inference may collect Candidate evidence, but it must never update
+            # an existing learned prototype. That authority belongs exclusively
+            # to the explicit human-feedback path in _assign_registry_species().
+            registry.record_unknown(
+                observation.embedding,
+                camera_id=camera_id,
+                captured_at=captured_at,
+                source_path=str(source_path),
+                bbox=tuple(float(value) for value in observation.bbox),
+                frame_index=(int(frame_index) if frame_index is not None else None),
+                timestamp_seconds=(float(timestamp) if timestamp is not None else None),
+                candidate_kind=(
+                    "new_mode_candidate"
+                    if getattr(observation, "registry_action", "candidate")
+                    == "new_mode_candidate"
+                    else "candidate"
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - inference persistence is non-fatal
             logger.warning("Failed to persist DINOv3 observation: %s", exc)
 

@@ -121,6 +121,21 @@ class NeriApiClient {
         .toList();
   }
 
+  Future<List<DinoV3RegistryCluster>> fetchDinoV3RegistryClusters(
+    String classificationModelPath,
+    int registrationId,
+  ) async {
+    final uri = _uri('/api/dinov3/registry/$registrationId/clusters').replace(
+      queryParameters: {'classification_model_path': classificationModelPath},
+    );
+    final response = await _httpClient.get(uri);
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(DinoV3RegistryCluster.fromJson)
+        .toList(growable: false);
+  }
+
   Future<Uint8List> fetchDinoV3RegistryExample(
     String classificationModelPath,
     int registrationId,

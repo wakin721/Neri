@@ -656,6 +656,8 @@ class ImageProcessor:
                                         observation_id=observation_id,
                                         best_known_species=prediction.best_known_species,
                                         bbox=bbox,
+                                        squared_distance=prediction.squared_distance,
+                                        registry_action=prediction.registry_action,
                                     )
                                 )
                         else:

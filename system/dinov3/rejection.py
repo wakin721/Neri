@@ -33,6 +33,24 @@ class MultiDualRejectionConfig:
             and distance <= self.squared_distance_threshold
         )
 
+    def route(self, *, cosine_score: float, squared_distance: float) -> str:
+        """Map the calibrated dual signals to a Registry action.
+
+        ``update_prototype`` is an eligibility signal only. Runtime inference
+        persistence must wait for explicit human confirmation before applying it.
+        """
+        cosine = float(cosine_score)
+        distance = float(squared_distance)
+        cosine_pass = math.isfinite(cosine) and cosine >= self.cosine_threshold
+        distance_pass = (
+            math.isfinite(distance) and distance <= self.squared_distance_threshold
+        )
+        if cosine_pass and distance_pass:
+            return "update_prototype"
+        if not cosine_pass and not distance_pass:
+            return "new_mode_candidate"
+        return "candidate"
+
     def as_dict(self) -> dict[str, float | str]:
         return {
             "mode": MULTI_DUAL_REJECTION_MODE,

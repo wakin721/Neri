@@ -26,6 +26,81 @@ def test_same_identity_within_30_minutes_counts_once(tmp_path):
     assert entry.event_count==1
     entry=reg.record_observation(entry.id,vector(),camera_id='cam',captured_at=BASE+timedelta(minutes=59),source_path='c.jpg')
     assert entry.event_count==2;reg.close()
+
+
+def test_out_of_order_observation_bridges_adjacent_events(tmp_path):
+    reg = SpeciesRegistry(tmp_path / 'r.db', model_fingerprint=FP)
+    entry = reg.record_unknown(
+        vector(), camera_id='cam', captured_at=BASE, source_path='0.jpg'
+    )
+    reg.record_observation(
+        entry.id,
+        vector(),
+        camera_id='cam',
+        captured_at=BASE + timedelta(minutes=40),
+        source_path='40.jpg',
+    )
+    entry = reg.record_observation(
+        entry.id,
+        vector(),
+        camera_id='cam',
+        captured_at=BASE + timedelta(minutes=20),
+        source_path='20.jpg',
+    )
+
+    assert entry.event_count == 1
+    event = reg.list_events(entry.id)[0]
+    assert event['started_at'] == BASE.isoformat()
+    assert event['ended_at'] == (BASE + timedelta(minutes=40)).isoformat()
+    assert event['sample_count'] == 3
+    reg.close()
+
+
+def test_out_of_order_observation_moves_event_start_backwards(tmp_path):
+    reg = SpeciesRegistry(tmp_path / 'r.db', model_fingerprint=FP)
+    entry = reg.record_unknown(
+        vector(),
+        camera_id='cam',
+        captured_at=BASE + timedelta(minutes=20),
+        source_path='20.jpg',
+    )
+    entry = reg.record_observation(
+        entry.id,
+        vector(),
+        camera_id='cam',
+        captured_at=BASE,
+        source_path='0.jpg',
+    )
+
+    assert entry.event_count == 1
+    event = reg.list_events(entry.id)[0]
+    assert event['started_at'] == BASE.isoformat()
+    assert event['ended_at'] == (BASE + timedelta(minutes=20)).isoformat()
+    assert event['sample_count'] == 2
+    reg.close()
+
+
+def test_cluster_purity_is_computed_from_event_coverage(tmp_path):
+    reg = SpeciesRegistry(tmp_path / 'r.db', model_fingerprint=FP)
+    entry = reg.record_unknown(
+        vector(0),
+        camera_id='cam-0',
+        captured_at=BASE,
+        source_path='0.jpg',
+    )
+    for index in range(1, 4):
+        entry = reg.record_observation(
+            entry.id,
+            vector(index),
+            camera_id=f'cam-{index}',
+            captured_at=BASE + timedelta(hours=index),
+            source_path=f'{index}.jpg',
+        )
+
+    assert entry is not None
+    assert entry.cluster_purity == pytest.approx(0.0)
+    assert entry.conditions['cluster_purity'] is False
+    reg.close()
 def test_register_refuses_failed_conditions(tmp_path):
     reg=SpeciesRegistry(tmp_path/'r.db',model_fingerprint=FP);entry=reg.record_unknown(vector(),camera_id='cam',captured_at=BASE,source_path='a.jpg')
     with pytest.raises(RegistrationConditionError):reg.register(entry.id)

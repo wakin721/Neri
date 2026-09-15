@@ -55,6 +55,8 @@ class DinoV3Observation:
     observation_id: str = ""
     best_known_species: str = ""
     bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    squared_distance: float | None = None
+    registry_action: str = "candidate"
 
     def __post_init__(self) -> None:
         embedding = np.asarray(self.embedding, dtype=np.float32).copy()
@@ -86,6 +88,7 @@ class DinoV3Prediction:
     assistive_match: bool = False
     nearest_prototype_index: int | None = None
     squared_distance: float | None = None
+    registry_action: str = "candidate"
 
     def as_candidate(self, *, detection_confidence=None) -> dict[str, Any]:
         return {
@@ -105,6 +108,7 @@ class DinoV3Prediction:
             "assistive_match": self.assistive_match,
             "nearest_prototype_index": self.nearest_prototype_index,
             "squared_distance": self.squared_distance,
+            "registry_action": self.registry_action,
         }
 
 
@@ -433,6 +437,7 @@ class DinoV3Classifier:
                         registration_status=formal.registration_status,
                         nearest_prototype_index=formal_index,
                         squared_distance=formal_distance,
+                        registry_action="update_prototype",
                     )
                 )
                 continue
@@ -460,6 +465,7 @@ class DinoV3Classifier:
                             assistive_match=True,
                             nearest_prototype_index=len(bank.formal) + provisional_index,
                             squared_distance=provisional_distance,
+                            registry_action="update_prototype",
                         )
                     )
                     continue

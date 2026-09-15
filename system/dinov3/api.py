@@ -19,6 +19,7 @@ from system.backend.models import (
     DinoV3RegisterRequest,
     DinoV3RegistryEntryResponse,
     DinoV3RegistryEventResponse,
+    DinoV3RegistryClusterResponse,
 )
 from .checkpoint import CheckpointValidationError
 from .registry import RegistrationConditionError, RegistryEntryNotFound
@@ -154,11 +155,17 @@ def build_registry_catalog(
                     "feedback_event_count": 0,
                     "feedback_prototype_count": 0,
                     "learning_status": entry.status,
-                    "clusters": cluster_reader(entry.id),
+                    "clusters": [],
                 }
             )
         result.append(data)
     return result
+
+
+def build_registry_clusters(registry: Any, registration_id: int) -> list[dict[str, Any]]:
+    """Load expensive Registry cluster membership only for the selected entry."""
+    registry.get(registration_id)
+    return registry.cluster_details(registration_id)
 
 
 def _catalog_with_feedback(checkpoint: Any, registry: Any) -> list[dict[str, Any]]:
@@ -220,6 +227,19 @@ def dinov3_registry_router() -> APIRouter:
         return _run_with_registry(
             classification_model_path,
             lambda registry: registry.get(registration_id).as_dict(),
+        )
+
+    @router.get(
+        "/registry/{registration_id}/clusters",
+        response_model=list[DinoV3RegistryClusterResponse],
+    )
+    def get_registry_clusters(
+        registration_id: int,
+        classification_model_path: str = Query(..., min_length=1),
+    ):
+        return _run_with_registry(
+            classification_model_path,
+            lambda registry: build_registry_clusters(registry, registration_id),
         )
 
     @router.get(

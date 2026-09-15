@@ -75,7 +75,7 @@ Existing state semantics remain normative:
 
 - Candidate: unregistered identity.
 - At 4 independent events: build/refresh a temporary prototype; public state remains Candidate.
-- Candidate is manually registrable only when: events `>=5`, cameras `>=2`, cluster purity `>=0.90`, embedding consistency `>=0.75`, and common name is non-empty.
+- Candidate is manually registrable only when: events `>=4`, cluster purity `>=0.90`, embedding consistency `>=0.75`, and common name is non-empty. Camera diversity is required by the later Confirmed/Mature lifecycle gates, not by the initial manual registration action.
 - Successful manual registration changes Candidate to Provisional.
 - Provisional automatically becomes Confirmed at events `>=10` and cameras `>=2`.
 - Confirmed may become Mature at events `>=20`, cameras `>=3`, and successful deterministic two-cluster splitting; Mature stores multiple prototypes.
