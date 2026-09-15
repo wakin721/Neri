@@ -87,15 +87,19 @@ def make_mark_validation_items(services_module: Any):
             return original(request)
 
         # The batched implementation depends on the indexed observation lookup
-        # installed by runtime_patches. If a caller/test/extension overrides that
-        # service seam, preserve the historical dynamic service behavior instead
-        # of bypassing the override and opening a real model feedback store.
+        # installed by runtime_patches. If a caller/test/extension overrides an
+        # existing service seam, preserve the historical dynamic service behavior
+        # instead of bypassing the override and opening a real model feedback store.
         observation_lookup = getattr(
             services_module,
             "_learnable_observations_for_file",
             None,
         )
-        if not getattr(observation_lookup, "_neri_indexed_observation_lookup", False):
+        if observation_lookup is not None and not getattr(
+            observation_lookup,
+            "_neri_indexed_observation_lookup",
+            False,
+        ):
             return original(request)
 
         started = time.perf_counter()
