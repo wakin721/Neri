@@ -1,4 +1,4 @@
-"""Indexed and batched validation feedback helpers."""
+"""Indexed and batched DINOv2 validation feedback helpers."""
 from __future__ import annotations
 
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _feedback_executor = ThreadPoolExecutor(
     max_workers=1,
-    thread_name_prefix="neri-dinov3-feedback",
+    thread_name_prefix="neri-dinov2-feedback",
 )
 _feedback_futures: dict[str, Future[int]] = {}
 _feedback_futures_lock = threading.Lock()
@@ -28,8 +28,8 @@ def apply_validation_feedback_batch(
     confirmed_species: str | None,
     assign_registry_species: bool,
 ) -> int:
-    """Apply conservative file-level DINOv3 feedback with one open store."""
-    from .dinov3_feedback_service import (
+    """Apply conservative file-level DINOv2 feedback with one open store."""
+    from .dinov2_feedback_service import (
         _affected_learning_species,
         _assign_registry_species,
         _open_feedback_state,
@@ -97,7 +97,7 @@ def schedule_validation_feedback_batch(
     confirmed_species: str | None,
     assign_registry_species: bool,
 ) -> Future[int]:
-    """Queue DINOv3 learning without extending the validation save request."""
+    """Queue DINOv2 learning without extending the validation save request."""
     future = _feedback_executor.submit(
         apply_validation_feedback_batch,
         classification_model_path,
@@ -114,13 +114,13 @@ def schedule_validation_feedback_batch(
         try:
             applied = completed.result()
             logger.info(
-                "Background DINOv3 feedback completed: operation_id=%s applied=%d",
+                "Background DINOv2 feedback completed: operation_id=%s applied=%d",
                 operation_id,
                 applied,
             )
         except Exception:
             logger.exception(
-                "Background DINOv3 feedback failed: operation_id=%s",
+                "Background DINOv2 feedback failed: operation_id=%s",
                 operation_id,
             )
         finally:
@@ -142,19 +142,19 @@ def wait_for_validation_feedback_operation(operation_id: str) -> None:
         future.result()
     except Exception:
         # The completion callback reports the original failure. Revert should
-        # still inspect the persisted feedback state in case it partially wrote.
+        # still inspect persisted feedback state in case it partially wrote.
         pass
 
 
 def _checkpoint_species_for_model(
     classification_model_path: str,
 ) -> set[str] | None:
-    from .dinov3_registry_service import load_checkpoint_for_model
-    from system.dinov3.runtime import DinoV3ManifestError
+    from .dinov2_registry_service import load_checkpoint_for_model
+    from system.dinov2.runtime import DinoV2ManifestError
 
     try:
         return set(load_checkpoint_for_model(classification_model_path).classes)
-    except (DinoV3ManifestError, FileNotFoundError):
+    except (DinoV2ManifestError, FileNotFoundError):
         return None
 
 
@@ -162,10 +162,49 @@ def make_mark_validation_items(services_module: Any):
     """Replace DINO-backed marking while preserving legacy operation ordering."""
     original = services_module.mark_validation_items
 
+    # The facade re-exports functions originally defined in services_legacy.
+    # Such functions keep their defining module's globals, so monkeypatching a
+    # facade seam would otherwise be ignored whenever we deliberately fall back
+    # to the legacy implementation. Mirror only the explicit validation seams
+    # for the duration of that call and restore them afterwards.
+    legacy_hook_names = (
+        "_preview_detection_db_roots",
+        "_unique_existing_dirs",
+        "_load_detection_index",
+        "_build_validation_update",
+        "_build_fast_metadata_item",
+        "_apply_detection_data",
+        "_persist_validation_updates",
+        "_update_species_database",
+        "_checkpoint_species_for_model",
+        "_learnable_observations_for_file",
+        "_eligible_auto_feedback",
+        "_record_validation_registry_feedback",
+        "_record_validation_feedback",
+    )
+    missing = object()
+
+    def call_original(request):
+        target_globals = original.__globals__
+        previous: dict[str, object] = {}
+        for name in legacy_hook_names:
+            if not hasattr(services_module, name):
+                continue
+            previous[name] = target_globals.get(name, missing)
+            target_globals[name] = getattr(services_module, name)
+        try:
+            return original(request)
+        finally:
+            for name, value in previous.items():
+                if value is missing:
+                    target_globals.pop(name, None)
+                else:
+                    target_globals[name] = value
+
     def mark_validation_items(request):
         model_path = request.classification_model_path
         if not model_path or request.action == "unverified":
-            return original(request)
+            return call_original(request)
 
         # The batched implementation depends on the indexed observation lookup
         # installed by runtime_patches. If a caller/test/extension overrides an
@@ -181,7 +220,7 @@ def make_mark_validation_items(services_module: Any):
             "_neri_indexed_observation_lookup",
             False,
         ):
-            return original(request)
+            return call_original(request)
 
         started = time.perf_counter()
         input_path = Path(request.input_path).expanduser().resolve()
@@ -301,5 +340,5 @@ def make_mark_validation_items(services_module: Any):
         )
         return updated_items
 
-    setattr(mark_validation_items, "_neri_batched_dinov3_feedback", True)
+    setattr(mark_validation_items, "_neri_batched_dinov2_feedback", True)
     return mark_validation_items
