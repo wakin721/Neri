@@ -432,6 +432,52 @@ class NeriApiClient extends core.NeriApiClient {
     _ensureSuccess(response);
   }
 
+  // Temporary source-compatibility bridge. These methods intentionally call the
+  // DINOv2 endpoints; they do not preserve or expose a DINOv3 backend.
+  @Deprecated('Use fetchDinoV2ComponentStatus.')
+  Future<DinoV2ComponentStatus> fetchDinoV3ComponentStatus() =>
+      fetchDinoV2ComponentStatus();
+
+  @Deprecated('Use installDinoV2.')
+  Future<core.MaintenanceStartResponse> installDinoV3({
+    required String envChoice,
+    String packageSource = 'auto',
+  }) => installDinoV2(envChoice: envChoice, packageSource: packageSource);
+
+  @Deprecated('Use removeDinoV2.')
+  Future<core.MaintenanceStartResponse> removeDinoV3() => removeDinoV2();
+
+  @Deprecated('Use mergeDinoV2RegistryCandidateIntoCheckpoint.')
+  Future<void> mergeDinoV3RegistryCandidateIntoCheckpoint({
+    required String classificationModelPath,
+    required int registrationId,
+    required String checkpointSpecies,
+  }) => mergeDinoV2RegistryCandidateIntoCheckpoint(
+    classificationModelPath: classificationModelPath,
+    registrationId: registrationId,
+    checkpointSpecies: checkpointSpecies,
+  );
+
+  @Deprecated('Use mergeDinoV2RegistryCandidate.')
+  Future<DinoV2RegistryEntry> mergeDinoV3RegistryCandidate({
+    required String classificationModelPath,
+    required int registrationId,
+    required int targetRegistrationId,
+  }) => mergeDinoV2RegistryCandidate(
+    classificationModelPath: classificationModelPath,
+    registrationId: registrationId,
+    targetRegistrationId: targetRegistrationId,
+  );
+
+  @Deprecated('Use markDinoV2RegistryCandidateEmpty.')
+  Future<void> markDinoV3RegistryCandidateEmpty({
+    required String classificationModelPath,
+    required int registrationId,
+  }) => markDinoV2RegistryCandidateEmpty(
+    classificationModelPath: classificationModelPath,
+    registrationId: registrationId,
+  );
+
   void _ensureSuccess(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) return;
     throw http.ClientException(
@@ -478,3 +524,6 @@ class DinoV2ComponentStatus {
   final int? prototypeCount;
   final String message;
 }
+
+@Deprecated('Use DinoV2ComponentStatus. This alias is removed by the clean-break.')
+typedef DinoV3ComponentStatus = DinoV2ComponentStatus;
