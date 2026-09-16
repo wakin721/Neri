@@ -110,16 +110,16 @@ def test_batch_feedback_opens_store_once_and_skips_ambiguous_files(
             ambiguous: [_observation('c1'), _observation('c2')],
         }
     )
-    from system.backend import dinov3_feedback_service
+    from system.backend import dinov2_feedback_service
 
     opens = []
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         '_open_feedback_state',
         lambda path: (opens.append(path) or feedback, object()),
     )
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         '_affected_learning_species',
         lambda record: set(record.affected),
     )
@@ -147,16 +147,16 @@ def test_batch_registry_assignment_reuses_open_feedback_store(
 ):
     path = tmp_path / 'camel.jpg'
     feedback = _Feedback({path: [_observation('obs-camel')]})
-    from system.backend import dinov3_feedback_service
+    from system.backend import dinov2_feedback_service
 
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         '_open_feedback_state',
         lambda _path: (feedback, object()),
     )
     assignments = []
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         '_assign_registry_species',
         lambda fb, model, observation, **kwargs: assignments.append(
             (fb, model, observation.id, kwargs)
@@ -193,16 +193,16 @@ def test_correct_registry_prediction_updates_registry_instead_of_checkpoint_feed
         registry_id=156,
     )
     feedback = _Feedback({path: [observation]})
-    from system.backend import dinov3_feedback_service
+    from system.backend import dinov2_feedback_service
 
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         "_open_feedback_state",
         lambda _path: (feedback, object()),
     )
     assignments = []
     monkeypatch.setattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         "_assign_registry_species",
         lambda fb, model, selected, **kwargs: assignments.append(
             (fb, model, selected, kwargs)
