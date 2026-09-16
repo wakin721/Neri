@@ -7,13 +7,18 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Literal, Sequence
 
-from system.dinov3.component import dinov3_component_status
-
 from .layout import ModelLayout
+
+try:
+    from system.dinov2.component import dinov2_component_status
+except ImportError:
+    def dinov2_component_status(**_kwargs):
+        return {"installed": False, "healthy": False}
+
 
 ModelKind = Literal["detect", "cls"]
 ModelSource = Literal["user", "sync"]
-ModelBackend = Literal["yolo", "dinov3"]
+ModelBackend = Literal["yolo", "dinov2"]
 _DETECT_EXTENSIONS = frozenset({".pt"})
 _CLS_EXTENSIONS = frozenset({".pt", ".onnx", ".engine"})
 _MANIFEST_SUFFIX = ".neri.json"
@@ -43,18 +48,32 @@ def _size(path: Path) -> int | None:
         return None
 
 
-def _manifest_model(path: Path, source: ModelSource):
+def _read_manifest(path: Path) -> dict | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("backend") != "dinov3":
-        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _manifest_reference(path: Path) -> tuple[dict | None, Path | None]:
+    payload = _read_manifest(path)
+    if not payload or payload.get("backend") not in {"dinov2", "dinov3"}:
+        return payload, None
     name = payload.get("checkpoint")
     if not isinstance(name, str) or not name.strip():
-        return None
+        return payload, None
     checkpoint = (path.parent / name).resolve()
-    if not checkpoint.is_file():
+    return payload, checkpoint if checkpoint.is_file() else None
+
+
+def _manifest_model(path: Path, source: ModelSource):
+    payload, checkpoint = _manifest_reference(path)
+    if (
+        not payload
+        or payload.get("backend") != "dinov2"
+        or checkpoint is None
+    ):
         return None
     dim = payload.get("feature_dim")
     dim = dim if isinstance(dim, int) else None
@@ -64,7 +83,7 @@ def _manifest_model(path: Path, source: ModelSource):
         _size(checkpoint),
         source,
         "cls",
-        "dinov3",
+        "dinov2",
         str(payload.get("architecture") or "") or None,
         dim,
         bool(payload.get("requires_detector", True)),
@@ -75,7 +94,11 @@ def _manifest_model(path: Path, source: ModelSource):
     return model, checkpoint
 
 
-def _scan(directory: Path, source: ModelSource, kind: ModelKind) -> list[DiscoveredModel]:
+def _scan(
+    directory: Path,
+    source: ModelSource,
+    kind: ModelKind,
+) -> list[DiscoveredModel]:
     extensions = _DETECT_EXTENSIONS if kind == "detect" else _CLS_EXTENSIONS
     if not directory.is_dir():
         return []
@@ -86,10 +109,14 @@ def _scan(directory: Path, source: ModelSource, kind: ModelKind) -> list[Discove
             directory.glob(f"*{_MANIFEST_SUFFIX}"),
             key=lambda path: path.name.casefold(),
         ):
+            _payload, checkpoint = _manifest_reference(manifest)
+            if checkpoint is not None:
+                # DINOv3 manifests are intentionally hidden, but their .pt files
+                # must also remain hidden so they cannot fall through as YOLO.
+                referenced.add(checkpoint)
             resolved = _manifest_model(manifest, source)
             if resolved:
                 items.append(resolved[0])
-                referenced.add(resolved[1])
     for path in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
         if (
             path.is_file()
@@ -108,7 +135,7 @@ def _scan(directory: Path, source: ModelSource, kind: ModelKind) -> list[Discove
     return sorted(items, key=lambda item: item.name.casefold())
 
 
-def _declared_dinov3_manifest(root: Path) -> Path | None:
+def _declared_dinov2_manifest(root: Path) -> Path | None:
     try:
         payload = json.loads((root / "install.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -128,7 +155,9 @@ def _declared_dinov3_manifest(root: Path) -> Path | None:
     ):
         return None
     relative = PurePosixPath(raw)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+    if relative.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
         return None
     manifest = root.joinpath(*relative.parts)
     try:
@@ -159,9 +188,9 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
         models.extend(_scan(directory, source, kind))
 
     if kind == "cls":
-        status = dinov3_component_status(root=layout.dinov3_root)
+        status = dinov2_component_status(root=layout.dinov2_root)
         if status.get("healthy") is True:
-            manifest = _declared_dinov3_manifest(layout.dinov3_root)
+            manifest = _declared_dinov2_manifest(layout.dinov2_root)
             if manifest is not None:
                 resolved = _manifest_model(manifest, "user")
                 if resolved is not None:
@@ -179,9 +208,9 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
 def _saved_path_matches(saved: str, current: str) -> bool:
     if saved == current:
         return True
-    return os.name == "nt" and os.path.normcase(os.path.normpath(saved)) == os.path.normcase(
-        os.path.normpath(current)
-    )
+    return os.name == "nt" and os.path.normcase(
+        os.path.normpath(saved)
+    ) == os.path.normcase(os.path.normpath(current))
 
 
 def resolve_saved_model_path(
@@ -193,7 +222,8 @@ def resolve_saved_model_path(
     value = saved.strip()
     for model in models:
         if _saved_path_matches(value, model.path) or (
-            model.checkpoint_path and _saved_path_matches(value, model.checkpoint_path)
+            model.checkpoint_path
+            and _saved_path_matches(value, model.checkpoint_path)
         ):
             return model.path
     named = [
@@ -203,4 +233,7 @@ def resolve_saved_model_path(
     ]
     if not named:
         return None
-    return next((model.path for model in named if model.source == "user"), named[0].path)
+    return next(
+        (model.path for model in named if model.source == "user"),
+        named[0].path,
+    )
