@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from system.backend.runtime_patches import (
     REJECTED_UNKNOWN_LABEL,
-    preserve_dinov3_rejections,
+    preserve_dinov2_rejections,
 )
 
 
@@ -30,7 +30,7 @@ class FakeBox:
         self.xyxy = FakeCoords([1, 2, 30, 40])
 
 
-def test_preserves_rejected_dinov3_box_as_unknown_instead_of_empty():
+def test_preserves_rejected_dinov2_box_as_unknown_instead_of_empty():
     rejected = {
         'name': 'Unknown',
         'conf': 0.61,
@@ -41,6 +41,10 @@ def test_preserves_rejected_dinov3_box_as_unknown_instead_of_empty():
         'known_score': 0.61,
         'threshold': 0.72,
         'squared_distance': 0.44,
+        'class_margin': 0.10,
+        'adjusted_distance_score': -0.34,
+        'score_threshold': -0.25,
+        'registry_action': 'new_mode_candidate',
     }
     result = SimpleNamespace(
         boxes=[FakeBox()],
@@ -55,7 +59,7 @@ def test_preserves_rejected_dinov3_box_as_unknown_instead_of_empty():
         '最低置信度': None,
     }
 
-    updated = preserve_dinov3_rejections(payload, detection)
+    updated = preserve_dinov2_rejections(payload, detection)
 
     assert updated['物种名称'] == REJECTED_UNKNOWN_LABEL
     assert updated['物种数量'] == '1'
@@ -69,6 +73,10 @@ def test_preserves_rejected_dinov3_box_as_unknown_instead_of_empty():
     assert box['predicted_species'] == 'Unknown'
     assert box['known_score'] == 0.61
     assert box['threshold'] == 0.72
+    assert box['class_margin'] == 0.10
+    assert box['adjusted_distance_score'] == -0.34
+    assert box['score_threshold'] == -0.25
+    assert box['registry_action'] == 'new_mode_candidate'
 
 
 def test_does_not_relabel_normal_low_confidence_classifier_filter_as_unknown():
@@ -81,7 +89,7 @@ def test_does_not_relabel_normal_low_confidence_classifier_filter_as_unknown():
     detection = {'detect_results': [result]}
     payload = {'物种名称': '空', '物种数量': '空', '检测框': []}
 
-    updated = preserve_dinov3_rejections(payload, detection)
+    updated = preserve_dinov2_rejections(payload, detection)
 
     assert updated == payload
 
@@ -203,7 +211,7 @@ def test_loader_patches_use_targeted_sql_and_keep_legacy_full_fallback(tmp_path)
 
 
 def test_installer_activates_all_performance_fast_paths():
-    from system.backend import dinov3_feedback_service
+    from system.backend import dinov2_feedback_service
     from system.backend.runtime_patches import install_runtime_patches
 
     services = SimpleNamespace(
@@ -232,7 +240,7 @@ def test_installer_activates_all_performance_fast_paths():
     )
     assert getattr(
         services.mark_validation_items,
-        '_neri_batched_dinov3_feedback',
+        '_neri_batched_dinov2_feedback',
         False,
     )
     assert getattr(
@@ -241,7 +249,7 @@ def test_installer_activates_all_performance_fast_paths():
         False,
     )
     assert getattr(
-        dinov3_feedback_service.persist_runtime_observations,
+        dinov2_feedback_service.persist_runtime_observations,
         '_neri_batched_runtime_persistence',
         False,
     )
@@ -268,7 +276,7 @@ def test_mixed_known_and_rejected_boxes_keep_species_counts_aligned():
         ],
     }
 
-    updated = preserve_dinov3_rejections(payload, {'detect_results': [result]})
+    updated = preserve_dinov2_rejections(payload, {'detect_results': [result]})
 
     assert updated['物种名称'] == '豹猫,拒识/Unknown'
     assert updated['物种数量'] == '2,1'
