@@ -116,6 +116,7 @@ def _create_registry(root: Path, checkpoint: DinoV2Checkpoint):
     return SpeciesRegistry(
         registry_path_for_fingerprint(root, checkpoint.fingerprint),
         model_fingerprint=checkpoint.fingerprint,
+        prototype_norm_power=checkpoint.prototype_norm_power,
     )
 
 
@@ -126,6 +127,7 @@ def _create_feedback(registry: Any, checkpoint: DinoV2Checkpoint):
         model_fingerprint=checkpoint.fingerprint,
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
+        prototype_norm_power=checkpoint.prototype_norm_power,
     )
 
 
@@ -153,7 +155,11 @@ def load_dinov2_model(
     created_feedback = None
     try:
         if registry is None:
-            root = Path(state_root).expanduser().resolve() if state_root is not None else default_dinov2_state_root()
+            root = (
+                Path(state_root).expanduser().resolve()
+                if state_root is not None
+                else default_dinov2_state_root()
+            )
             registry = _create_registry(root, checkpoint)
             created_registry = registry
         else:

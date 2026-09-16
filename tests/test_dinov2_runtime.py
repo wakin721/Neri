@@ -66,6 +66,7 @@ def test_runtime_loads_dinov2_manifest_with_injected_state(tmp_path):
     checkpoint = load_checkpoint(tmp_path / "classifier.pt")
     registry = FakeStore(checkpoint.fingerprint, tmp_path / "registry.sqlite3")
     feedback = FakeStore(checkpoint.fingerprint, tmp_path / "feedback.sqlite3")
+
     runtime = load_dinov2_model(
         manifest,
         registry=registry,
@@ -135,3 +136,31 @@ def test_injected_state_fingerprint_must_match_checkpoint(tmp_path):
             feedback=feedback,
             encoder_factory=FakeEncoder,
         )
+
+
+def test_default_state_constructors_receive_checkpoint_prototype_norm_power(tmp_path, monkeypatch):
+    import system.dinov2.runtime as runtime_module
+    from system.dinov2.checkpoint import validate_checkpoint
+
+    checkpoint = validate_checkpoint(make_dinov2_payload())
+    observed = {}
+
+    class CapturingRegistry:
+        def __init__(self, path, **kwargs):
+            observed["registry"] = kwargs
+            self.path = Path(path)
+
+    class CapturingFeedback:
+        def __init__(self, path, **kwargs):
+            observed["feedback"] = kwargs
+
+    import system.dinov2.registry as registry_module
+    import system.dinov2.feedback as feedback_module
+    monkeypatch.setattr(registry_module, "SpeciesRegistry", CapturingRegistry)
+    monkeypatch.setattr(feedback_module, "HumanFeedbackStore", CapturingFeedback)
+
+    registry = runtime_module._create_registry(tmp_path, checkpoint)
+    runtime_module._create_feedback(registry, checkpoint)
+
+    assert observed["registry"]["prototype_norm_power"] == pytest.approx(1.0)
+    assert observed["feedback"]["prototype_norm_power"] == pytest.approx(1.0)
