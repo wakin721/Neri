@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from system.backend.preview_fast import load_preview_indexes
-from system.dinov3.feedback_index import (
+from system.dinov2.feedback_index import (
     install_feedback_store_patches,
     normalize_observation_source_path,
 )
