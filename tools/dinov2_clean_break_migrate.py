@@ -19,11 +19,15 @@ def swap(text: str) -> str:
     return text
 
 
+def normalized(text: str) -> str:
+    return text.rstrip() + "\n"
+
+
 def rewrite(path: Path, transform=swap) -> None:
     if not path.is_file():
         return
     old = path.read_text(encoding="utf-8")
-    new = transform(old)
+    new = normalized(transform(old))
     if new != old:
         path.write_text(new, encoding="utf-8")
 
@@ -43,7 +47,7 @@ def strip_flutter_bridges() -> None:
         "\n",
         text,
     )
-    api.write_text(text, encoding="utf-8")
+    api.write_text(normalized(text), encoding="utf-8")
 
     settings = ROOT / "frontend/lib/src/models/settings.dart"
     text = settings.read_text(encoding="utf-8")
@@ -52,7 +56,7 @@ def strip_flutter_bridges() -> None:
         "\n",
         text,
     )
-    settings.write_text(text, encoding="utf-8")
+    settings.write_text(normalized(text), encoding="utf-8")
 
 
 def migrate_frontend() -> None:
@@ -73,7 +77,7 @@ def migrate_frontend() -> None:
         if dst.exists():
             src.unlink()
             continue
-        dst.write_text(swap(src.read_text(encoding="utf-8")), encoding="utf-8")
+        dst.write_text(normalized(swap(src.read_text(encoding="utf-8"))), encoding="utf-8")
         src.unlink()
 
     test_root = ROOT / "frontend/test"
@@ -85,7 +89,7 @@ def migrate_frontend() -> None:
         if dst.exists():
             src.unlink()
             continue
-        dst.write_text(swap(src.read_text(encoding="utf-8")), encoding="utf-8")
+        dst.write_text(normalized(swap(src.read_text(encoding="utf-8"))), encoding="utf-8")
         src.unlink()
 
 
@@ -112,7 +116,7 @@ def migrate_backend_hooks() -> None:
         "_legacy._dinov2_manifest_payload = _dinov2_manifest_payload\n"
         "_legacy._persist_dinov2_observations = _persist_dinov2_observations\n",
     )
-    facade.write_text(text, encoding="utf-8")
+    facade.write_text(normalized(text), encoding="utf-8")
 
 
 def clean_dinov2_base_names() -> None:
