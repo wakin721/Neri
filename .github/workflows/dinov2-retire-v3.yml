@@ -6,6 +6,7 @@ on:
       - feature/dinov2-clean-break
     paths:
       - .github/workflows/dinov2-retire-v3.yml
+      - system/backend/services.py
       - tests/test_validation_scale_regressions.py
 
 permissions:
