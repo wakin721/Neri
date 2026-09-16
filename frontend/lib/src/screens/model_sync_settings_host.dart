@@ -106,9 +106,7 @@ class _ModelSyncSettingsHostState extends State<ModelSyncSettingsHost> {
 
   bool _shouldShow(ModelSyncStatus status) {
     if (!widget.enabled) return false;
-    return status.isActive ||
-        status.state == 'completed' ||
-        status.state == 'failed';
+    return status.state == 'failed';
   }
 
   void _syncMessageEntry() {

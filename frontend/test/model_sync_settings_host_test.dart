@@ -7,7 +7,7 @@ import 'package:neri_flutter/src/screens/model_sync_settings_host.dart';
 
 void main() {
   testWidgets(
-    'theme and callback rebuild keep dismissed sync notification closed',
+    'completed sync stays silent across theme and callback rebuilds',
     (tester) async {
       var statusReads = 0;
       final client = NeriApiClient(
@@ -33,9 +33,7 @@ void main() {
       );
       await tester.pumpWidget(buildHost(Brightness.light));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('model-sync-message-card')), findsOneWidget);
-      await tester.tap(find.byTooltip('关闭'));
-      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('model-sync-message-card')), findsNothing);
       await tester.pumpWidget(buildHost(Brightness.dark));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('model-sync-message-card')), findsNothing);
@@ -208,7 +206,7 @@ void main() {
     },
   );
 
-  testWidgets('settings host shows a floating message card while models sync', (
+  testWidgets('active model sync does not show a floating message card', (
     tester,
   ) async {
     final client = NeriApiClient(
@@ -241,75 +239,46 @@ void main() {
     await tester.pump();
 
     final messageCard = find.byKey(const Key('model-sync-message-card'));
-    expect(messageCard, findsOneWidget);
-    expect(
-      find.descendant(of: messageCard, matching: find.text('模型同步')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: messageCard,
-        matching: find.textContaining('cloud-bird.pt'),
-      ),
-      findsOneWidget,
-    );
-    final progress = tester.widget<LinearProgressIndicator>(
-      find.descendant(
-        of: messageCard,
-        matching: find.byType(LinearProgressIndicator),
-      ),
-    );
-    expect(progress.value, 0.30);
+    expect(messageCard, findsNothing);
+    expect(find.textContaining('cloud-bird.pt'), findsNothing);
   });
 
-  testWidgets(
-    'completed sync is still announced when the first read is terminal',
-    (tester) async {
-      final client = NeriApiClient(
-        httpClient: MockClient((request) async {
-          return http.Response(
-            '{"state":"completed","run_id":"fast-run",'
-            '"cloud_detect_count":5,"cloud_cls_count":2,'
-            '"last_successful_sync":"2026-09-07T06:30:00+00:00"}',
-            200,
-            headers: const {'content-type': 'application/json; charset=utf-8'},
-          );
-        }),
-      );
-      addTearDown(client.close);
+  testWidgets('completed sync does not show a floating message card', (
+    tester,
+  ) async {
+    final client = NeriApiClient(
+      httpClient: MockClient((request) async {
+        return http.Response(
+          '{"state":"completed","run_id":"fast-run",'
+          '"cloud_detect_count":5,"cloud_cls_count":2,'
+          '"last_successful_sync":"2026-09-07T06:30:00+00:00"}',
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: ModelSyncSettingsHost(
-              apiClient: client,
-              enabled: true,
-              pollInterval: const Duration(hours: 1),
-              onCatalogChanged: () async {},
-              child: const SizedBox.expand(),
-            ),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelSyncSettingsHost(
+            apiClient: client,
+            enabled: true,
+            pollInterval: const Duration(hours: 1),
+            onCatalogChanged: () async {},
+            child: const SizedBox.expand(),
           ),
         ),
-      );
-      await tester.pump();
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
 
-      final messageCard = find.byKey(const Key('model-sync-message-card'));
-      expect(messageCard, findsOneWidget);
-      expect(
-        find.descendant(of: messageCard, matching: find.text('模型同步完成')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: messageCard, matching: find.textContaining('探测 5')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: messageCard, matching: find.textContaining('分类 2')),
-        findsOneWidget,
-      );
-    },
-  );
+    final messageCard = find.byKey(const Key('model-sync-message-card'));
+    expect(messageCard, findsNothing);
+    expect(find.text('模型同步完成'), findsNothing);
+  });
 
   testWidgets(
     'floating failed sync message retries through the shared controller',
