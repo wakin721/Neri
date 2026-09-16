@@ -11,7 +11,7 @@ from pathlib import Path
 from .storage import RemoteEntry
 
 ROOT = "/Neri_Data/Model"
-DINO_ROOT = ROOT + "/DINOv3"
+DINO_ROOT = ROOT + "/DINOv2"
 
 
 class ManifestError(RuntimeError):
@@ -56,25 +56,24 @@ class ManifestBuilder:
         self.store = store
         self.db_path = self.state_dir / "model_distribution.sqlite3"
         with closing(sqlite3.connect(self.db_path)) as db, db:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS hash_cache(
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS hash_cache(
                     path TEXT PRIMARY KEY,
                     size INTEGER NOT NULL,
                     modified TEXT,
                     sha256 TEXT NOT NULL
-                )
-            """)
+                )"""
+            )
 
     def _hash_remote(self, logical: str, remote: str, entry: RemoteEntry) -> str:
         if entry.modified:
-            with closing(sqlite3.connect(self.db_path)) as db, db:
+            with closing(sqlite3.connect(self.db_path)) as db:
                 row = db.execute(
                     "SELECT size,modified,sha256 FROM hash_cache WHERE path=?",
                     (logical,),
                 ).fetchone()
             if row and row[0] == entry.size and row[1] == entry.modified:
                 return row[2]
-
         digest = hashlib.sha256()
         link = self.store.resolve_link(remote)
         received = 0
@@ -96,9 +95,9 @@ class ManifestBuilder:
         return value
 
     @staticmethod
-    def _deduplicate(candidates: list[tuple[str, str, RemoteEntry]]) -> list[tuple[str, str, RemoteEntry]]:
+    def _deduplicate(candidates):
         seen: set[str] = set()
-        normalized: list[tuple[str, str, RemoteEntry]] = []
+        normalized = []
         for logical, remote, entry in candidates:
             key = unicodedata.normalize("NFC", logical).casefold()
             if key in seen:
@@ -108,30 +107,32 @@ class ManifestBuilder:
         return normalized
 
     def build(self) -> ManifestSnapshot:
-        candidates: list[tuple[str, str, RemoteEntry]] = []
+        candidates = []
         for folder in ("detect", "cls"):
             remote_dir = f"{ROOT}/{folder}"
             for entry in self.store.list_dir(remote_dir):
                 if entry.is_dir or not _allowed(folder, entry.name):
                     continue
-                logical = f"{folder}/{entry.name}"
-                remote = f"{remote_dir}/{entry.name}"
-                candidates.append((logical, remote, entry))
-
+                candidates.append(
+                    (f"{folder}/{entry.name}", f"{remote_dir}/{entry.name}", entry)
+                )
         tracker = self.store.stat(f"{ROOT}/tracker.yaml")
         if tracker is not None and not tracker.is_dir:
             candidates.append(("tracker.yaml", f"{ROOT}/tracker.yaml", tracker))
-
         normalized = self._deduplicate(candidates)
         files = tuple(
-            ManifestEntry(logical, entry.size, self._hash_remote(logical, remote, entry))
+            ManifestEntry(
+                logical,
+                entry.size,
+                self._hash_remote(logical, remote, entry),
+            )
             for logical, remote, entry in sorted(normalized, key=lambda item: item[0])
         )
         return _snapshot(files)
 
 
-class DinoV3ManifestBuilder(ManifestBuilder):
-    """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv3."""
+class DinoV2ManifestBuilder(ManifestBuilder):
+    """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv2."""
 
     @staticmethod
     def _safe_name(name: str) -> bool:
@@ -144,15 +145,10 @@ class DinoV3ManifestBuilder(ManifestBuilder):
             and "\x00" not in name
         )
 
-    def _walk(
-        self,
-        remote_dir: str,
-        logical_dir: str,
-        candidates: list[tuple[str, str, RemoteEntry]],
-    ) -> None:
+    def _walk(self, remote_dir: str, logical_dir: str, candidates) -> None:
         for entry in self.store.list_dir(remote_dir):
             if not self._safe_name(entry.name):
-                raise ManifestError("invalid_dinov3_path")
+                raise ManifestError("invalid_dinov2_path")
             remote = f"{remote_dir}/{entry.name}"
             logical = f"{logical_dir}/{entry.name}"
             if entry.is_dir:
@@ -161,11 +157,15 @@ class DinoV3ManifestBuilder(ManifestBuilder):
                 candidates.append((logical, remote, entry))
 
     def build(self) -> ManifestSnapshot:
-        candidates: list[tuple[str, str, RemoteEntry]] = []
-        self._walk(DINO_ROOT, "DINOv3", candidates)
+        candidates = []
+        self._walk(DINO_ROOT, "DINOv2", candidates)
         normalized = self._deduplicate(candidates)
         files = tuple(
-            ManifestEntry(logical, entry.size, self._hash_remote(logical, remote, entry))
+            ManifestEntry(
+                logical,
+                entry.size,
+                self._hash_remote(logical, remote, entry),
+            )
             for logical, remote, entry in sorted(normalized, key=lambda item: item[0])
         )
         return _snapshot(files)

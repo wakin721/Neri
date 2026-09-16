@@ -40,14 +40,12 @@ def proxy_reserved_bytes(file_size: int, range_header: str | None) -> int:
         return size
     if not valid_range_header(range_header):
         raise ValueError("invalid_range")
-
     start_text, end_text = range_header[6:].split("-", 1)
     start = int(start_text)
     if start >= size:
         raise ValueError("range_not_satisfiable")
     if not end_text:
         return size - start
-
     end = int(end_text)
     if end < start:
         raise ValueError("range_not_satisfiable")
@@ -60,10 +58,8 @@ def request_client_ip(request: Request) -> str:
         normalized_peer = str(ipaddress.ip_address(peer))
     except ValueError:
         normalized_peer = peer or "unknown"
-
     if normalized_peer not in {"127.0.0.1", "::1"}:
         return normalized_peer
-
     forwarded = request.headers.get("x-real-ip", "").strip()
     if not forwarded:
         return normalized_peer
@@ -80,10 +76,10 @@ class DirectRequest(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class DinoV3DirectRequest(BaseModel):
+class DinoV2DirectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     manifest_id: str = Field(pattern=r"^[a-f0-9]{64}$")
-    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv3/.+")
+    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv2/.+")
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -128,7 +124,6 @@ def create_app(
         budget.check_request(client_ip)
         return client_ip
 
-    @staticmethod
     def snapshot_payload(snapshot):
         return {
             "schema_version": 1,
@@ -153,15 +148,15 @@ def create_app(
         consume_request_budget(request)
         return service.direct(payload.manifest_id, payload.path, payload.sha256)
 
-    @app.get("/v1/dinov3/manifest")
-    def dinov3_manifest(request: Request):
+    @app.get("/v1/dinov2/manifest")
+    def dinov2_manifest(request: Request):
         consume_request_budget(request)
-        return snapshot_payload(service.dinov3_manifest())
+        return snapshot_payload(service.dinov2_manifest())
 
-    @app.post("/v1/dinov3/direct")
-    def dinov3_direct(payload: DinoV3DirectRequest, request: Request):
+    @app.post("/v1/dinov2/direct")
+    def dinov2_direct(payload: DinoV2DirectRequest, request: Request):
         consume_request_budget(request)
-        return service.dinov3_direct(
+        return service.dinov2_direct(
             payload.manifest_id,
             payload.path,
             payload.sha256,
@@ -179,22 +174,26 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=416, detail="invalid_range") from exc
         budget.reserve_proxy_bytes(client_ip, reserved_bytes)
-
         remote = "/Neri_Data/Model/" + bound.path
         link = service.store.resolve_link(remote)
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Length": str(reserved_bytes),
-            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(bound.path.rsplit("/", 1)[-1], safe=""),
+            "Content-Disposition": "attachment; filename*=UTF-8''"
+            + quote(bound.path.rsplit("/", 1)[-1], safe=""),
         }
         if range_header:
             start = int(range_header[6:].split("-", 1)[0])
-            headers["Content-Range"] = f"bytes {start}-{start + reserved_bytes - 1}/{bound.size}"
-        status_code = 206 if range_header else 200
+            headers["Content-Range"] = (
+                f"bytes {start}-{start + reserved_bytes - 1}/{bound.size}"
+            )
         return StreamingResponse(
-            bounded_proxy_stream(service.store.iter_bytes(link, range_header=range_header), reserved_bytes),
+            bounded_proxy_stream(
+                service.store.iter_bytes(link, range_header=range_header),
+                reserved_bytes,
+            ),
             media_type="application/octet-stream",
-            status_code=status_code,
+            status_code=206 if range_header else 200,
             headers=headers,
         )
 
