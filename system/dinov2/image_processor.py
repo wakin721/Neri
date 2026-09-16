@@ -1,8 +1,9 @@
-"""DINOv2-aware ImageProcessor adapter.
+"""DINOv2-aware image processor adapter.
 
-The legacy processor is retained temporarily for generic YOLO/file handling while
-all DINO-specific state and inference paths live here. The adapter is removed in
-the final clean-break task after full regression verification.
+DINOv2 state can be constructed without importing Ultralytics. The generic YOLO
+processor is loaded lazily only when detector/classification work actually needs
+it. This keeps DINOv2 checkpoint/runtime tests independent from the optional YOLO
+runtime while preserving the existing detector implementation.
 """
 from __future__ import annotations
 
@@ -10,15 +11,50 @@ import concurrent.futures
 import uuid
 from typing import Any, Dict, List, Optional
 
-from system.image_processor_legacy import ImageProcessor as _LegacyImageProcessor
 from .classifier import DinoV2Observation
 
 
-class ImageProcessor(_LegacyImageProcessor):
+class ImageProcessor:
     def __init__(self, model_path: Optional[str]):
-        super().__init__(model_path)
+        self.model_path = model_path or None
+        self.model = None
+        self.cls_model = None
+        self._legacy = None
         self.dinov2_classifier = None
         self._dinov2_observations: list[DinoV2Observation] = []
+
+        # Preserve eager model loading when the normal YOLO runtime is present,
+        # but do not make importing/constructing the DINOv2 adapter depend on it.
+        if self.model_path:
+            try:
+                self._ensure_legacy()
+            except ModuleNotFoundError as exc:
+                if exc.name != "ultralytics":
+                    raise
+
+    def _ensure_legacy(self):
+        legacy = self._legacy
+        if legacy is not None:
+            return legacy
+
+        from system.image_processor_legacy import ImageProcessor as LegacyImageProcessor
+
+        legacy = LegacyImageProcessor(self.model_path)
+        self._legacy = legacy
+        self.model = legacy.model
+        self.cls_model = legacy.cls_model
+        return legacy
+
+    def __getattr__(self, name: str):
+        if name == "_legacy":
+            raise AttributeError(name)
+        legacy = self._ensure_legacy()
+        return getattr(legacy, name)
+
+    def load_cls_model(self, model_path: str) -> None:
+        legacy = self._ensure_legacy()
+        legacy.load_cls_model(model_path)
+        self.cls_model = legacy.cls_model
 
     def load_dinov2_classifier(self, classifier) -> None:
         self.dinov2_classifier = classifier
@@ -111,7 +147,16 @@ class ImageProcessor(_LegacyImageProcessor):
         **kwargs,
     ) -> List[Dict[str, Any]]:
         if self.dinov2_classifier is None:
-            return super().detect_batch_species(img_paths, **kwargs)
+            return self._ensure_legacy().detect_batch_species(img_paths, **kwargs)
+
+        if self.model is None and self.model_path:
+            try:
+                legacy = self._ensure_legacy()
+                self.model = legacy.model
+            except ModuleNotFoundError as exc:
+                if exc.name != "ultralytics":
+                    raise
+
         if self.model is None:
             raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
 
