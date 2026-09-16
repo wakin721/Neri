@@ -16,6 +16,17 @@ def test_legacy_dinov3_tests_and_workflow_are_retired():
     assert not Path(".github/workflows/dinov3-implementation-verification.yml").exists()
 
 
+def test_legacy_dinov3_active_artifacts_are_retired():
+    for raw in (
+        ".github/workflows/dinov2-retire-v3.yml",
+        "docs/dinov3-ci-verified.txt",
+        "scripts/calibrate_dinov3_multi_dual.py",
+        "res/model/cls/user/README_DINOv3.md",
+        "res/model/cls/user/dinov3_classifier_merged_reviewed_20260908.neri.json",
+    ):
+        assert not Path(raw).exists(), raw
+
+
 def test_active_flutter_source_has_no_dinov3_symbols():
     for path in Path("frontend/lib").rglob("*.dart"):
         assert "dinov3" not in _source(path), path
