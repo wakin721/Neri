@@ -29,52 +29,48 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          settings = Path('frontend/lib/src/screens/settings_screen.dart')
-          text = settings.read_text(encoding='utf-8')
-          old = """            title: 'DINOv2 ViT-B/16',
-            subtitle: _loadingDinoV2Status
-                ? '正在读取 DINOv2 组件状态...'
-                : _dinoV2Status == null
-                ? '无法读取 DINOv2 组件状态。'
-                : _dinoV2Status!.healthy && _dinoV2Status!.selectionK != null
-                ? '${_dinoV2Status!.message} · Multi-prototype K=${_dinoV2Status!.selectionK}'
-                : _dinoV2Status!.message,
-          """
-          new = """            title: 'DINOv2 ViT-B/14',
-            subtitle: _loadingDinoV2Status
-                ? '正在读取 DINOv2 组件状态...'
-                : _dinoV2Status == null
-                ? '无法读取 DINOv2 组件状态。'
-                : _dinoV2Status!.healthy && _dinoV2Status!.prototypeCount != null
-                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} prototypes'
-                : _dinoV2Status!.message,
-          """
-          if old not in text:
-              raise SystemExit('settings DINOv2 status block not found')
-          settings.write_text(text.replace(old, new, 1), encoding='utf-8')
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected 1 occurrence of {old!r}, found {count}')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
 
-          for name, line in (
-              ('frontend/lib/src/widgets/dinov2_feature_scatter.dart', "import '../models/dinov2_explanation.dart';\n"),
-              ('frontend/lib/src/widgets/dinov2_registry_dialog.dart', "import '../models/dinov2_registry.dart';\n"),
-          ):
-              path = Path(name)
-              source = path.read_text(encoding='utf-8')
-              if line not in source:
-                  raise SystemExit(f'unnecessary import not found in {name}')
-              path.write_text(source.replace(line, '', 1), encoding='utf-8')
+          settings = Path('frontend/lib/src/screens/settings_screen.dart')
+          replace_once(settings, "title: 'DINOv2 ViT-B/16'", "title: 'DINOv2 ViT-B/14'")
+          replace_once(
+              settings,
+              '_dinoV2Status!.healthy && _dinoV2Status!.selectionK != null',
+              '_dinoV2Status!.healthy && _dinoV2Status!.prototypeCount != null',
+          )
+          replace_once(
+              settings,
+              "${_dinoV2Status!.message} · Multi-prototype K=${_dinoV2Status!.selectionK}",
+              "${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} prototypes",
+          )
+
+          replace_once(
+              Path('frontend/lib/src/widgets/dinov2_feature_scatter.dart'),
+              "import '../models/dinov2_explanation.dart';\n",
+              '',
+          )
+          replace_once(
+              Path('frontend/lib/src/widgets/dinov2_registry_dialog.dart'),
+              "import '../models/dinov2_registry.dart';\n",
+              '',
+          )
 
           legacy = Path('system/backend/main_core_legacy.py')
-          source = legacy.read_text(encoding='utf-8')
-          source = source.replace(
+          replace_once(
+              legacy,
               'from system.dinov3.api import dinov3_registry_router',
               'from system.dinov2.api import dinov2_registry_router',
-              1,
-          ).replace(
+          )
+          replace_once(
+              legacy,
               'app.include_router(dinov3_registry_router())',
               'app.include_router(dinov2_registry_router())',
-              1,
           )
-          legacy.write_text(source, encoding='utf-8')
 
           Path('system/backend/main_core.py').write_text(
               '"""FastAPI main app after the DINOv2 clean break."""\n'
