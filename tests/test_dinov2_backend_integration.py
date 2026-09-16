@@ -102,6 +102,8 @@ def test_persistence_drains_dinov2_observations_and_routes_unknown(tmp_path):
     unknown = []
 
     class Feedback:
+        path = tmp_path / "feedback.sqlite3"
+
         def persist_observation(self, observation):
             persisted.append(observation)
 
