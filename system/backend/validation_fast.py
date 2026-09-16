@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+import threading
 import time
 from typing import Any, Sequence
 import uuid
 
 logger = logging.getLogger(__name__)
+
+_feedback_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="neri-dinov3-feedback",
+)
+_feedback_futures: dict[str, Future[int]] = {}
+_feedback_futures_lock = threading.Lock()
 
 
 def apply_validation_feedback_batch(
@@ -40,13 +49,27 @@ def apply_validation_feedback_batch(
             if len(learnable) != 1:
                 continue
             observation = learnable[0]
+            registry_species = None
             if assign_registry_species and confirmed_species:
+                registry_species = confirmed_species
+            elif action == "correct":
+                predicted_species = str(
+                    getattr(observation, "predicted_species", "") or ""
+                ).strip()
+                if (
+                    predicted_species
+                    and predicted_species != "Unknown"
+                    and predicted_species not in feedback.checkpoint_classes
+                ):
+                    registry_species = predicted_species
+
+            if registry_species:
                 _assign_registry_species(
                     feedback,
                     classification_model_path,
                     observation,
                     operation_id=operation_id,
-                    confirmed_species=confirmed_species,
+                    confirmed_species=registry_species,
                 )
             else:
                 record = feedback.record_feedback(
@@ -63,6 +86,64 @@ def apply_validation_feedback_batch(
         return applied
     finally:
         feedback.close()
+
+
+def schedule_validation_feedback_batch(
+    classification_model_path: str,
+    paths: Sequence[Path],
+    *,
+    operation_id: str,
+    action: str,
+    confirmed_species: str | None,
+    assign_registry_species: bool,
+) -> Future[int]:
+    """Queue DINOv3 learning without extending the validation save request."""
+    future = _feedback_executor.submit(
+        apply_validation_feedback_batch,
+        classification_model_path,
+        tuple(paths),
+        operation_id=operation_id,
+        action=action,
+        confirmed_species=confirmed_species,
+        assign_registry_species=assign_registry_species,
+    )
+    with _feedback_futures_lock:
+        _feedback_futures[operation_id] = future
+
+    def report_completion(completed: Future[int]) -> None:
+        try:
+            applied = completed.result()
+            logger.info(
+                "Background DINOv3 feedback completed: operation_id=%s applied=%d",
+                operation_id,
+                applied,
+            )
+        except Exception:
+            logger.exception(
+                "Background DINOv3 feedback failed: operation_id=%s",
+                operation_id,
+            )
+        finally:
+            with _feedback_futures_lock:
+                if _feedback_futures.get(operation_id) is completed:
+                    _feedback_futures.pop(operation_id, None)
+
+    future.add_done_callback(report_completion)
+    return future
+
+
+def wait_for_validation_feedback_operation(operation_id: str) -> None:
+    """Keep undo ordered behind an already queued feedback operation."""
+    with _feedback_futures_lock:
+        future = _feedback_futures.get(operation_id)
+    if future is None:
+        return
+    try:
+        future.result()
+    except Exception:
+        # The completion callback reports the original failure. Revert should
+        # still inspect the persisted feedback state in case it partially wrote.
+        pass
 
 
 def _checkpoint_species_for_model(
@@ -186,19 +267,14 @@ def make_mark_validation_items(services_module: Any):
             and confirmed_species not in checkpoint_species
         )
 
-        feedback_started = time.perf_counter()
-        try:
-            applied = apply_validation_feedback_batch(
-                model_path,
-                paths,
-                operation_id=operation_id,
-                action=request.action,
-                confirmed_species=confirmed_species,
-                assign_registry_species=assign_registry_species,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
-        feedback_elapsed = time.perf_counter() - feedback_started
+        schedule_validation_feedback_batch(
+            model_path,
+            paths,
+            operation_id=operation_id,
+            action=request.action,
+            confirmed_species=confirmed_species,
+            assign_registry_species=assign_registry_species,
+        )
 
         try:
             from system.training import get_queue
@@ -216,13 +292,12 @@ def make_mark_validation_items(services_module: Any):
         logger.info(
             (
                 "Validation mark timing: targets=%d persisted=%.3fs "
-                "dino_feedback=%.3fs total=%.3fs applied=%d"
+                "dino_feedback=queued total=%.3fs operation_id=%s"
             ),
             len(paths),
             persisted_elapsed,
-            feedback_elapsed,
             time.perf_counter() - started,
-            applied,
+            operation_id,
         )
         return updated_items
 

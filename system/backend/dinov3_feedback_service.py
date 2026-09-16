@@ -584,6 +584,9 @@ def _restore_registry_assignments(registry, assignments) -> None:
 def revert_feedback_operation(request):
     """Revert both feedback learning state and ecological box edits for an operation."""
     from . import services
+    from .validation_fast import wait_for_validation_feedback_operation
+
+    wait_for_validation_feedback_operation(request.feedback_operation_id)
 
     feedback, feature_center = _open_feedback_state(request.classification_model_path)
     try:

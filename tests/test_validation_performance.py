@@ -1,13 +1,56 @@
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from system.backend import validation_fast
 
 
+def test_background_feedback_can_be_waited_for_without_blocking_submission(
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    def apply(*_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=2)
+        return 1
+
+    monkeypatch.setattr(validation_fast, "apply_validation_feedback_batch", apply)
+    operation_id = "op-background-ordering"
+    future = validation_fast.schedule_validation_feedback_batch(
+        "model.json",
+        [],
+        operation_id=operation_id,
+        action="correct",
+        confirmed_species=None,
+        assign_registry_species=False,
+    )
+
+    assert started.wait(timeout=2)
+    assert not future.done()
+
+    waiting_finished = threading.Event()
+    waiter = threading.Thread(
+        target=lambda: (
+            validation_fast.wait_for_validation_feedback_operation(operation_id),
+            waiting_finished.set(),
+        )
+    )
+    waiter.start()
+    assert not waiting_finished.wait(timeout=0.05)
+    release.set()
+    waiter.join(timeout=2)
+
+    assert waiting_finished.is_set()
+    assert future.result(timeout=2) == 1
+
+
 class _Feedback:
     def __init__(self, by_path):
         self.by_path = by_path
+        self.checkpoint_classes = {"豹猫"}
         self.lookup_paths = []
         self.records = []
         self.recomputed = []
@@ -38,8 +81,19 @@ class _Feedback:
         self.closed += 1
 
 
-def _observation(identifier):
-    return SimpleNamespace(id=identifier)
+def _observation(
+    identifier,
+    *,
+    predicted_species="豹猫",
+    prediction_source="checkpoint",
+    registry_id=None,
+):
+    return SimpleNamespace(
+        id=identifier,
+        predicted_species=predicted_species,
+        prediction_source=prediction_source,
+        registry_id=registry_id,
+    )
 
 
 def test_batch_feedback_opens_store_once_and_skips_ambiguous_files(
@@ -127,6 +181,50 @@ def test_batch_registry_assignment_reuses_open_feedback_store(
     assert feedback.closed == 1
 
 
+def test_correct_registry_prediction_updates_registry_instead_of_checkpoint_feedback(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "camel.jpg"
+    observation = _observation(
+        "obs-camel",
+        predicted_species="家骆驼",
+        prediction_source="registry",
+        registry_id=156,
+    )
+    feedback = _Feedback({path: [observation]})
+    from system.backend import dinov3_feedback_service
+
+    monkeypatch.setattr(
+        dinov3_feedback_service,
+        "_open_feedback_state",
+        lambda _path: (feedback, object()),
+    )
+    assignments = []
+    monkeypatch.setattr(
+        dinov3_feedback_service,
+        "_assign_registry_species",
+        lambda fb, model, selected, **kwargs: assignments.append(
+            (fb, model, selected, kwargs)
+        ),
+    )
+
+    applied = validation_fast.apply_validation_feedback_batch(
+        "model.json",
+        [path],
+        operation_id="op-correct-registry",
+        action="correct",
+        confirmed_species=None,
+        assign_registry_species=False,
+    )
+
+    assert applied == 1
+    assert len(assignments) == 1
+    assert assignments[0][2] is observation
+    assert assignments[0][3]["confirmed_species"] == "家骆驼"
+    assert feedback.records == []
+
+
 class _Request:
     def __init__(
         self,
@@ -156,7 +254,7 @@ class _Item:
         return _Item(self.path, validated=update.get('validated', self.validated))
 
 
-def test_fast_mark_preserves_persist_feedback_queue_order_without_legacy_loop(
+def test_fast_mark_returns_after_persisting_and_scheduling_background_feedback(
     monkeypatch,
     tmp_path,
 ):
@@ -189,11 +287,10 @@ def test_fast_mark_preserves_persist_feedback_queue_order_without_legacy_loop(
     calls = []
     monkeypatch.setattr(
         validation_fast,
-        'apply_validation_feedback_batch',
+        'schedule_validation_feedback_batch',
         lambda model, paths, **kwargs: (
-            events.append('feedback')
+            events.append('feedback-scheduled')
             or calls.append((model, list(paths), kwargs))
-            or 2
         ),
     )
 
@@ -210,7 +307,7 @@ def test_fast_mark_preserves_persist_feedback_queue_order_without_legacy_loop(
     result = wrapped(_Request(tmp_path, [first, second], action='correct'))
 
     assert len(result) == 2
-    assert events == ['persist', 'feedback', 'queue', 'queue']
+    assert events == ['persist', 'feedback-scheduled', 'queue', 'queue']
     assert len(calls) == 1
     assert calls[0][0] == 'model.json'
     assert calls[0][1] == [first.resolve(), second.resolve()]
