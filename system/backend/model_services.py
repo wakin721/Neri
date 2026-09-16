@@ -5,17 +5,16 @@ import json
 from pathlib import Path
 
 from system.dinov2.checkpoint import load_checkpoint
+from system.model_sync.layout import get_model_layout
 
 from .models import ModelClassInfo, ModelInfo
 
 
 def model_directory() -> Path:
-    from system.model_sync.layout import get_model_layout
     return get_model_layout().root / "detect"
 
 
 def classification_model_directory() -> Path:
-    from system.model_sync.layout import get_model_layout
     return get_model_layout().root / "cls"
 
 
@@ -38,13 +37,11 @@ def _to_model_info(item) -> ModelInfo:
 
 def list_available_models() -> list[ModelInfo]:
     from system.model_sync.catalog import discover_models
-    from system.model_sync.layout import get_model_layout
     return [_to_model_info(item) for item in discover_models(get_model_layout(), "detect")]
 
 
 def list_available_classification_models() -> list[ModelInfo]:
     from system.model_sync.catalog import discover_models
-    from system.model_sync.layout import get_model_layout
     return [_to_model_info(item) for item in discover_models(get_model_layout(), "cls")]
 
 
