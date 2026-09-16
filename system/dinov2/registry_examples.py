@@ -1,4 +1,4 @@
-"""Persistent cropped examples for DINOv3 registry and feedback evidence."""
+"""Persistent cropped examples for DINOv2 registry and feedback evidence."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -182,7 +182,7 @@ def _persist_example(
         frame_index=frame_index,
         timestamp_seconds=timestamp_seconds,
     )
-    return False if payload is None else _write_example(path, payload)
+    return _write_example(path, payload) if payload is not None else False
 
 
 def persist_registry_event_example(
@@ -221,6 +221,28 @@ def persist_feedback_observation_example(
     )
 
 
+def read_registry_event_example(
+    registry_path: str | Path,
+    event_id: int,
+) -> bytes | None:
+    path = registry_event_example_path(registry_path, event_id)
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        return None
+
+
+def read_feedback_observation_example(
+    feedback_path: str | Path,
+    observation_id: str,
+) -> bytes | None:
+    path = feedback_observation_example_path(feedback_path, observation_id)
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        return None
+
+
 def store_feedback_observation_example(
     feedback_path: str | Path,
     observation_id: str,
@@ -230,35 +252,3 @@ def store_feedback_observation_example(
         feedback_observation_example_path(feedback_path, observation_id),
         payload,
     )
-
-
-def read_registry_event_example(
-    registry_path: str | Path,
-    event_id: int,
-) -> bytes | None:
-    path = registry_event_example_path(registry_path, event_id)
-    try:
-        payload = path.read_bytes()
-    except OSError:
-        return None
-    return payload or None
-
-
-def read_feedback_observation_example(
-    feedback_path: str | Path,
-    observation_id: str,
-) -> bytes | None:
-    path = feedback_observation_example_path(feedback_path, observation_id)
-    try:
-        payload = path.read_bytes()
-    except OSError:
-        return None
-    return payload or None
-
-
-def delete_registry_event_examples(
-    registry_path: str | Path,
-    event_ids: Iterable[int],
-) -> None:
-    for event_id in event_ids:
-        registry_event_example_path(registry_path, int(event_id)).unlink(missing_ok=True)
