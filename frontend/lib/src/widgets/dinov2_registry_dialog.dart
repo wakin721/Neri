@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
-import '../models/dinov2_registry.dart';
 
 String dinov2RegistrySummary(List<DinoV2RegistryEntry> entries) {
   int count(String status) =>

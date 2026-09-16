@@ -1861,13 +1861,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _SettingsPanel(
-            title: 'DINOv2 ViT-B/16',
+            title: 'DINOv2 ViT-B/14',
             subtitle: _loadingDinoV2Status
                 ? '正在读取 DINOv2 组件状态...'
                 : _dinoV2Status == null
                 ? '无法读取 DINOv2 组件状态。'
-                : _dinoV2Status!.healthy && _dinoV2Status!.selectionK != null
-                ? '${_dinoV2Status!.message} · Multi-prototype K=${_dinoV2Status!.selectionK}'
+                : _dinoV2Status!.healthy && _dinoV2Status!.prototypeCount != null
+                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} prototypes'
                 : _dinoV2Status!.message,
             icon: Icons.hub_rounded,
             child: Builder(

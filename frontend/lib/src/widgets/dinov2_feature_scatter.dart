@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
-import '../models/dinov2_explanation.dart';
 
 class DinoV2FeatureScatter extends StatelessWidget {
   const DinoV2FeatureScatter({required this.explanation, super.key});
