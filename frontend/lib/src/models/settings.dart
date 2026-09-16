@@ -167,7 +167,7 @@ class ModelInfo {
   final bool supportsVideoAll;
   final String? checkpointPath;
 
-  bool get isDinoV3 => backend == 'dinov3';
+  bool get isDinoV2 => backend == 'dinov2';
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
   String get displayName => '$sourceLabel / $rawName';
   String get name => hasExplicitSource ? displayName : rawName;
