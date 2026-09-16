@@ -1,0 +1,125 @@
+name: Retire DINOv3 after DINOv2 state migration
+
+on:
+  push:
+    branches:
+      - feature/dinov2-clean-break
+    paths:
+      - .github/workflows/dinov2-retire-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest httpx numpy transformers safetensors
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Migrate backbone-independent state tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          selected = [
+              'test_dinov3_events_simple_shot.py',
+              'test_dinov3_feedback_index.py',
+              'test_dinov3_feedback_learning.py',
+              'test_dinov3_feedback_persistence.py',
+              'test_dinov3_feedback_semantics.py',
+              'test_dinov3_feedback_store.py',
+              'test_dinov3_feedback_validation_bridge.py',
+              'test_dinov3_persistence_fast.py',
+              'test_dinov3_registry.py',
+              'test_dinov3_registry_candidate_actions.py',
+              'test_dinov3_registry_clear_candidates.py',
+              'test_dinov3_registry_cluster_view.py',
+              'test_dinov3_registry_concurrency.py',
+              'test_dinov3_registry_examples.py',
+              'test_dinov3_registry_human_species_linking.py',
+              'test_dinov3_registry_management.py',
+              'test_dinov3_registry_named_candidate_migration.py',
+              'test_dinov3_registry_persistent_examples.py',
+              'test_dinov3_registry_routing.py',
+              'test_dinov3_registry_same_name_merge.py',
+          ]
+          replacements = (
+              ('DinoV3', 'DinoV2'),
+              ('dinoV3', 'dinoV2'),
+              ('DINOv3', 'DINOv2'),
+              ('dinov3', 'dinov2'),
+          )
+          tests = Path('tests')
+          migrated = []
+          for name in selected:
+              source = tests / name
+              if not source.is_file():
+                  raise SystemExit(f'missing source state test: {source}')
+              target = tests / name.replace('dinov3', 'dinov2')
+              if target.exists():
+                  raise SystemExit(f'target already exists: {target}')
+              text = source.read_text(encoding='utf-8')
+              for old, new in replacements:
+                  text = text.replace(old, new)
+              target.write_text(text, encoding='utf-8')
+              migrated.append(str(target))
+
+          for path in tests.glob('test_dinov3*.py'):
+              path.unlink()
+          fixture = tests / 'dinov3_multi_prototype_fixtures.py'
+          if fixture.exists():
+              fixture.unlink()
+
+          shutil.rmtree('system/dinov3', ignore_errors=True)
+          for path in Path('system/backend').glob('dinov3_*.py'):
+              path.unlink()
+          old_workflow = Path('.github/workflows/dinov3-implementation-verification.yml')
+          if old_workflow.exists():
+              old_workflow.unlink()
+
+          clean_break = Path('tests/test_dinov2_clean_break.py')
+          clean_break.write_text('''from pathlib import Path\n\n\ndef _source(path: Path) -> str:\n    return path.read_text(encoding="utf-8").lower()\n\n\ndef test_legacy_dinov3_runtime_tree_is_retired():\n    assert not Path("system/dinov3").exists()\n    assert not list(Path("system/backend").glob("dinov3_*.py"))\n\n\ndef test_legacy_dinov3_tests_and_workflow_are_retired():\n    assert not list(Path("tests").glob("test_dinov3*.py"))\n    assert not Path("tests/dinov3_multi_prototype_fixtures.py").exists()\n    assert not Path(".github/workflows/dinov3-implementation-verification.yml").exists()\n\n\ndef test_active_flutter_source_has_no_dinov3_symbols():\n    for path in Path("frontend/lib").rglob("*.dart"):\n        assert "dinov3" not in _source(path), path\n\n\ndef test_dinov2_registry_and_examples_have_no_dinov3_dependency():\n    for raw in (\n        "frontend/lib/src/models/dinov2_registry.dart",\n        "system/dinov2/registry_examples.py",\n    ):\n        path = Path(raw)\n        assert "dinov3" not in _source(path), path\n''', encoding='utf-8')
+
+          Path('/tmp/migrated-tests.txt').write_text('\n'.join(migrated) + '\n', encoding='utf-8')
+          PY
+
+      - name: Run migrated DINOv2 state tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t migrated < /tmp/migrated-tests.txt
+          python -m pytest -q "${migrated[@]}"
+
+      - name: Run clean-break and complete Python suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q system tests
+          git diff --check
+          python -m pytest -q
+
+      - name: Commit tested retirement
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A system tests .github/workflows/dinov3-implementation-verification.yml
+          git commit -m 'refactor: retire DINOv3 runtime after state test migration'
+          git push origin HEAD:feature/dinov2-clean-break
