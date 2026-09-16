@@ -6,6 +6,7 @@ on:
       - feature/dinov2-clean-break
     paths:
       - .github/workflows/dinov2-clean-break-migrate.yml
+      - tools/dinov2_clean_break_migrate.py
 
 permissions:
   contents: write
