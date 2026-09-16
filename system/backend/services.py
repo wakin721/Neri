@@ -182,3 +182,14 @@ _legacy._learnable_observations_for_file = _learnable_observations_for_file
 _legacy._checkpoint_species_for_model = _checkpoint_species_for_model
 _legacy._record_validation_registry_feedback = _record_validation_registry_feedback
 _legacy._record_validation_feedback = _record_validation_feedback
+
+
+# Make the active facade self-contained: callers that import services directly
+# must receive the same indexed/batched DINOv2 behavior as the FastAPI app.
+# The installer is idempotent via marker attributes on each patched function.
+import sys as _sys
+from .runtime_patches import install_runtime_patches as _install_runtime_patches
+
+_install_runtime_patches(_sys.modules[__name__])
+del _install_runtime_patches
+del _sys
