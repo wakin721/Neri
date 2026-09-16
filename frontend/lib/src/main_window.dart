@@ -13,7 +13,7 @@ import 'api_client.dart';
 import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
-import 'dinov3_startup_check.dart';
+import 'dinov2_startup_check.dart';
 import 'local_maintenance_status.dart';
 import 'models/close_behavior.dart';
 import 'models/job.dart';
@@ -31,12 +31,12 @@ import 'utils/local_detection_items.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
-String? resolveDinoV3ValidationModelPath(
+String? resolveDinoV2ValidationModelPath(
   ModelInfo? model,
   String? selectedPath,
 ) {
   final path = selectedPath?.trim() ?? '';
-  if (model?.isDinoV3 != true || path.isEmpty) return null;
+  if (model?.isDinoV2 != true || path.isEmpty) return null;
   return path;
 }
 
@@ -48,13 +48,13 @@ class MainWindow extends StatefulWidget {
   const MainWindow({
     required this.apiClient,
     required this.themeNotifier,
-    this.dinoV3StartupCheck,
+    this.dinoV2StartupCheck,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
-  final DinoV3StartupCheck? dinoV3StartupCheck;
+  final DinoV2StartupCheck? dinoV2StartupCheck;
 
   @override
   State<MainWindow> createState() => _MainWindowState();
@@ -114,8 +114,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final Set<int> _expectedBackendExitPids = <int>{};
   final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   final _appUpdater = AppUpdater();
-  late final DinoV3StartupCheck _dinoV3StartupCheck =
-      widget.dinoV3StartupCheck ?? DinoV3StartupCheck();
+  late final DinoV2StartupCheck _dinoV2StartupCheck =
+      widget.dinoV2StartupCheck ?? DinoV2StartupCheck();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -178,8 +178,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       0.25;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
-  Set<String> _dinov3ValidationPaths = <String>{};
-  int _dinov3ValidationRequestedCount = 0;
+  Set<String> _dinov2ValidationPaths = <String>{};
+  int _dinov2ValidationRequestedCount = 0;
   MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
   String _videoMode = defaultVideoProcessingMode;
@@ -822,7 +822,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     await _refresh(includeJobResults: true, finishLoading: false);
     if (!mounted || _closeFlowBlocksBackendStartup) return;
     unawaited(
-      _dinoV3StartupCheck.run(
+      _dinoV2StartupCheck.run(
         generation: _backendStartupGeneration,
         apiClient: widget.apiClient,
         onMessage: _showSnackBar,
@@ -2310,8 +2310,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return null;
   }
 
-  String? _selectedDinoV3ValidationModelPath() {
-    return resolveDinoV3ValidationModelPath(
+  String? _selectedDinoV2ValidationModelPath() {
+    return resolveDinoV2ValidationModelPath(
       _selectedClassificationModelInfo(),
       _selectedClassificationModelPath,
     );
@@ -2464,13 +2464,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final hasClassificationModel =
         _selectedClassificationModelPath?.trim().isNotEmpty == true;
     final classification = _selectedClassificationModelInfo();
-    if (classification?.isDinoV3 == true && !hasDetectionModel) {
+    if (classification?.isDinoV2 == true && !hasDetectionModel) {
       if (!mounted) return false;
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('DINOv3 需要探测模型'),
-          content: const Text('DINOv3 是二阶段分类模型。请先选择 YOLO 探测模型，再开始识别。'),
+          title: const Text('DINOv2 需要探测模型'),
+          content: const Text('DINOv2 是二阶段分类模型。请先选择 YOLO 探测模型，再开始识别。'),
           actions: [
             FilledButton(
               onPressed: () => Navigator.of(context).pop(),
@@ -2805,7 +2805,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
-        classificationModelPath: _selectedDinoV3ValidationModelPath(),
+        classificationModelPath: _selectedDinoV2ValidationModelPath(),
         feedbackOperationId: feedbackOperationId,
       );
       final merged = _mergeValidationUpdate(item, updated);
@@ -2843,7 +2843,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
-        classificationModelPath: _selectedDinoV3ValidationModelPath(),
+        classificationModelPath: _selectedDinoV2ValidationModelPath(),
         feedbackOperationId: feedbackOperationId,
       );
       final fallbackByPath = <String, DetectionItem>{
@@ -3425,8 +3425,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         .toSet();
     if (!mounted) return;
     setState(() {
-      _dinov3ValidationPaths = normalized;
-      _dinov3ValidationRequestedCount = normalized.length;
+      _dinov2ValidationPaths = normalized;
+      _dinov2ValidationRequestedCount = normalized.length;
       _selectedIndex = 2;
     });
   }
@@ -3434,8 +3434,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   void _clearDinoCandidateValidation() {
     if (!mounted) return;
     setState(() {
-      _dinov3ValidationPaths = <String>{};
-      _dinov3ValidationRequestedCount = 0;
+      _dinov2ValidationPaths = <String>{};
+      _dinov2ValidationRequestedCount = 0;
     });
   }
 
@@ -3484,11 +3484,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final allItems = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
         : validationItemsInInputFolder(_previewItems, inputPath);
-    final hasDinoFilter = _dinov3ValidationPaths.isNotEmpty;
+    final hasDinoFilter = _dinov2ValidationPaths.isNotEmpty;
     final items = hasDinoFilter
         ? allItems
               .where(
-                (item) => _dinov3ValidationPaths.contains(
+                (item) => _dinov2ValidationPaths.contains(
                   _validationPathKey(item.path),
                 ),
               )
@@ -3504,7 +3504,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final validationScreen = SpeciesValidationScreen(
       apiClient: widget.apiClient,
       inputPath: inputPath,
-      classificationModelPath: _selectedDinoV3ValidationModelPath(),
+      classificationModelPath: _selectedDinoV2ValidationModelPath(),
       items: items,
       loading: _previewLoading,
       refreshVersion: _previewContentVersion,
@@ -3572,7 +3572,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
     if (!hasDinoFilter) return validationScreen;
 
-    final requested = _dinov3ValidationRequestedCount;
+    final requested = _dinov2ValidationRequestedCount;
     final missing = (requested - items.length).clamp(0, requested).toInt();
     return Column(
       children: [
@@ -3581,7 +3581,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           child: ListTile(
             dense: true,
             leading: const Icon(Icons.filter_alt_rounded),
-            title: const Text('DINOv3 Candidate 验证筛选'),
+            title: const Text('DINOv2 Candidate 验证筛选'),
             subtitle: Text(
               missing > 0
                   ? '当前显示 ${items.length}/$requested 个代表事件；$missing 个历史文件不在当前任务中。'

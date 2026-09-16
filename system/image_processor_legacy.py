@@ -39,8 +39,8 @@ class ImageProcessor:
         self.model = self._load_model(model_path) if model_path else None
         self.translation_dict = self._load_translation_file()
         self.cls_model = None
-        self.dinov3_classifier = None
-        self._dinov3_observations = []
+        self.dinov2_classifier = None
+        self._dinov2_observations = []
 
     def _load_model(self, model_path: str) -> Optional[YOLO]:
         """加载YOLO模型"""
@@ -76,15 +76,15 @@ class ImageProcessor:
             logger.error(f"加载分类模型失败: {e}")
             self.cls_model = None
 
-    def load_dinov3_classifier(self, classifier) -> None:
-        """Attach a native DINOv3 second-stage classifier."""
-        self.dinov3_classifier = classifier
-        self._dinov3_observations = []
+    def load_dinov2_classifier(self, classifier) -> None:
+        """Attach a native DINOv2 second-stage classifier."""
+        self.dinov2_classifier = classifier
+        self._dinov2_observations = []
 
-    def drain_dinov3_observations(self):
-        """Return and clear ephemeral DINOv3 observations from the last call."""
-        observations = tuple(self._dinov3_observations)
-        self._dinov3_observations = []
+    def drain_dinov2_observations(self):
+        """Return and clear ephemeral DINOv2 observations from the last call."""
+        observations = tuple(self._dinov2_observations)
+        self._dinov2_observations = []
         return observations
 
     @staticmethod
@@ -472,8 +472,8 @@ class ImageProcessor:
         device_name, use_fp16 = self._determine_device(use_fp16)
         w_det, w_cls = combined_confidence_weights(confidence_priority)
         batch_results_info = []
-        if self.dinov3_classifier is not None:
-            self._dinov3_observations = []
+        if self.dinov2_classifier is not None:
+            self._dinov2_observations = []
 
         if not self.model:
             if self.cls_model:
@@ -584,7 +584,7 @@ class ImageProcessor:
                 batch_candidates_maps = [{} for _ in det_results]
                 batch_selected_candidate_maps = [{} for _ in det_results]
 
-                if self.cls_model or self.dinov3_classifier is not None:
+                if self.cls_model or self.dinov2_classifier is not None:
                     crop_tasks = []
                     # 收集所有需要裁剪的任务
                     for r_idx, r in enumerate(det_results):
@@ -613,16 +613,16 @@ class ImageProcessor:
                     if all_crops:
                         self._sync_device(device_name)
                         classify_start = time.perf_counter()
-                        if self.dinov3_classifier is not None:
-                            from system.dinov3.classifier import DinoV3Observation
+                        if self.dinov2_classifier is not None:
+                            from system.dinov2.classifier import DinoV2Observation
 
-                            predictions = self.dinov3_classifier.classify_crops(
+                            predictions = self.dinov2_classifier.classify_crops(
                                 all_crops,
                                 array_color="rgb",
                             )
                             if len(predictions) != len(crop_map_info):
                                 raise RuntimeError(
-                                    "DINOv3 classifier returned a different number of predictions than crops"
+                                    "DINOv2 classifier returned a different number of predictions than crops"
                                 )
                             for prediction, (r_idx, b_idx) in zip(predictions, crop_map_info):
                                 box = det_results[r_idx].boxes[b_idx]
@@ -640,8 +640,8 @@ class ImageProcessor:
                                 batch_selected_candidate_maps[r_idx][b_idx] = (
                                     candidate if prediction.accepted else None
                                 )
-                                self._dinov3_observations.append(
-                                    DinoV3Observation(
+                                self._dinov2_observations.append(
+                                    DinoV2Observation(
                                         result_index=r_idx,
                                         box_index=b_idx,
                                         embedding=prediction.embedding,
@@ -759,7 +759,7 @@ class ImageProcessor:
                         for i, box in enumerate(r.boxes):
                             final_name = ""
                             final_confidence = float(box.conf.item())
-                            if self.cls_model is not None or self.dinov3_classifier is not None:
+                            if self.cls_model is not None or self.dinov2_classifier is not None:
                                 selected_candidate = selected_candidates_map.get(i)
                                 if not hasattr(r, 'candidates_data'):
                                     r.candidates_data = {}

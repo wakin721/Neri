@@ -10,7 +10,7 @@ import '../utils/quick_mark_sort.dart';
 import '../utils/validation_cache_delta.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
-import '../widgets/dinov3_feature_scatter.dart';
+import '../widgets/dinov2_feature_scatter.dart';
 import '../widgets/selectable_list_card.dart';
 
 import 'package:lpinyin/lpinyin.dart';
@@ -136,12 +136,12 @@ String dinoValidationLearningSkipSummary(
   }
   if (skipped == 0) return '';
   if (targets.length == 1) {
-    return 'DINOv3 学习已跳过：该文件需恰好 1 个可学习检测框';
+    return 'DINOv2 学习已跳过：该文件需恰好 1 个可学习检测框';
   }
-  return 'DINOv3 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
+  return 'DINOv2 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
 }
 
-String dinoV3FeedbackPanelTitle(
+String dinoV2FeedbackPanelTitle(
   DetectionBox box,
   List<DetectionBox> visibleBoxes,
 ) {
@@ -1068,7 +1068,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
 
     _setMarking(true);
     try {
-      final result = await widget.apiClient.markDinoV3BoxFeedback(
+      final result = await widget.apiClient.markDinoV2BoxFeedback(
         inputPath: widget.inputPath,
         filePath: item.path,
         classificationModelPath: classificationModelPath,
@@ -1124,7 +1124,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     DetectionBox box,
     List<DetectionBox> visibleBoxes,
   ) {
-    final title = dinoV3FeedbackPanelTitle(box, visibleBoxes);
+    final title = dinoV2FeedbackPanelTitle(box, visibleBoxes);
     final classificationModelPath =
         widget.classificationModelPath?.trim() ?? '';
     final observationId = box.observationId?.trim() ?? '';
@@ -1228,7 +1228,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
                   if ((box.trackId?.trim() ?? '').isNotEmpty)
                     Text('Track：${box.trackId!.trim()}'),
                   if ((box.predictedSpecies?.trim() ?? '').isNotEmpty)
-                    Text('DINOv3：${box.predictedSpecies!.trim()}'),
+                    Text('DINOv2：${box.predictedSpecies!.trim()}'),
                 ],
               ),
             ),
@@ -1239,7 +1239,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             if (observationId.isEmpty) ...[
               const SizedBox(height: 6),
               Text(
-                '该检测框没有 DINOv3 observation ID：可查看检测详情，但不能提交学习反馈。',
+                '该检测框没有 DINOv2 observation ID：可查看检测详情，但不能提交学习反馈。',
                 style: TextStyle(
                   fontSize: 12,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -1249,7 +1249,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
             if (classificationModelPath.isNotEmpty &&
                 observationId.isNotEmpty) ...[
               const SizedBox(height: 6),
-              DinoV3FeatureExplanationPanel(
+              DinoV2FeatureExplanationPanel(
                 apiClient: widget.apiClient,
                 classificationModelPath: classificationModelPath,
                 observationId: observationId,
@@ -3587,9 +3587,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
         final classificationModelPath =
             widget.classificationModelPath?.trim() ?? '';
         if (classificationModelPath.isEmpty) {
-          throw StateError('缺少 DINOv3 分类模型路径，无法撤回学习反馈。');
+          throw StateError('缺少 DINOv2 分类模型路径，无法撤回学习反馈。');
         }
-        await widget.apiClient.revertDinoV3Feedback(
+        await widget.apiClient.revertDinoV2Feedback(
           classificationModelPath: classificationModelPath,
           feedbackOperationId: feedbackOperationId,
         );

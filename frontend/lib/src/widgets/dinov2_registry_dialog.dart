@@ -4,9 +4,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
-import '../models/dinov3_registry.dart';
+import '../models/dinov2_registry.dart';
 
-String dinov3RegistrySummary(List<DinoV3RegistryEntry> entries) {
+String dinov2RegistrySummary(List<DinoV2RegistryEntry> entries) {
   int count(String status) =>
       entries.where((entry) => entry.status == status).length;
   return 'Checkpoint ${count('checkpoint')} · Candidate ${count('candidate')} · '
@@ -15,8 +15,8 @@ String dinov3RegistrySummary(List<DinoV3RegistryEntry> entries) {
       'Mature ${count('mature')}';
 }
 
-class DinoV3RegistryButton extends StatefulWidget {
-  const DinoV3RegistryButton({
+class DinoV2RegistryButton extends StatefulWidget {
+  const DinoV2RegistryButton({
     required this.apiClient,
     required this.modelPath,
     required this.onContinueValidation,
@@ -30,11 +30,11 @@ class DinoV3RegistryButton extends StatefulWidget {
   final ValueChanged<String>? onShowMessage;
 
   @override
-  State<DinoV3RegistryButton> createState() => _DinoV3RegistryButtonState();
+  State<DinoV2RegistryButton> createState() => _DinoV2RegistryButtonState();
 }
 
-class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
-  List<DinoV3RegistryEntry> _entries = const [];
+class _DinoV2RegistryButtonState extends State<DinoV2RegistryButton> {
+  List<DinoV2RegistryEntry> _entries = const [];
   bool _loading = true;
 
   @override
@@ -44,7 +44,7 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
   }
 
   @override
-  void didUpdateWidget(covariant DinoV3RegistryButton oldWidget) {
+  void didUpdateWidget(covariant DinoV2RegistryButton oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.modelPath != widget.modelPath) {
       _entries = const [];
@@ -55,7 +55,7 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
 
   Future<void> _refresh() async {
     try {
-      final entries = await widget.apiClient.fetchDinoV3RegistryCatalog(
+      final entries = await widget.apiClient.fetchDinoV2RegistryCatalog(
         widget.modelPath,
       );
       if (!mounted) return;
@@ -66,14 +66,14 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _loading = false);
-      widget.onShowMessage?.call('读取 DINOv3 物种注册状态失败：$error');
+      widget.onShowMessage?.call('读取 DINOv2 物种注册状态失败：$error');
     }
   }
 
   Future<void> _open() async {
     await showDialog<void>(
       context: context,
-      builder: (context) => DinoV3RegistryDialog(
+      builder: (context) => DinoV2RegistryDialog(
         apiClient: widget.apiClient,
         modelPath: widget.modelPath,
         initialEntries: _entries,
@@ -89,15 +89,15 @@ class _DinoV3RegistryButtonState extends State<DinoV3RegistryButton> {
       contentPadding: EdgeInsets.zero,
       leading: const Icon(Icons.hub_rounded),
       title: const Text('物种注册状态'),
-      subtitle: Text(_loading ? '读取中…' : dinov3RegistrySummary(_entries)),
+      subtitle: Text(_loading ? '读取中…' : dinov2RegistrySummary(_entries)),
       trailing: const Icon(Icons.chevron_right_rounded),
       onTap: _open,
     );
   }
 }
 
-class DinoV3RegistryDialog extends StatefulWidget {
-  const DinoV3RegistryDialog({
+class DinoV2RegistryDialog extends StatefulWidget {
+  const DinoV2RegistryDialog({
     required this.apiClient,
     required this.modelPath,
     required this.onContinueValidation,
@@ -108,29 +108,29 @@ class DinoV3RegistryDialog extends StatefulWidget {
   final NeriApiClient apiClient;
   final String modelPath;
   final ValueChanged<Set<String>> onContinueValidation;
-  final List<DinoV3RegistryEntry>? initialEntries;
+  final List<DinoV2RegistryEntry>? initialEntries;
 
   @override
-  State<DinoV3RegistryDialog> createState() => _DinoV3RegistryDialogState();
+  State<DinoV2RegistryDialog> createState() => _DinoV2RegistryDialogState();
 }
 
-class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
+class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
   final _commonNameController = TextEditingController();
   final _scientificNameController = TextEditingController();
-  List<DinoV3RegistryEntry> _entries = const [];
-  DinoV3RegistryEntry? _selected;
-  DinoV3RegistryCluster? _selectedCluster;
+  List<DinoV2RegistryEntry> _entries = const [];
+  DinoV2RegistryEntry? _selected;
+  DinoV2RegistryCluster? _selectedCluster;
   List<Uint8List> _clusterExampleBytes = const <Uint8List>[];
   bool _loading = false;
   bool _saving = false;
   bool _examplesLoading = false;
   int _examplesRequestId = 0;
-  List<DinoV3RegistryEvent> _events = const <DinoV3RegistryEvent>[];
+  List<DinoV2RegistryEvent> _events = const <DinoV2RegistryEvent>[];
   Map<int, Uint8List> _exampleBytes = const <int, Uint8List>{};
   String? _error;
 
-  List<DinoV3RegistryEntry> get _displayEntries {
-    final entries = List<DinoV3RegistryEntry>.of(_entries);
+  List<DinoV2RegistryEntry> get _displayEntries {
+    final entries = List<DinoV2RegistryEntry>.of(_entries);
     entries.sort((left, right) {
       final leftNamed = left.commonName.trim().isNotEmpty;
       final rightNamed = right.commonName.trim().isNotEmpty;
@@ -152,7 +152,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     return leftName.isNotEmpty && leftName == rightName;
   }
 
-  String _displayNameForEntry(DinoV3RegistryEntry entry) {
+  String _displayNameForEntry(DinoV2RegistryEntry entry) {
     if (entry.isCheckpoint || entry.commonName.trim().isEmpty) {
       return entry.displayName;
     }
@@ -181,7 +181,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     return '${entry.commonName.trim()} #${index + 1}';
   }
 
-  int _registryMergePriority(DinoV3RegistryEntry entry) {
+  int _registryMergePriority(DinoV2RegistryEntry entry) {
     return switch (entry.status) {
       'mature' => 0,
       'confirmed' => 1,
@@ -190,7 +190,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     };
   }
 
-  DinoV3RegistryEntry? _matchingRegistryEntry(
+  DinoV2RegistryEntry? _matchingRegistryEntry(
     String commonName,
     int selectedId,
   ) {
@@ -231,14 +231,14 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     super.dispose();
   }
 
-  void _select(DinoV3RegistryEntry entry, {bool notify = true}) {
+  void _select(DinoV2RegistryEntry entry, {bool notify = true}) {
     void update() {
       _selected = entry;
       _selectedCluster = null;
       _clusterExampleBytes = const <Uint8List>[];
       _commonNameController.text = entry.commonName;
       _scientificNameController.text = entry.scientificName;
-      _events = const <DinoV3RegistryEvent>[];
+      _events = const <DinoV2RegistryEvent>[];
       _exampleBytes = const <int, Uint8List>{};
       _error = null;
     }
@@ -257,9 +257,9 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
-  Future<void> _loadClusters(DinoV3RegistryEntry entry) async {
+  Future<void> _loadClusters(DinoV2RegistryEntry entry) async {
     try {
-      final clusters = await widget.apiClient.fetchDinoV3RegistryClusters(
+      final clusters = await widget.apiClient.fetchDinoV2RegistryClusters(
         widget.modelPath,
         entry.id,
       );
@@ -285,11 +285,11 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       });
     }
     try {
-      final fetched = await widget.apiClient.fetchDinoV3RegistryCatalog(
+      final fetched = await widget.apiClient.fetchDinoV2RegistryCatalog(
         widget.modelPath,
       );
       if (!mounted) return;
-      // A real DINOv3 catalog always contains checkpoint classes. Keeping the
+      // A real DINOv2 catalog always contains checkpoint classes. Keeping the
       // supplied snapshot only when a legacy/mock backend returns [] preserves
       // backward compatibility while every normal dialog open still refreshes.
       final entries = fetched.isEmpty && _entries.isNotEmpty
@@ -308,7 +308,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         });
         return;
       }
-      DinoV3RegistryEntry selected = entries.first;
+      DinoV2RegistryEntry selected = entries.first;
       if (wantedId != null) {
         for (final entry in entries) {
           if (entry.id == wantedId) {
@@ -327,7 +327,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     }
   }
 
-  DinoV3RegistryEntry? _matchingCheckpoint(String commonName) {
+  DinoV2RegistryEntry? _matchingCheckpoint(String commonName) {
     final wanted = commonName.trim().toLowerCase();
     if (wanted.isEmpty) return null;
     for (final entry in _entries) {
@@ -354,7 +354,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      final updated = await widget.apiClient.updateDinoV3RegistryIdentity(
+      final updated = await widget.apiClient.updateDinoV2RegistryIdentity(
         classificationModelPath: widget.modelPath,
         registrationId: selected.id,
         commonName: commonName,
@@ -386,7 +386,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         );
         if (!mounted) return;
         if (shouldMerge == true) {
-          await widget.apiClient.mergeDinoV3RegistryCandidateIntoCheckpoint(
+          await widget.apiClient.mergeDinoV2RegistryCandidateIntoCheckpoint(
             classificationModelPath: widget.modelPath,
             registrationId: selected.id,
             checkpointSpecies: checkpoint.commonName,
@@ -419,7 +419,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         );
         if (!mounted) return;
         if (shouldMerge == true) {
-          await widget.apiClient.mergeDinoV3RegistryCandidate(
+          await widget.apiClient.mergeDinoV2RegistryCandidate(
             classificationModelPath: widget.modelPath,
             registrationId: selected.id,
             targetRegistrationId: registryMatch.id,
@@ -467,7 +467,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      await widget.apiClient.markDinoV3RegistryCandidateEmpty(
+      await widget.apiClient.markDinoV2RegistryCandidateEmpty(
         classificationModelPath: widget.modelPath,
         registrationId: selected.id,
       );
@@ -484,7 +484,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     if (selected == null || !selected.canRegister) return;
     setState(() => _saving = true);
     try {
-      final updated = await widget.apiClient.registerDinoV3Species(
+      final updated = await widget.apiClient.registerDinoV2Species(
         classificationModelPath: widget.modelPath,
         registrationId: selected.id,
       );
@@ -497,8 +497,8 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   Future<void> _loadClusterExamples(
-    DinoV3RegistryEntry entry,
-    DinoV3RegistryCluster cluster,
+    DinoV2RegistryEntry entry,
+    DinoV2RegistryCluster cluster,
   ) async {
     final requestId = ++_examplesRequestId;
     if (mounted &&
@@ -509,20 +509,20 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         _clusterExampleBytes = const <Uint8List>[];
       });
     }
-    Future<Uint8List?> loadRef(DinoV3ClusterExampleRef ref) async {
+    Future<Uint8List?> loadRef(DinoV2ClusterExampleRef ref) async {
       try {
         Uint8List? bytes;
         if (ref.kind == 'registry' &&
             ref.registrationId != null &&
             ref.eventId != null) {
-          bytes = await widget.apiClient.fetchDinoV3RegistryExample(
+          bytes = await widget.apiClient.fetchDinoV2RegistryExample(
             widget.modelPath,
             ref.registrationId!,
             ref.eventId!,
           );
         } else if (ref.kind == 'observation' &&
             (ref.observationId?.isNotEmpty ?? false)) {
-          bytes = await widget.apiClient.fetchDinoV3ObservationExample(
+          bytes = await widget.apiClient.fetchDinoV2ObservationExample(
             widget.modelPath,
             ref.observationId!,
           );
@@ -548,14 +548,14 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
   }
 
   void _selectCluster(
-    DinoV3RegistryEntry entry,
-    DinoV3RegistryCluster cluster,
+    DinoV2RegistryEntry entry,
+    DinoV2RegistryCluster cluster,
   ) {
     setState(() {
       _selected = entry;
       _selectedCluster = cluster;
       _clusterExampleBytes = const <Uint8List>[];
-      _events = const <DinoV3RegistryEvent>[];
+      _events = const <DinoV2RegistryEvent>[];
       _exampleBytes = const <int, Uint8List>{};
       _commonNameController.text = entry.commonName;
       _scientificNameController.text = entry.scientificName;
@@ -564,12 +564,12 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     unawaited(_loadClusterExamples(entry, cluster));
   }
 
-  Future<void> _loadExamples(DinoV3RegistryEntry entry) async {
+  Future<void> _loadExamples(DinoV2RegistryEntry entry) async {
     if (entry.isCheckpoint) {
       ++_examplesRequestId;
       if (mounted && _selected?.id == entry.id) {
         setState(() {
-          _events = const <DinoV3RegistryEvent>[];
+          _events = const <DinoV2RegistryEvent>[];
           _exampleBytes = const <int, Uint8List>{};
           _examplesLoading = false;
         });
@@ -581,15 +581,15 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       setState(() => _examplesLoading = true);
     }
     try {
-      final events = await widget.apiClient.fetchDinoV3RegistryEvents(
+      final events = await widget.apiClient.fetchDinoV2RegistryEvents(
         widget.modelPath,
         entry.id,
       );
       Future<MapEntry<int, Uint8List>?> loadEvent(
-        DinoV3RegistryEvent event,
+        DinoV2RegistryEvent event,
       ) async {
         try {
-          final data = await widget.apiClient.fetchDinoV3RegistryExample(
+          final data = await widget.apiClient.fetchDinoV2RegistryExample(
             widget.modelPath,
             entry.id,
             event.id,
@@ -627,7 +627,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         return;
       }
       setState(() {
-        _events = const <DinoV3RegistryEvent>[];
+        _events = const <DinoV2RegistryEvent>[];
         _exampleBytes = const <int, Uint8List>{};
         _examplesLoading = false;
       });
@@ -665,7 +665,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      await widget.apiClient.deleteDinoV3RegistryEntry(
+      await widget.apiClient.deleteDinoV2RegistryEntry(
         widget.modelPath,
         selected.id,
       );
@@ -677,7 +677,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       setState(() {
         _entries = remaining;
         _selected = null;
-        _events = const <DinoV3RegistryEvent>[];
+        _events = const <DinoV2RegistryEvent>[];
         _exampleBytes = const <int, Uint8List>{};
         _examplesLoading = false;
         _commonNameController.clear();
@@ -725,7 +725,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       _error = null;
     });
     try {
-      await widget.apiClient.clearDinoV3UnregisteredCandidates(
+      await widget.apiClient.clearDinoV2UnregisteredCandidates(
         widget.modelPath,
       );
       if (mounted) await _load();
@@ -776,7 +776,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                 height: 112,
                 child: Image.memory(
                   _clusterExampleBytes[index],
-                  key: ValueKey('dinov3-cluster-example-$index'),
+                  key: ValueKey('dinov2-cluster-example-$index'),
                   fit: BoxFit.cover,
                   errorBuilder: (_, __, ___) =>
                       const Center(child: Icon(Icons.broken_image_outlined)),
@@ -843,7 +843,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
               height: 112,
               child: Image.memory(
                 bytes,
-                key: ValueKey('dinov3-registry-example-${event.id}'),
+                key: ValueKey('dinov2-registry-example-${event.id}'),
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) =>
                     const Center(child: Icon(Icons.broken_image_outlined)),
@@ -860,7 +860,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     if (selected == null || selected.isCheckpoint) return;
     setState(() => _saving = true);
     try {
-      final events = await widget.apiClient.fetchDinoV3RegistryEvents(
+      final events = await widget.apiClient.fetchDinoV2RegistryEvents(
         widget.modelPath,
         selected.id,
       );
@@ -901,7 +901,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
     );
   }
 
-  Widget _detail(DinoV3RegistryEntry entry) {
+  Widget _detail(DinoV2RegistryEntry entry) {
     final editable = entry.isCandidate && !entry.isCheckpoint;
     final conditions = entry.conditions;
     return Column(
@@ -921,7 +921,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                 if (entry.isCheckpoint) ...[
                   const SizedBox(height: 8),
                   Text(
-                    '来自不可变 DINOv3 Checkpoint · ${entry.prototypeCount} 个 base prototype。'
+                    '来自不可变 DINOv2 Checkpoint · ${entry.prototypeCount} 个 base prototype。'
                     '分类头保存特征中心而非原始训练影像。',
                   ),
                   if (entry.hasFeedbackLearning)
@@ -1068,7 +1068,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
         .where((entry) => entry.status == 'candidate')
         .length;
     return AlertDialog(
-      title: const Text('DINOv3 物种注册状态'),
+      title: const Text('DINOv2 物种注册状态'),
       content: SizedBox(
         width: 860,
         height: 560,
@@ -1082,7 +1082,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Text(dinov3RegistrySummary(_entries)),
+                        Text(dinov2RegistrySummary(_entries)),
                         const SizedBox(height: 8),
                         Expanded(
                           child: _entries.isEmpty
@@ -1100,7 +1100,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
                                         : '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机';
                                     return ExpansionTile(
                                       key: PageStorageKey<String>(
-                                        'dinov3-registry-species-${entry.id}',
+                                        'dinov2-registry-species-${entry.id}',
                                       ),
                                       initiallyExpanded: false,
                                       title: Text(_displayNameForEntry(entry)),
@@ -1157,7 +1157,7 @@ class _DinoV3RegistryDialogState extends State<DinoV3RegistryDialog> {
       ),
       actions: [
         OutlinedButton.icon(
-          key: const ValueKey('dinov3-clear-unregistered-events'),
+          key: const ValueKey('dinov2-clear-unregistered-events'),
           onPressed: !_saving && candidateCount > 0 ? _clearCandidates : null,
           icon: const Icon(Icons.delete_sweep_outlined),
           label: const Text('清除未注册事件'),

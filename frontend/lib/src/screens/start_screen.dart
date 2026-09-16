@@ -277,7 +277,7 @@ class _CreateJobCard extends StatelessWidget {
       selectedClassificationModelPath,
     );
     final dinoNeedsDetector =
-        classificationInfo?.isDinoV3 == true &&
+        classificationInfo?.isDinoV2 == true &&
         classificationInfo?.requiresDetector == true &&
         (selectedModelPath == null || selectedModelPath!.isEmpty);
     return SectionCard(
@@ -315,7 +315,7 @@ class _CreateJobCard extends StatelessWidget {
           if (dinoNeedsDetector) ...[
             const SizedBox(height: 8),
             Text(
-              'DINOv3 必须同时选择探测模型后才能开始处理。',
+              'DINOv2 必须同时选择探测模型后才能开始处理。',
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
@@ -428,7 +428,7 @@ class _StartOptionGrid extends StatelessWidget {
                 enabled: enabled,
                 videoMode: videoMode,
                 supportsVideoAll: classificationInfo?.supportsVideoAll ?? true,
-                isDinoV3: classificationInfo?.isDinoV3 == true,
+                isDinoV2: classificationInfo?.isDinoV2 == true,
                 onChanged: onVideoModeChanged,
               ),
             ),
@@ -541,14 +541,14 @@ class _VideoModeSelector extends StatelessWidget {
     required this.enabled,
     required this.videoMode,
     required this.supportsVideoAll,
-    required this.isDinoV3,
+    required this.isDinoV2,
     required this.onChanged,
   });
 
   final bool enabled;
   final String videoMode;
   final bool supportsVideoAll;
-  final bool isDinoV3;
+  final bool isDinoV2;
   final ValueChanged<String> onChanged;
 
   @override
@@ -557,8 +557,8 @@ class _VideoModeSelector extends StatelessWidget {
     final selectedValue = !supportsVideoAll && normalized == videoProcessingModeAll
         ? videoProcessingModeFast
         : normalized;
-    final helperText = isDinoV3
-        ? 'DINOv3 当前仅支持抽帧快速识别或跳过视频'
+    final helperText = isDinoV2
+        ? 'DINOv2 当前仅支持抽帧快速识别或跳过视频'
         : switch (selectedValue) {
             videoProcessingModeFast => '抽帧批量识别',
             videoProcessingModeSkip => '任务中忽略视频文件',

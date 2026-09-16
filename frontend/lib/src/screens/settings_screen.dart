@@ -18,7 +18,7 @@ import '../privacy/privacy_settings_card.dart';
 import '../privacy/training_upload_debug_dialog.dart';
 import '../utils/quick_mark_sort.dart';
 import '../widgets/app_menu_style.dart';
-import '../widgets/dinov3_registry_dialog.dart';
+import '../widgets/dinov2_registry_dialog.dart';
 import '../widgets/section_card.dart';
 import '../widgets/workspace_split_metrics.dart';
 import 'model_sync_settings_host.dart';
@@ -154,7 +154,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _maintenancePreparationOperation;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
-  bool _maintainingDinoV3 = false;
+  bool _maintainingDinoV2 = false;
   bool _debugModeSaving = false;
   bool _clearingCache = false;
   bool _checkingForUpdates = false;
@@ -165,8 +165,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _maintenanceMessage;
   double? _maintenanceProgress;
   String? _maintenanceStatusPath;
-  DinoV3ComponentStatus? _dinoV3Status;
-  bool _loadingDinoV3Status = true;
+  DinoV2ComponentStatus? _dinoV2Status;
+  bool _loadingDinoV2Status = true;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -178,7 +178,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _loadModelClassesForSelection();
-      unawaited(_loadDinoV3Status());
+      unawaited(_loadDinoV2Status());
       unawaited(_resumeMaintenanceWatchIfActive());
     });
   }
@@ -462,28 +462,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _loadDinoV3Status() async {
+  Future<void> _loadDinoV2Status() async {
     try {
-      final status = await widget.apiClient.fetchDinoV3ComponentStatus();
+      final status = await widget.apiClient.fetchDinoV2ComponentStatus();
       if (!mounted) return;
       setState(() {
-        _dinoV3Status = status;
-        _loadingDinoV3Status = false;
+        _dinoV2Status = status;
+        _loadingDinoV2Status = false;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _dinoV3Status = null;
-        _loadingDinoV3Status = false;
+        _dinoV2Status = null;
+        _loadingDinoV2Status = false;
       });
     }
   }
 
-  Future<void> _installDinoV3() async {
+  Future<void> _installDinoV2() async {
     if (_maintenanceBusy) return;
     _startMaintenancePreparation(
-      operation: 'install_dinov3',
-      message: '正在检查 DINOv3 安装环境...',
+      operation: 'install_dinov2',
+      message: '正在检查 DINOv2 安装环境...',
     );
 
     final envChoice = _normalizedPytorchVersion(
@@ -499,32 +499,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     if (packageSource == null || !mounted) return;
-    final repairing = _dinoV3Status?.installed == true;
+    final repairing = _dinoV2Status?.installed == true;
     final confirmed = await _confirmPythonInstallation(
-      title: repairing ? '修复 DINOv3' : '安装 DINOv3',
+      title: repairing ? '修复 DINOv2' : '安装 DINOv2',
       message:
-          '将从 NeriCloud 严格同步 DINOv3 ViT-B/16 组件到 res/model/DINOv3，'
+          '将从 NeriCloud 严格同步 DINOv2 ViT-B/16 组件到 res/model/DINOv2，'
           '并校验 Multi-prototype 模型、官方 source 与 SHA-256。'
           '如果共享 PyTorch 环境缺失，会按当前运行环境自动补齐。',
     );
     if (confirmed != true || !mounted) return;
 
     setState(() {
-      _maintainingDinoV3 = true;
-      _maintenanceOperation = 'install_dinov3';
+      _maintainingDinoV2 = true;
+      _maintenanceOperation = 'install_dinov2';
       _maintenanceMessage = repairing
-          ? '正在启动 DINOv3 修复...'
-          : '正在启动 DINOv3 安装...';
+          ? '正在启动 DINOv2 修复...'
+          : '正在启动 DINOv2 安装...';
     });
     try {
-      final response = await widget.apiClient.installDinoV3(
+      final response = await widget.apiClient.installDinoV2(
         envChoice: envChoice,
         packageSource: packageSource.source,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
         operation: response.operation.isEmpty
-            ? 'install_dinov3'
+            ? 'install_dinov2'
             : response.operation,
         message: response.message,
         progress: response.progress,
@@ -532,32 +532,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 DINOv3 安装失败');
+      await _handleMaintenanceStartFailure(error, '启动 DINOv2 安装失败');
     }
   }
 
-  Future<void> _removeDinoV3() async {
+  Future<void> _removeDinoV2() async {
     if (_maintenanceBusy) return;
     final confirmed = await _confirmMaintenance(
-      title: '删除 DINOv3',
+      title: '删除 DINOv2',
       message:
-          '将删除 res/model/DINOv3 中的 DINOv3 组件文件。\n\n'
+          '将删除 res/model/DINOv2 中的 DINOv2 组件文件。\n\n'
           '共享 PyTorch 环境不会删除；本地已学习物种、人工校验事件和增量 prototype 数据也会保留。',
       confirmLabel: '删除',
     );
     if (confirmed != true || !mounted) return;
 
     setState(() {
-      _maintainingDinoV3 = true;
-      _maintenanceOperation = 'remove_dinov3';
-      _maintenanceMessage = '正在启动 DINOv3 删除...';
+      _maintainingDinoV2 = true;
+      _maintenanceOperation = 'remove_dinov2';
+      _maintenanceMessage = '正在启动 DINOv2 删除...';
     });
     try {
-      final response = await widget.apiClient.removeDinoV3();
+      final response = await widget.apiClient.removeDinoV2();
       if (!mounted) return;
       _startMaintenanceWatch(
         operation: response.operation.isEmpty
-            ? 'remove_dinov3'
+            ? 'remove_dinov2'
             : response.operation,
         message: response.message,
         progress: response.progress,
@@ -565,7 +565,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 DINOv3 删除失败');
+      await _handleMaintenanceStartFailure(error, '启动 DINOv2 删除失败');
     }
   }
 
@@ -877,7 +877,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _installingPytorch = false;
       _reinstallingPackage = false;
-      _maintainingDinoV3 = false;
+      _maintainingDinoV2 = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
       _maintenanceProgress = null;
@@ -908,8 +908,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'install_pytorch',
       'install_yolo_dependencies',
       'reinstall_package',
-      'install_dinov3',
-      'remove_dinov3',
+      'install_dinov2',
+      'remove_dinov2',
     }.contains(operation)) {
       return false;
     }
@@ -939,8 +939,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           operation == 'install_pytorch' ||
           operation == 'install_yolo_dependencies';
       _reinstallingPackage = operation == 'reinstall_package';
-      _maintainingDinoV3 =
-          operation == 'install_dinov3' || operation == 'remove_dinov3';
+      _maintainingDinoV2 =
+          operation == 'install_dinov2' || operation == 'remove_dinov2';
     });
     _maintenanceTimer = Timer.periodic(
       const Duration(seconds: 2),
@@ -973,8 +973,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               operation == 'install_pytorch' ||
               operation == 'install_yolo_dependencies';
           _reinstallingPackage = operation == 'reinstall_package';
-          _maintainingDinoV3 =
-              operation == 'install_dinov3' || operation == 'remove_dinov3';
+          _maintainingDinoV2 =
+              operation == 'install_dinov2' || operation == 'remove_dinov2';
         });
         return;
       }
@@ -993,7 +993,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   bool get _maintenanceInProgress =>
-      _installingPytorch || _reinstallingPackage || _maintainingDinoV3;
+      _installingPytorch || _reinstallingPackage || _maintainingDinoV2;
   bool get _maintenanceBusy =>
       _maintenancePreparationOperation != null || _maintenanceInProgress;
 
@@ -1004,19 +1004,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _installingPytorch = false;
       _reinstallingPackage = false;
-      _maintainingDinoV3 = false;
+      _maintainingDinoV2 = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
       _maintenanceProgress = null;
       _maintenanceStatusPath = null;
     });
     if (message.isNotEmpty) widget.onShowMessage(message);
-    if (finishedOperation == 'install_dinov3' ||
-        finishedOperation == 'remove_dinov3') {
+    if (finishedOperation == 'install_dinov2' ||
+        finishedOperation == 'remove_dinov2') {
       unawaited(
         Future<void>.delayed(
           const Duration(seconds: 1),
-          _loadDinoV3Status,
+          _loadDinoV2Status,
         ),
       );
     }
@@ -1246,7 +1246,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final combinedModelsEnabled =
         selectedModel?.isNotEmpty == true &&
         selectedClassificationModel?.isNotEmpty == true &&
-        selectedClassificationInfo?.isDinoV3 != true;
+        selectedClassificationInfo?.isDinoV2 != true;
     final confidencePriority =
         _string('confidence_priority', _classificationConfidencePriority) ==
             _detectionConfidencePriority
@@ -1320,19 +1320,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _loadModelClassesForSelection();
                   },
                 ),
-                if (selectedClassificationInfo?.isDinoV3 == true) ...[
+                if (selectedClassificationInfo?.isDinoV2 == true) ...[
                   const Divider(height: 20),
                   if (selectedModel?.isEmpty ?? true)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
-                        'DINOv3 必须同时选择探测模型。',
+                        'DINOv2 必须同时选择探测模型。',
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.error,
                         ),
                       ),
                     ),
-                  DinoV3RegistryButton(
+                  DinoV2RegistryButton(
                     apiClient: widget.apiClient,
                     modelPath: selectedClassificationModel!,
                     onContinueValidation:
@@ -1673,7 +1673,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: '视频处理模式',
         subtitle: supportsVideoAll
             ? '选择完整识别、快速识别，或在任务中忽略视频'
-            : 'DINOv3 当前仅支持快速识别或跳过视频',
+            : 'DINOv2 当前仅支持快速识别或跳过视频',
         icon: Icons.play_circle_outline_rounded,
         child: _SettingsMenuButton<String>(
           value: videoMode,
@@ -1769,7 +1769,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildEnvironmentMaintenance() {
     return SectionCard(
       title: '环境维护',
-      subtitle: 'PyTorch、DINOv3 与单个 Python 包维护入口',
+      subtitle: 'PyTorch、DINOv2 与单个 Python 包维护入口',
       icon: Icons.construction_rounded,
       child: Column(
         children: [
@@ -1861,34 +1861,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _SettingsPanel(
-            title: 'DINOv3 ViT-B/16',
-            subtitle: _loadingDinoV3Status
-                ? '正在读取 DINOv3 组件状态...'
-                : _dinoV3Status == null
-                ? '无法读取 DINOv3 组件状态。'
-                : _dinoV3Status!.healthy && _dinoV3Status!.selectionK != null
-                ? '${_dinoV3Status!.message} · Multi-prototype K=${_dinoV3Status!.selectionK}'
-                : _dinoV3Status!.message,
+            title: 'DINOv2 ViT-B/16',
+            subtitle: _loadingDinoV2Status
+                ? '正在读取 DINOv2 组件状态...'
+                : _dinoV2Status == null
+                ? '无法读取 DINOv2 组件状态。'
+                : _dinoV2Status!.healthy && _dinoV2Status!.selectionK != null
+                ? '${_dinoV2Status!.message} · Multi-prototype K=${_dinoV2Status!.selectionK}'
+                : _dinoV2Status!.message,
             icon: Icons.hub_rounded,
             child: Builder(
               builder: (context) {
-                if (_loadingDinoV3Status) {
+                if (_loadingDinoV2Status) {
                   return const SizedBox.square(
                     dimension: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   );
                 }
-                final status = _dinoV3Status;
+                final status = _dinoV2Status;
                 if (status?.healthy == true) {
                   return OutlinedButton(
-                    key: const Key('dinov3-component-action'),
-                    onPressed: _maintenanceBusy ? null : _removeDinoV3,
+                    key: const Key('dinov2-component-action'),
+                    onPressed: _maintenanceBusy ? null : _removeDinoV2,
                     child: const Text('删除'),
                   );
                 }
                 return FilledButton(
-                  key: const Key('dinov3-component-action'),
-                  onPressed: _maintenanceBusy ? null : _installDinoV3,
+                  key: const Key('dinov2-component-action'),
+                  onPressed: _maintenanceBusy ? null : _installDinoV2,
                   child: Text(status?.installed == true ? '安装/修复' : '安装'),
                 );
               },

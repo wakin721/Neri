@@ -81,9 +81,6 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
             detector.dinov2_registry = runtime.registry
             detector.dinov2_feedback = runtime.feedback
             detector.dinov2_runtime = runtime
-            # Temporary cleanup alias for the frozen generic job loop only.
-            # This does not enable DINOv3 inference and is deleted in Task 12.
-            detector.dinov3_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
     if (
@@ -176,11 +173,10 @@ def _record_validation_feedback(
         feedback.close()
 
 
-# These assignments redirect global lookups inside the frozen generic service
-# implementation. No DINOv3 checkpoint/encoder/runtime is loaded through them.
-_legacy._validate_dinov3_job_options = _validate_dinov2_job_options
-_legacy._dinov3_manifest_payload = _dinov2_manifest_payload
-_legacy._persist_dinov3_observations = _persist_dinov2_observations
+# These assignments redirect DINO hooks inside the generic service implementation.
+_legacy._validate_dinov2_job_options = _validate_dinov2_job_options
+_legacy._dinov2_manifest_payload = _dinov2_manifest_payload
+_legacy._persist_dinov2_observations = _persist_dinov2_observations
 _legacy._load_detector = _load_detector
 _legacy._learnable_observations_for_file = _learnable_observations_for_file
 _legacy._checkpoint_species_for_model = _checkpoint_species_for_model

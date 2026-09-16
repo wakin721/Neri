@@ -696,7 +696,7 @@ class ProcessingJobManager:
                 return
             self._active_job_ids.add(job_id)
         request = _effective_processing_request(request)
-        _validate_dinov3_job_options(
+        _validate_dinov2_job_options(
             request.options.model_path,
             request.options.classification_model_path,
             request.options.video_mode,
@@ -1267,12 +1267,12 @@ class ProcessingJobManager:
                 self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message="处理失败")
         finally:
             if detector is not None:
-                runtime = getattr(detector, "dinov3_runtime", None)
+                runtime = getattr(detector, "dinov2_runtime", None)
                 if runtime is not None:
                     try:
                         runtime.close()
                     except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
-                        logger.warning("DINOv3 runtime cleanup failed: %s", exc)
+                        logger.warning("DINOv2 runtime cleanup failed: %s", exc)
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
@@ -1549,7 +1549,7 @@ def _build_metadata_item(path: Path) -> DetectionItem:
 
 
 
-def _dinov3_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | None:
+def _dinov2_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | None:
     if not model_path:
         return None
     path = Path(model_path).expanduser()
@@ -1559,24 +1559,24 @@ def _dinov3_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | 
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) and payload.get("backend") == "dinov3" else None
+    return payload if isinstance(payload, dict) and payload.get("backend") == "dinov2" else None
 
 
-def _validate_dinov3_job_options(
+def _validate_dinov2_job_options(
     model_path: str | None,
     classification_model_path: str | None,
     video_mode: str,
 ) -> None:
-    payload = _dinov3_manifest_payload(classification_model_path)
+    payload = _dinov2_manifest_payload(classification_model_path)
     if payload is None:
         return
     if not model_path:
-        raise ValueError("DINOv3 分类模型必须同时选择探测模型。")
+        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError("DINOv3 暂不支持视频完整识别，请使用快速识别或跳过视频。")
+        raise ValueError("DINOv2 暂不支持视频完整识别，请使用快速识别或跳过视频。")
 
 
-def _parse_dinov3_capture_time(value: str | None) -> datetime | None:
+def _parse_dinov2_capture_time(value: str | None) -> datetime | None:
     if not value:
         return None
     text = str(value).strip()
@@ -1596,7 +1596,7 @@ def _parse_dinov3_capture_time(value: str | None) -> datetime | None:
     return None
 
 
-def _persist_dinov3_observations(
+def _persist_dinov2_observations(
     detector,
     paths: list[Path],
     items: list[DetectionItem],
@@ -1606,7 +1606,7 @@ def _persist_dinov3_observations(
     frame_indices: list[int | None] | None = None,
     timestamp_seconds: list[float | None] | None = None,
 ) -> None:
-    from .dinov3_feedback_service import persist_runtime_observations
+    from .dinov2_feedback_service import persist_runtime_observations
 
     persist_runtime_observations(
         detector,
@@ -1629,28 +1629,28 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
     if resolved_model_path is None and resolved_classification_path is None:
         raise ValueError("探测模型和分类模型至少需要选择一个。")
 
-    dinov3_payload = _dinov3_manifest_payload(resolved_classification_path)
-    if dinov3_payload is not None and resolved_model_path is None:
-        raise ValueError("DINOv3 分类模型必须同时选择探测模型。")
+    dinov2_payload = _dinov2_manifest_payload(resolved_classification_path)
+    if dinov2_payload is not None and resolved_model_path is None:
+        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
 
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None
     )
     if resolved_classification_path is not None:
-        if dinov3_payload is not None:
-            from system.dinov3.runtime import load_dinov3_model
+        if dinov2_payload is not None:
+            from system.dinov2.runtime import load_dinov2_model
 
-            runtime = load_dinov3_model(resolved_classification_path)
-            detector.load_dinov3_classifier(runtime.classifier)
-            detector.dinov3_registry = runtime.registry
-            detector.dinov3_feedback = runtime.feedback
-            detector.dinov3_runtime = runtime
+            runtime = load_dinov2_model(resolved_classification_path)
+            detector.load_dinov2_classifier(runtime.classifier)
+            detector.dinov2_registry = runtime.registry
+            detector.dinov2_feedback = runtime.feedback
+            detector.dinov2_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
     if (
         detector.model is None
         and detector.cls_model is None
-        and getattr(detector, "dinov3_classifier", None) is None
+        and getattr(detector, "dinov2_classifier", None) is None
     ):
         raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
@@ -2291,7 +2291,7 @@ def _detect_image_batch(
             detection_payloads.append((path, detection_data))
             detected_items.append(_apply_detection_data(item, detection_data))
         serialize_elapsed = time.perf_counter() - serialize_started
-        _persist_dinov3_observations(detector, paths, items, input_path)
+        _persist_dinov2_observations(detector, paths, items, input_path)
         save_started = time.perf_counter()
         _save_detection_data_batch(detection_payloads, input_path)
         save_elapsed = time.perf_counter() - save_started
@@ -2329,7 +2329,7 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             selected_species_names=request.options.selected_species_names,
         )
         detection = detections[0] if detections else {}
-        _persist_dinov3_observations(detector, [path], [item], input_path)
+        _persist_dinov2_observations(detector, [path], [item], input_path)
         detection_data = _serialize_detector_output(detector, detection)
         _save_detection_data_for_path(path, detection_data, input_path)
         return _apply_detection_data(item, detection_data)
@@ -2539,7 +2539,7 @@ def _detect_video_fast_batch(
                 frame_timestamps.append(
                     float(record["frame_index"]) / float(fps) if fps else None
                 )
-            _persist_dinov3_observations(
+            _persist_dinov2_observations(
                 detector,
                 [Path(record["path"]) for record in frame_batch],
                 frame_items,
@@ -2969,8 +2969,8 @@ def _learnable_observations_for_file(
     classification_model_path: str,
     file_path: Path,
 ):
-    """Return persisted DINOv3 observations belonging to one media file."""
-    from .dinov3_feedback_service import _open_feedback_state, _path_identity
+    """Return persisted DINOv2 observations belonging to one media file."""
+    from .dinov2_feedback_service import _open_feedback_state, _path_identity
 
     feedback, _feature_center = _open_feedback_state(classification_model_path)
     try:
@@ -3001,12 +3001,12 @@ def _eligible_auto_feedback(observations):
 
 
 def _checkpoint_species_for_model(classification_model_path: str) -> set[str] | None:
-    from .dinov3_registry_service import load_checkpoint_for_model
-    from system.dinov3.runtime import DinoV3ManifestError
+    from .dinov2_registry_service import load_checkpoint_for_model
+    from system.dinov2.runtime import DinoV2ManifestError
 
     try:
         return set(load_checkpoint_for_model(classification_model_path).classes)
-    except (DinoV3ManifestError, FileNotFoundError):
+    except (DinoV2ManifestError, FileNotFoundError):
         # Preserve the historical feedback path when the model cannot be
         # resolved (including mocked test paths). That path will surface
         # the original model error rather than misclassifying it as a
@@ -3020,7 +3020,7 @@ def _record_validation_registry_feedback(
     operation_id: str,
     confirmed_species: str,
 ):
-    from .dinov3_feedback_service import record_registry_species_feedback
+    from .dinov2_feedback_service import record_registry_species_feedback
 
     return record_registry_species_feedback(
         classification_model_path,
@@ -3038,7 +3038,7 @@ def _record_validation_feedback(
     confirmed_species: str | None,
 ):
     """Record one conservative file-level validation feedback event."""
-    from .dinov3_feedback_service import (
+    from .dinov2_feedback_service import (
         _affected_learning_species,
         _open_feedback_state,
     )
@@ -3183,7 +3183,7 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
                         confirmed_species,
                     )
         except Exception as exc:
-            raise RuntimeError(f"DINOv3 自动反馈失败: {exc}") from exc
+            raise RuntimeError(f"DINOv2 自动反馈失败: {exc}") from exc
 
     # Only journal after the user's local decision is saved. Compression/network run
     # on an independent worker; this optional feature must never break annotation.

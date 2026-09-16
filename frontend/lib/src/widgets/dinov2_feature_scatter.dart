@@ -5,12 +5,12 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
-import '../models/dinov3_explanation.dart';
+import '../models/dinov2_explanation.dart';
 
-class DinoV3FeatureScatter extends StatelessWidget {
-  const DinoV3FeatureScatter({required this.explanation, super.key});
+class DinoV2FeatureScatter extends StatelessWidget {
+  const DinoV2FeatureScatter({required this.explanation, super.key});
 
-  final DinoV3FeatureExplanation explanation;
+  final DinoV2FeatureExplanation explanation;
 
   @override
   Widget build(BuildContext context) {
@@ -20,7 +20,7 @@ class DinoV3FeatureScatter extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Container(
-      key: const ValueKey('dinov3-feature-scatter'),
+      key: const ValueKey('dinov2-feature-scatter'),
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
         border: Border.all(color: colorScheme.outlineVariant),
@@ -84,8 +84,8 @@ class DinoV3FeatureScatter extends StatelessWidget {
   }
 }
 
-class DinoV3FeatureExplanationPanel extends StatefulWidget {
-  const DinoV3FeatureExplanationPanel({
+class DinoV2FeatureExplanationPanel extends StatefulWidget {
+  const DinoV2FeatureExplanationPanel({
     required this.apiClient,
     required this.classificationModelPath,
     required this.observationId,
@@ -97,13 +97,13 @@ class DinoV3FeatureExplanationPanel extends StatefulWidget {
   final String observationId;
 
   @override
-  State<DinoV3FeatureExplanationPanel> createState() =>
-      _DinoV3FeatureExplanationPanelState();
+  State<DinoV2FeatureExplanationPanel> createState() =>
+      _DinoV2FeatureExplanationPanelState();
 }
 
-class _DinoV3FeatureExplanationPanelState
-    extends State<DinoV3FeatureExplanationPanel> {
-  DinoV3FeatureExplanation? _explanation;
+class _DinoV2FeatureExplanationPanelState
+    extends State<DinoV2FeatureExplanationPanel> {
+  DinoV2FeatureExplanation? _explanation;
   Uint8List? _currentExample;
   Uint8List? _nearestExample;
   String? _error;
@@ -117,7 +117,7 @@ class _DinoV3FeatureExplanationPanelState
   }
 
   @override
-  void didUpdateWidget(covariant DinoV3FeatureExplanationPanel oldWidget) {
+  void didUpdateWidget(covariant DinoV2FeatureExplanationPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.observationId != widget.observationId ||
         oldWidget.classificationModelPath != widget.classificationModelPath) {
@@ -137,7 +137,7 @@ class _DinoV3FeatureExplanationPanelState
       });
     }
     try {
-      final explanation = await widget.apiClient.fetchDinoV3FeatureExplanation(
+      final explanation = await widget.apiClient.fetchDinoV2FeatureExplanation(
         widget.classificationModelPath,
         widget.observationId,
       );
@@ -145,7 +145,7 @@ class _DinoV3FeatureExplanationPanelState
       Uint8List? nearestBytes;
       if (explanation.currentExampleAvailable) {
         try {
-          currentBytes = await widget.apiClient.fetchDinoV3ObservationExample(
+          currentBytes = await widget.apiClient.fetchDinoV2ObservationExample(
             widget.classificationModelPath,
             widget.observationId,
           );
@@ -157,14 +157,14 @@ class _DinoV3FeatureExplanationPanelState
           if (nearest.kind == 'registry' &&
               nearest.registrationId != null &&
               nearest.eventId != null) {
-            nearestBytes = await widget.apiClient.fetchDinoV3RegistryExample(
+            nearestBytes = await widget.apiClient.fetchDinoV2RegistryExample(
               widget.classificationModelPath,
               nearest.registrationId!,
               nearest.eventId!,
             );
           } else if (nearest.kind == 'observation' &&
               (nearest.observationId?.isNotEmpty ?? false)) {
-            nearestBytes = await widget.apiClient.fetchDinoV3ObservationExample(
+            nearestBytes = await widget.apiClient.fetchDinoV2ObservationExample(
               widget.classificationModelPath,
               nearest.observationId!,
             );
@@ -225,7 +225,7 @@ class _DinoV3FeatureExplanationPanelState
     );
   }
 
-  Widget _content(DinoV3FeatureExplanation explanation) {
+  Widget _content(DinoV2FeatureExplanation explanation) {
     final nearest = explanation.nearestSpecies;
     final closestName = nearest.isEmpty ? '暂无' : nearest.first.name;
     final nearestExampleLabel = explanation.nearestExample == null
@@ -262,7 +262,7 @@ class _DinoV3FeatureExplanationPanelState
         const SizedBox(height: 10),
         SizedBox(
           height: 210,
-          child: DinoV3FeatureScatter(explanation: explanation),
+          child: DinoV2FeatureScatter(explanation: explanation),
         ),
         const SizedBox(height: 10),
         Wrap(
@@ -302,7 +302,7 @@ class _DinoV3FeatureExplanationPanelState
   @override
   Widget build(BuildContext context) {
     return ExpansionTile(
-      key: ValueKey('dinov3-feature-explanation-${widget.observationId}'),
+      key: ValueKey('dinov2-feature-explanation-${widget.observationId}'),
       initiallyExpanded: true,
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.only(bottom: 4),
@@ -337,7 +337,7 @@ class _FeatureScatterPainter extends CustomPainter {
     required this.colors,
   });
 
-  final List<DinoV3ProjectionPoint> points;
+  final List<DinoV2ProjectionPoint> points;
   final String firstSpecies;
   final String secondSpecies;
   final ColorScheme colors;
@@ -372,7 +372,7 @@ class _FeatureScatterPainter extends CustomPainter {
     final centerX = (minX + maxX) / 2;
     final centerY = (minY + maxY) / 2;
 
-    Offset mapPoint(DinoV3ProjectionPoint point) => Offset(
+    Offset mapPoint(DinoV2ProjectionPoint point) => Offset(
       plot.center.dx + (point.x - centerX) * scale,
       plot.center.dy - (point.y - centerY) * scale,
     );

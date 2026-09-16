@@ -1,4 +1,4 @@
-"""Indexed compatibility layer for persisted DINOv3 feedback observations."""
+"""Indexed compatibility layer for persisted DINOv2 feedback observations."""
 from __future__ import annotations
 
 import json

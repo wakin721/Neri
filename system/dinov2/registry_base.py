@@ -1,4 +1,4 @@
-"""Compatibility facade for the DINOv3 species registry.
+"""Compatibility facade for the DINOv2 species registry.
 
 The implementation lives in ``registry_impl`` so this facade can keep the
 public module stable while applying small behavioural fixes.
@@ -12,7 +12,7 @@ from .registry_examples import (
 )
 
 # Preserve the historical module surface, including private helpers used by
-# nearby DINOv3 modules/tests, then override only SpeciesRegistry.
+# nearby DINOv2 modules/tests, then override only SpeciesRegistry.
 for _name in dir(_impl):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_impl, _name)

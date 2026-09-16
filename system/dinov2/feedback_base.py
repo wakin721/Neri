@@ -1,4 +1,4 @@
-"""Fingerprint-scoped human-feedback learning for DINOv3 classifiers.
+"""Fingerprint-scoped human-feedback learning for DINOv2 classifiers.
 
 The checkpoint remains immutable. Explicit box-level feedback is stored in a
 separate SQLite database and is converted into reversible prototype generations
