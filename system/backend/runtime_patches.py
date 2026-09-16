@@ -6,7 +6,7 @@ from typing import Any
 REJECTED_UNKNOWN_LABEL = '拒识/Unknown'
 
 
-def _candidate_is_dinov3_rejection(candidate: Any) -> bool:
+def _candidate_is_dinov2_rejection(candidate: Any) -> bool:
     if not isinstance(candidate, Mapping):
         return False
     if candidate.get('accepted') is not False:
@@ -23,7 +23,7 @@ def _first_rejected_candidate(candidates: Any) -> Mapping[str, Any] | None:
     if not isinstance(candidates, list):
         return None
     for candidate in candidates:
-        if _candidate_is_dinov3_rejection(candidate):
+        if _candidate_is_dinov2_rejection(candidate):
             return candidate
     return None
 
@@ -49,16 +49,11 @@ def _split_species(value: Any) -> list[str]:
     ]
 
 
-def preserve_dinov3_rejections(
+def preserve_dinov2_rejections(
     payload: dict[str, Any],
     detection: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Restore DINOv3 open-set rejections that ImageProcessor marks as filtered.
-
-    Normal low-confidence classifier filtering remains untouched. Only candidates
-    carrying the native DINOv3 rejection metadata and ``accepted == False`` are
-    surfaced as the explicit ``拒识/Unknown`` state.
-    """
+    """Restore DINOv2 open-set rejections that ImageProcessor marks as filtered."""
 
     results = detection.get('detect_results') or []
     rejected_boxes: list[dict[str, Any]] = []
@@ -96,6 +91,10 @@ def preserve_dinov3_rejections(
                 'known_score',
                 'threshold',
                 'squared_distance',
+                'class_margin',
+                'adjusted_distance_score',
+                'score_threshold',
+                'registry_action',
                 'assistive_match',
                 'source',
                 'nearest_prototype_index',
@@ -154,7 +153,7 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
             detection: dict[str, Any],
         ) -> dict[str, Any]:
             payload = original_serializer(detector, detection)
-            return preserve_dinov3_rejections(payload, detection)
+            return preserve_dinov2_rejections(payload, detection)
 
         setattr(patched_serializer, '_neri_preserves_open_set_rejections', True)
         services_module._serialize_detector_output = patched_serializer
@@ -162,7 +161,7 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
     if not patch_preview:
         return
 
-    from system.dinov3.feedback_index import install_feedback_store_patches
+    from system.dinov2.feedback_index import install_feedback_store_patches
 
     install_feedback_store_patches()
 
@@ -260,7 +259,7 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
     mark_items = getattr(services_module, 'mark_validation_items', None)
     if callable(mark_items) and not getattr(
         mark_items,
-        '_neri_batched_dinov3_feedback',
+        '_neri_batched_dinov2_feedback',
         False,
     ):
         from .validation_fast import make_mark_validation_items
@@ -280,7 +279,7 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
             classification_model_path,
             file_path,
         ):
-            from .dinov3_feedback_service import _open_feedback_state
+            from .dinov2_feedback_service import _open_feedback_state
 
             feedback, _feature_center = _open_feedback_state(
                 classification_model_path
@@ -299,10 +298,10 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
             indexed_learnable_observations
         )
 
-    from . import dinov3_feedback_service
+    from . import dinov2_feedback_service
 
     persistence = getattr(
-        dinov3_feedback_service,
+        dinov2_feedback_service,
         'persist_runtime_observations',
         None,
     )
@@ -311,8 +310,8 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
         '_neri_batched_runtime_persistence',
         False,
     ):
-        from .dinov3_persistence_fast import persist_runtime_observations
+        from .dinov2_persistence_fast import persist_runtime_observations
 
-        dinov3_feedback_service.persist_runtime_observations = (
+        dinov2_feedback_service.persist_runtime_observations = (
             persist_runtime_observations
         )
