@@ -3483,7 +3483,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final inputPath = _inputController.text.trim();
     final allItems = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
-        : _previewItems;
+        : validationItemsInInputFolder(_previewItems, inputPath);
     final hasDinoFilter = _dinov3ValidationPaths.isNotEmpty;
     final items = hasDinoFilter
         ? allItems
