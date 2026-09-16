@@ -168,6 +168,10 @@ class ModelInfo {
   final String? checkpointPath;
 
   bool get isDinoV2 => backend == 'dinov2';
+
+  @Deprecated('Use isDinoV2. This alias is removed by the DINOv2 clean-break.')
+  bool get isDinoV3 => isDinoV2;
+
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
   String get displayName => '$sourceLabel / $rawName';
   String get name => hasExplicitSource ? displayName : rawName;
