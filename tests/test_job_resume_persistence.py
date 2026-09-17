@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from system.backend import services_legacy as services
+from system.backend import services
 from system.backend.models import (
     CreateJobRequest,
     DetectionItem,
@@ -34,12 +34,18 @@ def _job(job_id: str, input_dir: Path) -> JobSummary:
     )
 
 
+def _patch_state_path(monkeypatch, state_path: Path) -> None:
+    resolver = lambda: state_path
+    monkeypatch.setattr(services, "job_state_path", resolver)
+    monkeypatch.setattr(services._legacy, "job_state_path", resolver)
+
+
 def test_completed_image_batch_is_checkpointed_while_job_is_running(
     monkeypatch,
     tmp_path,
 ):
     state_path = tmp_path / "job_state.json"
-    monkeypatch.setattr(services, "job_state_path", lambda: state_path)
+    _patch_state_path(monkeypatch, state_path)
 
     image_path = tmp_path / "camera-01" / "0001.jpg"
     image_path.parent.mkdir()
@@ -60,23 +66,24 @@ def test_completed_image_batch_is_checkpointed_while_job_is_running(
     class FakeDetector:
         pass
 
-    monkeypatch.setattr(services, "_validate_dinov2_job_options", lambda *args: None)
-    monkeypatch.setattr(services, "_start_batch_log_session", lambda *args, **kwargs: None)
+    legacy = services._legacy
+    monkeypatch.setattr(legacy, "_validate_dinov2_job_options", lambda *args: None)
+    monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        services,
+        legacy,
         "_resolve_job_inputs",
         lambda request, cancelled=None: (tmp_path, [image_path]),
     )
-    monkeypatch.setattr(services, "_preview_detection_db_roots", lambda *args, **kwargs: [])
-    monkeypatch.setattr(services, "_load_detection_index", lambda *args, **kwargs: {})
-    monkeypatch.setattr(services, "_load_detector", lambda *args, **kwargs: FakeDetector())
-    monkeypatch.setattr(services, "_build_metadata_item", lambda path: item)
+    monkeypatch.setattr(legacy, "_preview_detection_db_roots", lambda *args, **kwargs: [])
+    monkeypatch.setattr(legacy, "_load_detection_index", lambda *args, **kwargs: {})
+    monkeypatch.setattr(legacy, "_load_detector", lambda *args, **kwargs: FakeDetector())
+    monkeypatch.setattr(legacy, "_build_metadata_item", lambda path: item)
     monkeypatch.setattr(
-        services,
+        legacy,
         "_detect_image_batch",
         lambda detector, batch, batch_items, request, input_path, preloaded_data=None: [item],
     )
-    monkeypatch.setattr(services, "_export_results", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy, "_export_results", lambda *args, **kwargs: None)
 
     snapshots: list[tuple[JobState, int]] = []
     original_save = manager._save_state_unlocked
@@ -101,7 +108,7 @@ def test_failed_state_checkpoint_does_not_corrupt_previous_resume_state(
     tmp_path,
 ):
     state_path = tmp_path / "job_state.json"
-    monkeypatch.setattr(services, "job_state_path", lambda: state_path)
+    _patch_state_path(monkeypatch, state_path)
 
     manager = services.ProcessingJobManager(max_workers=1)
     job_id = "atomic-state"
