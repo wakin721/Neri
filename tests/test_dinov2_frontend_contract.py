@@ -36,4 +36,5 @@ def test_registry_dialog_matches_backend_initial_registration_conditions():
     text = _read("frontend/lib/src/widgets/dinov2_registry_dialog.dart")
     assert "_conditionRow('≥4 个独立事件', conditions['events'] == true)" in text
     assert "conditions['cameras']" not in text
+    assert "≥2 台相机" not in text
     assert "≥5 个独立事件" not in text
