@@ -98,7 +98,12 @@ def test_default_model_factory_uses_offline_safe_transformers_flags(tmp_path, mo
             observed.update(kwargs)
             return sentinel
 
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoModel=FakeAutoModel))
+    transformers_module = ModuleType("transformers")
+    transformers_module.AutoModel = FakeAutoModel
+    transformers_utils_module = ModuleType("transformers.utils")
+    transformers_utils_module.logging = SimpleNamespace(disable_progress_bar=lambda: None)
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    monkeypatch.setitem(sys.modules, "transformers.utils", transformers_utils_module)
 
     result = _default_model_factory(tmp_path)
 
