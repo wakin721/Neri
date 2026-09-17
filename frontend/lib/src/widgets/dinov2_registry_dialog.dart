@@ -1002,9 +1002,8 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
                 if (!entry.isCheckpoint) ...[
                   const SizedBox(height: 14),
                   Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
-                  _conditionRow('≥5 个独立事件', conditions['events'] == true),
-                  _conditionRow('≥2 台相机', conditions['cameras'] == true),
-                  _conditionRow(
+                  _conditionRow('≥4 个独立事件', conditions['events'] == true),
+                                    _conditionRow(
                     'cluster purity ≥ threshold',
                     conditions['cluster_purity'] == true,
                   ),
