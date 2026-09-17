@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -106,6 +106,32 @@ def test_default_model_factory_uses_offline_safe_transformers_flags(tmp_path, mo
     assert observed["path"] == str(tmp_path.resolve())
     assert observed["local_files_only"] is True
     assert observed["trust_remote_code"] is False
+
+
+def test_default_model_factory_disables_transformers_progress_bar_before_loading(tmp_path, monkeypatch):
+    events = []
+    sentinel = object()
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            events.append("load")
+            return sentinel
+
+    transformers_module = ModuleType("transformers")
+    transformers_module.AutoModel = FakeAutoModel
+    transformers_utils_module = ModuleType("transformers.utils")
+    transformers_logging = SimpleNamespace(
+        disable_progress_bar=lambda: events.append("disable_progress_bar")
+    )
+    transformers_utils_module.logging = transformers_logging
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    monkeypatch.setitem(sys.modules, "transformers.utils", transformers_utils_module)
+
+    result = _default_model_factory(tmp_path)
+
+    assert result is sentinel
+    assert events == ["disable_progress_bar", "load"]
 
 
 def test_encoder_rejects_requested_cuda_when_unavailable(tmp_path, monkeypatch):
