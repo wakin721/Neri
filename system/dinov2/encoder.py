@@ -65,10 +65,18 @@ def resolve_encoder_dir(
 def _default_model_factory(model_dir: str | Path):
     try:
         from transformers import AutoModel
+        from transformers.utils import logging as transformers_logging
     except ImportError as exc:
         raise EncoderAssetError(
             "Transformers is required for the DINOv2 component"
         ) from exc
+
+    # The packaged GUI backend can run without a console-backed stderr handle.
+    # Transformers uses tqdm during weight loading, and tqdm flushes stderr;
+    # disabling that redundant progress UI prevents OSError on Windows while
+    # leaving model loading and inference unchanged.
+    transformers_logging.disable_progress_bar()
+
     resolved = Path(model_dir).expanduser().resolve()
     return AutoModel.from_pretrained(
         str(resolved),
