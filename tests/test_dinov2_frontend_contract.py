@@ -30,3 +30,10 @@ def test_dinov2_startup_check_uses_new_component_status():
     assert "fetchDinoV2ComponentStatus" in text
     assert "DinoV2StartupCheck" in text
     assert "DINOv3" not in text
+
+
+def test_registry_dialog_matches_backend_initial_registration_conditions():
+    text = _read("frontend/lib/src/widgets/dinov2_registry_dialog.dart")
+    assert "_conditionRow('≥4 个独立事件', conditions['events'] == true)" in text
+    assert "conditions['cameras']" not in text
+    assert "≥5 个独立事件" not in text
