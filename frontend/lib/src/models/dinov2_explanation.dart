@@ -126,6 +126,7 @@ class DinoV2FeatureExplanation {
     required this.bestKnownSpecies,
     required this.knownScore,
     required this.threshold,
+    required this.rejectionMode,
     required this.nearestSpecies,
     required this.projection,
     required this.currentExampleAvailable,
@@ -140,18 +141,21 @@ class DinoV2FeatureExplanation {
   factory DinoV2FeatureExplanation.fromJson(Map<String, dynamic> json) {
     final projection = json['projection'];
     final nearestExample = json['nearest_example'];
+    final rejection = json['rejection'];
     return DinoV2FeatureExplanation(
       species: json['species']?.toString() ?? 'Unknown',
       accepted: json['accepted'] == true,
       bestKnownSpecies: json['best_known_species']?.toString() ?? '',
       knownScore: (json['known_score'] as num?)?.toDouble() ?? 0,
       threshold: (json['threshold'] as num?)?.toDouble() ?? 0,
-      nearestPrototypeIndex:
-          (json['nearest_prototype_index'] as num?)?.toInt(),
+      rejectionMode: rejection is Map<String, dynamic>
+          ? rejection['mode']?.toString() ?? ''
+          : '',
+      nearestPrototypeIndex: (json['nearest_prototype_index'] as num?)?.toInt(),
       squaredDistance: (json['squared_distance'] as num?)?.toDouble(),
       classMargin: (json['class_margin'] as num?)?.toDouble(),
-      adjustedDistanceScore:
-          (json['adjusted_distance_score'] as num?)?.toDouble(),
+      adjustedDistanceScore: (json['adjusted_distance_score'] as num?)
+          ?.toDouble(),
       scoreThreshold: (json['score_threshold'] as num?)?.toDouble(),
       nearestSpecies:
           (json['nearest_species'] as List<dynamic>? ?? const <dynamic>[])
@@ -175,6 +179,7 @@ class DinoV2FeatureExplanation {
   final String bestKnownSpecies;
   final double knownScore;
   final double threshold;
+  final String rejectionMode;
   final int? nearestPrototypeIndex;
   final double? squaredDistance;
   final double? classMargin;

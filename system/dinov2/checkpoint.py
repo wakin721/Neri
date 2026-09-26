@@ -330,10 +330,14 @@ def validate_checkpoint(
 
 
 def load_checkpoint(path: str | Path) -> DinoV2Checkpoint:
-    torch = _require_torch()
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(f"DINOv2 classifier checkpoint not found: {resolved}")
+    if resolved.suffix.lower() == ".npz":
+        from .memory_checkpoint import load_memory_checkpoint
+
+        return load_memory_checkpoint(resolved)
+    torch = _require_torch()
     try:
         saved = torch.load(resolved, map_location="cpu", weights_only=True)
     except TypeError:

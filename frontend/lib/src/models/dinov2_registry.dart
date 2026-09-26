@@ -172,6 +172,9 @@ class DinoV2RegistryEntry {
 
   bool get isCandidate => status == 'candidate';
   bool get isCheckpoint => status.toLowerCase() == 'checkpoint';
+  bool get isMemoryCheckpoint =>
+      isCheckpoint &&
+      clusters.any((cluster) => cluster.id.startsWith('memory:'));
   bool get hasFeedbackLearning => feedbackEventCount > 0;
 
   bool get canDelete => const <String>{

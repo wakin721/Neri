@@ -8,6 +8,7 @@ import '../models/job.dart';
 import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
 import '../utils/validation_cache_delta.dart';
+import '../utils/validation_selection_modifiers.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/dinov2_feature_scatter.dart';
@@ -331,7 +332,8 @@ class _MarkHistoryEntry {
   final String? feedbackOperationId;
 }
 
-class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
+class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
+    with WidgetsBindingObserver {
   static const _globalSpecies = 'global';
   static const _quickSpecies = <String>[
     '灰雁',
@@ -407,6 +409,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   String? _pendingItemPath;
   final List<String> _sessionQuickMarkHistory = <String>[];
   final Set<String> _selectedPaths = <String>{};
+  final ValidationSelectionModifiers _selectionModifiers =
+      ValidationSelectionModifiers();
   String? _selectionAnchorPath;
   String? _selectedGroupSignature;
   bool? _bucketCacheAutoGroup;
@@ -439,6 +443,25 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   final Set<String> _deferredRegroupGroupSignatures = <String>{};
   final Set<String> _expandedGroupSignatures = <String>{};
   int? _lastReportedAutoGroupInferredBurstSize;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _selectionModifiers.clear();
+    }
+  }
 
   bool get _useCollapsedGroups => widget.autoGroup && widget.collapseGroups;
   int get _undoHistoryLimit => widget.undoSteps.clamp(10, 200).toInt();
@@ -479,6 +502,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.inputPath != widget.inputPath) {
+      _selectionModifiers.clear();
       _markHistory.clear();
       _pendingValidationEchoPaths.clear();
     }
@@ -608,6 +632,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
       ),
       child: Focus(
         autofocus: true,
+        onFocusChange: (hasFocus) {
+          if (!hasFocus) _selectionModifiers.clear();
+        },
         onKeyEvent: (node, event) => _handleKeyEvent(event),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -646,6 +673,15 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
   }
 
   KeyEventResult _handleKeyEvent(KeyEvent event) {
+    if (event is KeyUpEvent) {
+      if (_selectionModifiers.release(event.logicalKey)) {
+        return KeyEventResult.ignored;
+      }
+    } else if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      if (_selectionModifiers.press(event.logicalKey)) {
+        return KeyEventResult.ignored;
+      }
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
@@ -1550,15 +1586,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen> {
     _ValidationFileRow? row,
   }) {
     final targetItem = row != null && row.isGroupHeader ? row.item : item;
-    final pressedKeys = HardwareKeyboard.instance.logicalKeysPressed;
-    final rangeSelection =
-        pressedKeys.contains(LogicalKeyboardKey.shiftLeft) ||
-        pressedKeys.contains(LogicalKeyboardKey.shiftRight);
-    final toggleSelection =
-        pressedKeys.contains(LogicalKeyboardKey.controlLeft) ||
-        pressedKeys.contains(LogicalKeyboardKey.controlRight) ||
-        pressedKeys.contains(LogicalKeyboardKey.metaLeft) ||
-        pressedKeys.contains(LogicalKeyboardKey.metaRight);
+    final rangeSelection = _selectionModifiers.rangeSelection;
+    final toggleSelection = _selectionModifiers.toggleSelection;
 
     setState(() {
       _selectedPath = targetItem.path;

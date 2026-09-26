@@ -64,6 +64,7 @@ from .model_services import (
     list_available_models,
     model_directory,
 )
+from .preview_scan import PreviewScanCoordinator
 from .services import (
     JobNotFoundError,
     ProcessingJobManager,
@@ -80,6 +81,7 @@ from .services import (
 
 configure_backend_crash_logging()
 logger = logging.getLogger(__name__)
+preview_scan_coordinator = PreviewScanCoordinator()
 
 @asynccontextmanager
 async def app_lifespan(_app):
@@ -537,10 +539,23 @@ def preview(
 ) -> list[DetectionItem]:
     """List previewable media and cached DB detections without starting a job."""
 
+    generation = preview_scan_coordinator.begin()
     try:
-        return preview_media_items(input_path, output_dir, include_cached=include_cached)
+        return preview_media_items(
+            input_path,
+            output_dir,
+            include_cached=include_cached,
+            cancelled=lambda: not preview_scan_coordinator.is_current(generation),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if not preview_scan_coordinator.is_current(generation):
+            raise HTTPException(
+                status_code=409,
+                detail="Preview scan superseded",
+            ) from exc
+        raise
 
 
 @app.get("/api/preview/item", response_model=DetectionItem)

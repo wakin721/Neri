@@ -129,12 +129,14 @@ def make_preview_media_items(services_module: Any):
         output_dir: str | None = None,
         *,
         include_cached: bool = True,
+        cancelled=None,
     ):
         input_path = Path(input_dir).expanduser().resolve()
         if not input_path.exists():
             raise ValueError(f'输入路径不存在: {input_path}')
 
-        files = list(services_module._resolve_supported_inputs(input_path))
+        resolve_kwargs = {"cancelled": cancelled} if cancelled is not None else {}
+        files = list(services_module._resolve_supported_inputs(input_path, **resolve_kwargs))
         if not files:
             return []
 
@@ -157,6 +159,8 @@ def make_preview_media_items(services_module: Any):
 
         items = []
         for path in files:
+            if cancelled is not None:
+                services_module._raise_if_cancelled(cancelled)
             item = services_module._build_fast_metadata_item(path)
             if include_cached:
                 data = detection_index.get(path.stem)

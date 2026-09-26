@@ -128,6 +128,7 @@ def _create_feedback(registry: Any, checkpoint: DinoV2Checkpoint):
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
+        memory_checkpoint=checkpoint if checkpoint.head_type == "memory_no_centroid" else None,
     )
 
 
@@ -142,6 +143,7 @@ def load_dinov2_model(
     use_fp16: bool = False,
 ) -> DinoV2Runtime:
     from .classifier import DinoV2Classifier
+    from .memory_classifier import MemoryDinoV2Classifier
     from .encoder import DinoV2Encoder
 
     manifest_path = resolve_dinov2_manifest(model_path)
@@ -178,7 +180,12 @@ def load_dinov2_model(
             device=device,
             use_fp16=use_fp16,
         )
-        classifier = DinoV2Classifier(
+        classifier_type = (
+            MemoryDinoV2Classifier
+            if checkpoint.head_type == "memory_no_centroid"
+            else DinoV2Classifier
+        )
+        classifier = classifier_type(
             checkpoint,
             encoder=encoder,
             feedback=feedback,

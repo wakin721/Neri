@@ -532,6 +532,7 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
         return null;
       }
     }
+
     final results = await Future.wait(cluster.exampleRefs.take(3).map(loadRef));
     final loaded = results.whereType<Uint8List>().toList(growable: false);
     if (!mounted ||
@@ -599,6 +600,7 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
           return null;
         }
       }
+
       final loaded = await Future.wait(
         events
             .where((event) => event.id > 0 && event.hasExample)
@@ -920,8 +922,11 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
                 if (entry.isCheckpoint) ...[
                   const SizedBox(height: 8),
                   Text(
-                    '来自不可变 DINOv2 Checkpoint · ${entry.prototypeCount} 个 base prototype。'
-                    '分类头保存特征中心而非原始训练影像。',
+                    entry.isMemoryCheckpoint
+                        ? '来自不可变 DINOv2 Memory · ${entry.prototypeCount} 个样本。'
+                              '分类头保存特征和相机分组，不保存原始训练影像。'
+                        : '来自不可变 DINOv2 Checkpoint · ${entry.prototypeCount} 个 base prototype。'
+                              '分类头保存特征中心而非原始训练影像。',
                   ),
                   if (entry.hasFeedbackLearning)
                     Text(
@@ -1003,7 +1008,7 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
                   const SizedBox(height: 14),
                   Text('注册条件', style: Theme.of(context).textTheme.titleSmall),
                   _conditionRow('≥4 个独立事件', conditions['events'] == true),
-                                    _conditionRow(
+                  _conditionRow(
                     'cluster purity ≥ threshold',
                     conditions['cluster_purity'] == true,
                   ),
@@ -1091,10 +1096,10 @@ class _DinoV2RegistryDialogState extends State<DinoV2RegistryDialog> {
                                     final entry = _displayEntries[index];
                                     final subtitle = entry.isCheckpoint
                                         ? entry.hasFeedbackLearning
-                                              ? '分类头基础物种 · ${entry.prototypeCount} base · '
+                                              ? '分类头基础物种 · ${entry.prototypeCount} ${entry.isMemoryCheckpoint ? 'Memory 样本' : 'base'} · '
                                                     '${entry.feedbackPrototypeCount} learned · '
                                                     '${entry.learningStatus ?? 'collecting'}'
-                                              : '分类头基础物种 · ${entry.prototypeCount} base prototypes'
+                                              : '分类头基础物种 · ${entry.prototypeCount} ${entry.isMemoryCheckpoint ? 'Memory 样本' : 'base prototypes'}'
                                         : '${entry.status} · ${entry.eventCount} 事件 · ${entry.cameraCount} 相机';
                                     return ExpansionTile(
                                       key: PageStorageKey<String>(

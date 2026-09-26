@@ -226,6 +226,7 @@ class _DinoV2FeatureExplanationPanelState
 
   Widget _content(DinoV2FeatureExplanation explanation) {
     final nearest = explanation.nearestSpecies;
+    final isMemory = explanation.rejectionMode == 'memory_no_centroid';
     final closestName = nearest.isEmpty ? '暂无' : nearest.first.name;
     final nearestExampleLabel = explanation.nearestExample == null
         ? '暂无本地代表例图'
@@ -270,7 +271,9 @@ class _DinoV2FeatureExplanationPanelState
           children: [
             Text('判定：${explanation.species}'),
             Text('最近类：$closestName'),
-            Text('cosine ${explanation.knownScore.toStringAsFixed(4)}'),
+            Text(
+              '${isMemory ? 'Memory 分数' : 'cosine'} ${explanation.knownScore.toStringAsFixed(4)}',
+            ),
             Text('阈值 ${explanation.threshold.toStringAsFixed(4)}'),
             if (explanation.squaredDistance != null)
               Text('距离² ${explanation.squaredDistance!.toStringAsFixed(4)}'),
@@ -282,13 +285,15 @@ class _DinoV2FeatureExplanationPanelState
             Text(
               '${index + 1}. ${nearest[index].name} · '
               '距离² ${nearest[index].squaredDistance.toStringAsFixed(4)} · '
-              'cosine ${nearest[index].cosineScore.toStringAsFixed(4)} · '
+              '${isMemory ? '近邻分数' : 'cosine'} ${nearest[index].cosineScore.toStringAsFixed(4)} · '
               '${nearest[index].source}',
             ),
         ],
         const SizedBox(height: 8),
         Text(
-          '二维图为当前样本附近 768 维特征空间的解释性投影；实际分类仍使用完整高维特征与真实距离。',
+          isMemory
+              ? '二维图仅用于展示；实际分类使用 768 维特征、按相机聚合的近邻分数和类别间隔。'
+              : '二维图为当前样本附近 768 维特征空间的解释性投影；实际分类仍使用完整高维特征与真实距离。',
           style: TextStyle(
             fontSize: 12,
             color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -306,7 +311,7 @@ class _DinoV2FeatureExplanationPanelState
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.only(bottom: 4),
       title: const Text('特征空间位置与最近类别'),
-      subtitle: const Text('局部二维投影 + 真实高维距离'),
+      subtitle: const Text('局部二维投影 + 高维分类依据'),
       children: [
         if (_loading)
           const Padding(

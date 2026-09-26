@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-
 import '../models/job.dart';
 import '../models/settings.dart';
 import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
+import '../widgets/input_folder_field.dart';
 import '../widgets/section_card.dart';
 
 const _defaultModelDirectory = 'res/model/detect';
@@ -12,8 +11,8 @@ const _defaultClassificationModelDirectory = 'res/model/cls';
 
 ModelInfo? _classificationModelForPath(NeriSettings? settings, String? path) {
   if (path == null || path.isEmpty) return null;
-  for (final model in
-      settings?.availableClassificationModels ?? const <ModelInfo>[]) {
+  for (final model
+      in settings?.availableClassificationModels ?? const <ModelInfo>[]) {
     if (model.path == path || model.checkpointPath == path) return model;
   }
   return null;
@@ -33,9 +32,7 @@ String _modelSelectorHelperText({
   return '扫描 $directory';
 }
 
-List<DropdownMenuEntry<String>> _modelDropdownEntries(
-  List<ModelInfo> models,
-) {
+List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
   final userModels = models.where((model) => model.source != 'sync').toList();
   final cloudModels = models.where((model) => model.source == 'sync').toList();
   return <DropdownMenuEntry<String>>[
@@ -245,29 +242,6 @@ class _CreateJobCard extends StatelessWidget {
   final bool submitting;
   final VoidCallback onCreateJob;
 
-  static const _dialogsChannel = MethodChannel('neri/dialogs');
-
-  Future<void> _selectInputFolder(BuildContext context) async {
-    try {
-      final selected = await _dialogsChannel.invokeMethod<String>(
-        'chooseDirectory',
-        <String, String>{'initialDirectory': inputController.text.trim()},
-      );
-      if (selected == null || selected.isEmpty) return;
-      inputController
-        ..text = selected
-        ..selection = TextSelection.collapsed(offset: selected.length);
-    } on PlatformException catch (error) {
-      if (!context.mounted) return;
-      final message = error.message?.isNotEmpty == true
-          ? error.message!
-          : '无法打开目录选择器';
-      ScaffoldMessenger.maybeOf(
-        context,
-      )?.showSnackBar(SnackBar(content: Text(message)));
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final fp16Enabled =
@@ -286,19 +260,7 @@ class _CreateJobCard extends StatelessWidget {
       icon: Icons.playlist_add_rounded,
       child: Column(
         children: [
-          TextField(
-            controller: inputController,
-            decoration: InputDecoration(
-              labelText: '输入文件夹',
-              hintText: '/path/to/camera-trap-folder',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                tooltip: '选择文件夹',
-                onPressed: () => _selectInputFolder(context),
-                icon: const Icon(Icons.folder_open_rounded),
-              ),
-            ),
-          ),
+          InputFolderField(controller: inputController),
           const SizedBox(height: 12),
           _StartOptionGrid(
             settings: settings,
@@ -554,7 +516,8 @@ class _VideoModeSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final normalized = normalizeVideoProcessingMode(videoMode);
-    final selectedValue = !supportsVideoAll && normalized == videoProcessingModeAll
+    final selectedValue =
+        !supportsVideoAll && normalized == videoProcessingModeAll
         ? videoProcessingModeFast
         : normalized;
     final helperText = isDinoV2

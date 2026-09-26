@@ -873,6 +873,7 @@ class HumanFeedbackStore:
         feature_center: np.ndarray,
         *,
         status: str,
+        species: str | None = None,
     ) -> tuple[np.ndarray, float, float, bool]:
         center = np.asarray(feature_center, dtype=np.float32)
         if center.shape != (DINO_DIM,) or not np.isfinite(center).all():
@@ -1075,6 +1076,7 @@ class HumanFeedbackStore:
                     negative_events,
                     feature_center,
                     status=eligible_status,
+                    species=species,
                 )
             )
         except (ValueError, FloatingPointError):
@@ -1171,6 +1173,7 @@ class HumanFeedbackStore:
                 negative_events,
                 feature_center,
                 status="provisional",
+                species=species,
             )
         )
         generation = self._activate_generation(

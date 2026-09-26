@@ -1014,10 +1014,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (finishedOperation == 'install_dinov2' ||
         finishedOperation == 'remove_dinov2') {
       unawaited(
-        Future<void>.delayed(
-          const Duration(seconds: 1),
-          _loadDinoV2Status,
-        ),
+        Future<void>.delayed(const Duration(seconds: 1), _loadDinoV2Status),
       );
     }
   }
@@ -1234,7 +1231,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final requestedVideoMode = normalizeVideoProcessingMode(
       _string('video_mode', defaultVideoProcessingMode),
     );
-    final videoMode = selectedClassificationInfo?.supportsVideoAll == false &&
+    final videoMode =
+        selectedClassificationInfo?.supportsVideoAll == false &&
             requestedVideoMode == videoProcessingModeAll
         ? videoProcessingModeFast
         : requestedVideoMode;
@@ -1486,7 +1484,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             videoMode,
             strideLabel,
             enabled: detectionEnabled,
-            supportsVideoAll: selectedClassificationInfo?.supportsVideoAll ?? true,
+            supportsVideoAll:
+                selectedClassificationInfo?.supportsVideoAll ?? true,
           ),
         ],
       ),
@@ -1866,8 +1865,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ? '正在读取 DINOv2 组件状态...'
                 : _dinoV2Status == null
                 ? '无法读取 DINOv2 组件状态。'
-                : _dinoV2Status!.healthy && _dinoV2Status!.prototypeCount != null
-                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} prototypes'
+                : _dinoV2Status!.healthy &&
+                      _dinoV2Status!.prototypeCount != null
+                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} ${_dinoV2Status!.classifierHeadType == 'memory_no_centroid' ? 'Memory 样本' : 'prototypes'}'
                 : _dinoV2Status!.message,
             icon: Icons.hub_rounded,
             child: Builder(

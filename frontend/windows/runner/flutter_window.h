@@ -40,6 +40,7 @@ class FlutterWindow : public Win32Window {
       windows_shell_channel_;
   bool dart_ready_ = false;
   bool duplicate_launch_pending_ = false;
+  bool directory_dialog_open_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

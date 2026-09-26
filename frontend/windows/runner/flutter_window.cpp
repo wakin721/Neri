@@ -146,10 +146,17 @@ bool FlutterWindow::OnCreate() {
           result->NotImplemented();
           return;
         }
+        if (directory_dialog_open_) {
+          result->Error("choose_directory_busy",
+                        "A folder picker is already open");
+          return;
+        }
 
+        directory_dialog_open_ = true;
         std::string selected_path;
         const HRESULT hr = ShowChooseDirectoryDialog(
             GetHandle(), InitialDirectoryFromCall(call), &selected_path);
+        directory_dialog_open_ = false;
         if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
           result->Success();
           return;

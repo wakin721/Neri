@@ -6,6 +6,7 @@ import numpy as np
 
 from . import registry_base as _base
 from .prototype_bank import PrototypeBank, PrototypeRecord
+from .memory_bank import MemoryBank, MemoryExample
 from .simple_shot import deterministic_k_means
 
 for _name in dir(_base):
@@ -87,3 +88,27 @@ class SpeciesRegistry(_base.SpeciesRegistry):
             elif entry.status in {"confirmed", "mature"}:
                 formal.extend(records)
         return PrototypeBank(tuple(formal), tuple(provisional))
+
+    def memory_bank(self) -> MemoryBank:
+        """Return registered raw event vectors with their distinct camera IDs."""
+        formal: list[MemoryExample] = []
+        provisional: list[MemoryExample] = []
+        for entry in self.list():
+            if entry.status == "candidate":
+                continue
+            rows = self._event_rows(entry.id)
+            if len(rows) < 4:
+                continue
+            destination = provisional if entry.status == "provisional" else formal
+            for row in rows:
+                destination.append(
+                    MemoryExample(
+                        species=entry.display_name,
+                        embedding=_from_blob(row["embedding"]),
+                        camera_id=str(row["camera_id"]),
+                        source="overlay",
+                        registry_id=entry.id,
+                        registration_status=entry.status,
+                    )
+                )
+        return MemoryBank(tuple(formal), tuple(provisional))

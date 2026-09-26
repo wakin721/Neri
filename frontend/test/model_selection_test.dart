@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -14,7 +17,10 @@ import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 import 'package:neri_flutter/src/utils/detection_species.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
+import 'package:neri_flutter/src/utils/validation_selection_modifiers.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
+import 'package:neri_flutter/src/widgets/input_folder_field.dart';
+import 'package:neri_flutter/src/widgets/selectable_list_card.dart';
 
 void main() {
   test('视频处理模式保留跳过视频并兼容旧值', () {
@@ -54,7 +60,10 @@ void main() {
               modelDirectory: 'res/model/detect',
               classificationModelDirectory: 'res/model/cls',
               availableModels: <ModelInfo>[
-                ModelInfo(name: 'detector.pt', path: 'res/model/detect/detector.pt'),
+                ModelInfo(
+                  name: 'detector.pt',
+                  path: 'res/model/detect/detector.pt',
+                ),
               ],
               availableClassificationModels: <ModelInfo>[
                 ModelInfo(
@@ -273,13 +282,21 @@ void main() {
       modelDirectory: 'res/model/detect',
       classificationModelDirectory: 'res/model/cls',
       availableModels: <ModelInfo>[
-        ModelInfo(name: 'detector-a.pt', path: 'res/model/detect/detector-a.pt'),
-        ModelInfo(name: 'detector-b.pt', path: 'res/model/detect/detector-b.pt'),
+        ModelInfo(
+          name: 'detector-a.pt',
+          path: 'res/model/detect/detector-a.pt',
+        ),
+        ModelInfo(
+          name: 'detector-b.pt',
+          path: 'res/model/detect/detector-b.pt',
+        ),
       ],
       availableClassificationModels: <ModelInfo>[],
       selectedModel: 'res/model/detect/detector-a.pt',
       speciesTypes: <String, String>{},
-      settings: <String, dynamic>{'selected_model': 'res/model/detect/detector-a.pt'},
+      settings: <String, dynamic>{
+        'selected_model': 'res/model/detect/detector-a.pt',
+      },
       gpuAvailable: false,
       missingYoloDependencies: <String>[],
     );
@@ -334,7 +351,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 900));
     await tester.pump();
     expect(savedDrafts, isNotEmpty);
-    expect(savedDrafts.last['selected_model'], 'res/model/detect/detector-b.pt');
+    expect(
+      savedDrafts.last['selected_model'],
+      'res/model/detect/detector-b.pt',
+    );
   });
 
   testWidgets('仅双模型启用时显示综合置信度', (tester) async {
@@ -475,5 +495,108 @@ void main() {
 
     expect(find.text('图片已被删除或移动'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('文件夹选择器打开时不能重复进入', (tester) async {
+    const channel = MethodChannel('neri/dialogs');
+    final selection = Completer<String?>();
+    var invocationCount = 0;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) {
+      invocationCount += 1;
+      return selection.future;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InputFolderField(controller: controller)),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('选择文件夹'));
+    await tester.pump();
+
+    expect(invocationCount, 1);
+    final folderButton = find.descendant(
+      of: find.byType(InputFolderField),
+      matching: find.byType(IconButton),
+    );
+    expect(tester.widget<IconButton>(folderButton).onPressed, isNull);
+
+    selection.complete(r'C:\camera-data');
+    await tester.pump();
+
+    expect(controller.text, r'C:\camera-data');
+    expect(tester.widget<IconButton>(folderButton).onPressed, isNotNull);
+  });
+
+  test('校验多选修饰键可在失焦时清空', () {
+    final modifiers = ValidationSelectionModifiers();
+
+    expect(modifiers.press(LogicalKeyboardKey.shiftLeft), isTrue);
+    expect(modifiers.rangeSelection, isTrue);
+    expect(modifiers.toggleSelection, isFalse);
+
+    modifiers.clear();
+    expect(modifiers.rangeSelection, isFalse);
+
+    expect(modifiers.press(LogicalKeyboardKey.controlLeft), isTrue);
+    expect(modifiers.toggleSelection, isTrue);
+    expect(modifiers.release(LogicalKeyboardKey.controlLeft), isTrue);
+    expect(modifiers.toggleSelection, isFalse);
+  });
+
+  testWidgets('桌面鼠标长按不触发多选', (tester) async {
+    var longPressCount = 0;
+    var selectionCount = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 300,
+            height: 200,
+            child: SelectableListCard<String>(
+              items: const <String>['photo.jpg'],
+              selectedIndex: 0,
+              titleBuilder: (item) => item,
+              onSelected: (_, __) => selectionCount += 1,
+              onLongPress: (_, __) => longPressCount += 1,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final center = tester.getCenter(find.text('photo.jpg'));
+    final mouse = await tester.startGesture(
+      center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+    await mouse.up();
+    await tester.pump();
+
+    expect(longPressCount, 0);
+    expect(selectionCount, 1);
+
+    final touch = await tester.startGesture(
+      center,
+      kind: PointerDeviceKind.touch,
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+    await touch.up();
+    await tester.pump();
+
+    expect(longPressCount, 1);
+    expect(selectionCount, 1);
   });
 }

@@ -360,6 +360,7 @@ def preview_media_items(
     output_dir: str | None = None,
     *,
     include_cached: bool = True,
+    cancelled=None,
 ) -> list[DetectionItem]:
     """Return previewable media without running YOLO.
 
@@ -372,7 +373,7 @@ def preview_media_items(
     if not input_path.exists():
         raise ValueError(f"输入路径不存在: {input_path}")
 
-    files = list(_resolve_supported_inputs(input_path))
+    files = list(_resolve_supported_inputs(input_path, cancelled=cancelled))
     if not files:
         return []
 
@@ -395,6 +396,7 @@ def preview_media_items(
     )
     items: list[DetectionItem] = []
     for path in files:
+        _raise_if_cancelled(cancelled)
         item = _build_fast_metadata_item(path)
         if include_cached:
             db_detection_data = detection_index.get(path.stem)
@@ -1456,6 +1458,7 @@ def _iter_supported_files(
             if not _is_generated_favorite_export_path(root_path / name)
         )
         for file_name in sorted(file_names):
+            _raise_if_cancelled(cancelled)
             path = root_path / file_name
             suffix = path.suffix.lower()
             if suffix not in supported:

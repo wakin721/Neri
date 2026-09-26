@@ -100,6 +100,7 @@ def _open_candidate_feedback(registry: SpeciesRegistry, checkpoint: DinoV2Checkp
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
+        memory_checkpoint=checkpoint if checkpoint.head_type == "memory_no_centroid" else None,
     )
 
 

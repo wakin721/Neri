@@ -8,6 +8,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from system.utils import resource_path
+
 from system.model_sync.layout import get_model_layout
 
 from .checkpoint import (
@@ -20,7 +22,7 @@ from .checkpoint import (
 
 DINO_COMPONENT_VERSION = 1
 DINO_ARCHITECTURE = "DINOv2 ViT-B/14"
-DINO_CLASSIFIER_FILENAME = "classifier.pt"
+DINO_CLASSIFIER_FILENAME = "memory_no_centroid.npz"
 DINO_MODEL_MANIFEST_FILENAME = "classifier.neri.json"
 DINO_LICENSE_FILENAME = "LICENSE_DINOv2.md"
 
@@ -45,13 +47,23 @@ def _component_root(root: Path | None = None) -> Path:
 def dinov2_component_paths(*, root: Path | None = None) -> DinoV2ComponentPaths:
     component_root = _component_root(root)
     model_dir = component_root / "model"
+    classifier_name = DINO_CLASSIFIER_FILENAME
+    install_path = component_root / "install.json"
+    if install_path.is_file():
+        try:
+            install = _read_json_object(install_path)
+            declared = install.get("classifier", {}).get("filename")
+            if declared in {"classifier.pt", DINO_CLASSIFIER_FILENAME}:
+                classifier_name = declared
+        except ValueError:
+            pass
     return DinoV2ComponentPaths(
         root=component_root,
         model_dir=model_dir,
         model_config=model_dir / "config.json",
         model_weights=model_dir / "model.safetensors",
         preprocessor_config=model_dir / "preprocessor_config.json",
-        classifier=component_root / DINO_CLASSIFIER_FILENAME,
+        classifier=component_root / classifier_name,
         model_manifest=component_root / DINO_MODEL_MANIFEST_FILENAME,
         license=component_root / DINO_LICENSE_FILENAME,
         install_manifest=component_root / "install.json",
@@ -238,6 +250,53 @@ def remove_dinov2_component(*, root: Path | None = None) -> dict:
     return dinov2_component_status(root=paths.root)
 
 
+def _replace_default_classifier(
+    root: Path, *, memory_asset: Path | None = None
+) -> None:
+    """Swap the verified distributed base head for the bundled Memory head."""
+    paths = dinov2_component_paths(root=root)
+    healthy, message = _component_health(paths)
+    if not healthy:
+        raise RuntimeError(message)
+    asset = Path(memory_asset or resource_path("res/dinov2/memory_no_centroid.npz"))
+    checkpoint = load_checkpoint(asset)
+    if checkpoint.head_type != "memory_no_centroid":
+        raise ValueError("Bundled classifier must be Memory-no-centroid")
+    if _sha256_file(paths.model_weights).lower() != checkpoint.encoder_sha256:
+        raise ValueError("Bundled Memory model requires different DINOv2 encoder weights")
+
+    target = paths.root / DINO_CLASSIFIER_FILENAME
+    if asset.resolve() != target.resolve():
+        shutil.copy2(asset, target)
+    manifest = _read_json_object(paths.model_manifest)
+    manifest.update(
+        checkpoint=target.name,
+        display_name="DINOv2 Memory 去质心",
+        encoder_sha256=checkpoint.encoder_sha256,
+        preprocessing=checkpoint.preprocessing,
+        event_aggregation=checkpoint.event_aggregation,
+    )
+    paths.model_manifest.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if paths.classifier != target:
+        paths.classifier.unlink()
+    install = _read_json_object(paths.install_manifest)
+    install["classifier"] = {"filename": target.name, "manifest": paths.model_manifest.name}
+    install["files"] = [
+        {
+            "path": path.relative_to(paths.root).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": _sha256_file(path),
+        }
+        for path in sorted(paths.root.rglob("*"))
+        if path.is_file() and path != paths.install_manifest
+    ]
+    paths.install_manifest.write_text(
+        json.dumps(install, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def install_dinov2_component(
     *,
     root: Path | None = None,
@@ -265,6 +324,8 @@ def install_dinov2_component(
 
                 distribution_client = DinoV2DistributionClient()
             distribution_client.download_tree("", staging, on_progress=on_progress)
+
+            _replace_default_classifier(staging)
 
         healthy, message = _component_health(
             dinov2_component_paths(root=staging)

@@ -6,6 +6,8 @@ import numpy as np
 
 from . import feedback_base as _base
 from .checkpoint import DinoV2Rejection
+from .memory_bank import MemoryBank, MemoryExample
+from .memory_checkpoint import MemoryCheckpoint
 from .simple_shot import deterministic_k_means
 
 for _name in dir(_base):
@@ -53,10 +55,12 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
         checkpoint_classes,
         rejection: DinoV2Rejection,
         prototype_norm_power: float = 0.0,
+        memory_checkpoint: MemoryCheckpoint | None = None,
     ) -> None:
         if not isinstance(rejection, DinoV2Rejection):
             raise TypeError("rejection must be DinoV2Rejection")
         self.rejection = rejection
+        self.memory_checkpoint = memory_checkpoint
         self.prototype_norm_power = float(prototype_norm_power)
         if not np.isfinite(self.prototype_norm_power) or self.prototype_norm_power < 0:
             raise ValueError("prototype_norm_power must be finite and nonnegative")
@@ -66,6 +70,17 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             checkpoint_classes=checkpoint_classes,
             threshold=rejection.cosine_threshold,
         )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS feedback_generation_memory(
+                generation_id INTEGER NOT NULL,
+                event_index INTEGER NOT NULL,
+                camera_id TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                PRIMARY KEY(generation_id,event_index),
+                FOREIGN KEY(generation_id) REFERENCES feedback_generations(id) ON DELETE CASCADE
+            )"""
+        )
+        self._conn.commit()
 
     def _build_candidate(
         self,
@@ -74,6 +89,7 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
         feature_center: np.ndarray,
         *,
         status: str,
+        species: str | None = None,
     ):
         positive_raw = np.stack([event.embedding for event in positive_events]).astype(
             np.float32, copy=False
@@ -87,15 +103,27 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             prototypes,
             getattr(self, "prototype_norm_power", 0.0),
         )
-        positive_scores = self._scores(positive_features, prototypes)
-        positive_coverage = float(np.mean(positive_scores >= self.threshold))
+        if getattr(self, "memory_checkpoint", None) is not None:
+            if species is None:
+                raise ValueError("Memory feedback candidate requires species")
+            positive_coverage = self._memory_accept_rate(
+                positive_events, species, positive_events
+            )
+        else:
+            positive_scores = self._scores(positive_features, prototypes)
+            positive_coverage = float(np.mean(positive_scores >= self.threshold))
         if negative_events:
             negative_raw = np.stack([event.embedding for event in negative_events]).astype(
                 np.float32, copy=False
             )
-            negative_features = _cl2n_rows(negative_raw, feature_center)
-            negative_scores = self._scores(negative_features, prototypes)
-            false_accept_rate = float(np.mean(negative_scores >= self.threshold))
+            if getattr(self, "memory_checkpoint", None) is not None:
+                false_accept_rate = self._memory_accept_rate(
+                    negative_events, species, positive_events
+                )
+            else:
+                negative_features = _cl2n_rows(negative_raw, feature_center)
+                negative_scores = self._scores(negative_features, prototypes)
+                false_accept_rate = float(np.mean(negative_scores >= self.threshold))
         else:
             false_accept_rate = 0.0
         quality_passed = (
@@ -106,6 +134,49 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             )
         )
         return prototypes, positive_coverage, false_accept_rate, quality_passed
+
+    def _memory_accept_rate(self, queries, species: str, positive_events) -> float:
+        from .memory_classifier import MemoryDinoV2Classifier, _normalize_rows
+
+        classifier = MemoryDinoV2Classifier(self.memory_checkpoint)
+        bank = tuple(
+            MemoryExample(species, event.embedding, event.camera_id, "feedback")
+            for event in positive_events
+        )
+        raw = np.stack([event.embedding for event in queries]).astype(np.float32)
+        centered = _normalize_rows(raw - classifier._center[None, :])
+        scores, _, classes = classifier._scores(centered, bank)
+        order = np.argsort(-scores, axis=1, kind="stable")
+        winner = order[:, 0]
+        runner = order[:, 1]
+        knownness = scores[np.arange(len(scores)), winner] + (
+            self.memory_checkpoint.margin_weight
+            * (scores[np.arange(len(scores)), winner] - scores[np.arange(len(scores)), runner])
+        )
+        return float(np.mean((np.asarray(classes)[winner] == species) & (
+            knownness >= self.memory_checkpoint.threshold
+        )))
+
+    def _activate_generation(self, species: str, **kwargs):
+        generation = super()._activate_generation(species, **kwargs)
+        events = self._group_events(
+            self._evidence_observations(species, column="positive_species")
+        )
+        generation_id = int(generation["id"])
+        self._conn.execute(
+            "DELETE FROM feedback_generation_memory WHERE generation_id=?", (generation_id,)
+        )
+        self._conn.executemany(
+            """INSERT INTO feedback_generation_memory(
+                generation_id,event_index,camera_id,embedding
+            ) VALUES(?,?,?,?)""",
+            [
+                (generation_id, index, event.camera_id,
+                 np.asarray(event.embedding, dtype="<f4").tobytes())
+                for index, event in enumerate(events)
+            ],
+        )
+        return generation
 
     def cluster_details(
         self,
@@ -190,3 +261,33 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
                 }
             )
         return result
+
+    def memory_bank(self) -> MemoryBank:
+        """Use only evidence captured when each generation was activated."""
+        rows = self._conn.execute(
+            """
+            SELECT id,species,status,formal FROM feedback_generations
+            WHERE active=1 ORDER BY species,id
+            """
+        ).fetchall()
+        formal: list[MemoryExample] = []
+        provisional: list[MemoryExample] = []
+        for row in rows:
+            species = str(row["species"])
+            events = self._conn.execute(
+                """SELECT camera_id,embedding FROM feedback_generation_memory
+                   WHERE generation_id=? ORDER BY event_index""",
+                (int(row["id"]),),
+            ).fetchall()
+            destination = formal if bool(row["formal"]) else provisional
+            for event in events:
+                destination.append(
+                    MemoryExample(
+                        species=species,
+                        embedding=np.frombuffer(event["embedding"], dtype="<f4").copy(),
+                        camera_id=str(event["camera_id"]),
+                        source="feedback",
+                        registration_status=str(row["status"]),
+                    )
+                )
+        return MemoryBank(tuple(formal), tuple(provisional))

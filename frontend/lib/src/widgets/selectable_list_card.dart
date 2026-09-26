@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 class SelectableListCard<T> extends StatefulWidget {
@@ -45,6 +46,7 @@ class SelectableListCard<T> extends StatefulWidget {
 class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
   final _selectedTileKey = GlobalKey();
   int? _lastSelectedIndex;
+  PointerDeviceKind? _lastPointerKind;
 
   @override
   void initState() {
@@ -99,38 +101,50 @@ class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
             void Function(TapDownDetails details)? onMenuTapDown,
           }) {
             final hasMenu = onMenuTapDown != null;
-            final tile = GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onSecondaryTapDown: hasMenu || widget.onSecondaryTapDown != null
-                  ? (details) {
-                      if (onMenuTapDown != null) {
-                        onMenuTapDown(details);
-                        return;
+            final tile = Listener(
+              onPointerDown: (event) => _lastPointerKind = event.kind,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onSecondaryTapDown: hasMenu || widget.onSecondaryTapDown != null
+                    ? (details) {
+                        if (onMenuTapDown != null) {
+                          onMenuTapDown(details);
+                          return;
+                        }
+                        widget.onSecondaryTapDown?.call(details, index, item);
                       }
-                      widget.onSecondaryTapDown?.call(details, index, item);
-                    }
-                  : null,
-              onLongPress: widget.onLongPress == null
-                  ? null
-                  : () => widget.onLongPress!(index, item),
-              child: ListTile(
-                selected: selected,
-                tileColor: widget.tileColorBuilder?.call(index, item),
-                leading: widget.leadingBuilder?.call(item),
-                title: Text(
-                  widget.titleBuilder(item),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: subtitle == null
+                    : null,
+                onLongPress: widget.onLongPress == null
                     ? null
-                    : Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                trailing: widget.trailingBuilder?.call(item),
-                onTap: () => widget.onSelected(index, item),
+                    : () {
+                        if (_lastPointerKind == PointerDeviceKind.touch ||
+                            _lastPointerKind == PointerDeviceKind.stylus ||
+                            _lastPointerKind ==
+                                PointerDeviceKind.invertedStylus) {
+                          widget.onLongPress!(index, item);
+                        } else {
+                          widget.onSelected(index, item);
+                        }
+                      },
+                child: ListTile(
+                  selected: selected,
+                  tileColor: widget.tileColorBuilder?.call(index, item),
+                  leading: widget.leadingBuilder?.call(item),
+                  title: Text(
+                    widget.titleBuilder(item),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: subtitle == null
+                      ? null
+                      : Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                  trailing: widget.trailingBuilder?.call(item),
+                  onTap: () => widget.onSelected(index, item),
+                ),
               ),
             );
             if (!scrollTarget) return tile;

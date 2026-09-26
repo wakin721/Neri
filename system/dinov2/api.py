@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
@@ -29,7 +30,7 @@ class DinoV2RegistryClusterResponse(BaseModel):
     id: str
     label: str
     source: str
-    prototype_index: int
+    prototype_index: int | None
     event_count: int = 0
     camera_count: int = 0
     sample_count: int = 0
@@ -85,6 +86,18 @@ class DinoV2RegisterRequest(BaseModel):
     classification_model_path: str = Field(..., min_length=1)
 
 
+class DinoV2DiscoveryRequest(BaseModel):
+    classification_model_path: str = Field(..., min_length=1)
+    calibration_features: list[list[float]] = Field(..., min_length=1)
+    query_features: list[list[float]] = Field(..., min_length=1)
+    calibration_sequence_ids: list[str] = Field(..., min_length=1)
+    query_sequence_ids: list[str] = Field(..., min_length=1)
+    n_clusters: int = Field(..., ge=1)
+    calibration_camera_ids: list[str] | None = None
+    query_camera_ids: list[str] | None = None
+    seed: int = 20260923
+
+
 class _MergeCheckpointRequest(BaseModel):
     classification_model_path: str = Field(..., min_length=1)
     checkpoint_species: str = Field(..., min_length=1)
@@ -117,24 +130,44 @@ def _run_with_registry(classification_model_path: str, action: Callable[[Any], A
 
 def build_registry_catalog(checkpoint: Any, registry: Any, *, feedback: Any | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    counts = tuple(int(v) for v in checkpoint.prototypes_per_class)
-    raw = checkpoint.prototype_class_indices
-    indices = [int(v) for v in (raw.tolist() if hasattr(raw, "tolist") else raw)]
+    memory = checkpoint.head_type == "memory_no_centroid"
+    if memory:
+        counts = tuple(int(np.sum(checkpoint.labels == species)) for species in checkpoint.classes)
+    else:
+        counts = tuple(int(v) for v in checkpoint.prototypes_per_class)
+        raw = checkpoint.prototype_class_indices
+        indices = [int(v) for v in (raw.tolist() if hasattr(raw, "tolist") else raw)]
     for index, species in enumerate(checkpoint.classes):
-        base_indices = [i for i, class_index in enumerate(indices) if class_index == index]
-        clusters = [{
-            "id": f"checkpoint:{index}:{local_index}",
-            "label": f"Base #{local_index + 1}",
-            "source": "checkpoint",
-            "prototype_index": prototype_index,
-            "event_count": 0,
-            "camera_count": 0,
-            "sample_count": 0,
-            "mean_squared_distance": None,
-            "active": True,
-            "learning_status": None,
-            "example_refs": [],
-        } for local_index, prototype_index in enumerate(base_indices)]
+        if memory:
+            cameras = checkpoint.cameras[checkpoint.labels == species]
+            clusters = [{
+                "id": f"memory:{index}",
+                "label": "Memory 样本库",
+                "source": "checkpoint",
+                "prototype_index": None,
+                "event_count": counts[index],
+                "camera_count": len(np.unique(cameras)),
+                "sample_count": counts[index],
+                "mean_squared_distance": None,
+                "active": True,
+                "learning_status": None,
+                "example_refs": [],
+            }]
+        else:
+            base_indices = [i for i, class_index in enumerate(indices) if class_index == index]
+            clusters = [{
+                "id": f"checkpoint:{index}:{local_index}",
+                "label": f"Base #{local_index + 1}",
+                "source": "checkpoint",
+                "prototype_index": prototype_index,
+                "event_count": 0,
+                "camera_count": 0,
+                "sample_count": 0,
+                "mean_squared_distance": None,
+                "active": True,
+                "learning_status": None,
+                "example_refs": [],
+            } for local_index, prototype_index in enumerate(base_indices)]
         feedback_event_count = 0
         feedback_prototype_count = 0
         learning_status = None
@@ -186,6 +219,7 @@ def _catalog_with_feedback(checkpoint: Any, registry: Any) -> list[dict[str, Any
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
+        memory_checkpoint=checkpoint if checkpoint.head_type == "memory_no_centroid" else None,
     )
     try:
         return build_registry_catalog(checkpoint, registry, feedback=feedback)
@@ -195,8 +229,10 @@ def _catalog_with_feedback(checkpoint: Any, registry: Any) -> list[dict[str, Any
 
 def _register_with_duplicate_guard(registry: Any, registration_id: int, classification_model_path: str):
     from .classifier import DinoV2Classifier
+    from .memory_classifier import MemoryDinoV2Classifier
     checkpoint = _registry_service().load_checkpoint_for_model(classification_model_path)
-    classifier = DinoV2Classifier(checkpoint, registry=registry)
+    classifier_type = MemoryDinoV2Classifier if checkpoint.head_type == "memory_no_centroid" else DinoV2Classifier
+    classifier = classifier_type(checkpoint, registry=registry)
 
     def matcher(embedding):
         prediction = classifier.classify_features(embedding[None, :])[0]
@@ -207,6 +243,29 @@ def _register_with_duplicate_guard(registry: Any, registration_id: int, classifi
 
 def dinov2_registry_router() -> APIRouter:
     router = APIRouter(prefix="/api/dinov2", tags=["dinov2"])
+
+    @router.post("/discovery/custom-weighted-kmeans")
+    def discover_custom_weighted_kmeans(request: DinoV2DiscoveryRequest):
+        """5% Known calibration gate plus weighted clustering of a mixed batch."""
+        from .custom_discovery import discover
+
+        try:
+            checkpoint = _registry_service().load_checkpoint_for_model(
+                request.classification_model_path
+            )
+            return discover(
+                checkpoint,
+                request.calibration_features,
+                request.query_features,
+                request.calibration_sequence_ids,
+                request.query_sequence_ids,
+                n_clusters=request.n_clusters,
+                calibration_camera_ids=request.calibration_camera_ids,
+                query_camera_ids=request.query_camera_ids,
+                seed=request.seed,
+            )
+        except (DinoV2ManifestError, CheckpointValidationError, FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/registry", response_model=list[DinoV2RegistryEntryResponse])
     def list_registry(classification_model_path: str = Query(..., min_length=1), status: str | None = Query(default=None)):

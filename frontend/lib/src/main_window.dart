@@ -125,6 +125,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Timer? _inputDirectoryChangeTimer;
   Timer? _modelSelectionSaveTimer;
   StreamSubscription<FileSystemEvent>? _inputDirectoryWatcher;
+  int _inputDirectoryWatcherGeneration = 0;
   Process? _backendProcess;
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
@@ -212,7 +213,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     _inputController.addListener(() {
       _schedulePreviewRefresh();
-      _updateInputDirectoryWatcher();
+      unawaited(_updateInputDirectoryWatcher());
       unawaited(_updateWindowsShellStatus());
     });
     _loadLastInputPath();
@@ -234,6 +235,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _previewRefreshTimer?.cancel();
     _inputDirectoryChangeTimer?.cancel();
     _modelSelectionSaveTimer?.cancel();
+    _inputDirectoryWatcherGeneration++;
     final inputDirectoryWatcher = _inputDirectoryWatcher;
     if (inputDirectoryWatcher != null) {
       unawaited(inputDirectoryWatcher.cancel());
@@ -1642,7 +1644,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     await _refreshPreviewItems(force: true);
   }
 
-  void _updateInputDirectoryWatcher() {
+  Future<void> _updateInputDirectoryWatcher() async {
+    final generation = ++_inputDirectoryWatcherGeneration;
     final inputPath = _inputController.text.trim();
     if (_watchedInputDirectory == inputPath && _inputDirectoryWatcher != null) {
       return;
@@ -1654,12 +1657,26 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _inputDirectoryWatcher = null;
     _watchedInputDirectory = null;
     if (previousWatcher != null) {
-      unawaited(previousWatcher.cancel());
+      try {
+        await previousWatcher.cancel();
+      } on FileSystemException {
+        // A stale watcher may already have been closed by the operating system.
+      }
     }
 
-    if (inputPath.isEmpty) return;
+    if (!mounted ||
+        generation != _inputDirectoryWatcherGeneration ||
+        _inputController.text.trim() != inputPath ||
+        inputPath.isEmpty) {
+      return;
+    }
     final directory = Directory(inputPath);
-    if (!directory.existsSync()) return;
+    if (!await directory.exists()) return;
+    if (!mounted ||
+        generation != _inputDirectoryWatcherGeneration ||
+        _inputController.text.trim() != inputPath) {
+      return;
+    }
 
     try {
       _inputDirectoryWatcher = directory
