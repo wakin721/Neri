@@ -1867,7 +1867,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ? '无法读取 DINOv2 组件状态。'
                 : _dinoV2Status!.healthy &&
                       _dinoV2Status!.prototypeCount != null
-                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} ${_dinoV2Status!.classifierHeadType == 'memory_no_centroid' ? 'Memory 样本' : 'prototypes'}'
+                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} ${const {'memory', 'memory_no_centroid'}.contains(_dinoV2Status!.classifierHeadType) ? 'Memory 样本' : 'prototypes'}'
                 : _dinoV2Status!.message,
             icon: Icons.hub_rounded,
             child: Builder(

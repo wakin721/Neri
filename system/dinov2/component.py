@@ -22,7 +22,7 @@ from .checkpoint import (
 
 DINO_COMPONENT_VERSION = 1
 DINO_ARCHITECTURE = "DINOv2 ViT-B/14"
-DINO_CLASSIFIER_FILENAME = "memory_no_centroid.npz"
+DINO_CLASSIFIER_FILENAME = "memory_head.npz"
 DINO_MODEL_MANIFEST_FILENAME = "classifier.neri.json"
 DINO_LICENSE_FILENAME = "LICENSE_DINOv2.md"
 
@@ -53,7 +53,7 @@ def dinov2_component_paths(*, root: Path | None = None) -> DinoV2ComponentPaths:
         try:
             install = _read_json_object(install_path)
             declared = install.get("classifier", {}).get("filename")
-            if declared in {"classifier.pt", DINO_CLASSIFIER_FILENAME}:
+            if declared in {"classifier.pt", "memory_no_centroid.npz", DINO_CLASSIFIER_FILENAME}:
                 classifier_name = declared
         except ValueError:
             pass
@@ -258,10 +258,10 @@ def _replace_default_classifier(
     healthy, message = _component_health(paths)
     if not healthy:
         raise RuntimeError(message)
-    asset = Path(memory_asset or resource_path("res/dinov2/memory_no_centroid.npz"))
+    asset = Path(memory_asset or resource_path("res/dinov2/memory_head.npz"))
     checkpoint = load_checkpoint(asset)
-    if checkpoint.head_type != "memory_no_centroid":
-        raise ValueError("Bundled classifier must be Memory-no-centroid")
+    if checkpoint.head_type != "memory":
+        raise ValueError("Bundled classifier must be standard Memory")
     if _sha256_file(paths.model_weights).lower() != checkpoint.encoder_sha256:
         raise ValueError("Bundled Memory model requires different DINOv2 encoder weights")
 
@@ -271,7 +271,7 @@ def _replace_default_classifier(
     manifest = _read_json_object(paths.model_manifest)
     manifest.update(
         checkpoint=target.name,
-        display_name="DINOv2 Memory 去质心",
+        display_name="DINOv2 Memory",
         encoder_sha256=checkpoint.encoder_sha256,
         preprocessing=checkpoint.preprocessing,
         event_aggregation=checkpoint.event_aggregation,

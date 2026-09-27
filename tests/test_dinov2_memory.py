@@ -96,6 +96,20 @@ def test_memory_no_centroid_scores_camera_maxima_and_margin(tmp_path):
     assert prediction.candidates[0]["name"] == "A"
 
 
+def test_standard_memory_blends_exemplar_and_class_centroid(tmp_path):
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+
+    model, _ = _memory_model(tmp_path, weight=0.5, threshold=1.0)
+    checkpoint = load_checkpoint(model)
+    prediction = MemoryDinoV2Classifier(checkpoint).classify_features(_unit(0)[None, :])[0]
+
+    assert checkpoint.head_type == "memory"
+    assert checkpoint.centroid_weight == pytest.approx(0.5)
+    assert prediction.candidates[0]["name"] == "A"
+    assert prediction.candidates[0]["known_score"] == pytest.approx(0.75)
+    assert prediction.known_score == pytest.approx(1.5)
+
+
 def test_memory_threshold_tie_accepts_and_higher_threshold_rejects(tmp_path):
     from system.dinov2.memory_classifier import MemoryDinoV2Classifier
 
@@ -128,6 +142,25 @@ def test_formal_memory_evidence_enters_classification_without_retraining(tmp_pat
     assert result.accepted is True
     assert result.source == "overlay"
     assert result.registry_id == 7
+
+
+def test_standard_memory_centroid_includes_formal_evidence(tmp_path):
+    from system.dinov2.memory_bank import MemoryBank, MemoryExample
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+
+    class Registry:
+        def memory_bank(self):
+            return MemoryBank(
+                formal=(MemoryExample("C", _unit(4), "new-camera", "overlay"),),
+            )
+
+    model, _ = _memory_model(tmp_path, weight=0.5)
+    classifier = MemoryDinoV2Classifier(load_checkpoint(model), registry=Registry())
+    result = classifier.classify_features(_unit(4)[None, :])[0]
+
+    assert result.species == "C"
+    assert result.candidates[0]["known_score"] == pytest.approx(1.0)
+    assert result.known_score == pytest.approx(2.0)
 
 
 def test_provisional_memory_evidence_is_assistive_only(tmp_path):
@@ -233,7 +266,7 @@ def test_feedback_memory_quality_uses_winner_and_margin(tmp_path):
     assert quality is False
 
 
-def test_default_component_replaces_distributed_prototype_with_memory(tmp_path):
+def test_default_component_replaces_distributed_prototype_with_standard_memory(tmp_path):
     from system.dinov2.component import (
         _replace_default_classifier,
         dinov2_component_status,
@@ -246,15 +279,15 @@ def test_default_component_replaces_distributed_prototype_with_memory(tmp_path):
     asset_dir = tmp_path / "asset"
     asset_dir.mkdir()
     asset, _ = _memory_model(
-        asset_dir, encoder_sha=_sha(root / "model" / "model.safetensors")
+        asset_dir, weight=0.5, encoder_sha=_sha(root / "model" / "model.safetensors")
     )
 
     _replace_default_classifier(root, memory_asset=asset)
 
     status = dinov2_component_status(root=root)
     assert status["healthy"] is True
-    assert status["classifier_head_type"] == "memory_no_centroid"
-    assert status["classifier_filename"] == "memory_no_centroid.npz"
+    assert status["classifier_head_type"] == "memory"
+    assert status["classifier_filename"] == "memory_head.npz"
     assert not (root / "classifier.pt").exists()
 
 
@@ -304,8 +337,8 @@ def test_memory_catalog_groups_exemplars_by_species(tmp_path):
     assert response.clusters[0].prototype_index is None
 
 
-@pytest.mark.parametrize("weight", [0.1, 0.5, 1.0, -0.1])
-def test_memory_loader_rejects_nonzero_centroid_weight(tmp_path, weight):
+@pytest.mark.parametrize("weight", [-0.1, 1.1, float("nan")])
+def test_memory_loader_rejects_invalid_centroid_weight(tmp_path, weight):
     model, _ = _memory_model(tmp_path, weight=weight)
     with pytest.raises(ValueError, match="centroid_weight"):
         load_checkpoint(model)

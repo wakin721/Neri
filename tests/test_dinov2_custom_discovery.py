@@ -9,7 +9,7 @@ from tests.test_dinov2_memory import _memory_model, _unit
 
 
 def test_custom_gate_rejects_novel_batch_and_keeps_known_assignments(tmp_path):
-    model, _ = _memory_model(tmp_path)
+    model, _ = _memory_model(tmp_path, weight=0.5)
     checkpoint = load_checkpoint(model)
     calibration = np.stack([_unit(0) for _ in range(20)])
     query = np.stack([_unit(4) for _ in range(8)] + [_unit(0)])

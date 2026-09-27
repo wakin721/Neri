@@ -226,7 +226,9 @@ class _DinoV2FeatureExplanationPanelState
 
   Widget _content(DinoV2FeatureExplanation explanation) {
     final nearest = explanation.nearestSpecies;
-    final isMemory = explanation.rejectionMode == 'memory_no_centroid';
+    final isMemory = const {'memory', 'memory_no_centroid'}.contains(
+      explanation.rejectionMode,
+    );
     final closestName = nearest.isEmpty ? '暂无' : nearest.first.name;
     final nearestExampleLabel = explanation.nearestExample == null
         ? '暂无本地代表例图'

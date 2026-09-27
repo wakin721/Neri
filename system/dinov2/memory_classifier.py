@@ -1,4 +1,4 @@
-"""DINOv2 Memory classifier without class-centroid score mixing."""
+"""DINOv2 Memory classifier with optional class-centroid score mixing."""
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -24,8 +24,8 @@ def _normalize_rows(values: np.ndarray) -> np.ndarray:
 
 class MemoryDinoV2Classifier:
     def __init__(self, checkpoint: MemoryCheckpoint, *, encoder=None, feedback=None, registry=None):
-        if checkpoint.head_type != "memory_no_centroid":
-            raise ValueError("Expected Memory-no-centroid checkpoint")
+        if checkpoint.head_type not in {"memory", "memory_no_centroid"}:
+            raise ValueError("Expected Memory checkpoint")
         self.checkpoint = checkpoint
         self.encoder = encoder
         self.feedback = feedback
@@ -41,10 +41,11 @@ class MemoryDinoV2Classifier:
     @property
     def rejection_metadata(self) -> dict[str, object]:
         return {
-            "mode": "memory_no_centroid",
+            "mode": self.checkpoint.head_type,
             "threshold": self.checkpoint.threshold,
             "neighbors": self.checkpoint.neighbors,
             "camera_pooling": True,
+            "centroid_weight": self.checkpoint.centroid_weight,
             "margin_weight": self.checkpoint.margin_weight,
         }
 
@@ -81,7 +82,20 @@ class MemoryDinoV2Classifier:
                 [values[:, cameras == camera].max(axis=1) for camera in np.unique(cameras)]
             )
             k = min(self.checkpoint.neighbors, pooled.shape[1])
-            scores[:, class_index] = np.partition(pooled, pooled.shape[1] - k, axis=1)[:, -k:].mean(axis=1)
+            memory_score = np.partition(pooled, pooled.shape[1] - k, axis=1)[:, -k:].mean(axis=1)
+            if self.checkpoint.centroid_weight:
+                if species in self.checkpoint.classes and not any(
+                    example.species == species for example in bank
+                ):
+                    centroid = self.checkpoint.centroids[self.checkpoint.classes.index(species)]
+                else:
+                    centroid = _normalize_rows(features[mask].mean(axis=0, keepdims=True))[0]
+                scores[:, class_index] = (
+                    (1.0 - self.checkpoint.centroid_weight) * memory_score
+                    + self.checkpoint.centroid_weight * (centered @ centroid)
+                )
+            else:
+                scores[:, class_index] = memory_score
             nearest[:, class_index] = np.flatnonzero(mask)[np.argmax(values, axis=1)]
         return scores, nearest, classes
 

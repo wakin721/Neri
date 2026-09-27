@@ -136,7 +136,7 @@ def _open_feedback_state(classification_model_path: str):
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
-        memory_checkpoint=checkpoint if checkpoint.head_type == "memory_no_centroid" else None,
+        memory_checkpoint=checkpoint if checkpoint.head_type in {"memory", "memory_no_centroid"} else None,
     )
     center = checkpoint.feature_center.numpy().astype(np.float32, copy=False)
     return feedback, center

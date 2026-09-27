@@ -25,9 +25,11 @@ class MemoryCheckpoint:
     classes: tuple[str, ...]
     feature_center: Any
     features: np.ndarray
+    centroids: np.ndarray
     labels: np.ndarray
     cameras: np.ndarray
     neighbors: int
+    centroid_weight: float
     margin_weight: float
     threshold: float
     encoder_sha256: str
@@ -38,7 +40,7 @@ class MemoryCheckpoint:
     preprocessing: str = DINO_PREPROCESSING
     event_aggregation: str = DINO_EVENT_AGGREGATION
     encoder_weights: str = "model/model.safetensors"
-    head_type: str = "memory_no_centroid"
+    head_type: str = "memory"
     prototype_norm_power: float = 1.0
 
     @property
@@ -83,7 +85,7 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
         labels = archive["labels"].astype(str).copy()
         cameras = archive["cameras"].astype(str).copy()
         classes = archive["classes"].astype(str).copy()
-        _unit_rows(archive["centroids"], "Memory centroids")
+        centroids = _unit_rows(archive["centroids"].copy(), "Memory centroids")
     if not isinstance(metadata, dict) or metadata.get("version") != 1:
         raise ValueError("Unsupported Memory checkpoint version")
     config = metadata.get("config")
@@ -91,8 +93,9 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
         "neighbors", "centroid_weight", "camera_pooling", "margin_weight"
     }:
         raise ValueError("Invalid Memory config")
-    if config["centroid_weight"] != 0.0:
-        raise ValueError("Memory centroid_weight must be zero")
+    centroid_weight = float(config["centroid_weight"])
+    if not np.isfinite(centroid_weight) or not 0 <= centroid_weight <= 1:
+        raise ValueError("Memory centroid_weight must be in [0, 1]")
     if config["neighbors"] not in (1, 3, 5) or isinstance(config["neighbors"], bool):
         raise ValueError("Memory neighbors must be 1, 3 or 5")
     if config["camera_pooling"] is not True:
@@ -117,6 +120,8 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
         raise ValueError("Memory exemplar labels or cameras are misaligned")
     if len(classes) < 2 or not np.array_equal(np.unique(labels), classes):
         raise ValueError("Memory classes do not match exemplar labels")
+    if centroids.shape != (len(classes), DINO_FEATURE_DIM):
+        raise ValueError("Memory centroids do not match classes")
     if any(not name.strip() for name in classes) or any(not camera.strip() for camera in cameras):
         raise ValueError("Memory classes and cameras must be nonempty")
     calibration = metadata.get("calibration")
@@ -131,12 +136,15 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
         classes=tuple(classes),
         feature_center=torch.from_numpy(center),
         features=features,
+        centroids=centroids,
         labels=labels,
         cameras=cameras,
         neighbors=int(config["neighbors"]),
+        centroid_weight=centroid_weight,
         margin_weight=margin_weight,
         threshold=threshold,
         encoder_sha256=encoder_sha256.lower(),
         fingerprint=fingerprint,
         calibration=calibration,
+        head_type="memory" if centroid_weight > 0 else "memory_no_centroid",
     )

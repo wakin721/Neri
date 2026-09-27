@@ -130,7 +130,7 @@ def _run_with_registry(classification_model_path: str, action: Callable[[Any], A
 
 def build_registry_catalog(checkpoint: Any, registry: Any, *, feedback: Any | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    memory = checkpoint.head_type == "memory_no_centroid"
+    memory = checkpoint.head_type in {"memory", "memory_no_centroid"}
     if memory:
         counts = tuple(int(np.sum(checkpoint.labels == species)) for species in checkpoint.classes)
     else:
@@ -219,7 +219,7 @@ def _catalog_with_feedback(checkpoint: Any, registry: Any) -> list[dict[str, Any
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
-        memory_checkpoint=checkpoint if checkpoint.head_type == "memory_no_centroid" else None,
+        memory_checkpoint=checkpoint if checkpoint.head_type in {"memory", "memory_no_centroid"} else None,
     )
     try:
         return build_registry_catalog(checkpoint, registry, feedback=feedback)
@@ -231,7 +231,7 @@ def _register_with_duplicate_guard(registry: Any, registration_id: int, classifi
     from .classifier import DinoV2Classifier
     from .memory_classifier import MemoryDinoV2Classifier
     checkpoint = _registry_service().load_checkpoint_for_model(classification_model_path)
-    classifier_type = MemoryDinoV2Classifier if checkpoint.head_type == "memory_no_centroid" else DinoV2Classifier
+    classifier_type = MemoryDinoV2Classifier if checkpoint.head_type in {"memory", "memory_no_centroid"} else DinoV2Classifier
     classifier = classifier_type(checkpoint, registry=registry)
 
     def matcher(embedding):
