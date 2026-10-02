@@ -552,6 +552,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _expandedGroupSignatures.clear();
       return;
     }
+    if (identical(oldWidget.items, widget.items) &&
+        oldWidget.inputPath == widget.inputPath &&
+        _selectedPath != null)
+      return;
     final validPaths = widget.items.map((item) => item.path).toSet();
     _selectedPaths.removeWhere((path) => !validPaths.contains(path));
     _discardMarkHistoryForPaths(
@@ -2839,7 +2843,20 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     return null;
   }
 
+  DetectionItem? _visibleBoxesItem;
+  Object? _visibleBoxesSettings;
+  List<DetectionBox> _visibleBoxes = const [];
+
   List<DetectionBox> _filteredBoxes(DetectionItem item) {
+    final settings = (
+      _selectedSpeciesFilter,
+      _confidenceSettingsSignature,
+      _minFrameRatio,
+    );
+    if (identical(_visibleBoxesItem, item) &&
+        _visibleBoxesSettings == settings) {
+      return _visibleBoxes;
+    }
     final trackFrameCounts = _trackFrameCountsForFilter(item);
     final selectedSpeciesFilter = _speciesFilterFor(item);
     final filtered = <DetectionBox>[];
@@ -2855,6 +2872,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         filtered.add(box);
       }
     }
+    _visibleBoxesItem = item;
+    _visibleBoxesSettings = settings;
+    _visibleBoxes = filtered;
     return filtered;
   }
 
@@ -4676,6 +4696,14 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
   late final FocusNode _speciesFocusNode;
 
   List<String> _suggestions = [];
+  late final Map<String, String> _speciesInitials = {
+    for (final species in widget.speciesTypes.keys)
+      species: PinyinHelper.getShortPinyin(species).toLowerCase(),
+  };
+  late final Map<String, int> _speciesOrder = {
+    for (final entry in widget.speciesTypes.keys.toList().asMap().entries)
+      entry.value: entry.key,
+  };
 
   @override
   void initState() {
@@ -4711,7 +4739,7 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
 
     for (final species in widget.speciesTypes.keys) {
       if (isPinyin) {
-        final initials = PinyinHelper.getShortPinyin(species).toLowerCase();
+        final initials = _speciesInitials[species]!;
         if (initials.startsWith(lowerInput)) {
           matches.add(species);
         }
@@ -4721,17 +4749,12 @@ class _OtherSpeciesDialogState extends State<_OtherSpeciesDialog> {
         }
       }
     }
-    final originalOrder = <String, int>{};
-    var index = 0;
-    for (final species in widget.speciesTypes.keys) {
-      originalOrder[species] = index++;
-    }
     matches.sort((a, b) {
       final usageCompare = (widget.speciesUsageCounts[b] ?? 0).compareTo(
         widget.speciesUsageCounts[a] ?? 0,
       );
       if (usageCompare != 0) return usageCompare;
-      return (originalOrder[a] ?? 0).compareTo(originalOrder[b] ?? 0);
+      return (_speciesOrder[a] ?? 0).compareTo(_speciesOrder[b] ?? 0);
     });
     return matches;
   }

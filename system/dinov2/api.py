@@ -98,6 +98,24 @@ class DinoV2DiscoveryRequest(BaseModel):
     seed: int = 20260923
 
 
+class WithinSeqFeatureBatch(BaseModel):
+    features: list[list[float]] = Field(..., min_length=1)
+    camera_ids: list[str] = Field(..., min_length=1)
+    sequence_ids: list[str] = Field(..., min_length=1)
+
+
+class WithinSeqBank(WithinSeqFeatureBatch):
+    labels: list[str] = Field(..., min_length=1)
+
+
+class WithinSeqDiscoveryRequest(BaseModel):
+    bank: WithinSeqBank
+    # Must contain auxiliary UNKNOWN species, not Known holdout examples.
+    auxiliary_unknown: WithinSeqFeatureBatch
+    query: WithinSeqFeatureBatch
+    target_unknown_recall: float = Field(default=0.90, gt=0, le=1)
+
+
 class _MergeCheckpointRequest(BaseModel):
     classification_model_path: str = Field(..., min_length=1)
     checkpoint_species: str = Field(..., min_length=1)
@@ -243,6 +261,24 @@ def _register_with_duplicate_guard(registry: Any, registration_id: int, classifi
 
 def dinov2_registry_router() -> APIRouter:
     router = APIRouter(prefix="/api/dinov2", tags=["dinov2"])
+
+    @router.post("/discovery/within-seq")
+    def discover_paper_within_seq(request: WithinSeqDiscoveryRequest):
+        """Explicit raw-feature batch route; does not replace installed models."""
+        from .within_seq import discover_within_seq
+
+        bank, calibration, query = request.bank, request.auxiliary_unknown, request.query
+        try:
+            return discover_within_seq(
+                bank.features, bank.labels, bank.camera_ids, bank.sequence_ids,
+                calibration.features, calibration.camera_ids, calibration.sequence_ids,
+                query.features, query.camera_ids, query.sequence_ids,
+                target=request.target_unknown_recall,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @router.post("/discovery/custom-weighted-kmeans")
     def discover_custom_weighted_kmeans(request: DinoV2DiscoveryRequest):

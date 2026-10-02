@@ -4568,6 +4568,7 @@ class _AboutLogo extends StatelessWidget {
         logoFile,
         width: 56,
         height: 56,
+        cacheWidth: (56 * MediaQuery.devicePixelRatioOf(context)).ceil(),
         fit: BoxFit.contain,
         errorBuilder: (context, error, stackTrace) {
           return Icon(Icons.camera_outdoor_rounded, size: 48, color: color);
