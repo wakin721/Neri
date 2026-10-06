@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install batch algorithm test dependencies
-        run: python -m pip install numpy scipy scikit-learn hdbscan==0.8.42 fastapi httpx pytest pillow
+        run: python -m pip install -r requirements-within-seq.txt httpx pytest
       - name: Verify classification, calibration, clustering and API
         env:
           OPENBLAS_NUM_THREADS: "1"

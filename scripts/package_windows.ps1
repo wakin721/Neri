@@ -41,6 +41,7 @@ Copy-Item "$release\*" $package -Recurse -Force
 Copy-Item "system" $package -Recurse -Force
 Copy-Item "res" $package -Recurse -Force
 Copy-Item "requirements.txt" $package -Force
+Copy-Item "requirements-within-seq.txt" $package -Force
 Copy-Item "res\demo\README_Update.md" (Join-Path $package "README_Update.md") -Force
 
 $requiredModelPaths = @(
@@ -91,5 +92,5 @@ if (Test-Path $generatedExe) {
   throw "The legacy neri_flutter.exe name is still present in the package."
 }
 
-& "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager"
+& "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager; from hdbscan import HDBSCAN"
 if ($LASTEXITCODE -ne 0) { throw "Packaged Python import check failed." }
