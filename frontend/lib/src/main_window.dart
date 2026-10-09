@@ -3038,7 +3038,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final titleBarColor = colorScheme.surface;
+    final shellColor = colorScheme.surfaceContainer;
     final showGlobalProgress =
         _loading ||
         _previewDetecting ||
@@ -3050,11 +3050,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       fit: StackFit.expand,
       children: [
         Scaffold(
+          backgroundColor: shellColor,
           appBar: PreferredSize(
             preferredSize: const Size.fromHeight(kToolbarHeight),
             child: DragToMoveArea(
               child: AppBar(
-                backgroundColor: titleBarColor,
+                backgroundColor: shellColor,
                 surfaceTintColor: Colors.transparent,
                 scrolledUnderElevation: 0,
                 titleSpacing: 12,
@@ -3142,15 +3143,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             children: [
               Column(
                 children: [
-                  // 标题栏下方的全局进度条
-                  SizedBox(
-                    height: 4, // 固定高度防止页面抖动
-                    child: showGlobalProgress
-                        ? const ExcludeSemantics(
-                            child: LinearProgressIndicator(),
-                          )
-                        : null,
-                  ),
                   // 原有的主体内容区域
                   Expanded(
                     child: Row(
@@ -3167,14 +3159,51 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                         ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: IndexedStack(
-                            index: _selectedIndex,
-                            children: [
-                              _buildTabWrapper(0, _buildStartScreen()),
-                              _buildTabWrapper(1, _buildPreviewPage()),
-                              _buildTabWrapper(2, _buildValidationPage()),
-                              _buildTabWrapper(3, _buildSettingsScreen()),
-                            ],
+                          child: ClipRRect(
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(18),
+                              bottomLeft: Radius.circular(18),
+                            ),
+                            child: ColoredBox(
+                              color: colorScheme.surface,
+                              child: Column(
+                                children: [
+                                  // Keep progress inside the rounded content
+                                  // surface, clear of the title/rail junction.
+                                  SizedBox(
+                                    height: 4,
+                                    child: showGlobalProgress
+                                        ? const ExcludeSemantics(
+                                            child: LinearProgressIndicator(),
+                                          )
+                                        : null,
+                                  ),
+                                  Expanded(
+                                    child: IndexedStack(
+                                      index: _selectedIndex,
+                                      children: [
+                                        _buildTabWrapper(
+                                          0,
+                                          _buildStartScreen(),
+                                        ),
+                                        _buildTabWrapper(
+                                          1,
+                                          _buildPreviewPage(),
+                                        ),
+                                        _buildTabWrapper(
+                                          2,
+                                          _buildValidationPage(),
+                                        ),
+                                        _buildTabWrapper(
+                                          3,
+                                          _buildSettingsScreen(),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -4200,12 +4229,13 @@ class _NativeNavigationRail extends StatelessWidget {
   final List<_NavigationRailEntry> entries;
   final ValueChanged<int> onDestinationSelected;
 
-  static const _width = 96.0;
+  static const _width = 72.0;
 
   @override
   Widget build(BuildContext context) {
     // Keep the native, fixed rail and its stable Windows semantics tree.
     return NavigationRail(
+      backgroundColor: Colors.transparent,
       labelType: NavigationRailLabelType.all,
       minWidth: _width,
       selectedIndex: selectedIndex,
