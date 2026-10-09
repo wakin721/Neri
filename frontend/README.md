@@ -24,4 +24,12 @@ flutter pub get
 flutter analyze
 flutter test
 flutter build windows --release
+python ../scripts/flutter_accessibility_hotfix.py build/windows/x64/runner/Release/flutter_windows.dll build/windows/x64/runner/Release/flutter_windows.dll
 ```
+
+The Windows release package applies a local null-parent guard to Flutter 3.44.6's
+accessibility bridge, which can crash during maximization. The script accepts only
+the verified engine hash and keeps accessibility enabled. It fails for a different
+engine rather than modifying unknown instructions. Review/remove it when upgrading
+to an engine with a verified upstream fix. Diagnosis and validation records for the
+installed application are in `runs/window_crash_20261009/`.
