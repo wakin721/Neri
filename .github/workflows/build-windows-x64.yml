@@ -79,6 +79,21 @@ jobs:
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
           path: package/${{ steps.artifact.outputs.artifact_name }}/
+          # scikit-learn bundles its Windows runtime DLLs in sklearn/.libs.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
+
+      - name: Download application for distribution verification
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: downloaded-package
+
+      - name: Verify downloaded Python dependencies
+        run: |
+          $python = Join-Path $env:GITHUB_WORKSPACE "downloaded-package\Neri\toolkit\python.exe"
+          # Isolated mode prevents the build environment from masking missing files.
+          & $python -I -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; from hdbscan import HDBSCAN as WithinSeqHDBSCAN"
+          if ($LASTEXITCODE -ne 0) { throw "Downloaded application dependency check failed." }

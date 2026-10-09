@@ -269,9 +269,12 @@ def _replace_default_classifier(
     if asset.resolve() != target.resolve():
         shutil.copy2(asset, target)
     manifest = _read_json_object(paths.model_manifest)
+    display_name = "DINOv2 Within-Seq" if checkpoint.head_type == "memory_within_seq" else "DINOv2 Memory"
+    if checkpoint.head_type == "memory" and checkpoint.calibration.get("point") == "Val90":
+        display_name = f"DINOv2 Seq Memory Val90 ({len(checkpoint.classes)}类)"
     manifest.update(
         checkpoint=target.name,
-        display_name="DINOv2 Within-Seq" if checkpoint.head_type == "memory_within_seq" else "DINOv2 Memory",
+        display_name=display_name,
         encoder_sha256=checkpoint.encoder_sha256,
         preprocessing=checkpoint.preprocessing,
         event_aggregation=checkpoint.event_aggregation,

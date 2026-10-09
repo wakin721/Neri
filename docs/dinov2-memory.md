@@ -1,12 +1,16 @@
-# DINOv2 旧标准 Memory 分类头
+# DINOv2 Seq Memory 分类头
 
-Nightly 当前默认头为 42 类 Within-Seq Val90，少于 10 张已校验图片的物种作为 Unknown，详见 [Within-Seq 部署说明](dinov2-within-seq.md#nightly-默认推理头)。以下记录旧标准 Memory 评分器和历史 76 类模型，适用于显式加载旧 checkpoint。
+Nightly 当前默认头为 **Seq Memory Val90（42 类）**，`head_type=memory`。少于 10 张已校验裁剪图片的物种全部作为 Unknown；42 类 Known 使用 3,311 个序列代表特征建库，43 类 Unknown 的 123 张图片全部退出建库，仅参与阈值校准。Within-Seq 仍受支持，可显式加载其 checkpoint，详见 [Within-Seq 说明](dinov2-within-seq.md)。
+
+当前阈值为 **0.6901171803474426**，严格低于阈值时拒识。Val90 表示 Unknown 校准图像的微平均拒识召回至少达到 90%，不是分数阈值 0.90。实际校准拒识 111/123 张（90.24%），4,281 张 Known 校准图像的误拒率为 23.45%，闭集准确率为 92.15%。全部 4,404 个校准样本经过保存后的真实运行时重放。Known 校准覆盖 40/42 类，红嘴鸥和赤麻鸭没有校准样本；赤麻鸭保留单相机例外，但原图和采集组仍隔离。这些数值属于内部校准结果，没有独立测试集。
+
+默认模型 SHA-256 为 `b469920e78e5bae3c8751c9ae49cfbb2c1ea50e970f41de3aa23557d93e7a180`，来源、类别计数及校准证据保存在 `res/dinov2/memory_head_manifest.json`。
 
 新的 DINOv2 组件安装会把下载到的旧多原型分类头替换为随应用附带的 `res/dinov2/memory_head.npz`。已有安装需在环境页面重新安装 DINOv2 组件，才会使用新默认头。显式选择的旧多原型模型和原去质心 Memory 模型仍可读取。
 
 标准导出配置为 `neighbors=1`、`centroid_weight=0.5`、相机池化和 `margin_weight=1`。特征使用冻结的类均衡中心做 CL2N 变换。每个类别先在每台相机内取最高记忆相似度，再取最高一台相机的分数；该分数与冻结的类别质心相似度各占一半。取混合分数最高的类别，拒识分数为获胜混合分数加上第一、第二类别的混合分数差，低于独立校准阈值才拒识。
 
-随附模型来自 `Neri_plus/runs/memory_head_verified_20260927/deployment/memory_head.npz`，使用 `data/by_species/00已校验` 的 76 类、9,275 张图片，其中 7,167 张构成记忆库，2,108 张来自独立相机用于 4% 目标误拒率校准。阈值为 `0.4590834081172943`，相等时接受；校准集实测误拒率约 3.94%。模型 SHA-256 为 `709e9bd79409179e0ea997ba18f5d4302a656db4aa3caa4a8efb45040043a702`；编码器 `model.safetensors` SHA-256 为 `d73036b56966966d07975d696bde331762f37297e2f095de8cea0040c3aa0841`。详细类别、相机校准和数据来源记录在 `res/dinov2/memory_head_manifest.json`，分类头构建与诊断见 `Neri_plus/runs/memory_head_verified_20260927/REPORT.md`。
+历史 76 类模型来自 `Neri_plus/runs/memory_head_verified_20260927/deployment/memory_head.npz`，使用 `data/by_species/00已校验` 的 76 类、9,275 张图片，其中 7,167 张构成记忆库，2,108 张来自独立相机用于 4% 目标误拒率校准。阈值为 `0.4590834081172943`，相等时接受；校准集实测误拒率约 3.94%。模型 SHA-256 为 `709e9bd79409179e0ea997ba18f5d4302a656db4aa3caa4a8efb45040043a702`；编码器 `model.safetensors` SHA-256 为 `d73036b56966966d07975d696bde331762f37297e2f095de8cea0040c3aa0841`。历史模型的构建与诊断见 `Neri_plus/runs/memory_head_verified_20260927/REPORT.md`。
 
 已登记的正式物种事件和已激活反馈代中审核通过的事件会按相机加入当前 Memory 评分；受影响类别的质心按加入后的记忆样本重新计算。反馈质量检查使用相同的获胜混合分数与类别间隔，未通过时保留上一代的样本快照。临时登记物种只提供辅助提示。阈值是对冻结基础记忆库校准的，动态样本加入后没有独立的新相机校准保证。校准集仅覆盖 44/76 类；该 76 类模型没有完整独立测试集，也不能套用较小类别对照实验的准确率。
 

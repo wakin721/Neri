@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,6 +10,26 @@ import pytest
 
 from system.dinov2.checkpoint import load_checkpoint
 from system.dinov2.runtime import load_dinov2_model
+
+
+def test_bundled_default_is_seq_memory_val90():
+    path = Path(__file__).resolve().parents[1] / "res/dinov2/memory_head.npz"
+    checkpoint = load_checkpoint(path)
+    manifest = json.loads(path.with_name("memory_head_manifest.json").read_text("utf8"))
+    assert checkpoint.head_type == "memory" and checkpoint.within_seq is None
+    assert len(checkpoint.classes) == 42 and len(checkpoint.features) == 3311
+    assert checkpoint.neighbors == 1 and checkpoint.centroid_weight == 0.5
+    assert checkpoint.threshold == pytest.approx(0.6901171803474426)
+    assert checkpoint.calibration["point"] == "Val90"
+    assert checkpoint.calibration["target_unknown_micro_recall"] == 0.9
+    assert checkpoint.calibration["unknown_rejection_recall"] >= 0.9
+    assert checkpoint.fingerprint == manifest["head_sha256"]
+    counts = manifest["role_protocol"]["reviewed_class_counts"]
+    assert set(checkpoint.classes) == {species for species, count in counts.items() if count >= 10}
+    assert set(manifest["role_protocol"]["unknown_classes"]) == {
+        species for species, count in counts.items() if count < 10
+    }
+    assert not set(checkpoint.labels) & set(manifest["role_protocol"]["unknown_classes"])
 
 
 def _unit(index: int) -> np.ndarray:
