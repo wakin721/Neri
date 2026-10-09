@@ -3270,13 +3270,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Widget _buildTitleLogo({double size = 26}) {
-    final logoFile = _resolveLogoFile();
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.file(
-          logoFile,
+        child: Image.asset(
+          'assets/logo.png',
           width: size,
           height: size,
           fit: BoxFit.contain,
@@ -3290,14 +3289,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ),
       ),
     );
-  }
-
-  File _resolveLogoFile() {
-    final candidates = <File>[File('res/logo.png'), File('../res/logo.png')];
-    for (final file in candidates) {
-      if (file.existsSync()) return file;
-    }
-    return candidates.first;
   }
 
   Widget _buildTabWrapper(int tabIndex, Widget child) {
