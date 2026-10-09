@@ -3038,7 +3038,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final titleBarColor = colorScheme.surfaceContainerHigh;
+    final titleBarColor = colorScheme.surface;
     final showGlobalProgress =
         _loading ||
         _previewDetecting ||
@@ -3165,7 +3165,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                             }
                           },
                         ),
-                        const VerticalDivider(width: 1),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: IndexedStack(
                             index: _selectedIndex,
@@ -4200,38 +4200,17 @@ class _NativeNavigationRail extends StatelessWidget {
   final List<_NavigationRailEntry> entries;
   final ValueChanged<int> onDestinationSelected;
 
-  static const _width = 80.0;
+  static const _width = 96.0;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    // 移除 Semantics 和 ExcludeSemantics 包裹
+    // Keep the native, fixed rail and its stable Windows semantics tree.
     return NavigationRail(
-      backgroundColor: colorScheme.surfaceContainerLowest,
       labelType: NavigationRailLabelType.all,
       minWidth: _width,
       selectedIndex: selectedIndex,
       groupAlignment: -0.85,
       useIndicator: true,
-      indicatorColor: colorScheme.secondaryContainer,
-      indicatorShape: const StadiumBorder(),
-      selectedIconTheme: IconThemeData(
-        color: colorScheme.onSecondaryContainer,
-        size: 26,
-      ),
-      unselectedIconTheme: IconThemeData(
-        color: colorScheme.onSurfaceVariant,
-        size: 26,
-      ),
-      selectedLabelTextStyle: TextStyle(
-        color: colorScheme.onSecondaryContainer,
-        fontWeight: FontWeight.w700,
-      ),
-      unselectedLabelTextStyle: TextStyle(
-        color: colorScheme.onSurfaceVariant,
-        fontWeight: FontWeight.w600,
-      ),
       onDestinationSelected: onDestinationSelected,
       destinations: [
         for (final entry in entries)

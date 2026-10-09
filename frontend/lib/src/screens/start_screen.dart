@@ -4,6 +4,7 @@ import '../models/settings.dart';
 import '../models/video_processing_mode.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/input_folder_field.dart';
+import '../widgets/expressive_action_button.dart';
 import '../widgets/section_card.dart';
 
 const _defaultModelDirectory = 'res/model/detect';
@@ -173,15 +174,27 @@ class _HeroPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              Icons.camera_outdoor_rounded,
-              size: 48,
-              color: colorScheme.onPrimaryContainer,
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: colorScheme.primary,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(28),
+                  topRight: Radius.circular(28),
+                  bottomLeft: Radius.circular(8),
+                  bottomRight: Radius.circular(28),
+                ),
+              ),
+              child: Icon(
+                Icons.camera_outdoor_rounded,
+                size: 32,
+                color: colorScheme.onPrimary,
+              ),
             ),
             const SizedBox(height: 12),
             Text(
               '红外相机影像智能处理',
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                 color: colorScheme.onPrimaryContainer,
               ),
             ),
@@ -303,7 +316,7 @@ class _CreateJobCard extends StatelessWidget {
             onChanged: detectionSettingsEnabled ? onIouChanged : null,
           ),
           const SizedBox(height: 8),
-          FilledButton.icon(
+          ExpressiveActionButton(
             onPressed: submitting || dinoNeedsDetector ? null : onCreateJob,
             icon: submitting
                 ? const SizedBox(

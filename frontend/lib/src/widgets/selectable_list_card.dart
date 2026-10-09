@@ -83,13 +83,16 @@ class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Card.filled(
       margin: EdgeInsets.zero,
+      color: scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       clipBehavior: Clip.antiAlias,
       child: ListView.separated(
-        padding: widget.padding,
+        padding: widget.padding.add(const EdgeInsets.all(8)),
         itemCount: widget.items.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
+        separatorBuilder: (_, __) => const SizedBox(height: 4),
         itemBuilder: (context, index) {
           final item = widget.items[index];
           final subtitle = widget.subtitleBuilder?.call(item);
@@ -128,6 +131,11 @@ class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
                       },
                 child: ListTile(
                   selected: selected,
+                  selectedColor: scheme.onSecondaryContainer,
+                  selectedTileColor: scheme.secondaryContainer,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                   tileColor: widget.tileColorBuilder?.call(index, item),
                   leading: widget.leadingBuilder?.call(item),
                   title: Text(

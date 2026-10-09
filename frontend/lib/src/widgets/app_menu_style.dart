@@ -70,7 +70,7 @@ class AppMenuButton<T> extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14),
             alignment: Alignment.centerLeft,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(16),
             ),
           ),
           child: Row(
@@ -110,13 +110,13 @@ MenuStyle appMenuStyle(
   final scheme = Theme.of(context).colorScheme;
   return MenuStyle(
     elevation: const WidgetStatePropertyAll(8),
-    backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHighest),
+    backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
     surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-    shadowColor: WidgetStatePropertyAll(Colors.black.withValues(alpha: 0.20)),
+    shadowColor: WidgetStatePropertyAll(scheme.shadow.withValues(alpha: 0.20)),
     minimumSize: WidgetStatePropertyAll(Size(minWidth, 0)),
     padding: WidgetStatePropertyAll(padding),
     shape: WidgetStatePropertyAll(
-      RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
     ),
   );
 }
@@ -125,15 +125,15 @@ MenuStyle appDropdownMenuStyle(BuildContext context, {double minWidth = 180}) {
   final scheme = Theme.of(context).colorScheme;
   return MenuStyle(
     elevation: const WidgetStatePropertyAll(8),
-    backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHighest),
+    backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
     surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-    shadowColor: WidgetStatePropertyAll(Colors.black.withValues(alpha: 0.20)),
+    shadowColor: WidgetStatePropertyAll(scheme.shadow.withValues(alpha: 0.20)),
     minimumSize: WidgetStatePropertyAll(Size(minWidth, 0)),
     padding: const WidgetStatePropertyAll(
       EdgeInsets.symmetric(horizontal: 6, vertical: 8),
     ),
     shape: WidgetStatePropertyAll(
-      RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
     ),
   );
 }
@@ -149,7 +149,7 @@ ButtonStyle appMenuItemStyle(
     padding: const EdgeInsets.symmetric(horizontal: 12),
     foregroundColor: selected ? scheme.onSecondaryContainer : scheme.onSurface,
     backgroundColor: selected ? scheme.secondaryContainer : Colors.transparent,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     textStyle: Theme.of(context).textTheme.bodyLarge,
   );
 }
