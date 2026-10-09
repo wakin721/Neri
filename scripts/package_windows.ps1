@@ -38,6 +38,10 @@ $pythonRoot = Split-Path -Parent (Get-Command python).Source
 
 New-Item -ItemType Directory -Path $package -Force | Out-Null
 Copy-Item "$release\*" $package -Recurse -Force
+# The pinned 3.44.6 release engine needs the version-locked accessibility guard.
+$engineDll = Join-Path $package "flutter_windows.dll"
+& python "scripts\flutter_accessibility_hotfix.py" $engineDll $engineDll
+if ($LASTEXITCODE -ne 0) { throw "Flutter accessibility hotfix failed; review the engine version/hash." }
 Copy-Item "system" $package -Recurse -Force
 Copy-Item "res" $package -Recurse -Force
 Copy-Item "requirements.txt" $package -Force

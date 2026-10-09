@@ -3038,7 +3038,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final titleBarColor = colorScheme.surfaceContainerHigh;
+    final shellColor = colorScheme.surfaceContainer;
     final showGlobalProgress =
         _loading ||
         _previewDetecting ||
@@ -3050,11 +3050,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       fit: StackFit.expand,
       children: [
         Scaffold(
+          backgroundColor: shellColor,
           appBar: PreferredSize(
             preferredSize: const Size.fromHeight(kToolbarHeight),
             child: DragToMoveArea(
               child: AppBar(
-                backgroundColor: titleBarColor,
+                backgroundColor: shellColor,
                 surfaceTintColor: Colors.transparent,
                 scrolledUnderElevation: 0,
                 titleSpacing: 12,
@@ -3142,15 +3143,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             children: [
               Column(
                 children: [
-                  // 标题栏下方的全局进度条
-                  SizedBox(
-                    height: 4, // 固定高度防止页面抖动
-                    child: showGlobalProgress
-                        ? const ExcludeSemantics(
-                            child: LinearProgressIndicator(),
-                          )
-                        : null,
-                  ),
                   // 原有的主体内容区域
                   Expanded(
                     child: Row(
@@ -3165,16 +3157,53 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                             }
                           },
                         ),
-                        const VerticalDivider(width: 1),
+                        const SizedBox(width: 8),
                         Expanded(
-                          child: IndexedStack(
-                            index: _selectedIndex,
-                            children: [
-                              _buildTabWrapper(0, _buildStartScreen()),
-                              _buildTabWrapper(1, _buildPreviewPage()),
-                              _buildTabWrapper(2, _buildValidationPage()),
-                              _buildTabWrapper(3, _buildSettingsScreen()),
-                            ],
+                          child: ClipRRect(
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(18),
+                              bottomLeft: Radius.circular(18),
+                            ),
+                            child: ColoredBox(
+                              color: colorScheme.surface,
+                              child: Column(
+                                children: [
+                                  // Keep progress inside the rounded content
+                                  // surface, clear of the title/rail junction.
+                                  SizedBox(
+                                    height: 4,
+                                    child: showGlobalProgress
+                                        ? const ExcludeSemantics(
+                                            child: LinearProgressIndicator(),
+                                          )
+                                        : null,
+                                  ),
+                                  Expanded(
+                                    child: IndexedStack(
+                                      index: _selectedIndex,
+                                      children: [
+                                        _buildTabWrapper(
+                                          0,
+                                          _buildStartScreen(),
+                                        ),
+                                        _buildTabWrapper(
+                                          1,
+                                          _buildPreviewPage(),
+                                        ),
+                                        _buildTabWrapper(
+                                          2,
+                                          _buildValidationPage(),
+                                        ),
+                                        _buildTabWrapper(
+                                          3,
+                                          _buildSettingsScreen(),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -3241,13 +3270,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Widget _buildTitleLogo({double size = 26}) {
-    final logoFile = _resolveLogoFile();
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.file(
-          logoFile,
+        child: Image.asset(
+          'assets/logo.png',
           width: size,
           height: size,
           fit: BoxFit.contain,
@@ -3261,14 +3289,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ),
       ),
     );
-  }
-
-  File _resolveLogoFile() {
-    final candidates = <File>[File('res/logo.png'), File('../res/logo.png')];
-    for (final file in candidates) {
-      if (file.existsSync()) return file;
-    }
-    return candidates.first;
   }
 
   Widget _buildTabWrapper(int tabIndex, Widget child) {
@@ -4200,38 +4220,18 @@ class _NativeNavigationRail extends StatelessWidget {
   final List<_NavigationRailEntry> entries;
   final ValueChanged<int> onDestinationSelected;
 
-  static const _width = 80.0;
+  static const _width = 72.0;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    // 移除 Semantics 和 ExcludeSemantics 包裹
+    // Keep the native, fixed rail and its stable Windows semantics tree.
     return NavigationRail(
-      backgroundColor: colorScheme.surfaceContainerLowest,
+      backgroundColor: Colors.transparent,
       labelType: NavigationRailLabelType.all,
       minWidth: _width,
       selectedIndex: selectedIndex,
       groupAlignment: -0.85,
       useIndicator: true,
-      indicatorColor: colorScheme.secondaryContainer,
-      indicatorShape: const StadiumBorder(),
-      selectedIconTheme: IconThemeData(
-        color: colorScheme.onSecondaryContainer,
-        size: 26,
-      ),
-      unselectedIconTheme: IconThemeData(
-        color: colorScheme.onSurfaceVariant,
-        size: 26,
-      ),
-      selectedLabelTextStyle: TextStyle(
-        color: colorScheme.onSecondaryContainer,
-        fontWeight: FontWeight.w700,
-      ),
-      unselectedLabelTextStyle: TextStyle(
-        color: colorScheme.onSurfaceVariant,
-        fontWeight: FontWeight.w600,
-      ),
       onDestinationSelected: onDestinationSelected,
       destinations: [
         for (final entry in entries)

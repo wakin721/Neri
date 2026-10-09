@@ -1,0 +1,13 @@
+--- a/flutter/shell/platform/common/accessibility_bridge.cc
++++ b/flutter/shell/platform/common/accessibility_bridge.cc
+@@ -219,8 +219,5 @@
+-      // Skip nodes that don't exist or have a parent in the current tree.
++      // Skip missing nodes and nodes without a parent in the current tree.
+       ui::AXNode* child = tree_->GetFromId(child_id);
+-      if (!child) {
++      if (!child || !child->parent()) {
+         continue;
+       }
+-
+-      // Flutter's root node should never be reparented.
+-      assert(child->parent());

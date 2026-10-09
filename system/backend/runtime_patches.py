@@ -158,6 +158,12 @@ def install_runtime_patches(services_module: Any, *, patch_preview: bool = True)
         setattr(patched_serializer, '_neri_preserves_open_set_rejections', True)
         services_module._serialize_detector_output = patched_serializer
 
+    # Imported legacy functions resolve their globals in services_legacy, not
+    # in the facade. Batch, single-image and video serialization all use it.
+    legacy = getattr(services_module, '_legacy', None)
+    if legacy is not None:
+        legacy._serialize_detector_output = services_module._serialize_detector_output
+
     if not patch_preview:
         return
 

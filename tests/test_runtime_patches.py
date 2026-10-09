@@ -131,6 +131,50 @@ def test_install_runtime_patches_is_idempotent_and_wraps_serializer():
     assert len(calls) == 1
 
 
+def test_real_batch_single_image_and_video_use_rejection_preserving_serializer():
+    from system.backend import services
+
+    serializer = services._serialize_detector_output
+    assert getattr(serializer, '_neri_preserves_open_set_rejections', False)
+    assert services._legacy._serialize_detector_output is serializer
+    # These functions keep their defining module's globals when copied to the
+    # facade. Verify the serializer actually used by all processing paths.
+    for function in (services._legacy._detect_image_batch,
+                     services._legacy._detect_image,
+                     services._legacy._detect_video_fast_batch):
+        assert function.__globals__['_serialize_detector_output'] is serializer
+
+
+def test_actual_image_batch_returns_unknown_box_instead_of_empty(tmp_path, monkeypatch):
+    from system.backend import services
+    from system.backend.models import CreateJobRequest, DetectionItem
+
+    path = tmp_path / 'animal.jpg'
+    path.write_bytes(b'test')
+    rejected = {
+        'name': 'Unknown', 'accepted': False,
+        'observation_id': 'batch-rejected', 'predicted_species': 'Unknown',
+        'known_score': 0.3, 'threshold': 0.5,
+    }
+    result = SimpleNamespace(
+        boxes=[FakeBox()], candidates_data={0: [rejected]},
+        classification_filtered_boxes={0}, names={0: 'animal'},
+    )
+    detector = SimpleNamespace(detect_batch_species=lambda *args, **kwargs: [{
+        '物种名称': '空', '物种数量': '空', 'detect_results': [result],
+    }])
+    monkeypatch.setattr(services._legacy, '_selected_inference_class_ids', lambda *args: None)
+    monkeypatch.setattr(services._legacy, '_persist_dinov2_observations', lambda *args: None)
+    monkeypatch.setattr(services._legacy, '_save_detection_data_batch', lambda *args: None)
+    item = DetectionItem(filename=path.name, path=str(path), file_type='jpg')
+    output = services._detect_image_batch(
+        detector, [path], [item], CreateJobRequest(input_dir=str(tmp_path)), tmp_path,
+    )
+    assert output[0].species == [REJECTED_UNKNOWN_LABEL]
+    assert len(output[0].detection_boxes) == 1
+    assert output[0].detection_boxes[0]['observation_id'] == 'batch-rejected'
+
+
 def test_loader_patches_use_targeted_sql_and_keep_legacy_full_fallback(tmp_path):
     from system.backend.runtime_patches import install_runtime_patches
 

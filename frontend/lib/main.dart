@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart'; // 確保 import 放在所有變數和宣告的最上方
 
 import 'src/api_client.dart';
+import 'src/app_theme.dart';
 import 'src/crash_reporter.dart';
 import 'src/crash_watchdog.dart';
 import 'src/dinov2_startup_check.dart';
@@ -138,8 +139,8 @@ class CrashReportOnlyApp extends StatelessWidget {
           title: 'Neri',
           debugShowCheckedModeBanner: false,
           themeMode: settings.themeMode,
-          theme: ThemeData(useMaterial3: true, colorScheme: lightScheme),
-          darkTheme: ThemeData(useMaterial3: true, colorScheme: darkScheme),
+          theme: buildNeriTheme(lightScheme),
+          darkTheme: buildNeriTheme(darkScheme),
           home: _CrashReportOnlyScreen(report: report),
         );
       },
@@ -288,8 +289,8 @@ class _NeriAppState extends State<NeriApp> {
               builder: (context, child) =>
                   CrashDialogListener(child: child ?? const SizedBox.shrink()),
               themeMode: settings.themeMode,
-              theme: ThemeData(useMaterial3: true, colorScheme: lightScheme),
-              darkTheme: ThemeData(useMaterial3: true, colorScheme: darkScheme),
+              theme: buildNeriTheme(lightScheme),
+              darkTheme: buildNeriTheme(darkScheme),
               home: MainWindow(
                 apiClient: _apiClient,
                 themeNotifier: widget.themeNotifier,

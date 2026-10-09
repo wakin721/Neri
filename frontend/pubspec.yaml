@@ -1,10 +1,11 @@
 name: neri_flutter
 version: 3.1.0-alpha1+645
 publish_to: none
-description: Material 3 Flutter frontend for the Neri infrared-camera processing backend.
+description: Material 3 Expressive Flutter frontend for the Neri infrared-camera processing backend.
 
 environment:
   sdk: ^3.8.0
+  flutter: '>=3.44.0'
 
 dependencies:
   crypto: ^3.0.7
@@ -30,6 +31,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/logo.png
     - assets/legal/user_agreement.md
 
 

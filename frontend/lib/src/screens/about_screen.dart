@@ -19,7 +19,7 @@ class AboutScreen extends StatelessWidget {
           subtitle: settings?.appVersion,
           icon: Icons.info_rounded,
           child: const Text(
-            'Neri 是红外相机图像智能处理工具。当前 Flutter Material 3 客户端通过 Python 后端复用项目已有的 EXIF 提取、批量处理和 YOLO 识别能力。',
+            'Neri 是红外相机图像智能处理工具。当前 Flutter Material 3 Expressive 客户端通过 Python 后端复用项目已有的 EXIF 提取、批量处理和 YOLO 识别能力。',
           ),
         ),
       ],
