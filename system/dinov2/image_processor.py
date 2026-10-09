@@ -8,10 +8,14 @@ runtime while preserving the existing detector implementation.
 from __future__ import annotations
 
 import concurrent.futures
+import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
 from .classifier import DinoV2Observation
+
+logger = logging.getLogger(__name__)
 
 
 class ImageProcessor:
@@ -186,8 +190,12 @@ class ImageProcessor:
             ]
 
         use_fp16 = bool(kwargs.get("use_fp16", False))
+        encoder = getattr(self.dinov2_classifier, "encoder", None)
+        if encoder is not None and hasattr(encoder, "use_fp16"):
+            encoder.use_fp16 = bool(use_fp16 and getattr(encoder, "device", None) == "cuda")
         device_name, use_fp16 = self._determine_device(use_fp16)
         self._sync_device(device_name)
+        detect_started = time.perf_counter()
         det_results = self.model(
             processed_imgs,
             augment=kwargs.get("augment", True),
@@ -201,8 +209,15 @@ class ImageProcessor:
             save=False,
         )
         self._sync_device(device_name)
+        detect_elapsed = time.perf_counter() - detect_started
+        classify_started = time.perf_counter()
         candidate_maps, selected_maps = self._classify_dinov2_crops(
             det_results, original_imgs_rgb
+        )
+        logger.info(
+            "DINOv2 batch timing: images=%d observations=%d detect=%.3fs classify=%.3fs fp16=%s",
+            len(processed_imgs), len(self._dinov2_observations), detect_elapsed,
+            time.perf_counter() - classify_started, getattr(encoder, "use_fp16", False),
         )
 
         output: List[Dict[str, Any]] = []

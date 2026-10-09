@@ -41,9 +41,12 @@ def _source_cache_key(source: Path) -> str:
 
 
 @contextmanager
-def example_frame_cache():
+def example_frame_cache(frames=None):
     """Reuse decoded still frames within one explicit persistence operation."""
-    token = _STILL_FRAME_CACHE.set({})
+    token = _STILL_FRAME_CACHE.set({
+        _source_cache_key(Path(path).expanduser().resolve()): frame
+        for path, frame in (frames or {}).items()
+    })
     try:
         yield
     finally:

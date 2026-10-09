@@ -29,6 +29,9 @@ LEGACY_TEMP_LOG_PREFIXES = (
 DEFAULT_LOG_TAIL_BYTES = 32_000
 CACHE_FILE_NAMES = {
     "job_state.json",
+    "job_state.sqlite3",
+    "job_state.sqlite3-wal",
+    "job_state.sqlite3-shm",
     "crash_startup_report.json",
 }
 CACHE_FILE_PREFIXES = (
