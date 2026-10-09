@@ -1,0 +1,3 @@
+# Optional batch Within-Seq discovery API (no encoder/weights included).
+-r requirements.txt
+hdbscan==0.8.42

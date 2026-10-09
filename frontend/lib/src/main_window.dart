@@ -27,7 +27,9 @@ import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
 import 'screens/start_screen.dart';
 import 'utils/job_result_refresh.dart';
+import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
+import 'widgets/retained_tab.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
@@ -110,7 +112,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final _inputController = TextEditingController();
   final Map<String, DetectionItem> _previewMetadataCache =
       <String, DetectionItem>{};
-  final Set<String> _previewMetadataLoading = <String>{};
+  final Map<String, ({int version, Object token})> _previewMetadataLoading = {};
   final Set<int> _expectedBackendExitPids = <int>{};
   final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   final _appUpdater = AppUpdater();
@@ -120,6 +122,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
   List<DetectionItem> _previewItems = const <DetectionItem>[];
+  final _validationItemsCache = ValidationItemsCache();
+  final Map<String, ProcessingJob> _completeJobsById = {};
+  final _refreshGate = AsyncRefreshGate();
   Timer? _timer;
   Timer? _previewRefreshTimer;
   Timer? _inputDirectoryChangeTimer;
@@ -730,7 +735,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       await _refreshInitialPageData();
       _timer ??= Timer.periodic(
         const Duration(seconds: 2),
-        (_) => _refresh(silent: true),
+        (_) => _refresh(silent: true, coalesce: true),
       );
     } catch (error) {
       if (!mounted) return;
@@ -788,7 +793,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted || _closeFlowBlocksBackendStartup) return;
     _timer ??= Timer.periodic(
       const Duration(seconds: 2),
-      (_) => _refresh(silent: true),
+      (_) => _refresh(silent: true, coalesce: true),
     );
   }
 
@@ -1768,6 +1773,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
       final sortedItems = _sortMediaItemsForDisplay(items);
       setState(() {
+        // Fast directory snapshots omit full metadata; invalidate the previous
+        // generation so selected files can load their metadata again.
+        _previewMetadataCache.clear();
         _previewItems = sortedItems;
         _previewLoadedPath = inputPath;
         _previewLoading = false;
@@ -1801,32 +1809,55 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (_closeFlowBlocksBackendStartup) return;
     if (item.path.isEmpty ||
         _previewMetadataCache.containsKey(item.path) ||
-        _previewMetadataLoading.contains(item.path)) {
+        _previewMetadataLoading[item.path]?.version ==
+            _previewRefreshRequestId) {
       return;
     }
 
-    _previewMetadataLoading.add(item.path);
+    final inputPath = _inputController.text.trim();
+    final requestId = _previewRefreshRequestId;
+    final token = Object();
+    _previewMetadataLoading[item.path] = (version: requestId, token: token);
     try {
-      final fullItem = await widget.apiClient.fetchPreviewItem(
-        filePath: item.path,
-        inputPath: _inputController.text.trim(),
+      final fullItem = await widget.apiClient
+          .fetchPreviewItem(filePath: item.path, inputPath: inputPath)
+          .timeout(const Duration(seconds: 15));
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          inputPath != _inputController.text.trim() ||
+          requestId != _previewRefreshRequestId)
+        return;
+      final index = _previewItems.indexWhere(
+        (entry) => entry.path == item.path,
       );
-      if (!mounted || _closeFlowBlocksBackendStartup) return;
+      if (index < 0) return;
+      final previous = _previewItems[index];
+      final selectedPath = _previewItems.isEmpty
+          ? null
+          : _previewItems[_safePreviewIndex(_previewItems)].path;
+      final updated = List<DetectionItem>.from(_previewItems);
+      updated[index] = fullItem;
+      final orderingChanged =
+          _mediaSortTimestamp(previous) != _mediaSortTimestamp(fullItem) ||
+          previous.filename != fullItem.filename;
       setState(() {
         _previewMetadataCache[item.path] = fullItem;
-        _previewItems = _sortMediaItemsForDisplay(
-          _previewItems
-              .map(
-                (previewItem) =>
-                    previewItem.path == fullItem.path ? fullItem : previewItem,
-              )
-              .toList(),
-        );
+        _previewItems = orderingChanged
+            ? _sortMediaItemsForDisplay(updated)
+            : updated;
+        if (orderingChanged && selectedPath != null) {
+          final selected = _previewItems.indexWhere(
+            (entry) => entry.path == selectedPath,
+          );
+          if (selected >= 0) _selectedPreviewIndex = selected;
+        }
       });
     } catch (_) {
       // Fast preview data is still usable if per-file metadata is unavailable.
     } finally {
-      _previewMetadataLoading.remove(item.path);
+      if (identical(_previewMetadataLoading[item.path]?.token, token)) {
+        _previewMetadataLoading.remove(item.path);
+      }
     }
   }
 
@@ -1997,37 +2028,86 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     bool reloadSettings = false,
     bool includeJobResults = true,
     bool finishLoading = true,
+    bool coalesce = false,
+  }) async {
+    await _refreshGate.run(() async {
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
+      await _performRefresh(
+        silent: silent,
+        reloadSettings: reloadSettings,
+        includeJobResults: includeJobResults,
+        finishLoading: finishLoading,
+      );
+    }, coalesce: coalesce);
+  }
+
+  Future<void> _performRefresh({
+    bool silent = false,
+    bool reloadSettings = false,
+    bool includeJobResults = true,
+    bool finishLoading = true,
   }) async {
     if (_closeFlowBlocksBackendStartup) return;
     if (!silent) {
       setState(() => _loading = true);
     }
 
+    var backendResponded = false;
     try {
       final shouldFetchSettings =
           reloadSettings || !silent || _settings == null;
       final settings = shouldFetchSettings
-          ? await widget.apiClient.fetchSettings()
+          ? await widget.apiClient.fetchSettings().timeout(
+              const Duration(seconds: 15),
+            )
           : _settings;
-      var fetchedCompleteJobResults = shouldFetchCompleteJobResults(
+      final mayFetchCompleteJobResults = shouldFetchCompleteJobResults(
         includeJobResults: includeJobResults,
         silent: silent,
         jobProcessingBusy: _jobProcessingBusy,
         resultsPageVisible: _selectedIndex == 1 || _selectedIndex == 2,
       );
-      var jobs = await widget.apiClient.listJobs(
-        includeResults: fetchedCompleteJobResults,
-      );
-      final jobFinishedSinceLastRefresh = _hasJobFinishedSinceLastRefresh(jobs);
-      if (!fetchedCompleteJobResults &&
-          includeJobResults &&
-          (jobFinishedSinceLastRefresh ||
-              jobs.every((job) => !job.isWorkerActive))) {
-        jobs = await widget.apiClient.listJobs();
-        fetchedCompleteJobResults = true;
-      } else if (!fetchedCompleteJobResults) {
-        jobs = _mergeJobSummariesWithCachedResults(jobs);
+      final summaries = await widget.apiClient
+          .listJobs(includeResults: false)
+          .timeout(const Duration(seconds: 15));
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
+      backendResponded = true;
+      _backendReady = true;
+      final changedJobs = summaries
+          .where(
+            (job) =>
+                includeJobResults &&
+                (mayFetchCompleteJobResults || !job.isWorkerActive) &&
+                (!silent ||
+                    jobResultsNeedRefresh(job, _completeJobsById[job.id])),
+          )
+          .toList();
+      final fetchedJobs = <ProcessingJob>[];
+      final deletedIds = <String>{};
+      for (var start = 0; start < changedJobs.length; start += 4) {
+        final end = (start + 4).clamp(0, changedJobs.length).toInt();
+        final batch = changedJobs.sublist(start, end);
+        final results = await Future.wait(
+          batch.map(
+            (job) => widget.apiClient
+                .fetchJobIfExists(job.id)
+                .timeout(const Duration(seconds: 30)),
+          ),
+        );
+        for (var i = 0; i < batch.length; i++) {
+          final job = results[i];
+          if (job == null) {
+            deletedIds.add(batch[i].id);
+          } else {
+            fetchedJobs.add(job);
+          }
+        }
       }
+      final fetchedById = {for (final job in fetchedJobs) job.id: job};
+      final jobs = _mergeJobSummariesWithCachedResults([
+        for (final job in summaries)
+          if (!deletedIds.contains(job.id)) fetchedById[job.id] ?? job,
+      ], completeIds: fetchedById.keys.toSet());
       if (!mounted || _closeFlowBlocksBackendStartup || settings == null) {
         return;
       }
@@ -2037,7 +2117,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
       final settingsChanged = shouldFetchSettings;
 
-      bool jobsChanged = _jobs.length != jobs.length;
+      bool jobsChanged = fetchedJobs.isNotEmpty || _jobs.length != jobs.length;
       if (!jobsChanged) {
         for (int i = 0; i < jobs.length; i++) {
           if (_jobs[i].id != jobs[i].id ||
@@ -2054,15 +2134,25 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         }
       }
 
-      var previewJobUpdates = jobsChanged && fetchedCompleteJobResults
-          ? _jobResultsForInputPath(jobs, _inputController.text.trim())
+      final previewPath = _inputController.text.trim();
+      final previewVersion = _previewRefreshRequestId;
+      var previewJobUpdates = fetchedJobs.isNotEmpty
+          ? _jobResultsForInputPath(fetchedJobs, previewPath)
           : const <DetectionItem>[];
       if (previewJobUpdates.isNotEmpty) {
         previewJobUpdates = await existingLocalDetectionItems(
           previewJobUpdates,
-        );
+        ).timeout(const Duration(seconds: 15));
         if (!mounted || _closeFlowBlocksBackendStartup) return;
+        if (previewPath != _inputController.text.trim() ||
+            previewVersion != _previewRefreshRequestId) {
+          previewJobUpdates = const <DetectionItem>[];
+        }
       }
+
+      final currentIds = jobs.map((job) => job.id).toSet();
+      _completeJobsById.removeWhere((id, _) => !currentIds.contains(id));
+      _completeJobsById.addAll(fetchedById);
 
       if (settingsChanged || jobsChanged) {
         setState(() {
@@ -2142,19 +2232,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted) return;
       if (_closeFlowBlocksBackendStartup) return;
-      _backendReady = false;
+      if (!backendResponded) _backendReady = false;
       setState(() => _loading = false);
-      if (!silent) _showSnackBar('无法连接 Python 后端：$error');
+      if (!silent) _showSnackBar('无法刷新任务数据：$error');
     }
   }
 
   List<ProcessingJob> _mergeJobSummariesWithCachedResults(
-    List<ProcessingJob> summaries,
-  ) {
+    List<ProcessingJob> summaries, {
+    Set<String> completeIds = const <String>{},
+  }) {
     final cachedById = {for (final job in _jobs) job.id: job};
     return [
       for (final summary in summaries)
-        if (summary.results.isEmpty &&
+        if (!completeIds.contains(summary.id) &&
+            summary.results.isEmpty &&
             (cachedById[summary.id]?.results.isNotEmpty ?? false))
           ProcessingJob(
             id: summary.id,
@@ -2176,14 +2268,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         else
           summary,
     ];
-  }
-
-  bool _hasJobFinishedSinceLastRefresh(List<ProcessingJob> jobs) {
-    final previousById = {for (final job in _jobs) job.id: job};
-    return jobs.any((job) {
-      final previous = previousById[job.id];
-      return previous != null && previous.isWorkerActive && !job.isWorkerActive;
-    });
   }
 
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
@@ -3182,21 +3266,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                                     child: IndexedStack(
                                       index: _selectedIndex,
                                       children: [
-                                        _buildTabWrapper(
-                                          0,
-                                          _buildStartScreen(),
-                                        ),
-                                        _buildTabWrapper(
-                                          1,
-                                          _buildPreviewPage(),
-                                        ),
+                                        _buildTabWrapper(0, _buildStartScreen),
+                                        _buildTabWrapper(1, _buildPreviewPage),
                                         _buildTabWrapper(
                                           2,
-                                          _buildValidationPage(),
+                                          _buildValidationPage,
                                         ),
                                         _buildTabWrapper(
                                           3,
-                                          _buildSettingsScreen(),
+                                          _buildSettingsScreen,
                                         ),
                                       ],
                                     ),
@@ -3278,6 +3356,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           'assets/logo.png',
           width: size,
           height: size,
+          cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).ceil(),
           fit: BoxFit.contain,
           errorBuilder: (context, error, stackTrace) {
             return Icon(
@@ -3291,11 +3370,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
   }
 
-  Widget _buildTabWrapper(int tabIndex, Widget child) {
-    final isActive = _selectedIndex == tabIndex;
-    return ExcludeSemantics(
-      excluding: !isActive,
-      child: FocusScope(canRequestFocus: isActive, child: child),
+  Widget _buildTabWrapper(int tabIndex, Widget Function() builder) {
+    return RetainedTab(
+      active: _selectedIndex == tabIndex,
+      preload: tabIndex == 3,
+      refreshKey: tabIndex == 3
+          ? (_settings, _closeBehavior, _autoGroupInferredBurstSize)
+          : null,
+      builder: (_) => builder(),
     );
   }
 
@@ -3518,19 +3600,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildValidationPage() {
     final inputPath = _inputController.text.trim();
-    final allItems = inputPath.isEmpty
-        ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
-        : validationItemsInInputFolder(_previewItems, inputPath);
     final hasDinoFilter = _dinov2ValidationPaths.isNotEmpty;
-    final items = hasDinoFilter
-        ? allItems
-              .where(
-                (item) => _dinov2ValidationPaths.contains(
-                  _validationPathKey(item.path),
-                ),
-              )
-              .toList()
-        : allItems;
+    final items = _validationItemsCache.itemsFor(
+      _previewItems,
+      inputPath,
+      _dinov2ValidationPaths,
+    );
     final settings = _settingsOrEmpty();
     final quickMarkSpecies = _stringListSetting(
       settings,

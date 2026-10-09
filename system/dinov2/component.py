@@ -260,7 +260,7 @@ def _replace_default_classifier(
         raise RuntimeError(message)
     asset = Path(memory_asset or resource_path("res/dinov2/memory_head.npz"))
     checkpoint = load_checkpoint(asset)
-    if checkpoint.head_type != "memory":
+    if checkpoint.head_type not in {"memory", "memory_within_seq"}:
         raise ValueError("Bundled classifier must be standard Memory")
     if _sha256_file(paths.model_weights).lower() != checkpoint.encoder_sha256:
         raise ValueError("Bundled Memory model requires different DINOv2 encoder weights")
@@ -271,7 +271,7 @@ def _replace_default_classifier(
     manifest = _read_json_object(paths.model_manifest)
     manifest.update(
         checkpoint=target.name,
-        display_name="DINOv2 Memory",
+        display_name="DINOv2 Within-Seq" if checkpoint.head_type == "memory_within_seq" else "DINOv2 Memory",
         encoder_sha256=checkpoint.encoder_sha256,
         preprocessing=checkpoint.preprocessing,
         event_aggregation=checkpoint.event_aggregation,

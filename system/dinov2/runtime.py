@@ -128,7 +128,7 @@ def _create_feedback(registry: Any, checkpoint: DinoV2Checkpoint):
         checkpoint_classes=checkpoint.classes,
         rejection=checkpoint.rejection,
         prototype_norm_power=checkpoint.prototype_norm_power,
-        memory_checkpoint=checkpoint if checkpoint.head_type in {"memory", "memory_no_centroid"} else None,
+        memory_checkpoint=checkpoint if checkpoint.head_type in {"memory", "memory_no_centroid", "memory_within_seq"} else None,
     )
 
 
@@ -182,7 +182,7 @@ def load_dinov2_model(
         )
         classifier_type = (
             MemoryDinoV2Classifier
-            if checkpoint.head_type in {"memory", "memory_no_centroid"}
+            if checkpoint.head_type in {"memory", "memory_no_centroid", "memory_within_seq"}
             else DinoV2Classifier
         )
         classifier = classifier_type(

@@ -11,7 +11,7 @@ import '../widgets/workspace_split_metrics.dart';
 
 const previewAllSpeciesLabel = '全局设置';
 
-class PreviewScreen extends StatelessWidget {
+class PreviewScreen extends StatefulWidget {
   const PreviewScreen({
     required this.inputPath,
     required this.items,
@@ -56,14 +56,23 @@ class PreviewScreen extends StatelessWidget {
   final void Function(String path) onOpenExternal;
 
   @override
+  State<PreviewScreen> createState() => _PreviewScreenState();
+}
+
+class _PreviewScreenState extends State<PreviewScreen> {
+  DetectionItem? _filteredItem;
+  (String, double)? _filterKey;
+  List<DetectionBox> _filteredBoxes = const [];
+
+  @override
   Widget build(BuildContext context) {
-    if (items.isEmpty) {
+    if (widget.items.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: _EmptyPreviewState(
-          inputPath: inputPath,
-          loading: loading,
-          onRefresh: onRefresh,
+          inputPath: widget.inputPath,
+          loading: widget.loading,
+          onRefresh: widget.onRefresh,
         ),
       );
     }
@@ -73,8 +82,10 @@ class PreviewScreen extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (items.isEmpty)
-            Text(inputPath.isEmpty ? '请先在开始界面设置输入文件夹。' : '该输入文件夹中暂无可预览图像。')
+          if (widget.items.isEmpty)
+            Text(
+              widget.inputPath.isEmpty ? '请先在开始界面设置输入文件夹。' : '该输入文件夹中暂无可预览图像。',
+            )
           else
             Expanded(
               child: LayoutBuilder(
@@ -89,8 +100,10 @@ class PreviewScreen extends StatelessWidget {
   }
 
   Widget _buildWorkspace(BuildContext context, double availableWidth) {
-    final safeIndex = selectedIndex.clamp(0, items.length - 1).toInt();
-    final item = selectedItem ?? items[safeIndex];
+    final safeIndex = widget.selectedIndex
+        .clamp(0, widget.items.length - 1)
+        .toInt();
+    final item = widget.selectedItem ?? widget.items[safeIndex];
     final useHorizontalLayout = availableWidth >= 900;
 
     if (useHorizontalLayout) {
@@ -118,13 +131,17 @@ class PreviewScreen extends StatelessWidget {
   Widget _buildFileList(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final selectedPath =
-        selectedItem?.path ??
-        (items.isEmpty
+        widget.selectedItem?.path ??
+        (widget.items.isEmpty
             ? null
-            : items[selectedIndex.clamp(0, items.length - 1).toInt()].path);
+            : widget
+                  .items[widget.selectedIndex
+                      .clamp(0, widget.items.length - 1)
+                      .toInt()]
+                  .path);
     return SelectableListCard<DetectionItem>(
-      items: items,
-      selectedIndex: selectedIndex,
+      items: widget.items,
+      selectedIndex: widget.selectedIndex,
       leadingBuilder: (item) => Icon(_previewFileIcon(item)),
       titleBuilder: (item) => item.filename,
       subtitleBuilder: _finalResultLabel,
@@ -152,8 +169,8 @@ class PreviewScreen extends StatelessWidget {
         );
       },
       onSelected: (index, item) {
-        onSelected(index, item);
-        unawaited(onLoadMetadata(item));
+        widget.onSelected(index, item);
+        unawaited(widget.onLoadMetadata(item));
       },
     );
   }
@@ -163,9 +180,9 @@ class PreviewScreen extends StatelessWidget {
       item,
       globalOption: previewAllSpeciesLabel,
     );
-    final filterApplies = speciesOptions.contains(selectedSpeciesFilter);
+    final filterApplies = speciesOptions.contains(widget.selectedSpeciesFilter);
     final effectiveSpecies = filterApplies
-        ? selectedSpeciesFilter
+        ? widget.selectedSpeciesFilter
         : previewAllSpeciesLabel;
     final visibleBoxes = _filteredPreviewBoxes(item, effectiveSpecies);
 
@@ -179,8 +196,8 @@ class PreviewScreen extends StatelessWidget {
             child: DetectionMediaViewer(
               item: item,
               visibleBoxes: visibleBoxes,
-              showDetections: showDetections,
-              onOpenExternal: () => onOpenExternal(item.path),
+              showDetections: widget.showDetections,
+              onOpenExternal: () => widget.onOpenExternal(item.path),
             ),
           ),
         ),
@@ -188,21 +205,21 @@ class PreviewScreen extends StatelessWidget {
         _ImageInfoCard(
           item: item,
           visibleBoxes: visibleBoxes,
-          speciesTypes: speciesTypes,
-          useCombinedConfidence: useCombinedConfidence,
+          speciesTypes: widget.speciesTypes,
+          useCombinedConfidence: widget.useCombinedConfidence,
         ),
         const SizedBox(height: 10), // 与校验界面保持 10 的间距
         _PreviewDetectionControls(
           item: item,
           selectedSpecies: effectiveSpecies,
           speciesOptions: speciesOptions,
-          showDetections: showDetections,
-          onShowDetectionsChanged: onShowDetectionsChanged,
-          confidenceThreshold: confidenceThreshold,
-          onConfidenceThresholdChanged: onConfidenceThresholdChanged,
-          detecting: detecting,
-          onSpeciesFilterChanged: onSpeciesFilterChanged,
-          onDetectCurrentImage: onDetectCurrentImage,
+          showDetections: widget.showDetections,
+          onShowDetectionsChanged: widget.onShowDetectionsChanged,
+          confidenceThreshold: widget.confidenceThreshold,
+          onConfidenceThresholdChanged: widget.onConfidenceThresholdChanged,
+          detecting: widget.detecting,
+          onSpeciesFilterChanged: widget.onSpeciesFilterChanged,
+          onDetectCurrentImage: widget.onDetectCurrentImage,
         ),
       ],
     );
@@ -212,6 +229,9 @@ class PreviewScreen extends StatelessWidget {
     DetectionItem item,
     String selectedSpecies,
   ) {
+    final key = (selectedSpecies, widget.confidenceThreshold);
+    if (identical(_filteredItem, item) && _filterKey == key)
+      return _filteredBoxes;
     final boxes = <DetectionBox>[];
     for (final box in item.detectionBoxes) {
       var visibleBox = box;
@@ -237,11 +257,14 @@ class PreviewScreen extends StatelessWidget {
       }
       final confidence = visibleBox.confidence;
       final matchesConfidence =
-          confidence == null || confidence >= confidenceThreshold;
+          confidence == null || confidence >= widget.confidenceThreshold;
       if (matchesConfidence && visibleBox.bbox.length >= 4) {
         boxes.add(visibleBox);
       }
     }
+    _filteredItem = item;
+    _filterKey = key;
+    _filteredBoxes = boxes;
     return boxes;
   }
 

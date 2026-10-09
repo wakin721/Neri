@@ -5,21 +5,21 @@ on:
   push:
     paths:
       - ".github/workflows/validation-performance.yml"
-      - "frontend/lib/src/screens/species_validation_screen.dart"
-      - "frontend/lib/src/utils/validation_cache_delta.dart"
-      - "frontend/test/species_validation_incremental_cache_test.dart"
-      - "frontend/test/species_validation_group_expansion_test.dart"
-      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "frontend/lib/src/**"
+      - "frontend/test/**"
       - "tests/test_validation_cache_wiring.py"
+      - "system/dinov2/**"
+      - "tests/test_dinov2_within_seq.py"
+      - "requirements-within-seq.txt"
   pull_request:
     paths:
       - ".github/workflows/validation-performance.yml"
-      - "frontend/lib/src/screens/species_validation_screen.dart"
-      - "frontend/lib/src/utils/validation_cache_delta.dart"
-      - "frontend/test/species_validation_incremental_cache_test.dart"
-      - "frontend/test/species_validation_group_expansion_test.dart"
-      - "frontend/test/dinov3_validation_selected_box_learning_test.dart"
+      - "frontend/lib/src/**"
+      - "frontend/test/**"
       - "tests/test_validation_cache_wiring.py"
+      - "system/dinov2/**"
+      - "tests/test_dinov2_within_seq.py"
+      - "requirements-within-seq.txt"
 
 permissions:
   contents: read
@@ -29,6 +29,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  within-seq:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install batch algorithm test dependencies
+        run: python -m pip install -r requirements-within-seq.txt httpx pytest
+      - name: Verify classification, calibration, clustering and API
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+        run: python -m pytest -q tests/test_dinov2_within_seq.py
+
   flutter-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -53,8 +68,8 @@ jobs:
 
       - name: Check Dart formatting
         working-directory: frontend
-        run: dart format --output=none --set-exit-if-changed lib/src/screens/species_validation_screen.dart lib/src/utils/validation_cache_delta.dart test/species_validation_incremental_cache_test.dart
+        run: dart format --output=none --set-exit-if-changed lib/src/main_window.dart lib/src/api_client_core.dart lib/src/screens/species_validation_screen.dart lib/src/screens/preview_screen.dart lib/src/utils/async_refresh_gate.dart lib/src/utils/job_result_refresh.dart lib/src/utils/local_detection_items.dart lib/src/utils/preview_decode_size.dart lib/src/utils/result_json_decoder.dart lib/src/utils/video_detection_index.dart lib/src/widgets/retained_tab.dart lib/src/widgets/detection_media_viewer_impl.dart test/ui_performance_test.dart
 
       - name: Run focused validation tests
         working-directory: frontend
-        run: flutter test --reporter expanded test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/dinov3_validation_selected_box_learning_test.dart
+        run: flutter test --reporter expanded test/species_validation_incremental_cache_test.dart test/species_validation_group_expansion_test.dart test/job_result_refresh_test.dart test/validation_folder_scope_test.dart test/ui_performance_test.dart

@@ -48,12 +48,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-within-seq.txt
 
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest httpx numpy transformers safetensors
+          python -m pip install -r requirements-within-seq.txt pytest httpx numpy transformers safetensors
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Compile Python sources

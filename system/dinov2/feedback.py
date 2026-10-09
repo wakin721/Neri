@@ -153,6 +153,9 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             self.memory_checkpoint.margin_weight
             * (scores[np.arange(len(scores)), winner] - scores[np.arange(len(scores)), runner])
         )
+        within = classifier._within_scores(raw, bank)
+        if within is not None:
+            knownness = within
         return float(np.mean((np.asarray(classes)[winner] == species) & (
             knownness >= self.memory_checkpoint.threshold
         )))

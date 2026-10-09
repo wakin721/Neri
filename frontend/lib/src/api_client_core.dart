@@ -12,6 +12,7 @@ import 'models/settings.dart';
 import 'models/video_processing_mode.dart';
 import 'privacy/privacy_status.dart';
 import 'privacy/training_upload_diagnostics.dart';
+import 'utils/result_json_decoder.dart';
 
 class NeriApiClient {
   NeriApiClient({
@@ -610,10 +611,7 @@ class NeriApiClient {
     );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
-    return (jsonDecode(response.body) as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .map(DetectionItem.fromJson)
-        .toList();
+    return decodeDetectionItems(response.body);
   }
 
   Future<DetectionItem> fetchPreviewItem({
@@ -630,9 +628,7 @@ class NeriApiClient {
     );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
-    return DetectionItem.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+    return decodeDetectionItem(response.body);
   }
 
   Future<DetectionItem> markValidationItem({
@@ -782,9 +778,17 @@ class NeriApiClient {
   Future<ProcessingJob> fetchJob(String id) async {
     final response = await _httpClient.get(_uri('/api/jobs/$id'));
     _ensureSuccess(response);
-    return ProcessingJob.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+    return decodeProcessingJob(response.body);
+  }
+
+  /// A job may be deleted between listing summaries and loading its results.
+  Future<ProcessingJob?> fetchJobIfExists(String id) async {
+    try {
+      return await fetchJob(id);
+    } on ApiException catch (error) {
+      if (error.statusCode == 404) return null;
+      rethrow;
+    }
   }
 
   Future<ProcessingJob> cancelJob(String id) async {

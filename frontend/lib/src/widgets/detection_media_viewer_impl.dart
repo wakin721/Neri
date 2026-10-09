@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/job.dart';
+import '../utils/preview_decode_size.dart';
+import '../utils/video_detection_index.dart';
 
 const _viewerImageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
 const _viewerVideoTypes = {
@@ -145,20 +148,10 @@ class _MediaContent extends StatelessWidget {
         onDetectionBoxSelected: onDetectionBoxSelected,
       );
     } else {
-      final itemWidth = item.width;
-      final itemHeight = item.height;
-      final mediaSizeHint =
-          itemWidth != null &&
-              itemWidth > 0 &&
-              itemHeight != null &&
-              itemHeight > 0
-          ? Size(itemWidth.toDouble(), itemHeight.toDouble())
-          : null;
       return _ImageMediaViewer(
         path: item.path,
         visibleBoxes: visibleBoxes,
         showDetections: showDetections,
-        mediaSizeHint: mediaSizeHint,
         selectedObservationId: selectedObservationId,
         onDetectionBoxSelected: onDetectionBoxSelected,
       );
@@ -171,7 +164,6 @@ class _ImageMediaViewer extends StatefulWidget {
     required this.path,
     required this.visibleBoxes,
     required this.showDetections,
-    this.mediaSizeHint,
     this.selectedObservationId,
     this.onDetectionBoxSelected,
   });
@@ -179,7 +171,6 @@ class _ImageMediaViewer extends StatefulWidget {
   final String path;
   final List<DetectionBox> visibleBoxes;
   final bool showDetections;
-  final Size? mediaSizeHint;
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
 
@@ -190,8 +181,7 @@ class _ImageMediaViewer extends StatefulWidget {
 class _ImageMediaViewerState extends State<_ImageMediaViewer> {
   Size? _imageSize;
   Object? _imageError;
-  ImageStream? _imageStream;
-  ImageStreamListener? _imageStreamListener;
+  int _sizeRequestId = 0;
 
   @override
   void initState() {
@@ -202,63 +192,46 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
   @override
   void didUpdateWidget(covariant _ImageMediaViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path ||
-        oldWidget.mediaSizeHint != widget.mediaSizeHint) {
+    if (oldWidget.path != widget.path) {
       _resolveImageSize();
     }
   }
 
   @override
   void dispose() {
-    _removeImageStreamListener();
+    _sizeRequestId++;
     super.dispose();
   }
 
-  void _removeImageStreamListener() {
-    final stream = _imageStream;
-    final listener = _imageStreamListener;
-    if (stream != null && listener != null) {
-      stream.removeListener(listener);
-    }
-    _imageStream = null;
-    _imageStreamListener = null;
+  void _resolveImageSize() {
+    final requestId = ++_sizeRequestId;
+    // Backend dimensions may describe the unrotated EXIF image. Read the
+    // display dimensions from the same codec used by Flutter's Image widget.
+    _imageSize = null;
+    _imageError = null;
+    unawaited(_readImageSize(widget.path, requestId));
   }
 
-  void _resolveImageSize() {
-    _removeImageStreamListener();
-    _imageSize = widget.mediaSizeHint;
-    _imageError = null;
-    final file = File(widget.path);
-    if (!file.existsSync()) {
-      _imageError = FileSystemException('文件不存在', widget.path);
-      return;
+  Future<void> _readImageSize(String path, int requestId) async {
+    ui.ImmutableBuffer? buffer;
+    ui.ImageDescriptor? descriptor;
+    try {
+      // Read original dimensions without decoding a full-resolution bitmap.
+      buffer = await ui.ImmutableBuffer.fromFilePath(path);
+      descriptor = await ui.ImageDescriptor.encoded(buffer);
+      final size = Size(
+        descriptor.width.toDouble(),
+        descriptor.height.toDouble(),
+      );
+      if (!mounted || requestId != _sizeRequestId) return;
+      setState(() => _imageSize = size);
+    } catch (error) {
+      if (!mounted || requestId != _sizeRequestId) return;
+      setState(() => _imageError = error);
+    } finally {
+      descriptor?.dispose();
+      buffer?.dispose();
     }
-
-    final imageProvider = FileImage(file);
-    final imageStream = imageProvider.resolve(const ImageConfiguration());
-    final listener = ImageStreamListener(
-      (info, _) {
-        if (mounted) {
-          setState(() {
-            _imageSize = Size(
-              info.image.width.toDouble(),
-              info.image.height.toDouble(),
-            );
-          });
-        }
-      },
-      onError: (error, _) {
-        if (mounted) {
-          setState(() {
-            _imageError = error;
-            _imageSize = null;
-          });
-        }
-      },
-    );
-    _imageStream = imageStream;
-    _imageStreamListener = listener;
-    imageStream.addListener(listener);
   }
 
   @override
@@ -266,9 +239,22 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
     if (_imageError != null) {
       return _MissingImagePlaceholder(path: widget.path);
     }
+    final imageSize = _imageSize;
+    if (imageSize == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+        final imageProvider = ResizeImage(
+          FileImage(File(widget.path)),
+          width: previewDecodeWidth(
+            imageSize,
+            viewport,
+            MediaQuery.devicePixelRatioOf(context),
+          ),
+          policy: ResizeImagePolicy.fit,
+        );
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
           onTapUp: widget.onDetectionBoxSelected == null || _imageSize == null
@@ -287,18 +273,20 @@ class _ImageMediaViewerState extends State<_ImageMediaViewer> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Image.file(
-                File(widget.path),
+              Image(
+                image: imageProvider,
                 key: ValueKey(widget.path),
                 fit: BoxFit.contain,
                 errorBuilder: (context, error, stackTrace) =>
                     _MissingImagePlaceholder(path: widget.path),
               ),
-              if (widget.showDetections && _imageSize != null)
-                CustomPaint(
-                  painter: _DetectionOverlayPainter(
-                    boxes: widget.visibleBoxes,
-                    mediaSize: _imageSize!,
+              if (widget.showDetections)
+                RepaintBoundary(
+                  child: CustomPaint(
+                    painter: _DetectionOverlayPainter(
+                      boxes: widget.visibleBoxes,
+                      mediaSize: imageSize,
+                    ),
                   ),
                 ),
             ],
@@ -353,7 +341,9 @@ List<DetectionBox> currentVideoDetectionBoxes({
   required Duration position,
   required Duration duration,
   required Map<String, dynamic> detectionData,
+  VideoDetectionIndex? index,
 }) {
+  final boxIndex = index ?? VideoDetectionIndex(boxes);
   int? intData(String key) {
     final value = detectionData[key];
     if (value is int) return value;
@@ -364,13 +354,7 @@ List<DetectionBox> currentVideoDetectionBoxes({
   int? totalFrameHint() {
     final processedFrames = intData('total_frames_processed');
     final stride = math.max(1, intData('vid_stride') ?? 1);
-    final maxBoxFrame = boxes
-        .map((box) => box.frameIndex)
-        .whereType<int>()
-        .fold<int?>(null, (maxFrame, frame) {
-          if (maxFrame == null || frame > maxFrame) return frame;
-          return maxFrame;
-        });
+    final maxBoxFrame = boxIndex.maxFrame;
     final processedHint = processedFrames == null
         ? null
         : math.max(1, processedFrames * stride);
@@ -461,18 +445,23 @@ List<DetectionBox> currentVideoDetectionBoxes({
   final currentFrame30 = (currentMs / 1000 * 30).round();
   final currentFrame60 = (currentMs / 1000 * 60).round();
 
-  final anyBoxHasTime = boxes.any(
-    (box) => box.frameIndex != null || box.timestamp != null,
-  );
-  if (!anyBoxHasTime) return boxes;
+  if (!boxIndex.hasTime) return boxes;
 
   final selectedByTrack = <String, _TimedBoxMatch>{};
   final untrackedBoxes = <_TimedBoxMatch>[];
-  for (var index = 0; index < boxes.length; index++) {
-    final box = boxes[index];
+  final candidates = boxIndex.candidates(
+    frames: currentFrame == null
+        ? [currentFrame25, currentFrame30, currentFrame60]
+        : [currentFrame],
+    frameTolerance: toleranceFrames,
+    seconds: currentSeconds,
+    timeTolerance: toleranceSeconds,
+  );
+  for (final entry in candidates) {
+    final box = entry.box;
     final match = matchForBox(
       box,
-      index,
+      entry.originalIndex,
       currentFrame,
       currentFrame25,
       currentFrame30,
@@ -508,6 +497,7 @@ class DinoVideoDetectionOverlay extends StatelessWidget {
     this.selectedObservationId,
     this.onDetectionBoxSelected,
     this.onBackgroundTap,
+    this.index,
     super.key,
   });
 
@@ -519,6 +509,7 @@ class DinoVideoDetectionOverlay extends StatelessWidget {
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
   final VoidCallback? onBackgroundTap;
+  final VideoDetectionIndex? index;
 
   @override
   Widget build(BuildContext context) {
@@ -527,6 +518,7 @@ class DinoVideoDetectionOverlay extends StatelessWidget {
       position: position,
       duration: duration,
       detectionData: detectionData,
+      index: index,
     );
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -590,6 +582,21 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   bool _isPlaying = false;
   bool _showControls = true;
   bool _isDragging = false;
+  bool _playbackVisible = true;
+  bool _resumeWhenVisible = true;
+  bool _playerOpened = false;
+  int _openRequestId = 0;
+  Future<void>? _openTask;
+  VideoDetectionIndex? _boxIndex;
+
+  VideoDetectionIndex get _videoBoxIndex {
+    if (_boxIndex == null ||
+        !identical(_boxIndex!.boxes, widget.visibleBoxes)) {
+      _boxIndex = VideoDetectionIndex(widget.visibleBoxes);
+    }
+    return _boxIndex!;
+  }
+
   Timer? _hideTimer;
   Timer? _positionTimer;
   Duration _duration = Duration.zero;
@@ -609,6 +616,10 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     _subs = [
       _player.stream.playing.listen((p) {
         if (mounted) {
+          if (!_playbackVisible) {
+            if (p) unawaited(_player.pause());
+            return;
+          }
           setState(() => _isPlaying = p);
           if (p) {
             _startPositionTimer();
@@ -623,7 +634,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
         }
       }),
       _player.stream.position.listen((p) {
-        if (!mounted || _positionTimer != null) return;
+        if (!mounted || !_playbackVisible || _positionTimer != null) return;
         final deltaMs = (p - _positionNotifier.value).inMilliseconds.abs();
         if (deltaMs < 200) return;
         // 直接更新 Notifier 的值，不会触发整个 Video 树的重绘
@@ -641,6 +652,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
       }),
       _player.stream.completed.listen((completed) {
         if (mounted && completed) {
+          _resumeWhenVisible = false;
           setState(() {
             _isPlaying = false;
             _showControls = true;
@@ -657,13 +669,47 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 
   Future<void> _initPlayer(String path) async {
+    final requestId = ++_openRequestId;
+    _resumeWhenVisible = true;
+    final previous = _openTask;
+    if (previous != null) await previous;
+    if (!mounted || requestId != _openRequestId) return;
+    final task = _openMedia(path, requestId);
+    _openTask = task;
+    await task;
+  }
+
+  Future<void> _openMedia(String path, int requestId) async {
     setState(() => _isError = false);
+    _playerOpened = false;
     try {
-      await _player.open(Media(path));
+      await _player.open(Media(path), play: false);
+      if (!mounted || requestId != _openRequestId) return;
       await _player.setPlaylistMode(PlaylistMode.none);
-      await _player.play();
+      if (!mounted || requestId != _openRequestId) return;
+      _playerOpened = true;
+      if (_playbackVisible && _resumeWhenVisible) await _player.play();
     } catch (_) {
-      if (mounted) setState(() => _isError = true);
+      if (mounted && requestId == _openRequestId)
+        setState(() => _isError = true);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final visible = TickerMode.valuesOf(context).enabled;
+    if (visible == _playbackVisible) return;
+    _playbackVisible = visible;
+    if (!visible) {
+      if (_playerOpened) _resumeWhenVisible = _player.state.playing;
+      _isPlaying = false;
+      _positionTimer?.cancel();
+      _positionTimer = null;
+      _hideTimer?.cancel();
+      unawaited(_player.pause());
+    } else if (_playerOpened && _resumeWhenVisible) {
+      unawaited(_player.play());
     }
   }
 
@@ -677,6 +723,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 
   void _startPositionTimer() {
+    if (!_playbackVisible) return;
     _positionTimer ??= Timer.periodic(
       const Duration(milliseconds: 250),
       (_) => _syncPlayerState(),
@@ -684,7 +731,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 
   void _syncPlayerState() {
-    if (!mounted) return;
+    if (!mounted || !_playbackVisible) return;
     final state = _player.state;
     final position = state.position;
     final duration = state.duration;
@@ -705,9 +752,12 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
   }
 
   void _togglePlayPause() {
+    if (!_playbackVisible) return;
     if (_isPlaying) {
+      _resumeWhenVisible = false;
       _player.pause();
     } else {
+      _resumeWhenVisible = true;
       if (_positionNotifier.value >= _duration && _duration > Duration.zero) {
         _player.seek(Duration.zero);
       }
@@ -726,6 +776,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
 
   @override
   void dispose() {
+    _openRequestId++;
     for (final s in _subs) {
       s.cancel();
     }
@@ -797,6 +848,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
                     position: position,
                     duration: _duration,
                     detectionData: widget.detectionData,
+                    index: _videoBoxIndex,
                     selectedObservationId: widget.selectedObservationId,
                     onDetectionBoxSelected: widget.onDetectionBoxSelected,
                     onBackgroundTap: _togglePlayPause,

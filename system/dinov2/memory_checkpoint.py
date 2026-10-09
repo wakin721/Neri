@@ -41,6 +41,7 @@ class MemoryCheckpoint:
     event_aggregation: str = DINO_EVENT_AGGREGATION
     encoder_weights: str = "model/model.safetensors"
     head_type: str = "memory"
+    within_seq: Any = None
     prototype_norm_power: float = 1.0
 
     @property
@@ -77,8 +78,12 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
     resolved = Path(path).expanduser().resolve()
     with np.load(resolved, allow_pickle=False) as archive:
         required = {"metadata", "center", "features", "labels", "cameras", "classes", "centroids"}
-        if set(archive.files) != required:
+        within = {"raw_features", "sequences"}
+        has_within = set(archive.files) == required | within
+        if set(archive.files) != required and not has_within:
             raise ValueError("Memory checkpoint fields are incomplete or unexpected")
+        raw_features = archive["raw_features"].copy() if has_within else None
+        sequences = archive["sequences"].astype(str).copy() if has_within else None
         metadata = json.loads(str(archive["metadata"].item()))
         center = np.asarray(archive["center"], dtype=np.float32).copy()
         features = _unit_rows(archive["features"].copy(), "Memory features")
@@ -127,6 +132,22 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
     calibration = metadata.get("calibration")
     if not isinstance(calibration, dict) or not calibration.get("images"):
         raise ValueError("Memory threshold must have calibration evidence")
+    within_model = None
+    if has_within:
+        from .within_seq import WithinSeqModel
+        if metadata.get("rejection_mode") != "within_seq" or config != {
+            "neighbors": 3, "centroid_weight": 0.5, "camera_pooling": True, "margin_weight": 1.0
+        }:
+            raise ValueError("Within-Seq requires frozen Memory k=3 and centroid_weight=0.5")
+        if raw_features.shape != features.shape or sequences.shape != labels.shape:
+            raise ValueError("Within-Seq raw features/sequences are misaligned")
+        if not 0 < float(calibration.get("target_unknown_recall", 0)) <= 1 or not calibration.get("sequences"):
+            raise ValueError("Within-Seq requires auxiliary unknown sequence calibration")
+        within_model = WithinSeqModel(raw_features, labels, cameras, sequences)
+        if not np.allclose(within_model.classification_center, center, atol=2e-6) or not np.allclose(within_model.memory, features, atol=2e-6) or not np.allclose(within_model.memory_centroids, centroids, atol=2e-6):
+            raise ValueError("Within-Seq raw and classification memories do not match")
+    elif metadata.get("rejection_mode") == "within_seq":
+        raise ValueError("Within-Seq raw memory is missing; centered features cannot replace it")
     with resolved.open("rb") as stream:
         fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
     labels.setflags(write=False)
@@ -146,5 +167,6 @@ def load_memory_checkpoint(path: str | Path) -> MemoryCheckpoint:
         encoder_sha256=encoder_sha256.lower(),
         fingerprint=fingerprint,
         calibration=calibration,
-        head_type="memory" if centroid_weight > 0 else "memory_no_centroid",
+        head_type="memory_within_seq" if has_within else ("memory" if centroid_weight > 0 else "memory_no_centroid"),
+        within_seq=within_model,
     )

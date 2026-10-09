@@ -70,7 +70,7 @@ def discover(
     Camera exclusion is used only when both camera arrays are supplied. The
     checkpoint's 4% deployment threshold is not reused as a 5% discovery gate.
     """
-    if checkpoint.head_type not in {"memory", "memory_no_centroid"}:
+    if checkpoint.head_type not in {"memory", "memory_no_centroid", "memory_within_seq"}:
         raise ValueError("Custom discovery requires a Memory checkpoint")
     calibration = DinoV2Classifier._validate_features(calibration_features)
     query = DinoV2Classifier._validate_features(query_features)

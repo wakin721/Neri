@@ -226,9 +226,12 @@ class _DinoV2FeatureExplanationPanelState
 
   Widget _content(DinoV2FeatureExplanation explanation) {
     final nearest = explanation.nearestSpecies;
-    final isMemory = const {'memory', 'memory_no_centroid'}.contains(
-      explanation.rejectionMode,
-    );
+    final isWithinSeq = explanation.rejectionMode == 'memory_within_seq';
+    final isMemory = const {
+      'memory',
+      'memory_no_centroid',
+      'memory_within_seq',
+    }.contains(explanation.rejectionMode);
     final closestName = nearest.isEmpty ? '暂无' : nearest.first.name;
     final nearestExampleLabel = explanation.nearestExample == null
         ? '暂无本地代表例图'
@@ -274,7 +277,7 @@ class _DinoV2FeatureExplanationPanelState
             Text('判定：${explanation.species}'),
             Text('最近类：$closestName'),
             Text(
-              '${isMemory ? 'Memory 分数' : 'cosine'} ${explanation.knownScore.toStringAsFixed(4)}',
+              '${isWithinSeq ? 'Within-Seq 分数' : (isMemory ? 'Memory 分数' : 'cosine')} ${explanation.knownScore.toStringAsFixed(4)}',
             ),
             Text('阈值 ${explanation.threshold.toStringAsFixed(4)}'),
             if (explanation.squaredDistance != null)
@@ -293,7 +296,9 @@ class _DinoV2FeatureExplanationPanelState
         ],
         const SizedBox(height: 8),
         Text(
-          isMemory
+          isWithinSeq
+              ? '二维图用于展示分类近邻；拒识使用冻结白化、自适应近邻和序列分数。'
+              : isMemory
               ? '二维图仅用于展示；实际分类使用 768 维特征、按相机聚合的近邻分数和类别间隔。'
               : '二维图为当前样本附近 768 维特征空间的解释性投影；实际分类仍使用完整高维特征与真实距离。',
           style: TextStyle(

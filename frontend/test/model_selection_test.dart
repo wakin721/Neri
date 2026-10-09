@@ -491,7 +491,14 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
+    // Image dimensions/errors now come from asynchronous native file I/O.
+    for (var attempt = 0; attempt < 100; attempt++) {
+      if (find.text('图片已被删除或移动').evaluate().isNotEmpty) break;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
 
     expect(find.text('图片已被删除或移动'), findsOneWidget);
     expect(tester.takeException(), isNull);

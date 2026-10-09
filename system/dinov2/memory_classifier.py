@@ -24,7 +24,7 @@ def _normalize_rows(values: np.ndarray) -> np.ndarray:
 
 class MemoryDinoV2Classifier:
     def __init__(self, checkpoint: MemoryCheckpoint, *, encoder=None, feedback=None, registry=None):
-        if checkpoint.head_type not in {"memory", "memory_no_centroid"}:
+        if checkpoint.head_type not in {"memory", "memory_no_centroid", "memory_within_seq"}:
             raise ValueError("Expected Memory checkpoint")
         self.checkpoint = checkpoint
         self.encoder = encoder
@@ -42,6 +42,8 @@ class MemoryDinoV2Classifier:
     def rejection_metadata(self) -> dict[str, object]:
         return {
             "mode": self.checkpoint.head_type,
+            "sequence_aggregation": "mean_knownness" if self.checkpoint.within_seq is not None else None,
+            "adaptive_neighbors": self.checkpoint.within_seq is not None,
             "threshold": self.checkpoint.threshold,
             "neighbors": self.checkpoint.neighbors,
             "camera_pooling": True,
@@ -99,7 +101,17 @@ class MemoryDinoV2Classifier:
             nearest[:, class_index] = np.flatnonzero(mask)[np.argmax(values, axis=1)]
         return scores, nearest, classes
 
-    def classify_features(self, features: np.ndarray) -> list[DinoV2Prediction]:
+    def _within_scores(self, raw, examples=(), camera_ids=None, sequence_ids=None):
+        model = self.checkpoint.within_seq
+        if model is None:
+            return None
+        if (camera_ids is None) != (sequence_ids is None):
+            raise ValueError("Within-Seq needs both camera_ids and sequence_ids")
+        cameras = camera_ids if camera_ids is not None else ["single"] * len(raw)
+        sequences = sequence_ids if sequence_ids is not None else [f"single:{i}" for i in range(len(raw))]
+        return model.with_examples(examples).score_batch(raw, cameras, sequences, classify=False)["sequence_knownness"]
+
+    def classify_features(self, features: np.ndarray, *, camera_ids=None, sequence_ids=None, _sequence_features=None) -> list[DinoV2Prediction]:
         raw = DinoV2Classifier._validate_features(features)
         centered = _normalize_rows(raw - self._center[None, :])
         registry = self._provider_bank(self.registry)
@@ -113,12 +125,19 @@ class MemoryDinoV2Classifier:
             # A formal threshold pass must not hide a stronger match to a
             # registered provisional species. Compare both banks for every crop.
             combined_scores, combined_nearest, combined_classes = self._scores(centered, combined)
+        gate_raw = raw if _sequence_features is None else DinoV2Classifier._validate_features(_sequence_features)
+        if _sequence_features is not None:
+            camera_ids, sequence_ids = ["event"] * len(gate_raw), ["event"] * len(gate_raw)
+        within_scores = self._within_scores(gate_raw, formal_examples, camera_ids, sequence_ids)
+        combined_within_scores = self._within_scores(gate_raw, combined, camera_ids, sequence_ids) if provisional_examples else None
         results: list[DinoV2Prediction] = []
         for index, row in enumerate(scores):
             order = np.argsort(-row, kind="stable")
             winner, runner_up = int(order[0]), int(order[1])
             margin = float(row[winner] - row[runner_up])
             knownness = float(row[winner] + self.checkpoint.margin_weight * margin)
+            if within_scores is not None:
+                knownness = float(within_scores[index])
             accepted = knownness >= self.checkpoint.threshold
             species = classes[winner]
             nearest_index = int(nearest[index, winner])
@@ -146,6 +165,8 @@ class MemoryDinoV2Classifier:
                         + self.checkpoint.margin_weight
                         * (combined_row[combined_winner] - combined_row[combined_runner_up])
                     )
+                    if combined_within_scores is not None:
+                        combined_knownness = float(combined_within_scores[index])
                     if not accepted and combined_knownness >= self.checkpoint.threshold:
                         assistive = combined[combined_index - len(self.checkpoint.features)]
             results.append(
@@ -170,16 +191,20 @@ class MemoryDinoV2Classifier:
             )
         return results
 
-    def classify_crops(self, crops: Sequence[ImageInput], *, array_color: str = "rgb") -> list[DinoV2Prediction]:
+    def classify_crops(self, crops: Sequence[ImageInput], *, array_color: str = "rgb", camera_ids=None, sequence_ids=None) -> list[DinoV2Prediction]:
         if self.encoder is None:
             raise RuntimeError("DINOv2 encoder is not loaded")
-        return self.classify_features(self.encoder.encode(crops, array_color=array_color))
+        return self.classify_features(self.encoder.encode(crops, array_color=array_color), camera_ids=camera_ids, sequence_ids=sequence_ids)
 
     def classify_event(self, crops: Sequence[ImageInput], *, array_color: str = "rgb") -> DinoV2Prediction:
         if self.encoder is None:
             raise RuntimeError("DINOv2 encoder is not loaded")
-        event = aggregate_event_embeddings(self.encoder.encode(crops, array_color=array_color))
-        return self.classify_features(event[None, :])[0]
+        features = self.encoder.encode(crops, array_color=array_color)
+        event = aggregate_event_embeddings(features)
+        return self.classify_features(
+            event[None, :],
+            _sequence_features=features if self.checkpoint.within_seq is not None else None,
+        )[0]
 
     def explain_feature(self, feature: np.ndarray) -> dict[str, Any]:
         raw = DinoV2Classifier._validate_features(np.asarray(feature, dtype=np.float32)[None, :])
