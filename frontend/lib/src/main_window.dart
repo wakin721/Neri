@@ -3241,7 +3241,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                             }
                           },
                         ),
-                        const SizedBox(width: 8),
                         Expanded(
                           child: ClipRRect(
                             borderRadius: const BorderRadius.only(
@@ -4295,7 +4294,9 @@ class _NativeNavigationRail extends StatelessWidget {
   final List<_NavigationRailEntry> entries;
   final ValueChanged<int> onDestinationSelected;
 
-  static const _width = 72.0;
+  // Include the former rail/content gutter so destinations are centered in
+  // the entire visible sidebar while the content boundary stays in place.
+  static const _width = 80.0;
 
   @override
   Widget build(BuildContext context) {
