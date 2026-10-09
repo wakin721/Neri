@@ -183,6 +183,72 @@ def test_provisional_memory_evidence_is_assistive_only(tmp_path):
     assert result.best_known_species in {"A", "B"}
 
 
+def test_stronger_provisional_species_prevents_false_formal_acceptance(tmp_path):
+    from system.dinov2.memory_bank import MemoryBank, MemoryExample
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+
+    query = 0.8 * _unit(0) + 0.6 * _unit(4)
+    model, _ = _memory_model(tmp_path, weight=0.5, threshold=0.5)
+    checkpoint = load_checkpoint(model)
+    baseline = MemoryDinoV2Classifier(checkpoint).classify_features(query[None, :])[0]
+    assert baseline.accepted is True
+    assert baseline.species == "A"
+
+    registry = SimpleNamespace(memory_bank=lambda: MemoryBank(
+        formal=(), provisional=(MemoryExample(
+            "C", query, "new-camera", "overlay", registry_id=7,
+            registration_status="provisional",
+        ),),
+    ))
+    classifier = MemoryDinoV2Classifier(checkpoint, registry=registry)
+    prediction = classifier.classify_features(query[None, :])[0]
+    assert prediction.accepted is False
+    assert prediction.assistive_match is True
+    assert prediction.species == "C"
+    assert prediction.best_known_species == "A"
+    assert prediction.registry_id == 7
+    assert prediction.registration_status == "provisional"
+    assert prediction.registry_action == "candidate"
+
+    # The same provisional bank must not suppress a stronger formal match.
+    formal = classifier.classify_features(_unit(2)[None, :])[0]
+    assert formal.accepted is True
+    assert formal.species == "B"
+
+
+def test_provisional_winner_below_threshold_still_prevents_forced_known_label(tmp_path):
+    from system.dinov2.memory_bank import MemoryBank, MemoryExample
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+
+    query = 0.8 * _unit(0) + 0.6 * _unit(4)
+    exemplar = 0.61 * query + np.sqrt(1 - 0.61 ** 2) * _unit(5)
+    model, _ = _memory_model(tmp_path, weight=0.5, threshold=0.8)
+    checkpoint = load_checkpoint(model)
+    assert MemoryDinoV2Classifier(checkpoint).classify_features(query[None, :])[0].accepted
+    registry = SimpleNamespace(memory_bank=lambda: MemoryBank(
+        formal=(), provisional=(MemoryExample("C", exemplar, "new-camera", "overlay"),),
+    ))
+    result = MemoryDinoV2Classifier(checkpoint, registry=registry).classify_features(query[None, :])[0]
+    assert result.accepted is False
+    assert result.species == "Unknown"
+    assert result.assistive_match is False
+
+
+def test_provisional_evidence_of_same_known_species_does_not_demote_acceptance(tmp_path):
+    from system.dinov2.memory_bank import MemoryBank, MemoryExample
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+
+    query = 0.8 * _unit(0) + 0.6 * _unit(4)
+    model, _ = _memory_model(tmp_path, weight=0.5, threshold=0.5)
+    registry = SimpleNamespace(memory_bank=lambda: MemoryBank(
+        formal=(), provisional=(MemoryExample("A", query, "new-camera", "feedback"),),
+    ))
+    result = MemoryDinoV2Classifier(load_checkpoint(model), registry=registry).classify_features(query[None, :])[0]
+    assert result.accepted is True
+    assert result.species == "A"
+    assert result.assistive_match is False
+
+
 def test_registry_memory_evidence_uses_event_cameras_after_registration(tmp_path):
     from system.dinov2.registry import SpeciesRegistry
 

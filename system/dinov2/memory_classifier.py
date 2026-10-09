@@ -107,6 +107,12 @@ class MemoryDinoV2Classifier:
         formal_examples = feedback.formal + registry.formal
         provisional_examples = feedback.provisional + registry.provisional
         scores, nearest, classes = self._scores(centered, formal_examples)
+        combined = formal_examples + provisional_examples
+        combined_scores = combined_nearest = combined_classes = None
+        if provisional_examples:
+            # A formal threshold pass must not hide a stronger match to a
+            # registered provisional species. Compare both banks for every crop.
+            combined_scores, combined_nearest, combined_classes = self._scores(centered, combined)
         results: list[DinoV2Prediction] = []
         for index, row in enumerate(scores):
             order = np.argsort(-row, kind="stable")
@@ -126,21 +132,21 @@ class MemoryDinoV2Classifier:
                 for j in order[:3]
             )
             assistive = None
-            if not accepted and provisional_examples:
-                combined = formal_examples + provisional_examples
-                combined_scores, combined_nearest, combined_classes = self._scores(centered[index:index + 1], combined)
-                combined_row = combined_scores[0]
+            if provisional_examples:
+                combined_row = combined_scores[index]
                 combined_order = np.argsort(-combined_row, kind="stable")
                 combined_winner = int(combined_order[0])
                 combined_runner_up = int(combined_order[1])
-                combined_index = int(combined_nearest[0, combined_winner])
+                combined_index = int(combined_nearest[index, combined_winner])
                 if combined_index >= len(self.checkpoint.features) + len(formal_examples):
+                    if combined_classes[combined_winner] not in classes:
+                        accepted = False
                     combined_knownness = float(
                         combined_row[combined_winner]
                         + self.checkpoint.margin_weight
                         * (combined_row[combined_winner] - combined_row[combined_runner_up])
                     )
-                    if combined_knownness >= self.checkpoint.threshold:
+                    if not accepted and combined_knownness >= self.checkpoint.threshold:
                         assistive = combined[combined_index - len(self.checkpoint.features)]
             results.append(
                 DinoV2Prediction(
