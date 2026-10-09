@@ -92,7 +92,18 @@ def test_manifest_selects_within_classifier_and_load_rejects_missing_raw(saved,t
 def test_bundled_default_is_validated_within_head():
     path=Path(__file__).resolve().parents[1]/'res/dinov2/memory_head.npz'
     with threadpool_limits(limits=1):cp=load_checkpoint(path)
-    assert cp.head_type=='memory_within_seq' and len(cp.classes)==85
+    assert cp.head_type=='memory_within_seq' and len(cp.classes)==42
     assert cp.calibration['target_unknown_recall']==.9
     assert cp.calibration['empirical_aux_unknown_recall']>=.9
-    assert cp.threshold==pytest.approx(.5192885710488518)
+    assert cp.threshold==pytest.approx(.592520534992218)
+    assert cp.calibration['point']=='Val90'
+    assert cp.calibration['images']==123
+    assert cp.calibration['query_mode']=='independent_single_frame'
+    manifest=json.loads(path.with_name('memory_head_manifest.json').read_text('utf8'))
+    policy=manifest['class_role_policy']
+    counts=policy['reviewed_class_counts']
+    assert policy['min_known_reviewed_images']==10
+    assert set(cp.classes)=={species for species,n in counts.items() if n>=10}
+    assert set(policy['unknown_classes'])=={species for species,n in counts.items() if n<10}
+    assert not set(cp.labels) & set(policy['unknown_classes'])
+    assert len(cp.within_seq.raw)==3311

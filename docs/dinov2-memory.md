@@ -1,4 +1,6 @@
-# DINOv2 标准 Memory 默认分类头
+# DINOv2 旧标准 Memory 分类头
+
+Nightly 当前默认头为 42 类 Within-Seq Val90，少于 10 张已校验图片的物种作为 Unknown，详见 [Within-Seq 部署说明](dinov2-within-seq.md#nightly-默认推理头)。以下记录旧标准 Memory 评分器和历史 76 类模型，适用于显式加载旧 checkpoint。
 
 新的 DINOv2 组件安装会把下载到的旧多原型分类头替换为随应用附带的 `res/dinov2/memory_head.npz`。已有安装需在环境页面重新安装 DINOv2 组件，才会使用新默认头。显式选择的旧多原型模型和原去质心 Memory 模型仍可读取。
 
