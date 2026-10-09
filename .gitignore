@@ -101,3 +101,4 @@ frontend/windows/runner/*
 !frontend/windows/runner/win32_window.cpp
 !frontend/windows/runner/win32_window.h
 !/tests/test_dinov2_custom_discovery.py
+!/tests/test_dinov2_clustering.py

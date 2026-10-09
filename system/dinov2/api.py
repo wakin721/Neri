@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .checkpoint import CheckpointValidationError
 try:
@@ -87,15 +87,17 @@ class DinoV2RegisterRequest(BaseModel):
 
 
 class DinoV2DiscoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     classification_model_path: str = Field(..., min_length=1)
     calibration_features: list[list[float]] = Field(..., min_length=1)
     query_features: list[list[float]] = Field(..., min_length=1)
     calibration_sequence_ids: list[str] = Field(..., min_length=1)
     query_sequence_ids: list[str] = Field(..., min_length=1)
-    n_clusters: int = Field(..., ge=1)
+    min_cluster_size: int = Field(default=4, ge=2, strict=True)
+    min_samples: int | None = Field(default=None, ge=1, strict=True)
     calibration_camera_ids: list[str] | None = None
     query_camera_ids: list[str] | None = None
-    seed: int = 20260923
 
 
 class _MergeCheckpointRequest(BaseModel):
@@ -244,9 +246,9 @@ def _register_with_duplicate_guard(registry: Any, registration_id: int, classifi
 def dinov2_registry_router() -> APIRouter:
     router = APIRouter(prefix="/api/dinov2", tags=["dinov2"])
 
-    @router.post("/discovery/custom-weighted-kmeans")
-    def discover_custom_weighted_kmeans(request: DinoV2DiscoveryRequest):
-        """5% Known calibration gate plus weighted clustering of a mixed batch."""
+    @router.post("/discovery/hdbscan")
+    def discover_hdbscan(request: DinoV2DiscoveryRequest):
+        """5% Known calibration gate plus HDBSCAN of independent query events."""
         from .custom_discovery import discover
 
         try:
@@ -259,10 +261,10 @@ def dinov2_registry_router() -> APIRouter:
                 request.query_features,
                 request.calibration_sequence_ids,
                 request.query_sequence_ids,
-                n_clusters=request.n_clusters,
+                min_cluster_size=request.min_cluster_size,
+                min_samples=request.min_samples,
                 calibration_camera_ids=request.calibration_camera_ids,
                 query_camera_ids=request.query_camera_ids,
-                seed=request.seed,
             )
         except (DinoV2ManifestError, CheckpointValidationError, FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

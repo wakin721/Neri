@@ -4,7 +4,7 @@ from __future__ import annotations
 def test_missing_dinov2_dependencies_detects_only_optional_packages(monkeypatch):
     import system.backend.dinov2_maintenance as maintenance
 
-    available = {"torch": True, "transformers": False, "safetensors": False}
+    available = {"sklearn": True, "torch": True, "transformers": False, "safetensors": False}
     monkeypatch.setattr(
         maintenance.importlib.util,
         "find_spec",
@@ -136,3 +136,10 @@ def test_start_uses_dinov2_operation_and_module(monkeypatch, tmp_path):
     assert result["operation"] == "install_dinov2"
     assert "system.backend.dinov2_maintenance" in observed["command"]
     assert "install_dinov2" in observed["command"]
+
+
+def test_missing_hdbscan_dependency_is_installed(monkeypatch):
+    import system.backend.dinov2_maintenance as maintenance
+    monkeypatch.setattr(maintenance.importlib.util, "find_spec",
+                        lambda name: None if name == "sklearn" else object())
+    assert maintenance._missing_dinov2_dependencies() == ["scikit-learn>=1.3,<2"]

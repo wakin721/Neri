@@ -16,8 +16,9 @@ from typing import Iterable
 
 import numpy as np
 
+from .clustering import hdbscan_prototypes
 from .prototype_bank import PrototypeBank, PrototypeRecord
-from .simple_shot import deterministic_k_means, normalize_embedding
+from .simple_shot import normalize_embedding
 
 DINO_DIM = 768
 EVENT_GAP_SECONDS = 1800
@@ -881,9 +882,9 @@ class HumanFeedbackStore:
         positive_centered = np.stack(
             [event.embedding - center for event in positive_events]
         ).astype(np.float32)
-        prototypes = deterministic_k_means(
+        prototypes = hdbscan_prototypes(
             positive_centered,
-            max_k=self._prototype_limit(status),
+            max_prototypes=self._prototype_limit(status),
         ).astype(np.float32)
         positive_scores = self._scores(positive_centered, prototypes)
         positive_coverage = float(np.mean(positive_scores >= self.threshold))
@@ -1243,7 +1244,7 @@ class HumanFeedbackStore:
             centered = np.stack(
                 [event.embedding - center for event in positive_events]
             ).astype(np.float32)
-            prototypes = deterministic_k_means(centered, max_k=1).astype(
+            prototypes = hdbscan_prototypes(centered, max_prototypes=1).astype(
                 np.float32,
                 copy=False,
             )

@@ -4,10 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 
+from .clustering import hdbscan_prototypes
 from . import registry_base as _base
 from .prototype_bank import PrototypeBank, PrototypeRecord
 from .memory_bank import MemoryBank, MemoryExample
-from .simple_shot import deterministic_k_means
 
 for _name in dir(_base):
     if not _name.startswith("__"):
@@ -65,9 +65,9 @@ class SpeciesRegistry(_base.SpeciesRegistry):
             if len(embeddings) < 4:
                 continue
             transformed = _cl2n_rows(embeddings, feature_center)
-            prototypes = deterministic_k_means(
+            prototypes = hdbscan_prototypes(
                 transformed,
-                max_k=self._status_prototype_limit(entry.status),
+                max_prototypes=self._status_prototype_limit(entry.status),
             )
             prototypes = _apply_prototype_norm_power(
                 prototypes,

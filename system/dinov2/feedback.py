@@ -4,11 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 
+from .clustering import hdbscan_prototypes
 from . import feedback_base as _base
 from .checkpoint import DinoV2Rejection
 from .memory_bank import MemoryBank, MemoryExample
 from .memory_checkpoint import MemoryCheckpoint
-from .simple_shot import deterministic_k_means
 
 for _name in dir(_base):
     if not _name.startswith("__"):
@@ -95,9 +95,9 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             np.float32, copy=False
         )
         positive_features = _cl2n_rows(positive_raw, feature_center)
-        prototypes = deterministic_k_means(
+        prototypes = hdbscan_prototypes(
             positive_features,
-            max_k=self._prototype_limit(status),
+            max_prototypes=self._prototype_limit(status),
         ).astype(np.float32)
         prototypes = _apply_prototype_norm_power(
             prototypes,
@@ -201,7 +201,7 @@ class HumanFeedbackStore(_base.HumanFeedbackStore):
             prototype_values = self._generation_prototypes(int(active_generation["id"]))
             prototypes = np.stack(prototype_values).astype(np.float32, copy=False)
         else:
-            prototypes = deterministic_k_means(event_vectors, max_k=1).astype(
+            prototypes = hdbscan_prototypes(event_vectors, max_prototypes=1).astype(
                 np.float32, copy=False
             )
             prototypes = _apply_prototype_norm_power(

@@ -12,12 +12,12 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .clustering import hdbscan_prototypes
 from .events import EVENT_GAP_SECONDS
 from .prototype_bank import PrototypeBank, PrototypeRecord
 from .simple_shot import (
     build_prototype,
     cosine_similarity,
-    deterministic_k_means,
     normalize_embedding,
 )
 
@@ -280,9 +280,9 @@ class SpeciesRegistry:
                 else np.empty((0, 768), dtype=np.float32)
             )
             prototypes = (
-                deterministic_k_means(
+                hdbscan_prototypes(
                     embeddings,
-                    max_k=self._status_prototype_limit("candidate"),
+                    max_prototypes=self._status_prototype_limit("candidate"),
                 )
                 if len(embeddings) >= 4
                 else np.empty((0, 768), dtype=np.float32)
@@ -779,12 +779,12 @@ class SpeciesRegistry:
             status = "mature"
 
         # Registry joining remains in raw normalized embedding space. Reusing
-        # the deterministic K<=3 splitter here improves long-lived matching,
+        # HDBSCAN summaries here improve long-lived matching,
         # while classifier overlay prototypes are computed separately in
         # centered feature space by prototype_bank().
-        raw_prototypes = deterministic_k_means(
+        raw_prototypes = hdbscan_prototypes(
             embeddings,
-            max_k=self._status_prototype_limit(status),
+            max_prototypes=self._status_prototype_limit(status),
         )
         normalized_prototypes = np.stack(
             [normalize_embedding(prototype) for prototype in raw_prototypes]
@@ -1105,9 +1105,9 @@ class SpeciesRegistry:
             if len(embeddings) < 4:
                 continue
             centered = embeddings - center[None, :]
-            prototypes = deterministic_k_means(
+            prototypes = hdbscan_prototypes(
                 centered,
-                max_k=self._status_prototype_limit(entry.status),
+                max_prototypes=self._status_prototype_limit(entry.status),
             )
             records = [
                 PrototypeRecord(

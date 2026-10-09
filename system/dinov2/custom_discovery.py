@@ -1,4 +1,4 @@
-"""Calibrated Memory and density gate followed by burst-weighted KMeans.
+"""Calibrated Memory and density gate followed by event-balanced HDBSCAN.
 
 Inputs are frozen, unit DINOv2 event embeddings. Calibration rows must be
 independent known examples; query rows form the mixed batch being discovered.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .clustering import DEFAULT_MIN_CLUSTER_SIZE, hdbscan_labels
 from .classifier import DinoV2Classifier
 from .memory_classifier import MemoryDinoV2Classifier, _normalize_rows
 
@@ -22,12 +23,6 @@ def _threshold(scores: np.ndarray) -> float:
         raise ValueError("Known calibration scores must be nonempty and finite")
     rank = int(np.floor((len(values) + 1) * TARGET_FRR))
     return float(values[rank - 1]) if rank else float(-np.finfo(np.float64).max)
-
-
-def _sequence_weights(ids: np.ndarray) -> np.ndarray:
-    _, inverse, counts = np.unique(ids, return_inverse=True, return_counts=True)
-    weights = 1.0 / np.sqrt(counts[inverse])
-    return weights / weights.mean()
 
 
 def _local_similarity(
@@ -55,57 +50,20 @@ def _local_similarity(
     return output
 
 
-def _weighted_kmeans(x: np.ndarray, weights: np.ndarray, k: int, seed: int) -> np.ndarray:
-    """Euclidean KMeans on unit vectors, with weighted centroids and inertia."""
-    rng = np.random.default_rng(seed)
-    best_labels = None
-    best_inertia = np.inf
-    for _ in range(20):
-        centers = np.empty((k, x.shape[1]), dtype=np.float64)
-        first = int(rng.choice(len(x), p=weights / weights.sum()))
-        centers[0] = x[first]
-        distance = np.maximum(2.0 - 2.0 * (x @ centers[0]), 0.0)
-        for index in range(1, k):
-            probability = weights * distance
-            chosen = int(rng.choice(len(x), p=probability / probability.sum())) if probability.sum() > 0 else int(rng.integers(len(x)))
-            centers[index] = x[chosen]
-            distance = np.minimum(distance, np.sum((x - centers[index]) ** 2, axis=1))
-        previous = None
-        for _iteration in range(500):
-            distances = np.maximum(
-                np.sum(x * x, axis=1)[:, None]
-                + np.sum(centers * centers, axis=1)[None, :] - 2.0 * x @ centers.T, 0.0,
-            )
-            labels = np.argmin(distances, axis=1)
-            if previous is not None and np.array_equal(labels, previous):
-                break
-            previous = labels.copy()
-            sums = np.zeros_like(centers)
-            np.add.at(sums, labels, x * weights[:, None])
-            mass = np.bincount(labels, weights=weights, minlength=k)
-            occupied = mass > 0
-            centers[occupied] = sums[occupied] / mass[occupied, None]
-            if not occupied.all():
-                nearest = np.min(distances, axis=1) * weights
-                for empty in np.flatnonzero(~occupied):
-                    selected = int(np.argmax(nearest))
-                    centers[empty] = x[selected]
-                    nearest[selected] = -1
-        distances = np.maximum(
-            np.sum(x * x, axis=1)[:, None]
-            + np.sum(centers * centers, axis=1)[None, :] - 2.0 * x @ centers.T, 0.0,
-        )
-        labels = np.argmin(distances, axis=1)
-        inertia = float(np.sum(weights * distances[np.arange(len(x)), labels]))
-        if inertia < best_inertia:
-            best_inertia, best_labels = inertia, labels.copy()
-    return best_labels.astype(np.int64)
+def _event_labels(features, sequence_ids, *, min_cluster_size, min_samples):
+    """One mean unit vector per sequence; map event labels back to images."""
+    sequences, inverse = np.unique(sequence_ids, return_inverse=True)
+    events = np.stack([features[inverse == index].mean(axis=0) for index in range(len(sequences))])
+    events = _normalize_rows(events)
+    labels = hdbscan_labels(events, min_cluster_size=min_cluster_size, min_samples=min_samples)
+    return labels[inverse]
 
 
 def discover(
     checkpoint, calibration_features, query_features, calibration_sequence_ids,
-    query_sequence_ids, *, n_clusters: int, calibration_camera_ids=None,
-    query_camera_ids=None, seed: int = 20260923,
+    query_sequence_ids, *, min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
+    min_samples: int | None = None, calibration_camera_ids=None,
+    query_camera_ids=None,
 ) -> dict[str, object]:
     """Assign accepted rows to known species and rejected rows to novel IDs.
 
@@ -132,8 +90,9 @@ def discover(
             raise ValueError("Camera IDs must align with feature rows")
         if any(not value.strip() for value in np.concatenate((ccam, qcam))):
             raise ValueError("Camera IDs must be nonempty")
-    if isinstance(n_clusters, bool) or not isinstance(n_clusters, int) or n_clusters < 1:
-        raise ValueError("n_clusters must be a positive integer")
+    # Validate HDBSCAN settings even when the gate rejects no rows.
+    hdbscan_labels(np.empty((0, 768), dtype=np.float32),
+                   min_cluster_size=min_cluster_size, min_samples=min_samples)
     center = checkpoint.feature_center.numpy()
     cal_centered = _normalize_rows(calibration - center[None, :])
     query_centered = _normalize_rows(query - center[None, :])
@@ -163,9 +122,12 @@ def discover(
     labels = np.full(len(query), -1, dtype=np.int64)
     count = int(rejected.sum())
     if count:
-        k = min(n_clusters, count)
-        weights = _sequence_weights(qseq[rejected])
-        labels[rejected] = _weighted_kmeans(query_centered[rejected], weights, k, seed)
+        event_labels = _event_labels(
+            query_centered[rejected], qseq[rejected],
+            min_cluster_size=min_cluster_size, min_samples=min_samples,
+        )
+        # -1 is reserved for accepted known rows; -2 identifies novel noise.
+        labels[rejected] = np.where(event_labels >= 0, event_labels, -2)
     return {
         "known_species": predictions[1].tolist(),
         "novel_cluster": labels.tolist(),
@@ -173,8 +135,12 @@ def discover(
         "target_known_calibration_frr": TARGET_FRR,
         "empirical_calibration_frr": float(np.mean(known_score[:ncal] < threshold)),
         "rejected_count": count,
-        "occupied_clusters": int(len(np.unique(labels[rejected]))),
-        "requested_clusters": n_clusters,
+        "occupied_clusters": int(len(np.unique(labels[labels >= 0]))),
+        "noise_count": int(np.sum(labels == -2)),
+        "rejected_mask": rejected.tolist(),
+        "algorithm": "hdbscan",
+        "min_cluster_size": min_cluster_size,
+        "min_samples": min_cluster_size if min_samples is None else min_samples,
         "cross_camera_density": qcam is not None,
         "density_neighbors": DENSITY_NEIGHBORS,
     }

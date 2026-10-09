@@ -1,0 +1,8 @@
+{
+  "images": 7709,
+  "reused": 6844,
+  "extracted": 865,
+  "device": "cuda",
+  "encoder_sha256": "d73036b56966966d07975d696bde331762f37297e2f095de8cea0040c3aa0841",
+  "data_fingerprint": "fa1f75cb9782acb11656ae56929e243f2a2e0e64e9af72b631af67dac1773165"
+}

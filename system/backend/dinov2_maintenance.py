@@ -12,6 +12,7 @@ from system.dinov2.component import install_dinov2_component, remove_dinov2_comp
 from . import maintenance as _maintenance
 
 DINO_OPTIONAL_DEPENDENCIES = {
+    "sklearn": "scikit-learn>=1.3,<2",
     "transformers": "transformers>=4.40",
     "safetensors": "safetensors>=0.4",
 }
