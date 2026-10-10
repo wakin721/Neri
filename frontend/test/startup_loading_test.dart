@@ -229,9 +229,23 @@ void main() {
       await tester.tap(find.text(page).first);
       await tester.pump();
       await settleStartup(tester);
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
-      expect(find.text('暂无预览图像。'), findsNothing);
-      expect(find.text('暂无可校验图像。'), findsNothing);
+      if (page == '预览') {
+        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(find.byIcon(Icons.image_search_rounded), findsOneWidget);
+        expect(find.text('暂无预览图像。'), findsOneWidget);
+        final refresh = find.widgetWithText(FilledButton, '重新获取');
+        expect(tester.widget<FilledButton>(refresh).onPressed, isNull);
+        expect(
+          find.descendant(
+            of: refresh,
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsOneWidget,
+        );
+      } else {
+        expect(find.byType(LinearProgressIndicator), findsOneWidget);
+        expect(find.text('暂无可校验图像。'), findsNothing);
+      }
       backend.preview.complete(
         http.Response(
           jsonEncode([
