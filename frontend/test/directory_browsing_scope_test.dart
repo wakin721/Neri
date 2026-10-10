@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -91,6 +92,102 @@ void main() {
     scope.update(source, '$root-other');
     expect(scope.selected, isNull);
     expect(scope.items, isEmpty);
+  });
+
+  test('directory cache survives empty media loads and switching roots', () {
+    final photo = item('camera/photo.jpg');
+    final directory = File(photo.path).parent.path;
+    final scope = DirectoryBrowsingScope()..update([], root);
+    scope.cacheDirectories([directory], root);
+    scope.select(directory);
+    scope.update([], root);
+    expect(scope.selected, directory);
+    scope.update([photo], root);
+    expect(scope.items, [photo]);
+    expect(scope.selected, directory);
+    scope.update([], '$root-other');
+    expect(scope.directories, isEmpty);
+    scope.update([], root);
+    expect(scope.directories, [directory]);
+    scope.select(directory);
+    scope.cacheDirectories([], root);
+    expect(scope.selected, isNull);
+    expect(scope.directories, isEmpty);
+  });
+
+  testWidgets('directory choices work before media and during refresh', (
+    tester,
+  ) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('window_manager'),
+          (call) async => call.method == 'isMaximized' ? false : null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('neri/windows_shell'),
+          (_) async => null,
+        );
+    final input = Directory('startup-test-input').absolute.path;
+    final camera = Directory('$input/camera-b').path;
+    final backend = startup.StartupBackend()
+      ..directories = [Directory('$input/camera-a').path, camera];
+    await startup.mount(tester, backend);
+    await tester.tap(find.text('预览').first);
+    await tester.pump();
+    await startup.settleStartup(tester);
+    expect(backend.preview.isCompleted, isFalse);
+    expect(
+      tester.widget<PreviewScreen>(find.byType(PreviewScreen)).loading,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<PopupMenuButton<String>>(find.byType(PopupMenuButton<String>))
+          .enabled,
+      isTrue,
+    );
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.tap(find.text('camera-b').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(
+      tester.widget<PreviewScreen>(find.byType(PreviewScreen)).inputPath,
+      camera,
+    );
+    final media = http.Response(
+      jsonEncode([
+        for (final dir in ['camera-a', 'camera-b'])
+          {
+            'filename': 'same.jpg',
+            'path': '$input/$dir/same.jpg',
+            'file_type': 'jpg',
+          },
+      ]),
+      200,
+    );
+    backend.preview.complete(media);
+    await startup.settleStartup(tester);
+    var screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+    expect(screen.items.single.path, '$input/camera-b/same.jpg');
+    backend.refreshedPreview = Completer<http.Response>();
+    screen.onRefresh();
+    await tester.pump();
+    screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+    expect(screen.loading, isTrue);
+    expect(screen.items.single.path, '$input/camera-b/same.jpg');
+    expect(
+      tester
+          .widget<PopupMenuButton<String>>(find.byType(PopupMenuButton<String>))
+          .enabled,
+      isTrue,
+    );
+    backend.refreshedPreview!.complete(media);
+    await startup.settleStartup(tester);
+    await startup.cleanup(tester, backend);
   });
 
   testWidgets('AppBar directory selector switches duplicate media paths', (

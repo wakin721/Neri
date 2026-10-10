@@ -126,6 +126,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   final _validationItemsCache = ValidationItemsCache();
   final _directoryScope = DirectoryBrowsingScope();
+  final _directoryRequests = <String>{};
   final Map<String, ProcessingJob> _completeJobsById = {};
   final _refreshGate = AsyncRefreshGate();
   final Set<String> _expandedJobIds = {};
@@ -1778,6 +1779,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return _supportedMediaExtensions.any(normalizedPath.endsWith);
   }
 
+  Future<void> _refreshDirectoryChoices(String inputPath) async {
+    if (!_directoryRequests.add(inputPath)) return;
+    final generation = _backendStartupGeneration;
+    try {
+      final paths = await widget.apiClient.fetchPreviewDirectories(inputPath);
+      if (!mounted ||
+          generation != _backendStartupGeneration ||
+          _closeFlowBlocksBackendStartup) {
+        return;
+      }
+      setState(() => _directoryScope.cacheDirectories(paths, inputPath));
+    } catch (_) {
+      // Older backends or unavailable disks still fall back to media snapshots.
+    } finally {
+      _directoryRequests.remove(inputPath);
+    }
+  }
+
   Future<void> _refreshPreviewItems({
     bool force = false,
     bool finishGlobalLoading = false,
@@ -1817,6 +1836,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
     });
 
+    unawaited(_refreshDirectoryChoices(inputPath));
     try {
       final items = await widget.apiClient.fetchPreviewItems(
         inputPath: inputPath,
@@ -3665,7 +3685,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         : _directoryScope.label(_directoryScope.selected!);
     return PopupMenuButton<String>(
       tooltip: '切换浏览目录（包含子目录）',
-      enabled: !_previewLoading && !_validationBusy && !_previewDetecting,
+      enabled: !_validationBusy && !_previewDetecting,
       onSelected: (value) {
         setState(() {
           _directoryScope.select(value.isEmpty ? null : value);

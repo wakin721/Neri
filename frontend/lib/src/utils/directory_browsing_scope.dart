@@ -3,9 +3,9 @@ import 'dart:io';
 import '../models/job.dart';
 import 'local_detection_items.dart';
 
-/// Derives terminal media directories from the already-loaded media snapshot.
-/// No filesystem enumeration is performed while the UI rebuilds.
+/// Keeps a small per-root directory cache independently of media loading.
 class DirectoryBrowsingScope {
+  final _directoryCache = <String, List<String>>{};
   List<DetectionItem>? _source;
   String _root = '';
   String? _selected;
@@ -15,11 +15,32 @@ class DirectoryBrowsingScope {
   String get inputPath => _selected ?? _root;
   String? get selected => _selected;
 
+  void cacheDirectories(List<String> paths, String root) {
+    _directoryCache.remove(root);
+    _directoryCache[root] = List.unmodifiable(paths);
+    if (_directoryCache.length > 8) {
+      _directoryCache.remove(_directoryCache.keys.first);
+    }
+    if (root != _root) return;
+    directories = _directoryCache[root]!;
+    if (_selected != null && !directories.contains(_selected)) _selected = null;
+    _filter();
+  }
+
   void update(List<DetectionItem> source, String root) {
     if (identical(source, _source) && root == _root) return;
     if (root != _root) _selected = null;
     _root = root;
     _source = source;
+    final cached = _directoryCache[root];
+    if (cached != null) {
+      directories = cached;
+      if (_selected != null && !directories.contains(_selected)) {
+        _selected = null;
+      }
+      _filter();
+      return;
+    }
     final paths = <String, String>{};
     final ancestors = <String>{};
     if (root.isNotEmpty) {
