@@ -86,6 +86,10 @@ class StartScreen extends StatelessWidget {
     required this.pendingStartJobIds,
     required this.pendingStopJobIds,
     required this.jobs,
+    this.onJobExpansionChanged,
+    this.onRetryJobDetails,
+    this.loadingJobDetailIds = const {},
+    this.failedJobDetailIds = const {},
     super.key,
   });
 
@@ -114,6 +118,10 @@ class StartScreen extends StatelessWidget {
   final Set<String> pendingStartJobIds;
   final Set<String> pendingStopJobIds;
   final List<ProcessingJob> jobs;
+  final void Function(ProcessingJob, bool)? onJobExpansionChanged;
+  final ValueChanged<ProcessingJob>? onRetryJobDetails;
+  final Set<String> loadingJobDetailIds;
+  final Set<String> failedJobDetailIds;
 
   @override
   Widget build(BuildContext context) {
@@ -153,6 +161,10 @@ class StartScreen extends StatelessWidget {
           onClearJobs: onClearJobs,
           pendingStartJobIds: pendingStartJobIds,
           pendingStopJobIds: pendingStopJobIds,
+          onJobExpansionChanged: onJobExpansionChanged,
+          onRetryJobDetails: onRetryJobDetails,
+          loadingJobDetailIds: loadingJobDetailIds,
+          failedJobDetailIds: failedJobDetailIds,
         ),
       ],
     );
@@ -650,9 +662,17 @@ class _JobsCard extends StatelessWidget {
     required this.onClearJobs,
     required this.pendingStartJobIds,
     required this.pendingStopJobIds,
+    required this.onJobExpansionChanged,
+    required this.onRetryJobDetails,
+    required this.loadingJobDetailIds,
+    required this.failedJobDetailIds,
   });
 
   final List<ProcessingJob> jobs;
+  final void Function(ProcessingJob, bool)? onJobExpansionChanged;
+  final ValueChanged<ProcessingJob>? onRetryJobDetails;
+  final Set<String> loadingJobDetailIds;
+  final Set<String> failedJobDetailIds;
   final ValueChanged<ProcessingJob> onCancelJob;
   final ValueChanged<ProcessingJob> onResumeJob;
   final ValueChanged<ProcessingJob> onDeleteJob;
@@ -686,6 +706,9 @@ class _JobsCard extends StatelessWidget {
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
     final runtimeText = _jobRuntimeText(job);
     return ExpansionTile(
+      key: ValueKey(job.id),
+      onExpansionChanged: (expanded) =>
+          onJobExpansionChanged?.call(job, expanded),
       leading: Icon(_jobIcon(job.state)),
       title: Text(job.inputDir, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Column(
@@ -735,6 +758,22 @@ class _JobsCard extends StatelessWidget {
         ],
       ),
       children: [
+        if (loadingJobDetailIds.contains(job.id))
+          const ListTile(
+            leading: SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            title: Text('正在加载任务结果'),
+          ),
+        if (failedJobDetailIds.contains(job.id))
+          ListTile(
+            title: const Text('任务结果加载失败'),
+            trailing: TextButton(
+              onPressed: () => onRetryJobDetails?.call(job),
+              child: const Text('重试'),
+            ),
+          ),
         if (job.error != null)
           ListTile(
             leading: const Icon(Icons.error_outline_rounded),

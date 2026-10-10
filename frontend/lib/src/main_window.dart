@@ -27,6 +27,7 @@ import 'screens/settings_screen.dart';
 import 'screens/species_validation_screen.dart';
 import 'screens/start_screen.dart';
 import 'utils/job_result_refresh.dart';
+import 'utils/startup_timing.dart';
 import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
 import 'widgets/retained_tab.dart';
@@ -125,6 +126,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final _validationItemsCache = ValidationItemsCache();
   final Map<String, ProcessingJob> _completeJobsById = {};
   final _refreshGate = AsyncRefreshGate();
+  final Set<String> _expandedJobIds = {};
+  final Set<String> _loadingJobDetailIds = {};
+  final Set<String> _failedJobDetailIds = {};
   Timer? _timer;
   Timer? _previewRefreshTimer;
   Timer? _inputDirectoryChangeTimer;
@@ -693,6 +697,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (_closeFlowBlocksBackendStartup) return;
     if (_backendStarting) return;
     _backendStarting = true;
+    final timing = StartupTiming();
     if (mounted) {
       setState(() {
         _loading = true;
@@ -704,13 +709,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     try {
       await _waitForActiveEnvironmentMaintenance();
+      timing.mark('maintenance_wait');
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       await _ensureBackendStarted();
+      timing.mark('backend_launch');
       if (_closeFlowBlocksBackendStartup) {
         if (mounted) setState(() => _loading = false);
         return;
       }
       final ready = await _waitForBackendReady();
+      timing.mark('backend_ready');
       if (!mounted) return;
       if (_closeFlowBlocksBackendStartup) {
         setState(() => _loading = false);
@@ -727,12 +735,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _backendReady = true;
       _backendStartupGeneration += 1;
       final privacyReady = await _loadPrivacyStatus();
+      timing.mark('privacy_status');
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       if (!privacyReady) {
         setState(() => _loading = false);
         return;
       }
-      await _refreshInitialPageData();
+      await _refreshInitialPageData(timing: timing);
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
       _timer ??= Timer.periodic(
         const Duration(seconds: 2),
         (_) => _refresh(silent: true, coalesce: true),
@@ -751,6 +761,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _showSnackBar('启动 Python 后端失败：$error');
       }
     } finally {
+      timing.mark('startup_finished');
       _backendStarting = false;
     }
   }
@@ -825,9 +836,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (mounted) setState(() => _startupMaintenanceStatus = null);
   }
 
-  Future<void> _refreshInitialPageData() async {
-    await _refresh(includeJobResults: true, finishLoading: false);
-    if (!mounted || _closeFlowBlocksBackendStartup) return;
+  Future<void> _refreshInitialPageData({StartupTiming? timing}) async {
+    timing ??= StartupTiming();
+    await _refresh(includeJobResults: false);
+    timing.mark('initial_settings_and_job_summaries');
+    if (!mounted || _closeFlowBlocksBackendStartup || !_backendReady) return;
+    timing.mark('shell_ready');
     unawaited(
       _dinoV2StartupCheck.run(
         generation: _backendStartupGeneration,
@@ -842,7 +856,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     _previewRefreshTimer?.cancel();
     _previewRefreshTimer = null;
-    await _refreshPreviewItems(force: true, finishGlobalLoading: true);
+    // Directory scans have their own progress state and must not block the shell.
+    unawaited(
+      _refreshPreviewItems(
+        force: true,
+      ).whenComplete(() => timing!.mark('initial_preview')),
+    );
   }
 
   void _scheduleStartupUpdateCheck() {
@@ -1565,8 +1584,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
   }
 
-  bool get _jobProcessingBusy => _jobs.any((job) => job.isWorkerActive);
-
   void _syncJobTransitionState(List<ProcessingJob> jobs) {
     if (_pendingStartJobBaselines.isEmpty && _pendingStopJobIds.isEmpty) {
       return;
@@ -1638,6 +1655,43 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       const Duration(milliseconds: 450),
       () => _refreshPreviewItems(),
     );
+  }
+
+  void _onJobExpansionChanged(ProcessingJob job, bool expanded) {
+    if (expanded) {
+      _expandedJobIds.add(job.id);
+      unawaited(_loadJobDetails(job));
+    } else {
+      _expandedJobIds.remove(job.id);
+    }
+  }
+
+  Future<void> _loadJobDetails(ProcessingJob job) async {
+    if (_loadingJobDetailIds.contains(job.id) ||
+        _closeFlowBlocksBackendStartup) {
+      return;
+    }
+    setState(() {
+      _loadingJobDetailIds.add(job.id);
+      _failedJobDetailIds.remove(job.id);
+    });
+    try {
+      await _refresh(silent: true);
+      if (!mounted || _closeFlowBlocksBackendStartup) return;
+      final latest = _jobs.where((current) => current.id == job.id).firstOrNull;
+      setState(() {
+        if (latest != null &&
+            jobResultsNeedRefresh(latest, _completeJobsById[job.id])) {
+          _failedJobDetailIds.add(job.id);
+        }
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _loadingJobDetailIds.remove(job.id));
+      } else {
+        _loadingJobDetailIds.remove(job.id);
+      }
+    }
   }
 
   Future<void> _refreshVisibleResultsPage() async {
@@ -1744,6 +1798,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       return;
     }
 
+    final startupGeneration = _backendStartupGeneration;
     final requestId = ++_previewRefreshRequestId;
     if (!mounted) return;
     setState(() {
@@ -1767,7 +1822,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       );
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
-          requestId != _previewRefreshRequestId) {
+          requestId != _previewRefreshRequestId ||
+          startupGeneration != _backendStartupGeneration ||
+          _closeFlowBlocksBackendStartup) {
         if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
@@ -1791,7 +1848,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (error) {
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
-          requestId != _previewRefreshRequestId) {
+          requestId != _previewRefreshRequestId ||
+          startupGeneration != _backendStartupGeneration ||
+          _closeFlowBlocksBackendStartup) {
         if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
@@ -2064,7 +2123,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final mayFetchCompleteJobResults = shouldFetchCompleteJobResults(
         includeJobResults: includeJobResults,
         silent: silent,
-        jobProcessingBusy: _jobProcessingBusy,
         resultsPageVisible: _selectedIndex == 1 || _selectedIndex == 2,
       );
       final summaries = await widget.apiClient
@@ -2073,13 +2131,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       backendResponded = true;
       _backendReady = true;
+      final previousById = {for (final job in _jobs) job.id: job};
       final changedJobs = summaries
           .where(
             (job) =>
                 includeJobResults &&
-                (mayFetchCompleteJobResults || !job.isWorkerActive) &&
-                (!silent ||
-                    jobResultsNeedRefresh(job, _completeJobsById[job.id])),
+                shouldFetchJobResults(
+                  summary: job,
+                  previous: previousById[job.id],
+                  complete: _completeJobsById[job.id],
+                  resultsRequested:
+                      mayFetchCompleteJobResults ||
+                      (_selectedIndex == 0 && _expandedJobIds.contains(job.id)),
+                ),
           )
           .toList();
       final fetchedJobs = <ProcessingJob>[];
@@ -2153,6 +2217,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final currentIds = jobs.map((job) => job.id).toSet();
       _completeJobsById.removeWhere((id, _) => !currentIds.contains(id));
       _completeJobsById.addAll(fetchedById);
+      _expandedJobIds.removeWhere((id) => !currentIds.contains(id));
+      _failedJobDetailIds.removeAll(fetchedById.keys);
 
       if (settingsChanged || jobsChanged) {
         setState(() {
@@ -3503,6 +3569,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onClearJobs: _clearJobs,
       pendingStartJobIds: _pendingStartJobBaselines.keys.toSet(),
       pendingStopJobIds: _pendingStopJobIds,
+      onJobExpansionChanged: _onJobExpansionChanged,
+      onRetryJobDetails: (job) => unawaited(_loadJobDetails(job)),
+      loadingJobDetailIds: _loadingJobDetailIds,
+      failedJobDetailIds: _failedJobDetailIds,
       jobs: _jobs,
     );
   }
@@ -3547,6 +3617,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _dinov2ValidationRequestedCount = normalized.length;
       _selectedIndex = 2;
     });
+    unawaited(_refreshVisibleResultsPage());
   }
 
   void _clearDinoCandidateValidation() {

@@ -3,11 +3,10 @@ import '../models/job.dart';
 bool shouldFetchCompleteJobResults({
   required bool includeJobResults,
   required bool silent,
-  required bool jobProcessingBusy,
   required bool resultsPageVisible,
 }) {
   if (!includeJobResults) return false;
-  if (!silent || !jobProcessingBusy) return true;
+  if (!silent) return true;
   return resultsPageVisible;
 }
 
@@ -24,4 +23,19 @@ bool jobResultsNeedRefresh(ProcessingJob summary, ProcessingJob? complete) {
       summary.processed != complete.processed ||
       summary.state != complete.state ||
       summary.active != complete.active;
+}
+
+// Hidden historical jobs stay summaries. A job that just finished still gets
+// its final results so processing completion updates previews promptly.
+bool shouldFetchJobResults({
+  required ProcessingJob summary,
+  required ProcessingJob? previous,
+  required ProcessingJob? complete,
+  required bool resultsRequested,
+}) {
+  if (!jobResultsNeedRefresh(summary, complete)) return false;
+  return resultsRequested ||
+      (!summary.isWorkerActive &&
+          previous != null &&
+          jobResultsNeedRefresh(summary, previous));
 }

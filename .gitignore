@@ -109,3 +109,7 @@ frontend/windows/runner/*
 !/tests/test_dinov2_within_seq.py
 !/tests/test_dinov2_within_seq_runtime.py
 !/tests/test_processing_performance.py
+
+!frontend/test/startup_loading_test.dart
+
+!/tests/test_media_storage_failures.py
