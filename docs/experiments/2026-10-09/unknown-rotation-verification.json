@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "rounds": 90,
+  "method_results": 270,
+  "recomputed_metric_checks": 6480,
+  "balanced_unknown_species_roles": true,
+  "unknown_excluded_from_known_heads": true,
+  "camera_original_hash_sequence_isolation": true,
+  "identical_paired_query_ids": true,
+  "same_classifier_control_predictions": true,
+  "Val90_threshold_recomputed": true,
+  "test_ROC_diagnostic_recomputed": true,
+  "paired_summary_recomputed": true,
+  "sensitivity_rows_recomputed": 1080
+}

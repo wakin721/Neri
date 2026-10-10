@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "result_rows": 50,
+  "held_out_cohorts": 12,
+  "recomputed_metrics_and_calibration_checks": 398,
+  "common_evaluation_ids": "passed",
+  "auxiliary_thresholds": "passed",
+  "pure_query_sequence_labels": "passed",
+  "iwildcam_single_sequence_equivalence": "passed"
+}
