@@ -4576,23 +4576,28 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     setState(() => _exporting = true);
     try {
       final scope = await _resolveExportScope();
-      if (!mounted || scope == null || widget.inputPath != initialPath) return;
-      final fileFormat = await _resolveExportFormat();
-      if (!mounted || fileFormat == null || widget.inputPath != initialPath)
+      if (!mounted || scope == null || widget.inputPath != initialPath) {
         return;
+      }
+      final fileFormat = await _resolveExportFormat();
+      if (!mounted || fileFormat == null || widget.inputPath != initialPath) {
+        return;
+      }
       final exportItems = scope.perDirectory ? widget.rootItems : widget.items;
       final deleteEmptyPhotos = await _resolveEmptyPhotoDelete(exportItems);
       if (!mounted ||
           deleteEmptyPhotos == null ||
-          widget.inputPath != initialPath)
+          widget.inputPath != initialPath) {
         return;
+      }
       final exportFavoritePhotos = await _resolveFavoritePhotoExport(
         exportItems,
       );
       if (!mounted ||
           exportFavoritePhotos == null ||
-          widget.inputPath != initialPath)
+          widget.inputPath != initialPath) {
         return;
+      }
       final confidenceSettings = Map<String, double>.from(
         _savedConfidenceSettings,
       );
@@ -4629,7 +4634,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       final favoriteMessage =
           result.favoriteExportedCount > 0 &&
               (result.favoriteOutputDir?.isNotEmpty ?? false)
-          ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
+          ? batch
+                ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到对应表格目录'
+                : '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
           : '';
       final deleteMessage = result.deletedEmptyPhotoCount > 0
           ? '\n已删除 ${result.deletedEmptyPhotoCount} 张空照片'

@@ -278,3 +278,31 @@ def test_export_per_directory_limits_favorite_and_delete_side_effects(tmp_path, 
     assert response.deleted_empty_photo_count == 1
     assert not inside.exists()
     assert outside.exists()
+
+
+def test_export_per_directory_favorite_failure_lists_written_tables(tmp_path, monkeypatch):
+    media = tmp_path / "camera" / "photo.JPG"
+    media.parent.mkdir()
+    media.write_bytes(b"fixture")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+    written = []
+
+    def capture(rows, output_path, *args, **kwargs):
+        Path(output_path).write_text("table", encoding="utf-8")
+        written.append(output_path)
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    def fail_copy(source, target):
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(legacy.shutil, "copy2", fail_copy)
+    with pytest.raises(RuntimeError, match="已生成") as error:
+        legacy.export_validation_data(ValidationExportRequest(
+            input_path=str(tmp_path), per_directory=True,
+            export_favorite_photos=True, favorite_photo_paths=[str(media)],
+        ))
+    assert written[0] in str(error.value)

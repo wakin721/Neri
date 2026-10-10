@@ -3365,30 +3365,34 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
 
     favorite_output_dir: Path | None = None
     favorite_exported_count = 0
-    if request.export_favorite_photos:
-        species_by_path = _export_species_by_path(processed_data)
-        for output_path in output_paths:
-            directory_files = (
-                [path for path in files if path.parent == output_path.parent]
-                if request.per_directory else files
-            )
-            favorite_dir, count = _export_favorite_photos(
-                directory_files, request.favorite_photo_paths, output_path, species_by_path,
-            )
-            if favorite_output_dir is None:
-                favorite_output_dir = favorite_dir
-            favorite_exported_count += count
-
     deleted_empty_photo_count = 0
     empty_photo_delete_failed_count = 0
-    if request.delete_empty_photos:
-        (
-            deleted_empty_photo_count,
-            empty_photo_delete_failed_count,
-        ) = _delete_empty_photos(
-            files,
-            request.empty_photo_paths,
-        )
+    try:
+        if request.export_favorite_photos:
+            species_by_path = _export_species_by_path(processed_data)
+            for output_path in output_paths:
+                directory_files = (
+                    [path for path in files if path.parent == output_path.parent]
+                    if request.per_directory else files
+                )
+                favorite_dir, count = _export_favorite_photos(
+                    directory_files, request.favorite_photo_paths, output_path, species_by_path,
+                )
+                if favorite_output_dir is None:
+                    favorite_output_dir = favorite_dir
+                favorite_exported_count += count
+
+        if request.delete_empty_photos:
+            (
+                deleted_empty_photo_count,
+                empty_photo_delete_failed_count,
+            ) = _delete_empty_photos(
+                files,
+                request.empty_photo_paths,
+            )
+    except Exception as exc:
+        completed = "、".join(str(path) for path in output_paths)
+        raise RuntimeError(f"导出后处理失败。已生成：{completed}。原因：{exc}") from exc
 
     return ValidationExportResponse(
         output_path=str(output_paths[0]),

@@ -68,9 +68,14 @@ void main() {
           exportBody = jsonDecode(request.body) as Map<String, dynamic>;
           return _jsonResponse({
             'output_path': '${directory.path}/result.csv',
-            'output_paths': ['${directory.path}/result.csv'],
+            'output_paths': [
+              '${directory.path}/result.csv',
+              '${directory.path}/other/result.csv',
+            ],
             'file_format': 'csv',
             'exported_count': 1,
+            'favorite_exported_count': 2,
+            'favorite_output_dir': '${directory.path}/first_only',
           });
         }
         return _jsonResponse({});
@@ -97,6 +102,7 @@ void main() {
     expect(exportBody?['input_path'], directory.parent.path);
     expect(exportBody?['per_directory'], true);
     expect(exportBody?['file_format'], 'csv');
+    expect(find.textContaining('2 个收藏媒体文件到对应表格目录'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
   });
 
