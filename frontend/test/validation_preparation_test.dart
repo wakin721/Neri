@@ -35,12 +35,30 @@ void main() {
       final state = tester.state<_GroupExpansionHarnessState>(
         find.byType(_GroupExpansionHarness),
       );
+      final previousAction = tester.element(find.text('正确').first);
       state.switchItems(items);
       final watch = Stopwatch()..start();
       await tester.pump();
       watch.stop();
       expect(
-        find.byKey(const ValueKey('validation-preparation-progress')),
+        find.text('正确'),
+        findsWidgets,
+        reason: 'Directory loading must retain the previous media and actions',
+      );
+      expect(
+        identical(tester.element(find.text('正确').first), previousAction),
+        isTrue,
+      );
+      expect(find.textContaining('4 组'), findsWidgets);
+      await tester.tap(find.text('正确').first, warnIfMissed: false);
+      expect(
+        state.markCalls,
+        0,
+        reason:
+            'Retained contents must not mark the new directory during loading',
+      );
+      expect(
+        _preparingContent(),
         findsOneWidget,
         reason:
             'A large regroup must defer computation instead of blocking its first frame',
@@ -48,10 +66,7 @@ void main() {
       expect(watch.elapsedMilliseconds, lessThan(300));
       var framesWhilePreparing = 0;
       for (var attempt = 0; attempt < 500; attempt++) {
-        if (find
-            .byKey(const ValueKey('validation-preparation-progress'))
-            .evaluate()
-            .isEmpty) {
+        if (_preparingContent().evaluate().isEmpty) {
           break;
         }
         framesWhilePreparing++;
@@ -61,10 +76,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 16));
       }
       expect(framesWhilePreparing, greaterThan(1));
-      expect(
-        find.byKey(const ValueKey('validation-preparation-progress')),
-        findsNothing,
-      );
+      expect(_preparingContent(), findsNothing);
       expect(find.textContaining('3000 组'), findsWidgets);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
@@ -102,17 +114,11 @@ void main() {
       );
       state.switchItems(photos('old', 12000));
       await tester.pump();
-      expect(
-        find.byKey(const ValueKey('validation-preparation-progress')),
-        findsOneWidget,
-      );
+      expect(_preparingContent(), findsOneWidget);
       state.switchItems(photos('new', 800));
       await tester.pump();
       for (var attempt = 0; attempt < 500; attempt++) {
-        if (find
-            .byKey(const ValueKey('validation-preparation-progress'))
-            .evaluate()
-            .isEmpty) {
+        if (_preparingContent().evaluate().isEmpty) {
           break;
         }
         await tester.runAsync(
@@ -127,10 +133,7 @@ void main() {
       state.switchItems(photos('small', 4));
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
-      expect(
-        find.byKey(const ValueKey('validation-preparation-progress')),
-        findsNothing,
-      );
+      expect(_preparingContent(), findsNothing);
       expect(find.textContaining('1 组'), findsWidgets);
       state.switchItems(photos('disposing', 12000));
       await tester.pump();
@@ -211,6 +214,7 @@ class _GroupExpansionHarness extends StatefulWidget {
 
 class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   late List<DetectionItem> _items = widget.initialItems;
+  int markCalls = 0;
   void switchItems(List<DetectionItem> next) {
     setState(() => _items = next);
   }
@@ -254,7 +258,10 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
                 speciesCount,
                 speciesType,
                 remark,
-              }) async => candidate,
+              }) async {
+                markCalls++;
+                return candidate;
+              },
           onMarkItems:
               (
                 candidates,
@@ -263,7 +270,10 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
                 speciesCount,
                 speciesType,
                 remark,
-              }) async => candidates,
+              }) async {
+                markCalls++;
+                return candidates;
+              },
           onQuickMarkUsed: (_) async {},
           onQuickMarkReverted: (_) async {},
           onRedetectItems: (_, {required confidence}) async {},
@@ -281,3 +291,10 @@ class _InvalidCaptureTime {
   @override
   String toString() => throw StateError('Invalid capture time');
 }
+
+Finder _preparingContent() => find.byWidgetPredicate(
+  (widget) =>
+      widget is AbsorbPointer &&
+      widget.key == const ValueKey('validation-directory-content') &&
+      widget.absorbing,
+);

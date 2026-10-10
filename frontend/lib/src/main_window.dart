@@ -3650,6 +3650,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           root != _inputController.text.trim()) {
         return;
       }
+      // A metadata response can replace the source while filtering. Retry on
+      // the new snapshot rather than silently losing the requested selection.
+      while (!await _directoryScope.selectAsync(path)) {
+        if (!mounted ||
+            _closeFlowBlocksBackendStartup ||
+            root != _inputController.text.trim())
+          return;
+        if (path != null && !_directoryScope.directories.contains(path)) return;
+      }
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          root != _inputController.text.trim())
+        return;
       _applyDirectorySelection(path);
       // Let the validation screen start its cancellable preparation, then
       // retain feedback until the latest directory has been painted.
@@ -3796,6 +3809,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _directoryScope.items,
       inputPath,
       _dinov2ValidationPaths,
+      alreadyScoped: true,
     );
     final settings = _settingsOrEmpty();
     final quickMarkSpecies = _stringListSetting(
@@ -3806,6 +3820,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     final validationScreen = SpeciesValidationScreen(
       key: _validationScreenKey,
+      interactionBlocked: _directorySwitching,
       apiClient: widget.apiClient,
       inputPath: inputPath,
       classificationModelPath: _selectedDinoV2ValidationModelPath(),

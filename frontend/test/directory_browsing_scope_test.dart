@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:neri_flutter/src/screens/preview_screen.dart';
+import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/utils/directory_browsing_scope.dart';
@@ -40,6 +41,78 @@ void main() {
       scope.update([first, second, next], root);
       expect(scope.items, [first, next]);
       expect(identical(scope.items, camera), isFalse);
+    },
+  );
+
+  test(
+    'directory preparation leaves the old selection until its filter is ready',
+    () async {
+      final source = [
+        for (var i = 0; i < 20000; i++) item('camera-${i % 4}/$i.jpg'),
+      ];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final previous = scope.items;
+      final path = File(source.first.path).parent.path;
+      final future = scope.selectAsync(path);
+      expect(identical(scope.items, previous), isTrue);
+      expect(scope.selected, isNull);
+      var timerTicks = 0;
+      final timer = Timer.periodic(
+        const Duration(milliseconds: 1),
+        (_) => timerTicks++,
+      );
+      expect(await future, isTrue);
+      timer.cancel();
+      expect(timerTicks, greaterThan(1));
+      expect(scope.selected, path);
+      expect(scope.items.length, 5000);
+      expect(
+        scope.items.every((entry) => entry.path.contains('camera-0')),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'directory preparation cannot publish after its source changes',
+    () async {
+      final source = [for (var i = 0; i < 20000; i++) item('camera-a/$i.jpg')];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final future = scope.selectAsync(File(source.first.path).parent.path);
+      final replacement = item('camera-b/new.jpg');
+      scope.update([replacement], root);
+      expect(await future, isFalse);
+      expect(scope.items, [replacement]);
+      expect(scope.selected, isNull);
+    },
+  );
+
+  test(
+    'metadata updates reuse cached membership and preserve new media order',
+    () {
+      final source = [
+        item('camera-a/1.jpg'),
+        item('camera-a/2.jpg'),
+        item('camera-b/3.jpg'),
+      ];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final camera = File(source.first.path).parent.path;
+      scope.select(camera);
+      var pathReads = 0;
+      final next = [
+        for (final entry in source.reversed)
+          _CountingPathItem(entry.path, () => pathReads++),
+      ];
+      scope.update(next, root);
+      expect(
+        pathReads,
+        lessThanOrEqualTo(9),
+        reason:
+            'Metadata changes must reuse membership instead of parsing every file path again',
+      );
+      expect(scope.items, [next[1], next[2]]);
+      scope.select(null);
+      expect(identical(scope.items, next), isTrue);
     },
   );
 
@@ -383,7 +456,7 @@ void main() {
   });
 
   testWidgets(
-    'returning to all directories paints a loading Snackbar before replacing the list',
+    'directory switching shows feedback and blocks validation before source changes',
     (tester) async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
@@ -412,7 +485,7 @@ void main() {
         ),
       );
       await startup.settleStartup(tester);
-      await tester.tap(find.text('预览').first);
+      await tester.tap(find.text('校验').first);
       await tester.pump();
       await startup.settleStartup(tester);
       final selector = find.byKey(const ValueKey('directory-scope-selector'));
@@ -434,15 +507,27 @@ void main() {
         findsOneWidget,
       );
       expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+      expect(
+        tester
+            .widget<AbsorbPointer>(
+              find.byKey(const ValueKey('validation-directory-content')),
+            )
+            .absorbing,
+        isTrue,
+        reason:
+            'Validation must be blocked while directory filtering still displays the old snapshot',
+      );
       await tester.pump(const Duration(milliseconds: 350));
       await startup.settleStartup(tester);
       await tester.pump(const Duration(milliseconds: 350));
-      final child = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      final child = tester.widget<SpeciesValidationScreen>(
+        find.byType(SpeciesValidationScreen),
+      );
       expect(child.items, hasLength(1));
       // An already-visible notice must not queue the loading feedback behind
       // its exit animation while the root is rebuilding.
       ScaffoldMessenger.of(
-        tester.element(find.byType(PreviewScreen)),
+        tester.element(find.byType(SpeciesValidationScreen)),
       ).showSnackBar(
         const SnackBar(
           content: Text('Existing notification'),
@@ -471,7 +556,21 @@ void main() {
       );
       expect(tester.widget<FilledButton>(selector).onPressed, isNull);
       expect(
-        tester.widget<PreviewScreen>(find.byType(PreviewScreen)).items,
+        tester
+            .widget<AbsorbPointer>(
+              find.byKey(const ValueKey('validation-directory-content')),
+            )
+            .absorbing,
+        isTrue,
+        reason:
+            'Validation must be blocked while directory filtering still displays the old snapshot',
+      );
+      expect(
+        tester
+            .widget<SpeciesValidationScreen>(
+              find.byType(SpeciesValidationScreen),
+            )
+            .items,
         same(child.items),
         reason:
             'The loading hint must get its own frame before rebuilding the root',
@@ -480,7 +579,9 @@ void main() {
       await tester.pump();
       await startup.settleStartup(tester);
       await tester.pump(const Duration(milliseconds: 350));
-      final all = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      final all = tester.widget<SpeciesValidationScreen>(
+        find.byType(SpeciesValidationScreen),
+      );
       expect(all.items, hasLength(2));
       expect(Directory(all.inputPath).absolute.path, input);
       expect(find.text('正在加载全部目录…'), findsNothing);
@@ -540,4 +641,16 @@ void main() {
     );
     await startup.cleanup(tester, backend);
   });
+}
+
+class _CountingPathItem extends DetectionItem {
+  _CountingPathItem(this.originalPath, this.onRead)
+    : super(filename: 'updated.jpg', path: originalPath, fileType: 'jpg');
+  final String originalPath;
+  final void Function() onRead;
+  @override
+  String get path {
+    onRead();
+    return originalPath;
+  }
 }

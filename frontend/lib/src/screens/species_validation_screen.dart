@@ -241,6 +241,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     this.classificationModelPath,
     required this.items,
     required this.loading,
+    this.interactionBlocked = false,
     required this.refreshVersion,
     required this.speciesTypes,
     required this.useCombinedConfidence,
@@ -280,6 +281,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final String? classificationModelPath;
   final List<DetectionItem> items;
   final bool loading;
+  final bool interactionBlocked;
   final int refreshVersion;
   final Map<String, String> speciesTypes;
   final bool useCombinedConfidence;
@@ -448,6 +450,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   bool _preparing = false;
   Object? _preparationError;
   Future<void>? _preparationFuture;
+  Widget? _lastReadyContent;
+  List<DetectionItem>? _lastReadyItems;
+  bool get _interactionBlocked => _preparing || widget.interactionBlocked;
 
   /// Directory switching keeps its Snackbar alive until the latest snapshot
   /// is ready; metadata arriving in the meantime can replace that snapshot.
@@ -886,16 +891,24 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _bucketCacheConfidenceSignature != _confidenceSettingsSignature) {
       _startPreparation();
     }
-    if (_preparing) {
-      return const Center(
-        child: SizedBox(
-          width: 240,
-          child: LinearProgressIndicator(
-            key: ValueKey('validation-preparation-progress'),
-          ),
-        ),
-      );
+    if (!_preparing &&
+        (!widget.interactionBlocked ||
+            _lastReadyContent == null ||
+            !identical(_lastReadyItems, widget.items))) {
+      _lastReadyContent = _buildReadyContent(context);
+      _lastReadyItems = widget.items;
     }
+    return AbsorbPointer(
+      key: const ValueKey('validation-directory-content'),
+      absorbing: _interactionBlocked,
+      child: ExcludeFocus(
+        excluding: _interactionBlocked,
+        child: _lastReadyContent ?? const SizedBox.expand(),
+      ),
+    );
+  }
+
+  Widget _buildReadyContent(BuildContext context) {
     if (_preparationError != null) {
       return Center(
         child: FilledButton.tonal(
@@ -993,6 +1006,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   KeyEventResult _handleKeyEvent(KeyEvent event) {
+    if (_interactionBlocked) return KeyEventResult.handled;
     if (event is KeyUpEvent) {
       if (_selectionModifiers.release(event.logicalKey)) {
         return KeyEventResult.ignored;
@@ -3594,6 +3608,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   void _markQuickSpecies(String species) {
+    if (_interactionBlocked) return;
     setState(() {
       _preparePendingMarkForSelectedPath();
       if (_pendingSpeciesNames.contains(species)) {
@@ -3607,6 +3622,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   void _markQuantity(String quantity) {
+    if (_interactionBlocked) return;
     setState(() {
       _preparePendingMarkForSelectedPath();
       _selectedQuantity = quantity;
@@ -3617,7 +3633,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Future<void> _submitPendingMarkIfReady() async {
-    if (_marking ||
+    if (_interactionBlocked ||
+        _marking ||
         _pendingItemPath == null ||
         _pendingItemPath != _selectedPath ||
         _pendingSpeciesNames.isEmpty ||
@@ -3654,6 +3671,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Future<void> _markOtherSpecies({List<DetectionItem>? itemsOverride}) async {
+    if (_interactionBlocked) return;
     final batchItems = itemsOverride;
     if ((batchItems == null || batchItems.isEmpty) && widget.items.isEmpty) {
       return;
@@ -3796,7 +3814,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String? speciesType,
     String? remark,
   }) async {
-    if (items.isEmpty || _marking) return;
+    if (items.isEmpty || _marking || _interactionBlocked) return;
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
@@ -3945,6 +3963,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Future<void> _undoRecentMarks() async {
+    if (_interactionBlocked) return;
     if (_marking || _markHistory.isEmpty) return;
     final targets = _recentUndoTargets();
     if (targets.isEmpty) return;
@@ -4029,7 +4048,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String? remark,
     bool nextPhotoOnly = false,
   }) async {
-    if (widget.items.isEmpty) return;
+    if (widget.items.isEmpty || _interactionBlocked) return;
     final item =
         itemOverride ??
         widget.items.firstWhere(

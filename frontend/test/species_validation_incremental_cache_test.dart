@@ -126,7 +126,12 @@ void main() {
 
     for (var attempt = 0; attempt < 500; attempt++) {
       if (find
-          .byKey(const ValueKey('validation-preparation-progress'))
+          .byWidgetPredicate(
+            (widget) =>
+                widget is AbsorbPointer &&
+                widget.key == const ValueKey('validation-directory-content') &&
+                widget.absorbing,
+          )
           .evaluate()
           .isEmpty)
         break;
@@ -136,7 +141,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 16));
     }
     expect(
-      find.byKey(const ValueKey('validation-preparation-progress')),
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is AbsorbPointer &&
+            widget.key == const ValueKey('validation-directory-content') &&
+            widget.absorbing,
+      ),
       findsNothing,
     );
 

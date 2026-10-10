@@ -7,19 +7,26 @@ class ValidationItemsCache {
   List<DetectionItem>? _source;
   String? _inputPath;
   Set<String>? _paths;
+  bool _alreadyScoped = false;
   List<DetectionItem> _items = const <DetectionItem>[];
 
   List<DetectionItem> itemsFor(
     List<DetectionItem> source,
     String inputPath,
-    Set<String> paths,
-  ) {
+    Set<String> paths, {
+    bool alreadyScoped = false,
+  }) {
     if (identical(source, _source) &&
         inputPath == _inputPath &&
-        identical(paths, _paths)) {
+        identical(paths, _paths) &&
+        alreadyScoped == _alreadyScoped) {
       return _items;
     }
-    final scoped = validationItemsInInputFolder(source, inputPath);
+    final scoped = inputPath.trim().isEmpty
+        ? const <DetectionItem>[]
+        : alreadyScoped
+        ? source
+        : validationItemsInInputFolder(source, inputPath);
     _items = paths.isEmpty
         ? scoped
         : scoped
@@ -28,6 +35,7 @@ class ValidationItemsCache {
     _source = source;
     _inputPath = inputPath;
     _paths = paths;
+    _alreadyScoped = alreadyScoped;
     return _items;
   }
 }
@@ -52,6 +60,31 @@ List<DetectionItem> validationItemsInInputFolder(
               ).startsWith('$inputDirectory/')))
         item,
   ];
+}
+
+/// Yield while inspecting large directory snapshots before publishing them.
+Future<List<DetectionItem>> validationItemsInInputFolderAsync(
+  Iterable<DetectionItem> items,
+  String inputPath, {
+  required bool Function() cancelled,
+}) async {
+  if (inputPath.trim().isEmpty) return const [];
+  final root = _localPathKey(Directory(inputPath.trim()).absolute.path);
+  final result = <DetectionItem>[];
+  await Future<void>.delayed(Duration.zero);
+  final watch = Stopwatch()..start();
+  for (final item in items) {
+    if (cancelled()) return const [];
+    if (item.path.trim().isNotEmpty) {
+      final parent = _localPathKey(File(item.path).absolute.parent.path);
+      if (parent == root || parent.startsWith('$root/')) result.add(item);
+    }
+    if (watch.elapsedMilliseconds >= 4) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      watch.reset();
+    }
+  }
+  return result;
 }
 
 String _localPathKey(String path) {

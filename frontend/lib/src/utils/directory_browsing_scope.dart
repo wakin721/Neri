@@ -11,6 +11,7 @@ class DirectoryBrowsingScope {
   List<DetectionItem>? _source;
   String _root = '';
   String? _selected;
+  int _selectionGeneration = 0;
   List<String> directories = const [];
   List<DetectionItem> _items = const [];
 
@@ -31,15 +32,29 @@ class DirectoryBrowsingScope {
 
   void update(List<DetectionItem> source, String root) {
     if (identical(source, _source) && root == _root) return;
+    _selectionGeneration++;
     final samePaths =
         root == _root &&
         source.length == _source?.length &&
         source.every((item) => _sourcePaths.contains(item.path));
     if (root != _root) _selected = null;
-    _sourcePaths = {for (final item in source) item.path};
+    if (!samePaths) _sourcePaths = {for (final item in source) item.path};
     _root = root;
     _source = source;
-    _filteredCache.clear();
+    if (samePaths) {
+      // Metadata may reorder media, but it cannot change directory membership.
+      // Reuse membership and follow the new source order without parsing paths.
+      _filteredCache.updateAll((_, previous) {
+        if (previous.length == source.length) return source;
+        final members = {for (final item in previous) item.path};
+        return [
+          for (final item in source)
+            if (members.contains(item.path)) item,
+        ];
+      });
+    } else {
+      _filteredCache.clear();
+    }
     final cached = _directoryCache[root];
     if (cached != null) {
       directories = cached;
@@ -77,8 +92,37 @@ class DirectoryBrowsingScope {
 
   void select(String? path) {
     if (_selected == path) return;
+    _selectionGeneration++;
     _selected = path;
     _filter();
+  }
+
+  /// Prepare an uncached directory without replacing the visible snapshot.
+  Future<bool> selectAsync(String? path) async {
+    if (_selected == path) return true;
+    final generation = ++_selectionGeneration;
+    final source = _source ?? const <DetectionItem>[];
+    final root = _root;
+    final target = path ?? root;
+    bool cancelled() =>
+        generation != _selectionGeneration ||
+        root != _root ||
+        !identical(source, _source);
+    final next = target.isEmpty
+        ? source
+        : _filteredCache[target] ??
+              await validationItemsInInputFolderAsync(
+                source,
+                target,
+                cancelled: cancelled,
+              );
+    if (cancelled()) return false;
+    _selected = path;
+    _items = next;
+    if (target.isNotEmpty) _filteredCache[target] = next;
+    if (_filteredCache.length > 8)
+      _filteredCache.remove(_filteredCache.keys.first);
+    return true;
   }
 
   List<DetectionItem> get items => _items;
