@@ -66,6 +66,13 @@ class _PreviewScreenState extends State<PreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.loading &&
+        widget.items.isEmpty &&
+        widget.inputPath.trim().isNotEmpty) {
+      return const Center(
+        child: SizedBox(width: 240, child: LinearProgressIndicator()),
+      );
+    }
     if (widget.items.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(16),

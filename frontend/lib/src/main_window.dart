@@ -3636,6 +3636,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         content: Text(path == null ? '正在加载全部目录…' : '正在加载目录…'),
         duration: Duration(days: 1),
         dismissDirection: DismissDirection.none,
+        action: SnackBarAction(
+          label: '关闭',
+          onPressed: messenger.hideCurrentSnackBar,
+        ),
       ),
     );
     var noticeClosed = false;

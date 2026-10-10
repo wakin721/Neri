@@ -451,6 +451,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   Object? _preparationError;
   Future<void>? _preparationFuture;
   Widget? _lastReadyContent;
+  bool _hasReadyMedia = false;
   List<DetectionItem>? _lastReadyItems;
   bool get _interactionBlocked => _preparing || widget.interactionBlocked;
 
@@ -891,19 +892,38 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _bucketCacheConfidenceSignature != _confidenceSettingsSignature) {
       _startPreparation();
     }
-    if (!_preparing &&
+    final initialLoading =
+        !_hasReadyMedia &&
+        (_preparing ||
+            (widget.loading &&
+                widget.items.isEmpty &&
+                widget.inputPath.trim().isNotEmpty));
+    if (!initialLoading &&
+        !_preparing &&
         (!widget.interactionBlocked ||
             _lastReadyContent == null ||
             !identical(_lastReadyItems, widget.items))) {
       _lastReadyContent = _buildReadyContent(context);
       _lastReadyItems = widget.items;
+      if (widget.items.isNotEmpty && _preparationError == null) {
+        _hasReadyMedia = true;
+      }
     }
     return AbsorbPointer(
       key: const ValueKey('validation-directory-content'),
       absorbing: _interactionBlocked,
       child: ExcludeFocus(
         excluding: _interactionBlocked,
-        child: _lastReadyContent ?? const SizedBox.expand(),
+        child: initialLoading
+            ? const Center(
+                child: SizedBox(
+                  width: 240,
+                  child: LinearProgressIndicator(
+                    key: ValueKey('validation-preparation-progress'),
+                  ),
+                ),
+              )
+            : _lastReadyContent ?? const SizedBox.expand(),
       ),
     );
   }

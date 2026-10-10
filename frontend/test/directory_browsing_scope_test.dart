@@ -517,9 +517,29 @@ void main() {
         reason:
             'Validation must be blocked while directory filtering still displays the old snapshot',
       );
+      expect(find.byType(SnackBarAction), findsOneWidget);
+      expect(find.text('关闭'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('validation-preparation-progress')),
+        findsNothing,
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(tester.getRect(find.text('关闭')).bottom, lessThan(1100));
+      await tester.tap(find.text('关闭'));
+      await tester.pump();
+      expect(
+        tester.widget<SnackBar>(find.byType(SnackBar)).animation!.status,
+        AnimationStatus.reverse,
+      );
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsOneWidget,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNull);
       await tester.pump(const Duration(milliseconds: 350));
       await startup.settleStartup(tester);
       await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('正在加载目录…'), findsNothing);
       final child = tester.widget<SpeciesValidationScreen>(
         find.byType(SpeciesValidationScreen),
       );
