@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
+import '../models/export_result.dart';
 import '../models/job.dart';
 import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
@@ -240,6 +241,9 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.inputPath,
     this.classificationModelPath,
     required this.items,
+    required this.rootInputPath,
+    required this.rootItems,
+    required this.exportFormatMode,
     required this.loading,
     this.interactionBlocked = false,
     required this.refreshVersion,
@@ -271,6 +275,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onRedetectItems,
     required this.onFavoritePhotoPathsChanged,
     required this.onFavoritePhotoExportModeChanged,
+    required this.onExportFormatModeChanged,
     required this.onEmptyPhotoDeleteModeChanged,
     required this.onAutoGroupInferredBurstSizeChanged,
     super.key,
@@ -280,6 +285,9 @@ class SpeciesValidationScreen extends StatefulWidget {
   final String inputPath;
   final String? classificationModelPath;
   final List<DetectionItem> items;
+  final String rootInputPath;
+  final List<DetectionItem> rootItems;
+  final String exportFormatMode;
   final bool loading;
   final bool interactionBlocked;
   final int refreshVersion;
@@ -311,6 +319,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final RedetectValidationItems onRedetectItems;
   final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
   final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
+  final Future<void> Function(String mode) onExportFormatModeChanged;
   final Future<void> Function(String mode) onEmptyPhotoDeleteModeChanged;
   final ValueChanged<int?> onAutoGroupInferredBurstSizeChanged;
 
@@ -355,7 +364,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   static String? _savedSelectedBucketKey;
   static String _savedSelectedQuantity = '1';
   static String _savedSelectedSpeciesFilter = _globalSpecies;
-  static String _savedExportFormat = 'csv';
   static final Map<String, double> _savedConfidenceSettings = <String, double>{
     _globalSpecies: 0.25,
   };
@@ -374,9 +382,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   String get _selectedSpeciesFilter => _savedSelectedSpeciesFilter;
   set _selectedSpeciesFilter(String value) =>
       _savedSelectedSpeciesFilter = value;
-
-  String get _exportFormat => _savedExportFormat;
-  set _exportFormat(String value) => _savedExportFormat = value;
 
   double _confidenceFor(String species) {
     return _savedConfidenceSettings[species] ??
@@ -1914,43 +1919,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Widget _buildExportControls() {
-    final label = _exportFormat == 'excel' ? '导出 Excel' : '导出 CSV';
     return _ValidationPanel(
       child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment<String>(value: 'csv', label: Text('CSV')),
-                ButtonSegment<String>(value: 'excel', label: Text('Excel')),
-              ],
-              selected: {_exportFormat},
-              onSelectionChanged: _exporting
-                  ? null
-                  : (selection) {
-                      if (selection.isEmpty) return;
-                      setState(() => _exportFormat = selection.first);
-                    },
-            ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _exporting ? null : _exportData,
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(0, _validationButtonHeight),
-              ),
-              icon: _exporting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.ios_share_rounded),
-              label: Text(label),
-            ),
-          ],
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: SizedBox(
+          height: 56,
+          child: FilledButton.icon(
+            onPressed: _exporting ? null : _exportData,
+            icon: _exporting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.ios_share_rounded),
+            label: const Text('导出'),
+          ),
         ),
       ),
     );
@@ -4226,7 +4210,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     Future.delayed(const Duration(seconds: 4), controller.close);
   }
 
-  List<DetectionItem> _favoriteMediaItemsForExport() {
+  List<DetectionItem> _favoriteMediaItemsForExport(List<DetectionItem> items) {
     final favoritePaths = widget.favoritePhotoPaths
         .map((path) => path.trim())
         .where((path) => path.isNotEmpty)
@@ -4235,7 +4219,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
     final seen = <String>{};
     return [
-      for (final item in widget.items)
+      for (final item in items)
         if ((_isImage(item) || _isVideo(item)) &&
             favoritePaths.contains(item.path) &&
             seen.add(item.path))
@@ -4243,8 +4227,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     ];
   }
 
-  Future<bool?> _resolveFavoritePhotoExport() async {
-    final favoriteItems = _favoriteMediaItemsForExport();
+  Future<bool?> _resolveFavoritePhotoExport(List<DetectionItem> items) async {
+    final favoriteItems = _favoriteMediaItemsForExport(items);
     if (favoriteItems.isEmpty) return false;
 
     final mode = _favoritePhotoExportMode;
@@ -4334,10 +4318,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     );
   }
 
-  List<DetectionItem> _emptyImageItemsForExport() {
+  List<DetectionItem> _emptyImageItemsForExport(List<DetectionItem> items) {
     final seen = <String>{};
     return [
-      for (final item in widget.items)
+      for (final item in items)
         if (_isImage(item) &&
             _isEmptySpeciesLabel(_primarySpeciesAfterConfidenceFilter(item)) &&
             seen.add(item.path))
@@ -4350,8 +4334,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     return normalized == '空' || normalized.toLowerCase() == 'empty';
   }
 
-  Future<bool?> _resolveEmptyPhotoDelete() async {
-    final emptyItems = _emptyImageItemsForExport();
+  Future<bool?> _resolveEmptyPhotoDelete(List<DetectionItem> items) async {
+    final emptyItems = _emptyImageItemsForExport(items);
     if (emptyItems.isEmpty) return false;
 
     final mode = _emptyPhotoDeleteMode;
@@ -4480,36 +4464,158 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     );
   }
 
-  Future<void> _exportData() async {
-    final inputPath = widget.inputPath;
-    final deleteEmptyPhotos = await _resolveEmptyPhotoDelete();
-    if (!mounted ||
-        deleteEmptyPhotos == null ||
-        widget.inputPath != inputPath) {
-      return;
+  Future<_ExportScopeChoice?> _resolveExportScope() {
+    final current = widget.inputPath;
+    final root = widget.rootInputPath;
+    final normalizedRoot = root
+        .replaceAll('\\', '/')
+        .replaceAll(RegExp(r'/+$'), '')
+        .toLowerCase();
+    final normalizedCurrent = current
+        .replaceAll('\\', '/')
+        .replaceAll(RegExp(r'/+$'), '')
+        .toLowerCase();
+    if (root.isEmpty || !normalizedCurrent.startsWith('$normalizedRoot/')) {
+      return Future.value(
+        _ExportScopeChoice(inputPath: current, perDirectory: false),
+      );
     }
-    final exportFavoritePhotos = await _resolveFavoritePhotoExport();
-    if (!mounted ||
-        exportFavoritePhotos == null ||
-        widget.inputPath != inputPath) {
-      return;
-    }
+    return showDialog<_ExportScopeChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('选择导出范围'),
+        content: const SizedBox(
+          width: 420,
+          child: Text('当前选中的是子文件夹。仅导出当前子文件夹，还是为总文件夹中每个含媒体的目录分别生成表格？'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(
+              context,
+            ).pop(_ExportScopeChoice(inputPath: current, perDirectory: false)),
+            child: const Text('仅导出当前子文件夹'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(
+              context,
+            ).pop(_ExportScopeChoice(inputPath: root, perDirectory: true)),
+            child: const Text('导出全部目录'),
+          ),
+        ],
+      ),
+    );
+  }
 
+  Future<String?> _resolveExportFormat() async {
+    final mode = normalizeExportFormatMode(widget.exportFormatMode);
+    if (mode != 'ask') return mode;
+    var remember = false;
+    final choice = await showDialog<_ExportFormatChoice>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('选择导出格式'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('请选择校验表格的导出格式。'),
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: remember,
+                  onChanged: (value) =>
+                      setDialogState(() => remember = value ?? false),
+                  title: const Text('不再询问'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(
+                context,
+              ).pop(_ExportFormatChoice(format: 'csv', remember: remember)),
+              child: const Text('CSV'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(
+                context,
+              ).pop(_ExportFormatChoice(format: 'excel', remember: remember)),
+              child: const Text('Excel'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return null;
+    if (choice.remember) {
+      try {
+        await widget.onExportFormatModeChanged(choice.format);
+      } catch (error) {
+        if (mounted) _showSnackBar('保存导出格式偏好失败：$error');
+      }
+    }
+    return choice.format;
+  }
+
+  Future<void> _exportData() async {
+    if (_exporting) return;
+    final initialPath = widget.inputPath;
     setState(() => _exporting = true);
     try {
+      final scope = await _resolveExportScope();
+      if (!mounted || scope == null || widget.inputPath != initialPath) {
+        return;
+      }
+      final fileFormat = await _resolveExportFormat();
+      if (!mounted || fileFormat == null || widget.inputPath != initialPath) {
+        return;
+      }
+      final exportItems = scope.perDirectory ? widget.rootItems : widget.items;
+      final deleteEmptyPhotos = await _resolveEmptyPhotoDelete(exportItems);
+      if (!mounted ||
+          deleteEmptyPhotos == null ||
+          widget.inputPath != initialPath) {
+        return;
+      }
+      final exportFavoritePhotos = await _resolveFavoritePhotoExport(
+        exportItems,
+      );
+      if (!mounted ||
+          exportFavoritePhotos == null ||
+          widget.inputPath != initialPath) {
+        return;
+      }
       final confidenceSettings = Map<String, double>.from(
         _savedConfidenceSettings,
       );
       confidenceSettings.putIfAbsent(_globalSpecies, () => 0.25);
       final favoritePhotoPaths = exportFavoritePhotos
-          ? _favoriteMediaItemsForExport().map((item) => item.path).toList()
+          ? _favoriteMediaItemsForExport(
+              exportItems,
+            ).map((item) => item.path).toList()
           : const <String>[];
       final emptyPhotoPaths = deleteEmptyPhotos
-          ? _emptyImageItemsForExport().map((item) => item.path).toList()
+          ? _emptyImageItemsForExport(
+              exportItems,
+            ).map((item) => item.path).toList()
           : const <String>[];
       final result = await widget.apiClient.exportValidationData(
-        inputPath: inputPath,
-        fileFormat: _exportFormat,
+        inputPath: scope.inputPath,
+        fileFormat: fileFormat,
+        perDirectory: scope.perDirectory,
         columnsToExport: widget.exportColumns.isEmpty
             ? validationExportColumns
             : widget.exportColumns,
@@ -4521,10 +4627,16 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         emptyPhotoPaths: emptyPhotoPaths,
       );
       if (!mounted) return;
+      final outputPaths = result.outputPaths.isEmpty
+          ? [result.outputPath]
+          : result.outputPaths;
+      final batch = outputPaths.length > 1;
       final favoriteMessage =
           result.favoriteExportedCount > 0 &&
               (result.favoriteOutputDir?.isNotEmpty ?? false)
-          ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
+          ? batch
+                ? '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到对应表格目录'
+                : '\n已同步导出 ${result.favoriteExportedCount} 个收藏媒体文件到 ${result.favoriteOutputDir}'
           : '';
       final deleteMessage = result.deletedEmptyPhotoCount > 0
           ? '\n已删除 ${result.deletedEmptyPhotoCount} 张空照片'
@@ -4540,11 +4652,14 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         }
       }
       if (!mounted) return;
+      final summary = batch
+          ? '已生成 ${outputPaths.length} 份表格，共 ${result.exportedCount} 条记录，保存在各媒体目录'
+          : '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}';
       _showSnackBar(
-        '已导出 ${result.exportedCount} 条记录到 ${result.outputPath}'
-        '$favoriteMessage$deleteMessage$deleteFailedMessage',
+        '$summary$favoriteMessage$deleteMessage$deleteFailedMessage',
         actionLabel: '打开',
-        onAction: () => widget.onOpenExternal(result.outputPath),
+        onAction: () =>
+            widget.onOpenExternal(batch ? scope.inputPath : result.outputPath),
       );
     } catch (error) {
       if (!mounted) return;
@@ -5045,6 +5160,23 @@ class _FavoritePhotoExportChoice {
   });
 
   final bool exportPhotos;
+  final bool remember;
+}
+
+class _ExportScopeChoice {
+  const _ExportScopeChoice({
+    required this.inputPath,
+    required this.perDirectory,
+  });
+
+  final String inputPath;
+  final bool perDirectory;
+}
+
+class _ExportFormatChoice {
+  const _ExportFormatChoice({required this.format, required this.remember});
+
+  final String format;
   final bool remember;
 }
 

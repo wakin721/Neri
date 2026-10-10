@@ -191,3 +191,118 @@ def test_export_respects_directory_scope_and_separate_camera_events(cameras, mon
     response = legacy.export_validation_data(ValidationExportRequest(input_path=str(second.parent)))
     assert response.exported_count == 1
     assert exported[0]["_source_path"] == str(second)
+
+
+def test_export_per_directory_writes_root_and_nested_tables(tmp_path, monkeypatch):
+    root_media = tmp_path / "root.JPG"
+    nested_media = tmp_path / "site" / "camera" / "nested.JPG"
+    empty = tmp_path / "empty"
+    nested_media.parent.mkdir(parents=True)
+    empty.mkdir()
+    root_media.write_bytes(b"root")
+    nested_media.write_bytes(b"nested")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+    written = {}
+
+    def capture(rows, output_path, *args, **kwargs):
+        written[Path(output_path).parent] = {row["_source_path"] for row in rows}
+        Path(output_path).write_text("table", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    response = legacy.export_validation_data(ValidationExportRequest(
+        input_path=str(tmp_path), file_format="excel", per_directory=True,
+    ))
+
+    assert written == {
+        tmp_path: {str(root_media)},
+        nested_media.parent: {str(nested_media)},
+    }
+    assert response.exported_count == 2
+    assert {Path(path).parent for path in response.output_paths} == set(written)
+    assert all(Path(path).suffix == ".xlsx" for path in response.output_paths)
+    assert not list(empty.glob("*.xlsx"))
+
+
+def test_export_per_directory_failure_lists_written_paths(tmp_path, monkeypatch):
+    for name in ("a", "b"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "photo.JPG").write_bytes(b"fixture")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+    written = []
+
+    def capture(rows, output_path, *args, **kwargs):
+        if written:
+            return False
+        Path(output_path).write_text("table", encoding="utf-8")
+        written.append(output_path)
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    with pytest.raises(RuntimeError, match="已生成") as error:
+        legacy.export_validation_data(ValidationExportRequest(
+            input_path=str(tmp_path), per_directory=True,
+        ))
+    assert str(written[0]) in str(error.value)
+
+
+def test_export_per_directory_limits_favorite_and_delete_side_effects(tmp_path, monkeypatch):
+    inside = tmp_path / "inside" / "photo.JPG"
+    inside.parent.mkdir()
+    inside.write_bytes(b"inside")
+    outside = tmp_path.parent / "outside.JPG"
+    outside.write_bytes(b"outside")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+
+    def capture(rows, output_path, *args, **kwargs):
+        Path(output_path).write_text("table", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    response = legacy.export_validation_data(ValidationExportRequest(
+        input_path=str(tmp_path), per_directory=True,
+        export_favorite_photos=True, favorite_photo_paths=[str(inside), str(outside)],
+        delete_empty_photos=True, empty_photo_paths=[str(inside), str(outside)],
+    ))
+    assert response.favorite_exported_count == 1
+    assert response.deleted_empty_photo_count == 1
+    assert not inside.exists()
+    assert outside.exists()
+
+
+def test_export_per_directory_favorite_failure_lists_written_tables(tmp_path, monkeypatch):
+    media = tmp_path / "camera" / "photo.JPG"
+    media.parent.mkdir()
+    media.write_bytes(b"fixture")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+    written = []
+
+    def capture(rows, output_path, *args, **kwargs):
+        Path(output_path).write_text("table", encoding="utf-8")
+        written.append(output_path)
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    def fail_copy(source, target):
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(legacy.shutil, "copy2", fail_copy)
+    with pytest.raises(RuntimeError, match="已生成") as error:
+        legacy.export_validation_data(ValidationExportRequest(
+            input_path=str(tmp_path), per_directory=True,
+            export_favorite_photos=True, favorite_photo_paths=[str(media)],
+        ))
+    assert written[0] in str(error.value)

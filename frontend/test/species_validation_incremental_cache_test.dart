@@ -334,6 +334,9 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
         body: SpeciesValidationScreen(
           apiClient: widget.apiClient,
           inputPath: widget.tempDir.path,
+          rootInputPath: widget.tempDir.path,
+          rootItems: _items,
+          exportFormatMode: 'ask',
           items: _items,
           loading: false,
           refreshVersion: 0,
@@ -365,6 +368,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           onRedetectItems: (_, {required confidence}) async {},
           onFavoritePhotoPathsChanged: (_) async {},
           onFavoritePhotoExportModeChanged: (_) async {},
+          onExportFormatModeChanged: (_) async {},
           onEmptyPhotoDeleteModeChanged: (_) async {},
           onAutoGroupInferredBurstSizeChanged: (_) {},
         ),

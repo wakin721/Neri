@@ -16,6 +16,7 @@ import 'crash_watchdog.dart';
 import 'dinov2_startup_check.dart';
 import 'local_maintenance_status.dart';
 import 'models/close_behavior.dart';
+import 'models/export_result.dart';
 import 'models/job.dart';
 import 'models/settings.dart';
 import 'models/theme_settings.dart';
@@ -3108,6 +3109,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
   }
 
+  Future<void> _updateExportFormatMode(String mode) {
+    return _saveSilentSettingsPatch({
+      'export_format_mode': normalizeExportFormatMode(mode),
+    });
+  }
+
   Future<void> _updateEmptyPhotoDeleteMode(String mode) {
     final normalizedMode = switch (mode) {
       emptyPhotoDeleteAlways => emptyPhotoDeleteAlways,
@@ -3827,6 +3834,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       interactionBlocked: _directorySwitching,
       apiClient: widget.apiClient,
       inputPath: inputPath,
+      rootInputPath: _inputController.text.trim(),
+      rootItems: _previewItems,
+      exportFormatMode: normalizeExportFormatMode(
+        _stringSetting(settings, 'export_format_mode', 'ask'),
+      ),
       classificationModelPath: _selectedDinoV2ValidationModelPath(),
       items: items,
       loading: _previewLoading,
@@ -3889,6 +3901,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onRedetectItems: _redetectValidationItems,
       onFavoritePhotoPathsChanged: _updateFavoritePhotoPaths,
       onFavoritePhotoExportModeChanged: _updateFavoritePhotoExportMode,
+      onExportFormatModeChanged: _updateExportFormatMode,
       onEmptyPhotoDeleteModeChanged: _updateEmptyPhotoDeleteMode,
       onAutoGroupInferredBurstSizeChanged:
           _handleAutoGroupInferredBurstSizeChanged,

@@ -3293,6 +3293,8 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
     input_path = Path(request.input_path).expanduser().resolve()
     if not input_path.exists():
         raise ValueError(f"输入路径不存在: {input_path}")
+    if request.per_directory and (not input_path.is_dir() or request.output_path):
+        raise ValueError("逐目录导出需要输入文件夹，且不能指定单个输出文件")
 
     files = list(_resolve_supported_inputs(input_path))
     if not files:
@@ -3315,8 +3317,9 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
 
     confidence_settings = dict(request.confidence_settings or {"global": 0.25})
     processed_data: list[dict[str, Any]] = []
+    processed_by_directory: dict[Path, list[dict[str, Any]]] = {}
     # Camera folders have independent event timelines and deployment dates.
-    for rows in rows_by_directory.values():
+    for directory, rows in rows_by_directory.items():
         camera_rows = DataProcessor.process_independent_detection(
             rows, confidence_settings, min_frame_ratio=request.min_frame_ratio,
         )
@@ -3328,45 +3331,72 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
         if earliest_date:
             camera_rows = DataProcessor.calculate_working_days(camera_rows, earliest_date)
         processed_data.extend(camera_rows)
+        processed_by_directory[directory] = camera_rows
 
     processed_data.sort(key=_export_filename_sort_key)
 
-    output_path = _resolve_validation_export_path(input_path, request)
     columns = request.columns_to_export or DEFAULT_EXPORT_COLUMNS
-    success = DataProcessor.export_to_excel(
-        processed_data,
-        str(output_path),
-        confidence_settings,
-        file_format=request.file_format,
-        columns_to_export=columns,
-        min_frame_ratio=request.min_frame_ratio,
+    output_paths: list[Path] = []
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batches = (
+        ((directory, rows) for directory, rows in sorted(
+            processed_by_directory.items(), key=lambda entry: str(entry[0]).lower(),
+        ))
+        if request.per_directory else ((input_path, processed_data),)
     )
-    if not success:
-        raise RuntimeError("导出文件失败，请查看后端日志获取详情。")
+    for directory, rows in batches:
+        output_path = _resolve_validation_export_path(directory, request, timestamp=timestamp)
+        try:
+            success = DataProcessor.export_to_excel(
+                rows,
+                str(output_path),
+                confidence_settings,
+                file_format=request.file_format,
+                columns_to_export=columns,
+                min_frame_ratio=request.min_frame_ratio,
+            )
+        except Exception as exc:
+            completed = "、".join(str(path) for path in output_paths)
+            raise RuntimeError(f"导出文件失败：{directory}。已生成：{completed or '无'}。原因：{exc}") from exc
+        if not success:
+            completed = "、".join(str(path) for path in output_paths)
+            raise RuntimeError(f"导出文件失败：{directory}。已生成：{completed or '无'}")
+        output_paths.append(output_path)
 
     favorite_output_dir: Path | None = None
     favorite_exported_count = 0
-    if request.export_favorite_photos:
-        favorite_output_dir, favorite_exported_count = _export_favorite_photos(
-            files,
-            request.favorite_photo_paths,
-            output_path,
-            _export_species_by_path(processed_data),
-        )
-
     deleted_empty_photo_count = 0
     empty_photo_delete_failed_count = 0
-    if request.delete_empty_photos:
-        (
-            deleted_empty_photo_count,
-            empty_photo_delete_failed_count,
-        ) = _delete_empty_photos(
-            files,
-            request.empty_photo_paths,
-        )
+    try:
+        if request.export_favorite_photos:
+            species_by_path = _export_species_by_path(processed_data)
+            for output_path in output_paths:
+                directory_files = (
+                    [path for path in files if path.parent == output_path.parent]
+                    if request.per_directory else files
+                )
+                favorite_dir, count = _export_favorite_photos(
+                    directory_files, request.favorite_photo_paths, output_path, species_by_path,
+                )
+                if favorite_output_dir is None:
+                    favorite_output_dir = favorite_dir
+                favorite_exported_count += count
+
+        if request.delete_empty_photos:
+            (
+                deleted_empty_photo_count,
+                empty_photo_delete_failed_count,
+            ) = _delete_empty_photos(
+                files,
+                request.empty_photo_paths,
+            )
+    except Exception as exc:
+        completed = "、".join(str(path) for path in output_paths)
+        raise RuntimeError(f"导出后处理失败。已生成：{completed}。原因：{exc}") from exc
 
     return ValidationExportResponse(
-        output_path=str(output_path),
+        output_path=str(output_paths[0]),
+        output_paths=[str(path) for path in output_paths],
         file_format=request.file_format,
         exported_count=len(processed_data),
         favorite_output_dir=str(favorite_output_dir) if favorite_output_dir else None,
@@ -3615,7 +3645,9 @@ def _unique_favorite_export_path(target_dir: Path, filename: str) -> Path:
         index += 1
 
 
-def _resolve_validation_export_path(input_path: Path, request: ValidationExportRequest) -> Path:
+def _resolve_validation_export_path(
+    input_path: Path, request: ValidationExportRequest, *, timestamp: str | None = None,
+) -> Path:
     extension = ".xlsx" if request.file_format == "excel" else ".csv"
     if request.output_path:
         output_path = Path(request.output_path).expanduser()
@@ -3624,7 +3656,7 @@ def _resolve_validation_export_path(input_path: Path, request: ValidationExportR
     else:
         target_dir = input_path if input_path.is_dir() else input_path.parent
         folder_name = target_dir.name or "neri"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = target_dir / f"{folder_name}_validation_data_{timestamp}{extension}"
 
     output_path = output_path.resolve()

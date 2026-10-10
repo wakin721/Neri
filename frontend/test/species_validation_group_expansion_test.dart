@@ -150,6 +150,9 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
         body: SpeciesValidationScreen(
           apiClient: widget.apiClient,
           inputPath: File(widget.initialItems.first.path).parent.path,
+          rootInputPath: File(widget.initialItems.first.path).parent.path,
+          rootItems: _items,
+          exportFormatMode: 'ask',
           items: _items,
           loading: false,
           refreshVersion: 0,
@@ -197,6 +200,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           onRedetectItems: (_, {required confidence}) async {},
           onFavoritePhotoPathsChanged: (_) async {},
           onFavoritePhotoExportModeChanged: (_) async {},
+          onExportFormatModeChanged: (_) async {},
           onEmptyPhotoDeleteModeChanged: (_) async {},
           onAutoGroupInferredBurstSizeChanged: (_) {},
         ),

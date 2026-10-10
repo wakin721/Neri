@@ -49,6 +49,202 @@ void main() {
     ],
   );
 
+  Future<void> tapExport(WidgetTester tester) async {
+    final button = find.widgetWithText(FilledButton, '导出');
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  testWidgets('selected child can export every media directory in root', (
+    tester,
+  ) async {
+    _setSize(tester, 1280);
+    Map<String, dynamic>? exportBody;
+    final api = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/validation/export') {
+          exportBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return _jsonResponse({
+            'output_path': '${directory.path}/result.csv',
+            'output_paths': [
+              '${directory.path}/result.csv',
+              '${directory.path}/other/result.csv',
+            ],
+            'file_format': 'csv',
+            'exported_count': 1,
+            'favorite_exported_count': 2,
+            'favorite_output_dir': '${directory.path}/first_only',
+          });
+        }
+        return _jsonResponse({});
+      }),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(
+      _screen(
+        api,
+        directory.path,
+        item(),
+        rootPath: directory.parent.path,
+        exportMode: 'ask',
+      ),
+    );
+    await _waitForImage(tester);
+    await tapExport(tester);
+    expect(find.text('选择导出范围'), findsOneWidget);
+    await tester.tap(find.text('导出全部目录'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('选择导出格式'), findsOneWidget);
+    await tester.tap(find.text('CSV'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(exportBody?['input_path'], directory.parent.path);
+    expect(exportBody?['per_directory'], true);
+    expect(exportBody?['file_format'], 'csv');
+    expect(find.textContaining('2 个收藏媒体文件到对应表格目录'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('current child export keeps selected input and one table', (
+    tester,
+  ) async {
+    _setSize(tester, 1280);
+    Map<String, dynamic>? exportBody;
+    final api = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/validation/export') {
+          exportBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return _jsonResponse({
+            'output_path': '${directory.path}/result.csv',
+            'file_format': 'csv',
+            'exported_count': 1,
+          });
+        }
+        return _jsonResponse({});
+      }),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(
+      _screen(
+        api,
+        directory.path,
+        item(),
+        rootPath: directory.parent.path,
+        exportMode: 'csv',
+      ),
+    );
+    await _waitForImage(tester);
+    await tapExport(tester);
+    await tester.tap(find.text('仅导出当前子文件夹'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('选择导出格式'), findsNothing);
+    expect(exportBody?['input_path'], directory.path);
+    expect(exportBody?['per_directory'], false);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('format choice can be remembered', (tester) async {
+    _setSize(tester, 1280);
+    String? savedMode;
+    String? format;
+    final api = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/validation/export') {
+          format =
+              (jsonDecode(request.body) as Map<String, dynamic>)['file_format']
+                  as String;
+          return _jsonResponse({
+            'output_path': '${directory.path}/result.xlsx',
+            'file_format': 'excel',
+            'exported_count': 1,
+          });
+        }
+        return _jsonResponse({});
+      }),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(
+      _screen(
+        api,
+        directory.path,
+        item(),
+        onFormatModeChanged: (mode) async => savedMode = mode,
+      ),
+    );
+    await _waitForImage(tester);
+    await tapExport(tester);
+    expect(find.text('选择导出范围'), findsNothing);
+    await tester.tap(find.text('不再询问'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Excel'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(savedMode, 'excel');
+    expect(format, 'excel');
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('cancelled export choice sends no request', (tester) async {
+    _setSize(tester, 1280);
+    var exports = 0;
+    final api = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/validation/export') exports++;
+        return _jsonResponse({});
+      }),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(_screen(api, directory.path, item()));
+    await _waitForImage(tester);
+    await tapExport(tester);
+    await tester.tap(find.text('取消'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(exports, 0);
+  });
+
+  testWidgets('cancelled child scope sends no request', (tester) async {
+    _setSize(tester, 1280);
+    var exports = 0;
+    final api = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/validation/export') exports++;
+        return _jsonResponse({});
+      }),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(
+      _screen(api, directory.path, item(), rootPath: directory.parent.path),
+    );
+    await _waitForImage(tester);
+    await tapExport(tester);
+    await tester.tap(find.text('取消'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(exports, 0);
+  });
+
+  testWidgets('export panel matches confidence panel height', (tester) async {
+    _setSize(tester, 1280);
+    final api = NeriApiClient(
+      httpClient: MockClient((_) async => _jsonResponse({})),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(_screen(api, directory.path, item()));
+    await _waitForImage(tester);
+    final exportCard = find
+        .ancestor(
+          of: find.widgetWithText(FilledButton, '导出'),
+          matching: find.byType(Card),
+        )
+        .first;
+    final filterCard = find
+        .ancestor(of: find.text('置信度'), matching: find.byType(Card))
+        .first;
+    expect(
+      tester.getSize(exportCard).height,
+      tester.getSize(filterCard).height,
+    );
+  });
+
   for (final width in [1280.0, 600.0]) {
     testWidgets(
       'box click opens details and feature explanation at width $width',
@@ -249,62 +445,72 @@ http.Response _jsonResponse(Map<String, dynamic> json) => http.Response(
   headers: const {'content-type': 'application/json; charset=utf-8'},
 );
 
-Widget _screen(NeriApiClient api, String path, DetectionItem item) =>
-    MaterialApp(
-      home: Scaffold(
-        body: SpeciesValidationScreen(
-          apiClient: api,
-          inputPath: path,
-          classificationModelPath: 'model.dinov2',
-          items: [item],
-          loading: false,
-          refreshVersion: 0,
-          speciesTypes: const {},
-          useCombinedConfidence: false,
-          minFrameRatio: 0,
-          autoGroup: false,
-          collapseGroups: false,
-          autoGroupDetectBurst: false,
-          autoGroupBurstSize: 4,
-          autoGroupGapSeconds: 1800,
-          autoSortQuickMarks: false,
-          undoSteps: 20,
-          quickMarkSpecies: const [],
-          quickMarkRecentHistory: const [],
-          quickMarkUsageCounts: const {},
-          quantityButtons: const ['1'],
-          exportColumns: const [],
-          favoritePhotoPaths: const [],
-          favoritePhotoExportMode: favoritePhotoExportAsk,
-          emptyPhotoDeleteMode: emptyPhotoDeleteAsk,
-          onRefresh: () async {},
-          onLoadMetadata: (_) async {},
-          onOpenExternal: (_) {},
-          onMarkItem:
-              (
-                candidate,
-                action, {
-                speciesName,
-                speciesCount,
-                speciesType,
-                remark,
-              }) async => candidate,
-          onMarkItems:
-              (
-                candidates,
-                action, {
-                speciesName,
-                speciesCount,
-                speciesType,
-                remark,
-              }) async => candidates,
-          onQuickMarkUsed: (_) async {},
-          onQuickMarkReverted: (_) async {},
-          onRedetectItems: (_, {required confidence}) async {},
-          onFavoritePhotoPathsChanged: (_) async {},
-          onFavoritePhotoExportModeChanged: (_) async {},
-          onEmptyPhotoDeleteModeChanged: (_) async {},
-          onAutoGroupInferredBurstSizeChanged: (_) {},
-        ),
-      ),
-    );
+Widget _screen(
+  NeriApiClient api,
+  String path,
+  DetectionItem item, {
+  String? rootPath,
+  String exportMode = 'ask',
+  Future<void> Function(String)? onFormatModeChanged,
+}) => MaterialApp(
+  home: Scaffold(
+    body: SpeciesValidationScreen(
+      apiClient: api,
+      inputPath: path,
+      rootInputPath: rootPath ?? path,
+      rootItems: [item],
+      exportFormatMode: exportMode,
+      classificationModelPath: 'model.dinov2',
+      items: [item],
+      loading: false,
+      refreshVersion: 0,
+      speciesTypes: const {},
+      useCombinedConfidence: false,
+      minFrameRatio: 0,
+      autoGroup: false,
+      collapseGroups: false,
+      autoGroupDetectBurst: false,
+      autoGroupBurstSize: 4,
+      autoGroupGapSeconds: 1800,
+      autoSortQuickMarks: false,
+      undoSteps: 20,
+      quickMarkSpecies: const [],
+      quickMarkRecentHistory: const [],
+      quickMarkUsageCounts: const {},
+      quantityButtons: const ['1'],
+      exportColumns: const [],
+      favoritePhotoPaths: const [],
+      favoritePhotoExportMode: favoritePhotoExportAsk,
+      emptyPhotoDeleteMode: emptyPhotoDeleteAsk,
+      onRefresh: () async {},
+      onLoadMetadata: (_) async {},
+      onOpenExternal: (_) {},
+      onMarkItem:
+          (
+            candidate,
+            action, {
+            speciesName,
+            speciesCount,
+            speciesType,
+            remark,
+          }) async => candidate,
+      onMarkItems:
+          (
+            candidates,
+            action, {
+            speciesName,
+            speciesCount,
+            speciesType,
+            remark,
+          }) async => candidates,
+      onQuickMarkUsed: (_) async {},
+      onQuickMarkReverted: (_) async {},
+      onRedetectItems: (_, {required confidence}) async {},
+      onFavoritePhotoPathsChanged: (_) async {},
+      onFavoritePhotoExportModeChanged: (_) async {},
+      onExportFormatModeChanged: onFormatModeChanged ?? (_) async {},
+      onEmptyPhotoDeleteModeChanged: (_) async {},
+      onAutoGroupInferredBurstSizeChanged: (_) {},
+    ),
+  ),
+);

@@ -387,6 +387,9 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
         body: SpeciesValidationScreen(
           apiClient: widget.apiClient,
           inputPath: r'I:\原始照片\安息',
+          rootInputPath: r'I:\原始照片\安息',
+          rootItems: _items,
+          exportFormatMode: 'ask',
           items: _items,
           loading: _loading,
           refreshVersion: _refreshVersion,
@@ -440,6 +443,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           onRedetectItems: (_, {required confidence}) async {},
           onFavoritePhotoPathsChanged: (_) async {},
           onFavoritePhotoExportModeChanged: (_) async {},
+          onExportFormatModeChanged: (_) async {},
           onEmptyPhotoDeleteModeChanged: (_) async {},
           onAutoGroupInferredBurstSizeChanged: (_) {},
         ),

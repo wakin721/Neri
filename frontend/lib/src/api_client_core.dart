@@ -738,6 +738,7 @@ class NeriApiClient {
   Future<ValidationExportResult> exportValidationData({
     required String inputPath,
     required String fileFormat,
+    bool perDirectory = false,
     String? outputPath,
     List<String>? columnsToExport,
     Map<String, double>? confidenceSettings,
@@ -753,6 +754,7 @@ class NeriApiClient {
       body: jsonEncode({
         'input_path': inputPath,
         'file_format': fileFormat,
+        'per_directory': perDirectory,
         if (outputPath != null && outputPath.isNotEmpty)
           'output_path': outputPath,
         if (columnsToExport != null) 'columns_to_export': columnsToExport,

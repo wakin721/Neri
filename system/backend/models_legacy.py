@@ -429,6 +429,7 @@ class ValidationExportRequest(BaseModel):
     input_path: str = Field(..., min_length=1)
     output_path: str | None = None
     file_format: Literal["excel", "csv"] = "csv"
+    per_directory: bool = False
     confidence_settings: dict[str, float] = Field(default_factory=lambda: {"global": 0.25})
     columns_to_export: list[str] | None = None
     export_favorite_photos: bool = False
@@ -442,6 +443,7 @@ class ValidationExportResponse(BaseModel):
     """Result of a validation export."""
 
     output_path: str
+    output_paths: list[str] = Field(default_factory=list)
     file_format: str
     exported_count: int
     favorite_output_dir: str | None = None
