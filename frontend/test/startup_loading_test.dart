@@ -243,8 +243,18 @@ void main() {
           findsOneWidget,
         );
       } else {
-        expect(find.byType(LinearProgressIndicator), findsOneWidget);
-        expect(find.text('暂无可校验图像。'), findsNothing);
+        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
+        expect(find.text('暂无待校验图像。'), findsOneWidget);
+        final refresh = find.widgetWithText(FilledButton, '重新获取');
+        expect(tester.widget<FilledButton>(refresh).onPressed, isNull);
+        expect(
+          find.descendant(
+            of: refresh,
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsOneWidget,
+        );
       }
       backend.preview.complete(
         http.Response(

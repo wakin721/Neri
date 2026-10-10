@@ -380,6 +380,13 @@ void main() {
     expect(screen.loading, isTrue);
     expect(screen.items.single.path, '$input/camera-b/same.jpg');
     expect(
+      find.descendant(
+        of: find.byType(PreviewScreen),
+        matching: find.byType(LinearProgressIndicator),
+      ),
+      findsNothing,
+    );
+    expect(
       tester
           .widget<FilledButton>(
             find.byKey(const ValueKey('directory-scope-selector')),
@@ -520,7 +527,10 @@ void main() {
       expect(find.byType(SnackBarAction), findsOneWidget);
       expect(find.text('关闭'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey('validation-preparation-progress')),
+        find.descendant(
+          of: find.byType(SpeciesValidationScreen),
+          matching: find.byType(LinearProgressIndicator),
+        ),
         findsNothing,
       );
       await tester.pump(const Duration(milliseconds: 200));

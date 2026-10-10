@@ -8,6 +8,63 @@ import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 
 void main() {
+  testWidgets('refresh and regroup settings retain media without a central bar', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    final api = NeriApiClient(
+      httpClient: MockClient((_) async => http.Response('{}', 200)),
+    );
+    await tester.pumpWidget(
+      _GroupExpansionHarness(
+        apiClient: api,
+        initialItems: [
+          for (var i = 0; i < 1200; i++)
+            DetectionItem(
+              filename: '$i.jpg',
+              path:
+                  '${Directory('regroup-settings-input').absolute.path}/$i.jpg',
+              fileType: 'jpg',
+              dateTaken: '2026-10-10T12:00:00',
+            ),
+        ],
+      ),
+    );
+    final state = tester.state<_GroupExpansionHarnessState>(
+      find.byType(_GroupExpansionHarness),
+    );
+    await _waitForValidationPreparation(tester);
+    for (final trigger in ['refresh', 'burst', 'gap', 'confidence']) {
+      final previousAction = tester.element(find.text('正确').first);
+      if (trigger == 'confidence') {
+        final slider = tester.widget<Slider>(find.byType(Slider).first);
+        slider.onChanged!(slider.value == 0.75 ? 0.25 : 0.75);
+      } else {
+        state.regroup(trigger);
+      }
+      await tester.pump();
+      expect(_preparingContent(), findsOneWidget, reason: trigger);
+      expect(
+        find.byType(LinearProgressIndicator),
+        findsNothing,
+        reason: trigger,
+      );
+      expect(
+        identical(tester.element(find.text('正确').first), previousAction),
+        isTrue,
+        reason: trigger,
+      );
+      await _waitForValidationPreparation(tester);
+      expect(find.text('正确'), findsWidgets);
+    }
+    expect(find.textContaining('400 组'), findsWidgets);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    api.close();
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
   testWidgets(
     'an initial empty placeholder still shows first media preparation',
     (tester) async {
@@ -25,7 +82,7 @@ void main() {
       expect(find.byType(LinearProgressIndicator), findsNothing);
       state.setLoading(true);
       await tester.pump();
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      _expectInitialValidationLoading(tester);
       state.switchItems([
         for (var i = 0; i < 600; i++)
           DetectionItem(
@@ -36,7 +93,7 @@ void main() {
           ),
       ]);
       await tester.pump();
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      _expectInitialValidationLoading(tester);
       for (var attempt = 0; attempt < 500; attempt++) {
         if (_preparingContent().evaluate().isEmpty) break;
         await tester.runAsync(
@@ -76,9 +133,9 @@ void main() {
         ],
       ),
     );
-    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    _expectInitialValidationLoading(tester);
     for (var attempt = 0; attempt < 500; attempt++) {
-      if (find.byType(LinearProgressIndicator).evaluate().isEmpty) break;
+      if (_preparingContent().evaluate().isEmpty) break;
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
@@ -302,6 +359,19 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   late List<DetectionItem> _items = widget.initialItems;
   int markCalls = 0;
   bool _loading = false;
+  int _refreshVersion = 0;
+  int _burstSize = 4;
+  int _gapSeconds = 1800;
+  void regroup(String trigger) => setState(() {
+    switch (trigger) {
+      case 'refresh':
+        _refreshVersion++;
+      case 'burst':
+        _burstSize = 3;
+      case 'gap':
+        _gapSeconds = 60;
+    }
+  });
   void setLoading(bool value) => setState(() => _loading = value);
   void switchItems(List<DetectionItem> next) {
     setState(() {
@@ -319,15 +389,15 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           inputPath: r'I:\原始照片\安息',
           items: _items,
           loading: _loading,
-          refreshVersion: 0,
+          refreshVersion: _refreshVersion,
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,
           minFrameRatio: 0,
           autoGroup: true,
           collapseGroups: true,
           autoGroupDetectBurst: false,
-          autoGroupBurstSize: 4,
-          autoGroupGapSeconds: 1800,
+          autoGroupBurstSize: _burstSize,
+          autoGroupGapSeconds: _gapSeconds,
           autoSortQuickMarks: false,
           undoSteps: 20,
           quickMarkSpecies: const <String>['豹猫'],
@@ -389,3 +459,29 @@ Finder _preparingContent() => find.byWidgetPredicate(
       widget.key == const ValueKey('validation-directory-content') &&
       widget.absorbing,
 );
+
+void _expectInitialValidationLoading(WidgetTester tester) {
+  expect(find.byType(LinearProgressIndicator), findsNothing);
+  expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
+  expect(find.text('暂无待校验图像。'), findsOneWidget);
+  final refresh = find.widgetWithText(FilledButton, '重新获取');
+  expect(tester.widget<FilledButton>(refresh).onPressed, isNull);
+  expect(
+    find.descendant(
+      of: refresh,
+      matching: find.byType(CircularProgressIndicator),
+    ),
+    findsOneWidget,
+  );
+}
+
+Future<void> _waitForValidationPreparation(WidgetTester tester) async {
+  for (var attempt = 0; attempt < 500; attempt++) {
+    if (_preparingContent().evaluate().isEmpty) break;
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+  }
+  expect(_preparingContent(), findsNothing);
+}
