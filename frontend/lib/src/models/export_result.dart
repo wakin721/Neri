@@ -1,7 +1,8 @@
 String normalizeExportFormatMode(String? value) => switch (value) {
+  'ask' => 'ask',
   'csv' => 'csv',
   'excel' => 'excel',
-  _ => 'ask',
+  _ => 'csv',
 };
 
 class ValidationExportResult {

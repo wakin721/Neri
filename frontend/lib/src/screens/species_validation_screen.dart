@@ -1919,23 +1919,19 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Widget _buildExportControls() {
-    return _ValidationPanel(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: SizedBox(
-          height: 56,
-          child: FilledButton.icon(
-            onPressed: _exporting ? null : _exportData,
-            icon: _exporting
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.ios_share_rounded),
-            label: const Text('导出'),
-          ),
-        ),
+    return SizedBox(
+      width: double.infinity,
+      height: 72,
+      child: FilledButton.icon(
+        onPressed: _exporting ? null : _exportData,
+        icon: _exporting
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.ios_share_rounded),
+        label: const Text('导出'),
       ),
     );
   }
@@ -4493,13 +4489,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('取消'),
           ),
-          TextButton(
+          FilledButton(
             onPressed: () => Navigator.of(
               context,
             ).pop(_ExportScopeChoice(inputPath: current, perDirectory: false)),
             child: const Text('仅导出当前子文件夹'),
           ),
-          FilledButton(
+          TextButton(
             onPressed: () => Navigator.of(
               context,
             ).pop(_ExportScopeChoice(inputPath: root, perDirectory: true)),
@@ -4519,41 +4515,47 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('选择导出格式'),
-          content: SizedBox(
-            width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+          content: SizedBox(width: 420, child: const Text('请选择校验表格的导出格式。')),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          actions: [
+            Row(
               children: [
-                const Text('请选择校验表格的导出格式。'),
-                const SizedBox(height: 12),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: remember,
-                  onChanged: (value) =>
-                      setDialogState(() => remember = value ?? false),
-                  title: const Text('不再询问'),
-                  controlAffinity: ListTileControlAffinity.leading,
+                InkWell(
+                  onTap: () => setDialogState(() => remember = !remember),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: remember,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        onChanged: (value) =>
+                            setDialogState(() => remember = value ?? false),
+                      ),
+                      const SizedBox(width: 4),
+                      const Text('不再询问'),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(
+                    context,
+                  ).pop(_ExportFormatChoice(format: 'csv', remember: remember)),
+                  child: const Text('CSV'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(
+                    _ExportFormatChoice(format: 'excel', remember: remember),
+                  ),
+                  child: const Text('Excel'),
                 ),
               ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(
-                context,
-              ).pop(_ExportFormatChoice(format: 'csv', remember: remember)),
-              child: const Text('CSV'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(
-                context,
-              ).pop(_ExportFormatChoice(format: 'excel', remember: remember)),
-              child: const Text('Excel'),
             ),
           ],
         ),

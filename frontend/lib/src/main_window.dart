@@ -3837,7 +3837,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       rootInputPath: _inputController.text.trim(),
       rootItems: _previewItems,
       exportFormatMode: normalizeExportFormatMode(
-        _stringSetting(settings, 'export_format_mode', 'ask'),
+        _stringSetting(settings, 'export_format_mode', 'csv'),
       ),
       classificationModelPath: _selectedDinoV2ValidationModelPath(),
       items: items,

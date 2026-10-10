@@ -11,13 +11,16 @@ import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 
 void main() {
-  test('export format setting asks for missing and invalid values', () {
-    expect(normalizeExportFormatMode(null), 'ask');
-    expect(normalizeExportFormatMode('unknown'), 'ask');
-    expect(normalizeExportFormatMode('ask'), 'ask');
-    expect(normalizeExportFormatMode('csv'), 'csv');
-    expect(normalizeExportFormatMode('excel'), 'excel');
-  });
+  test(
+    'export format setting defaults to CSV for missing and invalid values',
+    () {
+      expect(normalizeExportFormatMode(null), 'csv');
+      expect(normalizeExportFormatMode('unknown'), 'csv');
+      expect(normalizeExportFormatMode('ask'), 'ask');
+      expect(normalizeExportFormatMode('csv'), 'csv');
+      expect(normalizeExportFormatMode('excel'), 'excel');
+    },
+  );
 
   test('export result carries every output and supports old responses', () {
     final batch = ValidationExportResult.fromJson({
@@ -106,14 +109,15 @@ void main() {
     await tester.tap(find.text('基础设置').first);
     await tester.pumpAndSettle();
     expect(find.text('导出格式'), findsOneWidget);
-    final formatButton = find.widgetWithText(TextButton, '每次询问').first;
+    final formatButton = find.widgetWithText(TextButton, 'CSV').first;
     await tester.ensureVisible(formatButton);
     await tester.pumpAndSettle();
     await tester.tap(formatButton);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('CSV').last);
+    await tester.tap(find.widgetWithText(MenuItemButton, '每次询问'));
     await tester.pumpAndSettle();
+    expect(find.widgetWithText(TextButton, '每次询问'), findsWidgets);
     await tester.pump(const Duration(seconds: 1));
-    expect(saved?['export_format_mode'], 'csv');
+    expect(saved?['export_format_mode'], 'ask');
   });
 }

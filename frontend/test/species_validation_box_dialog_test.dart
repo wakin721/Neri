@@ -94,6 +94,8 @@ void main() {
     await _waitForImage(tester);
     await tapExport(tester);
     expect(find.text('选择导出范围'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '仅导出当前子文件夹'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, '导出全部目录'), findsOneWidget);
     await tester.tap(find.text('导出全部目录'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('选择导出格式'), findsOneWidget);
@@ -184,6 +186,27 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
+  for (final width in [1280.0, 600.0]) {
+    testWidgets('CSV is primary and remember aligns with cancel at $width', (
+      tester,
+    ) async {
+      _setSize(tester, width);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(_screen(api, directory.path, item()));
+      await _waitForImage(tester);
+      await tapExport(tester);
+
+      expect(find.widgetWithText(FilledButton, 'CSV'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Excel'), findsOneWidget);
+      final rememberY = tester.getCenter(find.text('不再询问')).dy;
+      final cancelY = tester.getCenter(find.text('取消')).dy;
+      expect((rememberY - cancelY).abs(), lessThan(3));
+    });
+  }
+
   testWidgets('cancelled export choice sends no request', (tester) async {
     _setSize(tester, 1280);
     var exports = 0;
@@ -222,28 +245,43 @@ void main() {
     expect(exports, 0);
   });
 
-  testWidgets('export panel matches confidence panel height', (tester) async {
-    _setSize(tester, 1280);
-    final api = NeriApiClient(
-      httpClient: MockClient((_) async => _jsonResponse({})),
-    );
-    addTearDown(api.close);
-    await tester.pumpWidget(_screen(api, directory.path, item()));
-    await _waitForImage(tester);
-    final exportCard = find
-        .ancestor(
-          of: find.widgetWithText(FilledButton, '导出'),
-          matching: find.byType(Card),
-        )
-        .first;
-    final filterCard = find
-        .ancestor(of: find.text('置信度'), matching: find.byType(Card))
-        .first;
-    expect(
-      tester.getSize(exportCard).height,
-      tester.getSize(filterCard).height,
-    );
-  });
+  for (final width in [1280.0, 600.0]) {
+    testWidgets('export button fills right actions without card at $width', (
+      tester,
+    ) async {
+      _setSize(tester, width);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(_screen(api, directory.path, item()));
+      await _waitForImage(tester);
+      final exportButton = find.widgetWithText(FilledButton, '导出');
+      expect(
+        find.ancestor(of: exportButton, matching: find.byType(Card)),
+        findsNothing,
+      );
+      final quickMarkCard = find
+          .ancestor(of: find.text('正确'), matching: find.byType(Card))
+          .first;
+      final quantityCard = find
+          .ancestor(of: find.text('1'), matching: find.byType(Card))
+          .first;
+      final exportSize = tester.getSize(exportButton);
+      expect(
+        exportSize.width,
+        tester.getSize(quickMarkCard).width +
+            8 +
+            tester.getSize(quantityCard).width,
+      );
+      if (width > 800) {
+        final filterCard = find
+            .ancestor(of: find.text('置信度'), matching: find.byType(Card))
+            .first;
+        expect(exportSize.height, tester.getSize(filterCard).height);
+      }
+    });
+  }
 
   for (final width in [1280.0, 600.0]) {
     testWidgets(

@@ -288,7 +288,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _defaultExportColumns,
       ),
       'export_format_mode': normalizeExportFormatMode(
-        _stringSetting(saved, 'export_format_mode', 'ask'),
+        _stringSetting(saved, 'export_format_mode', 'csv'),
       ),
       'favorite_photo_paths': _stringListSetting(
         saved,
