@@ -378,6 +378,103 @@ void main() {
     await startup.cleanup(tester, backend);
   });
 
+  testWidgets(
+    'returning to all directories paints a loading Snackbar before replacing the list',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final backend = startup.StartupBackend();
+      await startup.mount(tester, backend);
+      final input = Directory('startup-test-input').absolute.path;
+      backend.preview.complete(
+        http.Response(
+          jsonEncode([
+            for (final directory in ['camera-a', 'camera-b'])
+              {
+                'filename': 'same.jpg',
+                'path': '$input/$directory/same.jpg',
+                'file_type': 'jpg',
+              },
+          ]),
+          200,
+        ),
+      );
+      await startup.settleStartup(tester);
+      await tester.tap(find.text('预览').first);
+      await tester.pump();
+      await startup.settleStartup(tester);
+      final selector = find.byKey(const ValueKey('directory-scope-selector'));
+      await tester.tap(selector);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('camera-b').last);
+      await tester.pump();
+      await startup.settleStartup(tester);
+      final child = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(child.items, hasLength(1));
+      // An already-visible notice must not queue the loading feedback behind
+      // its exit animation while the root is rebuilding.
+      ScaffoldMessenger.of(
+        tester.element(find.byType(PreviewScreen)),
+      ).showSnackBar(
+        const SnackBar(
+          content: Text('Existing notification'),
+          duration: Duration(minutes: 1),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Existing notification'), findsOneWidget);
+      await tester.tap(selector);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('全部目录').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.text('正在加载全部目录…'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsOneWidget,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+      expect(
+        tester.widget<PreviewScreen>(find.byType(PreviewScreen)).items,
+        same(child.items),
+        reason:
+            'The loading hint must get its own frame before rebuilding the root',
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+      await startup.settleStartup(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      final all = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(all.items, hasLength(2));
+      expect(Directory(all.inputPath).absolute.path, input);
+      expect(find.text('正在加载全部目录…'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsNothing,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+      await startup.cleanup(tester, backend);
+    },
+  );
+
   testWidgets('interleaved camera timestamps preserve per-camera bursts', (
     tester,
   ) async {

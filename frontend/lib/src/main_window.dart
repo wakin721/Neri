@@ -155,6 +155,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _backendReady = false;
   bool _submitting = false;
   bool _previewLoading = false;
+  bool _directorySwitching = false;
   bool _settingsSaving = false;
   bool _modelSelectionSaveInProgress = false;
   bool _validationBusy = false;
@@ -3160,6 +3161,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final shellColor = colorScheme.surfaceContainer;
     final showGlobalProgress =
         _loading ||
+        _directorySwitching ||
         _previewDetecting ||
         _submitting ||
         _settingsSaving ||
@@ -3296,8 +3298,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                                   SizedBox(
                                     height: 4,
                                     child: showGlobalProgress
-                                        ? const ExcludeSemantics(
-                                            child: LinearProgressIndicator(),
+                                        ? ExcludeSemantics(
+                                            child: LinearProgressIndicator(
+                                              key: _directorySwitching
+                                                  ? const ValueKey(
+                                                      'directory-switch-progress',
+                                                    )
+                                                  : null,
+                                            ),
                                           )
                                         : null,
                                   ),
@@ -3602,11 +3610,65 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
   }
 
+  void _applyDirectorySelection(String? path) {
+    setState(() {
+      _directoryScope.select(path);
+      _selectedPreviewIndex = 0;
+      _previewContentVersion++;
+    });
+    if (_directoryScope.items.isNotEmpty) {
+      unawaited(_loadPreviewMetadata(_directoryScope.items.first));
+    }
+  }
+
+  Future<void> _selectBrowseDirectory(String? path) async {
+    if (!mounted || _directorySwitching || _directoryScope.selected == path) {
+      return;
+    }
+    if (path != null) {
+      _applyDirectorySelection(path);
+      return;
+    }
+
+    final root = _inputController.text.trim();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    setState(() => _directorySwitching = true);
+    messenger?.clearSnackBars();
+    messenger?.removeCurrentSnackBar();
+    final notice = messenger?.showSnackBar(
+      const SnackBar(
+        content: Text('正在加载全部目录…'),
+        duration: Duration(days: 1),
+        dismissDirection: DismissDirection.none,
+      ),
+    );
+    var noticeClosed = false;
+    unawaited(notice?.closed.then((_) => noticeClosed = true));
+    try {
+      // Paint the loading state and finish the Snackbar entrance before the
+      // synchronous validation grouping work can occupy the UI isolate.
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          root != _inputController.text.trim()) {
+        return;
+      }
+      _applyDirectorySelection(null);
+      // Keep the notice until the rebuilt root has actually been painted.
+      await WidgetsBinding.instance.endOfFrame;
+    } finally {
+      if (mounted) setState(() => _directorySwitching = false);
+      if (messenger?.mounted == true && !noticeClosed) notice?.close();
+    }
+  }
+
   Widget _buildDirectorySelector() {
     final label = _directoryScope.selected == null
         ? '全部目录'
         : _directoryScope.label(_directoryScope.selected!);
-    final enabled = !_validationBusy && !_previewDetecting;
+    final enabled =
+        !_validationBusy && !_previewDetecting && !_directorySwitching;
     final mediaQuery = MediaQuery.of(context);
     // Leave room below the AppBar so long menus scroll instead of covering it.
     final maxMenuHeight =
@@ -3640,20 +3702,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                 ? const Icon(Icons.check_rounded)
                 : const SizedBox(width: 24),
             onPressed: enabled
-                ? () {
-                    setState(() {
-                      _directoryScope.select(
-                        option.value.isEmpty ? null : option.value,
-                      );
-                      _selectedPreviewIndex = 0;
-                      _previewContentVersion++;
-                    });
-                    if (_directoryScope.items.isNotEmpty) {
-                      unawaited(
-                        _loadPreviewMetadata(_directoryScope.items.first),
-                      );
-                    }
-                  }
+                ? () => unawaited(
+                    _selectBrowseDirectory(
+                      option.value.isEmpty ? null : option.value,
+                    ),
+                  )
                 : null,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 360),
