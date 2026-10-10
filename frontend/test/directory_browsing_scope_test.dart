@@ -22,7 +22,7 @@ void main() {
   );
 
   test(
-    'same filenames stay isolated, nested paths share one browsing scope',
+    'only terminal directories are listed while all media remain accessible',
     () {
       final first = item('camera-a/photo.jpg');
       final nested = item('camera-a/nested/photo.jpg');
@@ -30,13 +30,12 @@ void main() {
       final source = [first, nested, second];
       final scope = DirectoryBrowsingScope()..update(source, root);
       expect(scope.directories.map(scope.label), [
-        'camera-a',
         'camera-a/nested',
         'camera-b',
       ]);
       expect(scope.items, source);
-      scope.select(File(first.path).parent.path);
-      expect(scope.items, [first, nested]);
+      scope.select(File(nested.path).parent.path);
+      expect(scope.items, [nested]);
       expect(
         validationItemsInInputFolder(source, scope.inputPath),
         scope.items,
@@ -51,6 +50,35 @@ void main() {
       expect(scope.items, source);
     },
   );
+
+  test('year and site ancestors are omitted from terminal camera choices', () {
+    final source = [
+      item('2021/1号样地巴尔峡-寒山样区czc/2/photo.jpg'),
+      item('2021/1号样地巴尔峡-寒山样区czc/10/photo.jpg'),
+      item('2021/2号样地/2/photo.jpg'),
+      item('2022/1号样地/2/photo.jpg'),
+    ];
+    final scope = DirectoryBrowsingScope()..update(source, root);
+    expect(scope.directories.map(scope.label), [
+      '2021/1号样地巴尔峡-寒山样区czc/10',
+      '2021/1号样地巴尔峡-寒山样区czc/2',
+      '2021/2号样地/2',
+      '2022/1号样地/2',
+    ]);
+    scope.select(File(source.first.path).parent.path);
+    expect(scope.items, [source.first]);
+  });
+
+  test('a newly nested media directory removes its ancestor choice', () {
+    final parent = item('camera/photo.jpg');
+    final child = item('camera/nested/photo.jpg');
+    final scope = DirectoryBrowsingScope()..update([parent], root);
+    scope.select(scope.directories.single);
+    scope.update([parent, child], root);
+    expect(scope.directories.map(scope.label), ['camera/nested']);
+    expect(scope.selected, isNull);
+    expect(scope.items, [parent, child]);
+  });
 
   test('changed roots and removed directories clear obsolete selections', () {
     final source = [item('camera-a/photo.jpg')];

@@ -3,7 +3,7 @@ import 'dart:io';
 import '../models/job.dart';
 import 'local_detection_items.dart';
 
-/// Derives the directory tree from the already-loaded media snapshot.
+/// Derives terminal media directories from the already-loaded media snapshot.
 /// No filesystem enumeration is performed while the UI rebuilds.
 class DirectoryBrowsingScope {
   List<DetectionItem>? _source;
@@ -20,18 +20,24 @@ class DirectoryBrowsingScope {
     if (root != _root) _selected = null;
     _root = root;
     _source = source;
-    final paths = <String>{};
+    final paths = <String, String>{};
+    final ancestors = <String>{};
     if (root.isNotEmpty) {
       final rootKey = _key(Directory(root).absolute.path);
       for (final item in source) {
+        if (item.path.trim().isEmpty) continue;
         var directory = File(item.path).absolute.parent;
         while (_key(directory.path).startsWith('$rootKey/')) {
-          paths.add(directory.path);
+          paths.putIfAbsent(_key(directory.path), () => directory.path);
           directory = directory.parent;
+          ancestors.add(_key(directory.path));
         }
       }
     }
-    directories = paths.toList()..sort((a, b) => _key(a).compareTo(_key(b)));
+    directories = [
+      for (final entry in paths.entries)
+        if (!ancestors.contains(entry.key)) entry.value,
+    ]..sort((a, b) => _key(a).compareTo(_key(b)));
     if (_selected != null && !directories.contains(_selected)) _selected = null;
     _filter();
   }
