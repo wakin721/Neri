@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 import uuid
@@ -45,6 +46,27 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MediaStorageError(RuntimeError):
+    """Storage access failed; do not mark an unread or unsaved batch complete."""
+
+    def __init__(self, path: str | Path, operation: str, cause: Exception):
+        super().__init__(
+            f"{operation}失败：{path}。存储设备或文件夹暂不可访问，请检查磁盘连接、读写权限及可用空间。"
+            f"恢复访问后可继续任务。原始错误：{cause}"
+        )
+
+
+def _checked_media_file(path: Path) -> bool:
+    # Unlike is_file on newer Python versions, do not suppress device errors.
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise MediaStorageError(path, "读取媒体文件", exc) from exc
+
 
 _BATCH_LOG_RETENTION = 5
 _BATCH_LOGGER_NAMES = (
@@ -800,7 +822,7 @@ class ProcessingJobManager:
                 existing: list[Path] = []
                 removed = 0
                 for path in paths:
-                    if path.is_file():
+                    if _checked_media_file(path):
                         existing.append(path)
                         continue
                     key = _path_key(path)
@@ -1173,7 +1195,7 @@ class ProcessingJobManager:
                         def detect_one_video(video_index: int) -> tuple[int, DetectionItem]:
                             _raise_if_cancelled(lambda: self._is_cancelled(job_id))
                             path = video_files[video_index]
-                            if not path.is_file():
+                            if not _checked_media_file(path):
                                 raise FileNotFoundError(f"文件已删除: {path}")
                             item = video_items[video_index]
                             detected_item = _detect_video(
@@ -1201,6 +1223,8 @@ class ProcessingJobManager:
                                 video_index = future_to_index[future]
                                 try:
                                     completed_index, item = future.result()
+                                except MediaStorageError:
+                                    raise
                                 except Exception as exc:
                                     if self._is_cancelled(job_id):
                                         self._mark_cancelled(job_id, results)
@@ -1241,7 +1265,7 @@ class ProcessingJobManager:
             results = [
                 item
                 for item in results
-                if item.path and Path(item.path).is_file()
+                if item.path and _checked_media_file(Path(item.path))
             ]
             total_files = len(results)
             exported_path = _export_results(request.output_dir, results)
@@ -1269,7 +1293,15 @@ class ProcessingJobManager:
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id)
             else:
-                self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message="处理失败")
+                if isinstance(exc, OSError):
+                    exc = MediaStorageError(
+                        exc.filename or _request_input_label(request), "访问任务文件", exc,
+                    )
+                message = (
+                    "存储访问失败，恢复访问后可继续任务"
+                    if isinstance(exc, MediaStorageError) else "处理失败"
+                )
+                self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message=message)
         finally:
             if detector is not None:
                 runtime = getattr(detector, "dinov2_runtime", None)
@@ -1452,7 +1484,10 @@ def _iter_supported_files(
     if _is_generated_favorite_export_path(input_dir):
         return
 
-    for root, directory_names, file_names in os.walk(input_dir):
+    def scan_error(exc: OSError) -> None:
+        raise MediaStorageError(exc.filename or input_dir, "扫描输入文件夹", exc) from exc
+
+    for root, directory_names, file_names in os.walk(input_dir, onerror=scan_error):
         _raise_if_cancelled(cancelled)
         root_path = Path(root)
         directory_names[:] = sorted(
@@ -2202,7 +2237,7 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
     validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
     for path, detection_data in detections:
-        if not path.is_file():
+        if not _checked_media_file(path):
             logger.info("Not saving detection data for deleted file: %s", path)
             continue
         roots = [path.parent]
@@ -2243,9 +2278,8 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             init_db(db_path)
             upsert_detections_bulk(db_path, payloads)
             upsert_validation_bulk(db_path, validations_by_root.get(root, []))
-        except Exception as exc:
-            logger.warning("Failed to save detection batch to SQLite at %s: %s", root, exc)
-            continue
+        except (OSError, sqlite3.Error) as exc:
+            raise MediaStorageError(root, "保存检测结果", exc) from exc
 
 
 def _detect_image_batch(
@@ -2259,7 +2293,7 @@ def _detect_image_batch(
     surviving_pairs = [
         (path, item)
         for path, item in zip(paths, items)
-        if path.is_file()
+        if _checked_media_file(path)
     ]
     if not surviving_pairs:
         return []
@@ -2318,6 +2352,8 @@ def _detect_image_batch(
             save_elapsed,
         )
         return detected_items
+    except MediaStorageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - preserve per-file metadata on batch failure
         return [item.model_copy(update={"error": f"批量检测失败: {exc}"}) for item in items]
 
@@ -2345,6 +2381,8 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
         detection_data = _serialize_detector_output(detector, detection)
         _save_detection_data_for_path(path, detection_data, input_path)
         return _apply_detection_data(item, detection_data)
+    except MediaStorageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
         return item.model_copy(update={"error": f"检测失败: {exc}"})
 
@@ -2424,6 +2462,8 @@ def _detect_video_track(
             _save_detection_data_for_path(path, detection_data, input_path)
             return _apply_detection_data(item, detection_data)
         return item
+    except MediaStorageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
         return item.model_copy(update={"error": f"视频检测失败: {exc}"})
     finally:
@@ -2719,6 +2759,8 @@ def _detect_video_fast_batch(
             result_item if result_item is not None else item
             for item, result_item in zip(items, result_items)
         ]
+    except MediaStorageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
         return [
             item.model_copy(update={"error": f"视频批量快速检测失败: {exc}"})
