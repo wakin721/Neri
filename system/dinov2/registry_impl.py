@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -466,7 +467,7 @@ class SpeciesRegistry:
             if matched
             else self._create(candidate_kind=candidate_kind)
         )
-        return self.record_observation(
+        result = self.record_observation(
             entry_id,
             vector,
             camera_id=camera_id,
@@ -476,6 +477,8 @@ class SpeciesRegistry:
             frame_index=frame_index,
             timestamp_seconds=timestamp_seconds,
         )
+        self._refresh_match_indexes(entry_id)
+        return result
 
     @_serialized_write
     def record_observation(
@@ -1171,6 +1174,35 @@ class SpeciesRegistry:
         self._refresh(entry_id)
         return self.get(entry_id)
 
+    @contextmanager
+    def matching_batch(self):
+        """Reuse matching evidence while retaining sequential candidate updates."""
+        with self._write_lock:
+            previous = getattr(self, "_batch_match_indexes", None)
+            previous_revision = getattr(self, "_batch_match_revision", None)
+            self._batch_match_indexes = {}
+            self._batch_match_revision = self._match_revision()
+            try:
+                yield
+            finally:
+                self._batch_match_indexes = previous
+                self._batch_match_revision = previous_revision
+
+    def _match_revision(self):
+        return (self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0])
+
+    def _refresh_match_indexes(self, entry_id):
+        indexes = getattr(self, "_batch_match_indexes", None)
+        if indexes is None:
+            return
+        revision = self._match_revision()
+        if revision[1] != self._batch_match_revision[1]:
+            indexes.clear()
+        else:
+            for index in indexes.values():
+                index.refresh(entry_id)
+        self._batch_match_revision = revision
+
     def match(
         self,
         embedding,
@@ -1180,30 +1212,31 @@ class SpeciesRegistry:
         candidate_kinds=None,
     ):
         vector = normalize_embedding(embedding)
+        # cosine_similarity historically normalizes its input again.
+        vector = normalize_embedding(vector)
         best = None
         excluded = {int(entry_id) for entry_id in exclude_entry_ids}
-        entries = self._conn.execute(
-            "SELECT id,candidate_number,status,candidate_kind,common_name FROM registrations"
-        ).fetchall()
-        prototype_rows = self._conn.execute(
-            "SELECT registration_id,embedding FROM prototypes "
-            "ORDER BY registration_id,prototype_index"
-        ).fetchall()
-        event_rows = self._conn.execute(
-            "SELECT registration_id,embedding FROM events ORDER BY registration_id,id"
-        ).fetchall()
-        prototypes_by_entry: dict[int, list[np.ndarray]] = {}
-        for row in prototype_rows:
-            prototypes_by_entry.setdefault(int(row["registration_id"]), []).append(
-                _from_blob(row["embedding"])
-            )
-        events_by_entry: dict[int, list[np.ndarray]] = {}
-        for row in event_rows:
-            events_by_entry.setdefault(int(row["registration_id"]), []).append(
-                _from_blob(row["embedding"])
-            )
+        from .registry_match_index import RegistryMatchIndex
 
-        for row in entries:
+        key = (tuple(sorted(statuses)) if statuses is not None else None,
+               tuple(sorted(candidate_kinds)) if candidate_kinds is not None else None)
+        if key[0] == () or key[1] == ():
+            return None
+        with self._write_lock:
+            indexes = getattr(self, "_batch_match_indexes", None)
+            if indexes is None:
+                index = RegistryMatchIndex(self._conn, *key)
+            else:
+                revision = self._match_revision()
+                if revision != self._batch_match_revision:
+                    indexes.clear()
+                self._batch_match_revision = revision
+                if key not in indexes:
+                    indexes[key] = RegistryMatchIndex(self._conn, *key)
+                index = indexes[key]
+            scores = tuple(index.scores(vector))
+
+        for row, score in scores:
             entry_id = int(row["id"])
             entry_status = str(row["status"])
             if entry_id in excluded or (
@@ -1213,15 +1246,6 @@ class SpeciesRegistry:
                 and str(row["candidate_kind"]) not in candidate_kinds
             ):
                 continue
-            values = prototypes_by_entry.get(entry_id, [])
-            if values:
-                prototypes = np.stack(values)
-            else:
-                events = events_by_entry.get(entry_id, [])
-                if not events:
-                    continue
-                prototypes = build_prototype(np.stack(events))[None, :]
-            score = float(np.max(cosine_similarity(vector, prototypes)))
             threshold = (
                 self.join_threshold
                 if entry_status == "candidate"

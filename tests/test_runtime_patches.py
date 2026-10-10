@@ -164,7 +164,7 @@ def test_actual_image_batch_returns_unknown_box_instead_of_empty(tmp_path, monke
         '物种名称': '空', '物种数量': '空', 'detect_results': [result],
     }])
     monkeypatch.setattr(services._legacy, '_selected_inference_class_ids', lambda *args: None)
-    monkeypatch.setattr(services._legacy, '_persist_dinov2_observations', lambda *args: None)
+    monkeypatch.setattr(services._legacy, '_persist_dinov2_observations', lambda *args, **kwargs: None)
     monkeypatch.setattr(services._legacy, '_save_detection_data_batch', lambda *args: None)
     item = DetectionItem(filename=path.name, path=str(path), file_type='jpg')
     output = services._detect_image_batch(

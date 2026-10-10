@@ -47,7 +47,10 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 _BATCH_LOG_RETENTION = 5
-_BATCH_LOGGER_NAMES = (__name__, "system.image_processor")
+_BATCH_LOGGER_NAMES = (
+    __name__, "system.image_processor", "system.dinov2.image_processor",
+    "system.backend.dinov2_persistence_fast",
+)
 
 
 class _BatchLogSession:
@@ -1608,6 +1611,7 @@ def _persist_dinov2_observations(
     source_paths: list[Path] | None = None,
     frame_indices: list[int | None] | None = None,
     timestamp_seconds: list[float | None] | None = None,
+    preloaded_data: Any = None,
 ) -> None:
     from .dinov2_feedback_service import persist_runtime_observations
 
@@ -2294,18 +2298,23 @@ def _detect_image_batch(
             detection_payloads.append((path, detection_data))
             detected_items.append(_apply_detection_data(item, detection_data))
         serialize_elapsed = time.perf_counter() - serialize_started
-        _persist_dinov2_observations(detector, paths, items, input_path)
+        persist_started = time.perf_counter()
+        _persist_dinov2_observations(
+            detector, paths, items, input_path, preloaded_data=preloaded_data,
+        )
+        persist_elapsed = time.perf_counter() - persist_started
         save_started = time.perf_counter()
         _save_detection_data_batch(detection_payloads, input_path)
         save_elapsed = time.perf_counter() - save_started
         logger.info(
             (
                 "Image batch backend timing: size=%d detect=%.3fs "
-                "serialize=%.3fs save=%.3fs"
+                "serialize=%.3fs persist=%.3fs save=%.3fs"
             ),
             len(paths),
             detect_elapsed,
             serialize_elapsed,
+            persist_elapsed,
             save_elapsed,
         )
         return detected_items

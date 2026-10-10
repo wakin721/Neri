@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import nullcontext
 import logging
 from pathlib import Path
 import time
@@ -60,6 +61,7 @@ def persist_runtime_observations(
     source_paths: list[Path] | None = None,
     frame_indices: Sequence[int | None] | None = None,
     timestamp_seconds: Sequence[float | None] | None = None,
+    preloaded_data=None,
 ) -> None:
     """Persist one inference batch with one feedback DB write when possible."""
     feedback = getattr(detector, "dinov2_feedback", None)
@@ -186,7 +188,15 @@ def persist_runtime_observations(
 
     example_elapsed = 0.0
     registry_elapsed = 0.0
-    with example_frame_cache():
+    frames = {}
+    if preloaded_data is not None and source_paths is None:
+        valid_indices, processed_imgs, _original_rgb = preloaded_data
+        frames = {
+            paths[index]: frame for index, frame in zip(valid_indices, processed_imgs)
+            if 0 <= index < len(paths)
+        }
+    matching_batch = getattr(registry, "matching_batch", None)
+    with example_frame_cache(frames), (matching_batch() if callable(matching_batch) else nullcontext()):
         for context in prepared:
             runtime_observation = context["runtime"]
             feedback_observation = context["feedback"]

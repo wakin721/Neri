@@ -7,7 +7,6 @@ DINOv3 model is loaded or executed.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import time
 
@@ -25,7 +24,33 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
 
     def __init__(self, *args, **kwargs) -> None:
         self._resume_checkpoint_at: dict[str, float] = {}
+        from .job_state_store import JobStateStore
+
+        self._state_store = JobStateStore(job_state_path())
         super().__init__(*args, **kwargs)
+
+    def _load_state(self) -> None:
+        data = self._state_store.load()
+        if data is None:
+            # Import the previous JSON checkpoint once; retain it for recovery.
+            super()._load_state()
+            return
+        for job_id, raw_job in data["jobs"].items():
+            job = JobSummary(**raw_job).model_copy(update={"active": False})
+            self._jobs[job_id] = job
+        self._job_requests = {
+            job_id: CreateJobRequest(**request)
+            for job_id, request in data["requests"].items()
+        }
+        self._state_store.remember(self._jobs, self._job_requests)
+        for job_id, job in tuple(self._jobs.items()):
+            if job.state in {JobState.QUEUED, JobState.RUNNING}:
+                self._jobs[job_id] = job.model_copy(update={
+                    "state": JobState.CANCELLED,
+                    "message": "后端已重启，任务已暂停，可继续任务",
+                    "updated_at": utc_now(),
+                })
+        self._save_state_unlocked()
 
     def _should_checkpoint_detection_progress(
         self,
@@ -55,41 +80,23 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
         persist: bool = True,
         **changes: object,
     ) -> None:
-        if not persist and self._should_checkpoint_detection_progress(job_id, changes):
+        checkpoint_progress = self._should_checkpoint_detection_progress(job_id, changes)
+        if not persist and checkpoint_progress:
             now = time.monotonic()
             last = self._resume_checkpoint_at.get(job_id)
             if last is None or now - last >= self._resume_checkpoint_interval_seconds:
                 persist = True
-                self._resume_checkpoint_at[job_id] = now
         super()._mutate_job(job_id, persist=persist, **changes)
+        if persist and checkpoint_progress:
+            if self._state_store.has_saved(job_id, self._jobs.get(job_id)):
+                self._resume_checkpoint_at[job_id] = time.monotonic()
 
     def _save_state_unlocked(self) -> None:
-        """Atomically replace job_state.json so forced restarts keep the last checkpoint."""
-        state_path = job_state_path()
-        temp_path = state_path.with_name(f"{state_path.name}.tmp")
+        """Commit changed jobs and new results without rewriting historical results."""
         try:
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "jobs": {
-                    job_id: job.model_copy(update={"active": False}).model_dump()
-                    for job_id, job in self._jobs.items()
-                },
-                "requests": {
-                    job_id: request.model_dump()
-                    for job_id, request in self._job_requests.items()
-                    if job_id in self._jobs
-                },
-            }
-            temp_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(temp_path, state_path)
+            self._state_store.save(self._jobs, self._job_requests)
         except Exception:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            logger.warning("Failed to checkpoint job progress", exc_info=True)
 
 
 def _dinov2_manifest_payload(model_path: str | Path | None):
