@@ -127,6 +127,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   final _validationItemsCache = ValidationItemsCache();
+  final _validationScreenKey = GlobalKey<SpeciesValidationScreenState>();
   final _directoryScope = DirectoryBrowsingScope();
   final _directoryRequests = <String>{};
   final Map<String, ProcessingJob> _completeJobsById = {};
@@ -3625,19 +3626,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted || _directorySwitching || _directoryScope.selected == path) {
       return;
     }
-    if (path != null) {
-      _applyDirectorySelection(path);
-      return;
-    }
-
     final root = _inputController.text.trim();
     final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() => _directorySwitching = true);
     messenger?.clearSnackBars();
     messenger?.removeCurrentSnackBar();
     final notice = messenger?.showSnackBar(
-      const SnackBar(
-        content: Text('正在加载全部目录…'),
+      SnackBar(
+        content: Text(path == null ? '正在加载全部目录…' : '正在加载目录…'),
         duration: Duration(days: 1),
         dismissDirection: DismissDirection.none,
       ),
@@ -3646,7 +3642,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     unawaited(notice?.closed.then((_) => noticeClosed = true));
     try {
       // Paint the loading state and finish the Snackbar entrance before the
-      // synchronous validation grouping work can occupy the UI isolate.
+      // directory contents change. Large validation preparation yields frames.
       await WidgetsBinding.instance.endOfFrame;
       await Future<void>.delayed(const Duration(milliseconds: 250));
       if (!mounted ||
@@ -3654,9 +3650,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           root != _inputController.text.trim()) {
         return;
       }
-      _applyDirectorySelection(null);
-      // Keep the notice until the rebuilt root has actually been painted.
+      _applyDirectorySelection(path);
+      // Let the validation screen start its cancellable preparation, then
+      // retain feedback until the latest directory has been painted.
       await WidgetsBinding.instance.endOfFrame;
+      if (_selectedIndex == 2) {
+        await _validationScreenKey.currentState?.waitUntilReady();
+      }
+      if (!mounted) return;
+      await WidgetsBinding.instance.endOfFrame;
+    } catch (_) {
+      _showSnackBar('目录加载失败，请重试');
     } finally {
       if (mounted) setState(() => _directorySwitching = false);
       if (messenger?.mounted == true && !noticeClosed) notice?.close();
@@ -3801,6 +3805,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
 
     final validationScreen = SpeciesValidationScreen(
+      key: _validationScreenKey,
       apiClient: widget.apiClient,
       inputPath: inputPath,
       classificationModelPath: _selectedDinoV2ValidationModelPath(),

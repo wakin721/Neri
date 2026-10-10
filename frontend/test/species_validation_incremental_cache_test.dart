@@ -124,6 +124,22 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
+    for (var attempt = 0; attempt < 500; attempt++) {
+      if (find
+          .byKey(const ValueKey('validation-preparation-progress'))
+          .evaluate()
+          .isEmpty)
+        break;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(
+      find.byKey(const ValueKey('validation-preparation-progress')),
+      findsNothing,
+    );
+
     key.currentState!.resetReadCount();
     await tester.tap(find.text('正确').first);
     await tester.pump();

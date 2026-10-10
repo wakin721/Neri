@@ -314,7 +314,7 @@ class SpeciesValidationScreen extends StatefulWidget {
 
   @override
   State<SpeciesValidationScreen> createState() =>
-      _SpeciesValidationScreenState();
+      SpeciesValidationScreenState();
 }
 
 enum _ValidationListFocus { species, photos }
@@ -334,7 +334,7 @@ class _MarkHistoryEntry {
   final String? feedbackOperationId;
 }
 
-class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
+class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     with WidgetsBindingObserver {
   static const _globalSpecies = 'global';
   static const _quickSpecies = <String>[
@@ -444,14 +444,281 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   final Set<String> _expandedGroupSignatures = <String>{};
   int? _lastReportedAutoGroupInferredBurstSize;
 
+  int _preparationGeneration = 0;
+  bool _preparing = false;
+  Object? _preparationError;
+  Future<void>? _preparationFuture;
+
+  /// Directory switching keeps its Snackbar alive until the latest snapshot
+  /// is ready; metadata arriving in the meantime can replace that snapshot.
+  Future<void> waitUntilReady() async {
+    while (_preparing && mounted) {
+      await _preparationFuture;
+    }
+    if (_preparationError != null) {
+      throw StateError('Validation preparation failed');
+    }
+  }
+
+  void _startPreparation() {
+    final generation = ++_preparationGeneration;
+    _preparing = true;
+    _preparationError = null;
+    _preparationFuture = _prepareBuckets(generation);
+  }
+
+  Future<void> _prepareBuckets(int generation) async {
+    final items = widget.items;
+    final budget = _ValidationWorkBudget(
+      () => !mounted || generation != _preparationGeneration,
+    );
+    try {
+      // Yield before any large traversal so the loading frame reaches paint.
+      await Future<void>.delayed(Duration.zero);
+      await budget.checkpoint(force: true);
+      final indices = await mediaDisplayIndicesAsync(
+        items,
+        byDirectory: widget.autoGroup,
+      );
+      await budget.checkpoint(force: true);
+      final ordered = <DetectionItem>[];
+      for (final index in indices) {
+        ordered.add(items[index]);
+        if (ordered.length % 128 == 0) await budget.checkpoint();
+      }
+      final groups = <_ValidationMediaGroup>[];
+      int? inferred;
+      if (widget.autoGroup) {
+        final gapThreshold = Duration(
+          seconds: widget.autoGroupGapSeconds.clamp(1, 3600),
+        );
+        final counts = <int, int>{};
+        var runLength = 0;
+        DetectionItem? previous;
+        void finishRun() {
+          if (runLength == 0) return;
+          final size = runLength.clamp(1, 20);
+          counts[size] = (counts[size] ?? 0) + 1;
+          runLength = 0;
+        }
+
+        for (var i = 0; i < ordered.length; i++) {
+          final item = ordered[i];
+          if (previous != null &&
+              (File(previous.path).parent.path != File(item.path).parent.path ||
+                  (_mediaGap(previous, item) ?? Duration.zero) >=
+                      gapThreshold)) {
+            finishRun();
+          }
+          if (_isImage(item)) runLength++;
+          previous = item;
+          if (i % 128 == 0) await budget.checkpoint();
+        }
+        finishRun();
+        final entries = counts.entries.toList()
+          ..sort((a, b) {
+            final comparison = b.value.compareTo(a.value);
+            return comparison != 0 ? comparison : b.key.compareTo(a.key);
+          });
+        inferred = entries.isEmpty
+            ? widget.autoGroupBurstSize.clamp(1, 20)
+            : entries.first.key;
+        final burst = widget.autoGroupDetectBurst
+            ? inferred
+            : widget.autoGroupBurstSize.clamp(1, 20);
+        var current = <DetectionItem>[];
+        var currentPhotoCount = 0;
+        for (var i = 0; i < ordered.length; i++) {
+          final item = ordered[i];
+          if (_shouldStartNewAutoGroup(
+            current,
+            item,
+            burstSize: burst,
+            currentPhotoCount: currentPhotoCount,
+            gapThreshold: gapThreshold,
+          )) {
+            groups.add(_ValidationMediaGroup(current));
+            current = <DetectionItem>[];
+            currentPhotoCount = 0;
+          }
+          current.add(item);
+          if (_isImage(item)) currentPhotoCount++;
+          if (i % 128 == 0) await budget.checkpoint();
+        }
+        if (current.isNotEmpty) groups.add(_ValidationMediaGroup(current));
+      } else {
+        for (var i = 0; i < ordered.length; i++) {
+          groups.add(_ValidationMediaGroup([ordered[i]]));
+          if (i % 128 == 0) await budget.checkpoint();
+        }
+      }
+      final bucketMap = <String, _SpeciesBucket>{};
+      final labels = <String, String>{};
+      final groupIndices = <String, int>{};
+      for (var i = 0; i < groups.length; i++) {
+        final group = groups[i];
+        final species = widget.autoGroup
+            ? _primarySpeciesForGroup(group)
+            : _primarySpeciesAfterConfidenceFilter(group.items.first);
+        labels[group.signature] = species;
+        groupIndices[group.signature] = i;
+        final validated = group.items.every(_isItemValidated);
+        final key = '${validated ? 1 : 0}::$species';
+        final bucket = bucketMap.putIfAbsent(
+          key,
+          () => _SpeciesBucket(
+            key: key,
+            isValidated: validated,
+            species: species,
+            items: [],
+            groups: [],
+          ),
+        );
+        bucket.items.addAll(group.items);
+        bucket.groups.add(group);
+        if (i % 128 == 0) await budget.checkpoint();
+      }
+      final buckets = bucketMap.values.toList()
+        ..sort(
+          (a, b) => a.isValidated != b.isValidated
+              ? (a.isValidated ? 1 : -1)
+              : a.species.compareTo(b.species),
+        );
+      final itemByPath = <String, DetectionItem>{};
+      final itemIndices = <String, int>{};
+      final paths = <String>[];
+      final signatures = <String>[];
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
+        paths.add(item.path);
+        signatures.add(
+          [
+            item.path,
+            item.dateTaken ?? '',
+            item.detectionData['拍摄时间']?.toString() ?? '',
+            item.modifiedAt ?? '',
+            item.fileType,
+            _primarySpeciesAfterConfidenceFilter(item),
+            _isItemValidated(item),
+            item.error ?? '',
+          ].join('\u001d'),
+        );
+        itemByPath[item.path] = item;
+        itemIndices[item.path] = i;
+        if (i % 128 == 0) await budget.checkpoint();
+      }
+      final bucketByPath = <String, _SpeciesBucket>{};
+      final bucketItemIndices = <String, int>{};
+      final groupByPath = <String, _ValidationGroupIndexEntry>{};
+      final groupBySignature = <String, _ValidationMediaGroup>{};
+      var traversed = 0;
+      for (final bucket in buckets) {
+        for (var i = 0; i < bucket.items.length; i++) {
+          final path = bucket.items[i].path;
+          bucketByPath[path] = bucket;
+          bucketItemIndices[path] = i;
+          if (++traversed % 128 == 0) await budget.checkpoint();
+        }
+        for (final group in bucket.groups) {
+          groupBySignature[group.signature] = group;
+          final entry = _ValidationGroupIndexEntry(
+            index: groupIndices[group.signature]!,
+            group: group,
+            signature: group.signature,
+          );
+          for (final item in group.items) {
+            groupByPath[item.path] = entry;
+            if (++traversed % 128 == 0) await budget.checkpoint();
+          }
+        }
+      }
+      var pruned = 0;
+      for (final path in _mediaTimestampCache.keys.toList()) {
+        if (!itemByPath.containsKey(path)) _mediaTimestampCache.remove(path);
+        if (++pruned % 128 == 0) await budget.checkpoint();
+      }
+      final pathSignature = paths.join('\u001f');
+      final groupingSignature = signatures.join('\u001f');
+      await budget.checkpoint(force: true);
+      // Everything above is private working data. Publish one complete cache
+      // only after confirming that its source/configuration is still current.
+      final expanded = [
+        for (final signature in _expandedGroupSignatures)
+          if (_bucketCacheGroupBySignature[signature] case final group?)
+            group.items.map((item) => item.path).toSet(),
+      ];
+      final selectedPaths =
+          _bucketCacheGroupBySignature[_selectedGroupSignature]?.items
+              .map((item) => item.path)
+              .toSet();
+      _bucketCacheAutoGroup = widget.autoGroup;
+      _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
+      _bucketCacheBurstSize = widget.autoGroupBurstSize;
+      _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
+      _bucketCacheConfidenceSignature = _confidenceSettingsSignature;
+      _bucketCacheMinFrameRatio = _minFrameRatio;
+      _bucketCacheRefreshVersion = widget.refreshVersion;
+      _bucketCacheItemsIdentity = items;
+      _bucketCachePathSignature = pathSignature;
+      _bucketCacheGroupingSignature = groupingSignature;
+      _bucketCache = buckets;
+      _bucketCacheGroupCount = groups.length;
+      _bucketCacheGroupIndexBySignature = groupIndices;
+      _bucketCacheItemByPath = itemByPath;
+      _bucketCacheItemIndexByPath = itemIndices;
+      _bucketCacheBucketByPath = bucketByPath;
+      _bucketCacheBucketItemIndexByPath = bucketItemIndices;
+      _bucketCacheGroupByPath = groupByPath;
+      _bucketCacheGroupBySignature = groupBySignature;
+      _groupSpeciesLabelCache
+        ..clear()
+        ..addAll(labels);
+      _pendingValidationEchoPaths.clear();
+      _deferredRegroupGroupSignatures.clear();
+      _restoreGroupUiStateAfterRegroup(
+        expandedGroupPaths: expanded,
+        selectedGroupPaths: selectedPaths,
+      );
+      _selectedPaths.removeWhere((path) => !itemByPath.containsKey(path));
+      if (!itemByPath.containsKey(_selectedPath)) {
+        _selectedPath = items.isEmpty ? null : items.first.path;
+        _selectedPaths.clear();
+        if (_selectedPath != null) _selectedPaths.add(_selectedPath!);
+      }
+      if (!itemByPath.containsKey(_selectionAnchorPath)) {
+        _selectionAnchorPath = _selectedPath;
+      }
+      _discardMarkHistoryForPaths(
+        _markHistory
+            .expand((entry) => entry.items)
+            .map((item) => item.path)
+            .where((path) => !itemByPath.containsKey(path))
+            .toSet(),
+      );
+      _notifyAutoGroupInferredBurstSize(inferred);
+      setState(() => _preparing = false);
+    } on _ValidationPreparationCancelled {
+      // A newer directory, metadata snapshot or disposal owns the UI now.
+    } catch (error) {
+      if (mounted && generation == _preparationGeneration) {
+        setState(() {
+          _preparing = false;
+          _preparationError = error;
+        });
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (widget.items.length >= 512) _startPreparation();
   }
 
   @override
   void dispose() {
+    _preparationGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -501,6 +768,25 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   @override
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final preparationChanged =
+        !identical(oldWidget.items, widget.items) ||
+        oldWidget.inputPath != widget.inputPath ||
+        oldWidget.refreshVersion != widget.refreshVersion ||
+        oldWidget.autoGroup != widget.autoGroup ||
+        oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
+        oldWidget.autoGroupBurstSize != widget.autoGroupBurstSize ||
+        oldWidget.autoGroupGapSeconds != widget.autoGroupGapSeconds ||
+        oldWidget.minFrameRatio != widget.minFrameRatio;
+    if (preparationChanged) _preparationError = null;
+    if (preparationChanged &&
+        widget.items.length >= 512 &&
+        (_preparing || _pendingValidationEchoPaths.isEmpty)) {
+      _startPreparation();
+    } else if (preparationChanged && _preparing) {
+      _preparationGeneration++;
+      _preparing = false;
+      _preparationError = null;
+    }
     if (oldWidget.inputPath != widget.inputPath) {
       _selectionModifiers.clear();
       _selectedPaths.clear();
@@ -557,6 +843,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _expandedGroupSignatures.clear();
       return;
     }
+    if (_preparing) return;
     if (identical(oldWidget.items, widget.items) &&
         oldWidget.inputPath == widget.inputPath &&
         _selectedPath != null)
@@ -593,6 +880,30 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (widget.items.length >= 512 &&
+        !_preparing &&
+        _preparationError == null &&
+        _bucketCacheConfidenceSignature != _confidenceSettingsSignature) {
+      _startPreparation();
+    }
+    if (_preparing) {
+      return const Center(
+        child: SizedBox(
+          width: 240,
+          child: LinearProgressIndicator(
+            key: ValueKey('validation-preparation-progress'),
+          ),
+        ),
+      );
+    }
+    if (_preparationError != null) {
+      return Center(
+        child: FilledButton.tonal(
+          onPressed: () => setState(_startPreparation),
+          child: const Text('目录加载失败，点击重试'),
+        ),
+      );
+    }
     if (widget.inputPath.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(16),
@@ -2122,6 +2433,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   List<_SpeciesBucket> _currentBuckets() {
+    if (_preparing) return const [];
     final hasSameGroupingSettings =
         _bucketCacheAutoGroup == widget.autoGroup &&
         _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
@@ -2231,6 +2543,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     required List<Set<String>> expandedGroupPaths,
     required Set<String>? selectedGroupPaths,
   }) {
+    if (expandedGroupPaths.isEmpty && selectedGroupPaths == null) {
+      _expandedGroupSignatures.clear();
+      _selectedGroupSignature = null;
+      return;
+    }
     final nextExpandedSignatures = <String>{};
     final selectedPath = _selectedPath;
     String? selectedPathGroupSignature;
@@ -2604,13 +2921,14 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem next, {
     required int burstSize,
     required Duration gapThreshold,
+    int? currentPhotoCount,
   }) {
     if (current.isEmpty) return false;
     if (File(current.last.path).parent.path != File(next.path).parent.path) {
       return true;
     }
 
-    final photoCount = current.where(_isImage).length;
+    final photoCount = currentPhotoCount ?? current.where(_isImage).length;
     if (photoCount >= burstSize && _isImage(next)) return true;
 
     final gap = _mediaGap(current.last, next);
@@ -4343,6 +4661,23 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     }
     return row.item.path == _selectedPath ||
         _selectedPaths.contains(row.item.path);
+  }
+}
+
+class _ValidationPreparationCancelled implements Exception {}
+
+class _ValidationWorkBudget {
+  _ValidationWorkBudget(this.cancelled);
+  final bool Function() cancelled;
+  final Stopwatch watch = Stopwatch()..start();
+
+  Future<void> checkpoint({bool force = false}) async {
+    if (cancelled()) throw _ValidationPreparationCancelled();
+    if (force || watch.elapsedMilliseconds >= 8) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      if (cancelled()) throw _ValidationPreparationCancelled();
+      watch.reset();
+    }
   }
 }
 

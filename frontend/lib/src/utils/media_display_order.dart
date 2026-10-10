@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 
 import '../models/job.dart';
@@ -9,6 +11,53 @@ Future<List<DetectionItem>> sortMediaItemsForDisplayAsync(
 ) async => items.length < 2048
     ? sortMediaItemsForDisplay(items)
     : compute(sortMediaItemsForDisplay, items);
+
+/// Return indices so the UI can keep the original metadata objects after
+/// sorting in another isolate. Each camera's sequence remains contiguous.
+Future<List<int>> mediaDisplayIndicesAsync(
+  List<DetectionItem> items, {
+  required bool byDirectory,
+}) async {
+  // Copy only the fields used for ordering, keeping UI callbacks and large
+  // detection metadata out of the isolate message.
+  final sortable = <DetectionItem>[];
+  final watch = Stopwatch()..start();
+  for (final item in items) {
+    sortable.add(
+      DetectionItem(
+        filename: item.filename,
+        path: item.path,
+        fileType: item.fileType,
+        dateTaken: item.dateTaken,
+        modifiedAt: item.modifiedAt,
+        detectionData: {'拍摄时间': item.detectionData['拍摄时间']?.toString()},
+      ),
+    );
+    if (watch.elapsedMilliseconds >= 8) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      watch.reset();
+    }
+  }
+  return compute(_mediaDisplayIndices, (sortable, byDirectory));
+}
+
+List<int> _mediaDisplayIndices((List<DetectionItem>, bool) request) {
+  final (items, byDirectory) = request;
+  final directories = <String, List<(int, _MediaSortEntry)>>{};
+  for (var i = 0; i < items.length; i++) {
+    final directory = byDirectory ? File(items[i].path).parent.path : '';
+    directories.putIfAbsent(directory, () => []).add((
+      i,
+      _MediaSortEntry(items[i]),
+    ));
+  }
+  final indices = <int>[];
+  for (final entries in directories.values) {
+    entries.sort((a, b) => a.$2.compareTo(b.$2));
+    indices.addAll(entries.map((entry) => entry.$1));
+  }
+  return indices;
+}
 
 List<DetectionItem> sortMediaItemsForDisplay(List<DetectionItem> items) {
   final keyed = [for (final item in items) _MediaSortEntry(item)];

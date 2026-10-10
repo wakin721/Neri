@@ -279,6 +279,8 @@ void main() {
     await tester.tap(find.text('camera-b').last);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
     expect(
       tester.widget<PreviewScreen>(find.byType(PreviewScreen)).inputPath,
       camera,
@@ -366,6 +368,8 @@ void main() {
     await tester.tap(find.text('camera-b').last);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
     final preview = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
     expect(preview.items.map((item) => item.path), [
       '$input/camera-b/same.jpg',
@@ -417,7 +421,22 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       await tester.tap(find.text('camera-b').last);
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.text('正在加载目录…'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsOneWidget,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+      await tester.pump(const Duration(milliseconds: 350));
       await startup.settleStartup(tester);
+      await tester.pump(const Duration(milliseconds: 350));
       final child = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
       expect(child.items, hasLength(1));
       // An already-visible notice must not queue the loading feedback behind
