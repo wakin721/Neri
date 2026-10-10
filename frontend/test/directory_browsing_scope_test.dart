@@ -131,7 +131,11 @@ void main() {
     final input = Directory('startup-test-input').absolute.path;
     final camera = Directory('$input/camera-b').path;
     final backend = startup.StartupBackend()
-      ..directories = [Directory('$input/camera-a').path, camera];
+      ..directories = [
+        Directory('$input/camera-a').path,
+        camera,
+        for (var i = 0; i < 30; i++) Directory('$input/camera-extra-$i').path,
+      ];
     await startup.mount(tester, backend);
     await tester.tap(find.text('预览').first);
     await tester.pump();
@@ -149,10 +153,33 @@ void main() {
           .onPressed,
       isNotNull,
     );
-    await tester.tap(find.byKey(const ValueKey('directory-scope-selector')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
-    await tester.pump(const Duration(milliseconds: 350));
+    final directoryButton = find.byKey(
+      const ValueKey('directory-scope-selector'),
+    );
+    for (final height in [1100.0, 520.0]) {
+      tester.view.physicalSize = Size(1400, height);
+      await tester.pump();
+      await tester.tap(directoryButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+      final menu = find.ancestor(
+        of: find.byType(MenuItemButton).first,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Material && widget.elevation == 8,
+        ),
+      );
+      final buttonRect = tester.getRect(directoryButton);
+      final menuRect = tester.getRect(menu);
+      expect(menuRect.top, greaterThanOrEqualTo(buttonRect.bottom + 8));
+      expect(menuRect.left, closeTo(buttonRect.left, 0.1));
+      expect(menuRect.height, lessThanOrEqualTo(480));
+      expect(menuRect.bottom, lessThan(height));
+      if (height == 1100) {
+        await tester.tap(directoryButton);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 700));
+      }
+    }
     await tester.tap(find.text('camera-b').last);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));

@@ -3685,13 +3685,28 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ? '全部目录'
         : _directoryScope.label(_directoryScope.selected!);
     final enabled = !_validationBusy && !_previewDetecting;
+    final mediaQuery = MediaQuery.of(context);
+    // Leave room below the AppBar so long menus scroll instead of covering it.
+    final maxMenuHeight =
+        (mediaQuery.size.height -
+                mediaQuery.padding.vertical -
+                mediaQuery.viewInsets.vertical -
+                kToolbarHeight -
+                24)
+            .clamp(0.0, 480.0);
     final options = [
       const AppMenuOption(value: '', label: '全部目录'),
       for (final path in _directoryScope.directories)
         AppMenuOption(value: path, label: _directoryScope.label(path)),
     ];
     return MenuAnchor(
-      style: appDropdownMenuStyle(context),
+      alignmentOffset: const Offset(0, 8),
+      style: appDropdownMenuStyle(context).copyWith(
+        alignment: AlignmentDirectional.bottomStart,
+        maximumSize: WidgetStatePropertyAll(
+          Size(double.infinity, maxMenuHeight),
+        ),
+      ),
       menuChildren: [
         for (final option in options)
           MenuItemButton(
