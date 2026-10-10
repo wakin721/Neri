@@ -114,3 +114,5 @@ frontend/windows/runner/*
 !frontend/test/startup_loading_test.dart
 
 !/tests/test_media_storage_failures.py
+!/tests/test_directory_results.py
+!frontend/test/directory_browsing_scope_test.dart

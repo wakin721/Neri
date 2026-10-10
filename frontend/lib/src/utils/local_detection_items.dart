@@ -45,7 +45,11 @@ List<DetectionItem> validationItemsInInputFolder(
   return <DetectionItem>[
     for (final item in items)
       if (item.path.trim().isNotEmpty &&
-          _localPathKey(File(item.path).absolute.parent.path) == inputDirectory)
+          (_localPathKey(File(item.path).absolute.parent.path) ==
+                  inputDirectory ||
+              _localPathKey(
+                File(item.path).absolute.parent.path,
+              ).startsWith('$inputDirectory/')))
         item,
   ];
 }

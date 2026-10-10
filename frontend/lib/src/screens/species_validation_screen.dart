@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -501,6 +502,11 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.inputPath != widget.inputPath) {
       _selectionModifiers.clear();
+      _selectedPaths.clear();
+      _selectedPath = null;
+      _selectionAnchorPath = null;
+      _selectedGroupSignature = null;
+      _expandedGroupSignatures.clear();
       _markHistory.clear();
       _pendingValidationEchoPaths.clear();
     }
@@ -2495,7 +2501,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   List<_ValidationMediaGroup> _buildAutoGroups(List<DetectionItem> items) {
-    final orderedItems = _sortValidationItems(items);
+    final byDirectory = <String, List<DetectionItem>>{};
+    for (final item in items) {
+      byDirectory.putIfAbsent(File(item.path).parent.path, () => []).add(item);
+    }
+    // Keep each camera's chronological sequence contiguous before detecting
+    // bursts; interleaved timestamps from other cameras must not split it.
+    final orderedItems = [
+      for (final directoryItems in byDirectory.values)
+        ..._sortValidationItems(directoryItems),
+    ];
     final groups = <_ValidationMediaGroup>[];
     var current = <DetectionItem>[];
     final gapThreshold = Duration(
@@ -2563,7 +2578,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       final previousItem = previous;
       final startsNewRun =
           previousItem != null &&
-          ((_mediaGap(previousItem, item) ?? Duration.zero) >= gapThreshold);
+          (File(previousItem.path).parent.path != File(item.path).parent.path ||
+              (_mediaGap(previousItem, item) ?? Duration.zero) >= gapThreshold);
       if (startsNewRun) finishRun();
       if (_isImage(item)) {
         runLength += 1;
@@ -2589,6 +2605,9 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     required Duration gapThreshold,
   }) {
     if (current.isEmpty) return false;
+    if (File(current.last.path).parent.path != File(next.path).parent.path) {
+      return true;
+    }
 
     final photoCount = current.where(_isImage).length;
     if (photoCount >= burstSize && _isImage(next)) return true;
@@ -4150,10 +4169,19 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Future<void> _exportData() async {
+    final inputPath = widget.inputPath;
     final deleteEmptyPhotos = await _resolveEmptyPhotoDelete();
-    if (deleteEmptyPhotos == null) return;
+    if (!mounted ||
+        deleteEmptyPhotos == null ||
+        widget.inputPath != inputPath) {
+      return;
+    }
     final exportFavoritePhotos = await _resolveFavoritePhotoExport();
-    if (exportFavoritePhotos == null) return;
+    if (!mounted ||
+        exportFavoritePhotos == null ||
+        widget.inputPath != inputPath) {
+      return;
+    }
 
     setState(() => _exporting = true);
     try {
@@ -4168,7 +4196,7 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           ? _emptyImageItemsForExport().map((item) => item.path).toList()
           : const <String>[];
       final result = await widget.apiClient.exportValidationData(
-        inputPath: widget.inputPath,
+        inputPath: inputPath,
         fileFormat: _exportFormat,
         columnsToExport: widget.exportColumns.isEmpty
             ? validationExportColumns

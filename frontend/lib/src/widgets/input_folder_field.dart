@@ -46,7 +46,7 @@ class _InputFolderFieldState extends State<InputFolderField> {
       controller: widget.controller,
       decoration: InputDecoration(
         labelText: '输入文件夹',
-        hintText: '/path/to/camera-trap-folder',
+        hintText: '选择根目录或单个子目录（包含所选目录的所有子目录）',
         border: const OutlineInputBorder(),
         suffixIcon: IconButton(
           tooltip: '选择文件夹',

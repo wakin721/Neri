@@ -281,7 +281,7 @@ class _CreateJobCard extends StatelessWidget {
         (selectedModelPath == null || selectedModelPath!.isEmpty);
     return SectionCard(
       title: '新建处理任务',
-      subtitle: '输入本机路径，由 Python 后端读取和处理文件。',
+      subtitle: '可选择根目录批量处理，也可选择单个子目录；包含所选目录中的所有子目录。',
       icon: Icons.playlist_add_rounded,
       child: Column(
         children: [

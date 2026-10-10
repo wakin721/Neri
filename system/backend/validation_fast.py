@@ -240,12 +240,11 @@ def make_mark_validation_items(services_module: Any):
         if not paths:
             return []
 
-        roots = services_module._preview_detection_db_roots(input_path, None, paths)
         detection_indexes: dict[Path, dict[str, dict[str, Any]]] = {}
         filenames = {path.name for path in paths}
 
         def detection_data_for(path: Path) -> dict[str, Any]:
-            for root in services_module._unique_existing_dirs([path.parent, *roots]):
+            for root in services_module._unique_existing_dirs([path.parent]):
                 index = detection_indexes.get(root)
                 if index is None:
                     index = services_module._load_detection_index(

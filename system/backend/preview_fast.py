@@ -5,7 +5,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,8 @@ def _in_clause(size: int) -> str:
 def load_detection_index_for_filenames(
     db_paths: Iterable[Path],
     filenames: set[str],
+    *,
+    key_by_filename: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Load detection payloads only for the requested media filenames."""
     if not filenames:
@@ -50,8 +52,8 @@ def load_detection_index_for_filenames(
                         f'FROM detections WHERE image_filename IN ({placeholders})',
                         chunk,
                     ).fetchall()
-                    for base_name, _image_filename, detection_json in rows:
-                        key = str(base_name)
+                    for base_name, image_filename, detection_json in rows:
+                        key = str(image_filename if key_by_filename else base_name)
                         if key in detection_index:
                             continue
                         try:
@@ -121,6 +123,41 @@ def load_preview_indexes(
     )
 
 
+def load_media_indexes(
+    files: Iterable[Path],
+    candidate_dbs: Callable[..., Iterable[Path]],
+    *,
+    include_validation: bool = True,
+) -> tuple[dict[str, dict[str, Any]], dict[str, bool]]:
+    """Index each camera directory separately and return full-path keys.
+
+    Legacy databases identify records by filename, so a parent or sibling
+    database cannot establish ownership of a nested photo with the same name.
+    Keep the legacy on-disk schema while retaining directory identity in memory.
+    """
+    grouped: dict[Path, list[Path]] = {}
+    for path in files:
+        grouped.setdefault(path.parent, []).append(path)
+    detections: dict[str, dict[str, Any]] = {}
+    validations: dict[str, bool] = {}
+    for parent, paths in grouped.items():
+        databases = tuple(candidate_dbs([parent], recursive=False))
+        filenames = {path.name for path in paths}
+        local_detections = load_detection_index_for_filenames(
+            databases, filenames, key_by_filename=True,
+        )
+        local_validations = (
+            load_validation_index_for_filenames(databases, filenames)
+            if include_validation else {}
+        )
+        for path in paths:
+            if path.name in local_detections:
+                detections[str(path)] = local_detections[path.name]
+            if path.name in local_validations:
+                validations[str(path)] = local_validations[path.name]
+    return detections, validations
+
+
 def make_preview_media_items(services_module: Any):
     """Build a drop-in replacement for services.preview_media_items."""
 
@@ -143,18 +180,8 @@ def make_preview_media_items(services_module: Any):
         detection_index: dict[str, dict[str, Any]] = {}
         validation_index: dict[str, bool] = {}
         if include_cached:
-            roots = services_module._preview_detection_db_roots(
-                input_path,
-                output_dir,
-                files,
-            )
-            db_paths = services_module._candidate_detection_dbs_for_roots(
-                roots,
-                recursive=False,
-            )
-            detection_index, validation_index = load_preview_indexes(
-                db_paths,
-                {path.name for path in files},
+            detection_index, validation_index = load_media_indexes(
+                files, services_module._candidate_detection_dbs_for_roots,
             )
 
         items = []
@@ -163,12 +190,12 @@ def make_preview_media_items(services_module: Any):
                 services_module._raise_if_cancelled(cancelled)
             item = services_module._build_fast_metadata_item(path)
             if include_cached:
-                data = detection_index.get(path.stem)
+                data = detection_index.get(str(path))
                 if data:
                     item = services_module._apply_detection_data(item, data)
                 item = services_module._apply_validation_state(
                     item,
-                    path.name,
+                    str(path),
                     validation_index,
                 )
             items.append(item)
@@ -197,14 +224,6 @@ def make_preview_media_item(services_module: Any):
 
         item = services_module._build_metadata_item(path)
         roots: list[Path] = [path.parent]
-        if input_dir:
-            input_path = Path(input_dir).expanduser()
-            roots.extend(
-                services_module._detection_db_search_roots(
-                    input_path,
-                    output_dir,
-                )
-            )
         db_paths = services_module._candidate_detection_dbs_for_roots(
             roots,
             recursive=False,
@@ -234,14 +253,14 @@ def make_reload_validation_item(services_module: Any):
     """Build a validation reload helper that avoids a full validation scan."""
 
     def reload_validation_item(path: Path, input_path: Path):
-        roots = services_module._detection_db_search_roots(input_path, None)
+        roots = [path.parent]
         item = services_module._build_metadata_item(path)
-        data = services_module._load_detection_data_for_path(path, roots)
+        data = services_module._load_detection_data_for_path(path, roots, recursive=False)
         if data:
             item = services_module._apply_detection_data(item, data)
         db_paths = services_module._candidate_detection_dbs_for_roots(
             roots,
-            recursive=True,
+            recursive=False,
         )
         validation_index = load_validation_index_for_filenames(
             db_paths,
