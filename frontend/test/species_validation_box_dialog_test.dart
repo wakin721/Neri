@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
+import 'package:neri_flutter/src/app_theme.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/widgets/dinov2_feature_scatter.dart';
@@ -254,7 +255,14 @@ void main() {
         httpClient: MockClient((_) async => _jsonResponse({})),
       );
       addTearDown(api.close);
-      await tester.pumpWidget(_screen(api, directory.path, item()));
+      await tester.pumpWidget(
+        _screen(
+          api,
+          directory.path,
+          item(),
+          theme: buildNeriTheme(ColorScheme.fromSeed(seedColor: Colors.brown)),
+        ),
+      );
       await _waitForImage(tester);
       final exportButton = find.widgetWithText(FilledButton, '导出');
       expect(
@@ -274,12 +282,7 @@ void main() {
             8 +
             tester.getSize(quantityCard).width,
       );
-      if (width > 800) {
-        final filterCard = find
-            .ancestor(of: find.text('置信度'), matching: find.byType(Card))
-            .first;
-        expect(exportSize.height, tester.getSize(filterCard).height);
-      }
+      expect(exportSize.height, 64);
     });
   }
 
@@ -490,7 +493,9 @@ Widget _screen(
   String? rootPath,
   String exportMode = 'ask',
   Future<void> Function(String)? onFormatModeChanged,
+  ThemeData? theme,
 }) => MaterialApp(
+  theme: theme,
   home: Scaffold(
     body: SpeciesValidationScreen(
       apiClient: api,

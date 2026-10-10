@@ -1921,7 +1921,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   Widget _buildExportControls() {
     return SizedBox(
       width: double.infinity,
-      height: 72,
+      height: 64,
       child: FilledButton.icon(
         onPressed: _exporting ? null : _exportData,
         icon: _exporting
