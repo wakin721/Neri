@@ -597,6 +597,16 @@ class NeriApiClient {
     );
   }
 
+  Future<List<String>> fetchPreviewDirectories(String inputPath) async {
+    final response = await _httpClient.get(
+      _uri(
+        '/api/preview/directories',
+      ).replace(queryParameters: {'input_path': inputPath}),
+    );
+    _ensureSuccess(response);
+    return (jsonDecode(response.body) as List<dynamic>).cast<String>();
+  }
+
   Future<List<DetectionItem>> fetchPreviewItems({
     required String inputPath,
     String? outputDir,

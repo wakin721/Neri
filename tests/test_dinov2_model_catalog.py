@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def test_layout_uses_dinov2_component_root(tmp_path):
     from system.model_sync.layout import get_model_layout
@@ -12,7 +14,15 @@ def test_layout_uses_dinov2_component_root(tmp_path):
     assert not hasattr(layout, "dinov3_root")
 
 
-def test_manifest_exposes_dinov2_capabilities(tmp_path):
+@pytest.mark.parametrize(
+    ("display_name", "expected_name"),
+    [
+        ("DINOv2 reviewed", "DINOv2 reviewed"),
+        ("DINOv2 Seq Memory Val90 (42类)", "DINOv2 Seq"),
+        ("DINOv2 Seq", "DINOv2 Seq"),
+    ],
+)
+def test_manifest_exposes_dinov2_capabilities(tmp_path, display_name, expected_name):
     from system.model_sync.catalog import discover_models, resolve_saved_model_path
     from system.model_sync.layout import get_model_layout
 
@@ -25,7 +35,7 @@ def test_manifest_exposes_dinov2_capabilities(tmp_path):
             {
                 "schema_version": 2,
                 "backend": "dinov2",
-                "display_name": "DINOv2 reviewed",
+                "display_name": display_name,
                 "checkpoint": "head.pt",
                 "architecture": "dinov2_vitb14",
                 "feature_dim": 768,
@@ -41,6 +51,7 @@ def test_manifest_exposes_dinov2_capabilities(tmp_path):
 
     assert len(models) == 1
     model = models[0]
+    assert model.name == expected_name
     assert model.backend == "dinov2"
     assert model.architecture == "dinov2_vitb14"
     assert model.feature_dim == 768

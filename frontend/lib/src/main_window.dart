@@ -30,7 +30,10 @@ import 'utils/job_result_refresh.dart';
 import 'utils/startup_timing.dart';
 import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
+import 'utils/media_display_order.dart';
+import 'utils/directory_browsing_scope.dart';
 import 'widgets/retained_tab.dart';
+import 'widgets/app_menu_style.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
@@ -124,6 +127,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
   List<DetectionItem> _previewItems = const <DetectionItem>[];
   final _validationItemsCache = ValidationItemsCache();
+  final _validationScreenKey = GlobalKey<SpeciesValidationScreenState>();
+  final _directoryScope = DirectoryBrowsingScope();
+  final _directoryRequests = <String>{};
   final Map<String, ProcessingJob> _completeJobsById = {};
   final _refreshGate = AsyncRefreshGate();
   final Set<String> _expandedJobIds = {};
@@ -150,6 +156,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   bool _backendReady = false;
   bool _submitting = false;
   bool _previewLoading = false;
+  bool _directorySwitching = false;
   bool _settingsSaving = false;
   bool _modelSelectionSaveInProgress = false;
   bool _validationBusy = false;
@@ -1776,6 +1783,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return _supportedMediaExtensions.any(normalizedPath.endsWith);
   }
 
+  Future<void> _refreshDirectoryChoices(String inputPath) async {
+    if (!_directoryRequests.add(inputPath)) return;
+    final generation = _backendStartupGeneration;
+    try {
+      final paths = await widget.apiClient.fetchPreviewDirectories(inputPath);
+      if (!mounted ||
+          generation != _backendStartupGeneration ||
+          _closeFlowBlocksBackendStartup) {
+        return;
+      }
+      setState(() => _directoryScope.cacheDirectories(paths, inputPath));
+    } catch (_) {
+      // Older backends or unavailable disks still fall back to media snapshots.
+    } finally {
+      _directoryRequests.remove(inputPath);
+    }
+  }
+
   Future<void> _refreshPreviewItems({
     bool force = false,
     bool finishGlobalLoading = false,
@@ -1815,11 +1840,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }
     });
 
+    unawaited(_refreshDirectoryChoices(inputPath));
     try {
-      final items = await widget.apiClient.fetchPreviewItems(
+      final fetchedItems = await widget.apiClient.fetchPreviewItems(
         inputPath: inputPath,
         includeCached: true,
       );
+      final sortedItems = await sortMediaItemsForDisplayAsync(fetchedItems);
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
           requestId != _previewRefreshRequestId ||
@@ -1828,7 +1855,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
-      final sortedItems = _sortMediaItemsForDisplay(items);
+      final selectedPath = _directoryScope.items.isEmpty
+          ? null
+          : _directoryScope
+                .items[_safePreviewIndex(_directoryScope.items)]
+                .path;
       setState(() {
         // Fast directory snapshots omit full metadata; invalidate the previous
         // generation so selected files can load their metadata again.
@@ -1840,10 +1871,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (finishGlobalLoading) {
           _loading = false;
         }
-        _selectedPreviewIndex = _safePreviewIndex(sortedItems);
+        _directoryScope.update(_previewItems, inputPath);
+        final selected = _directoryScope.items.indexWhere(
+          (item) => item.path == selectedPath,
+        );
+        _selectedPreviewIndex = selected < 0 ? 0 : selected;
       });
-      if (sortedItems.isNotEmpty) {
-        unawaited(_loadPreviewMetadata(sortedItems[_selectedPreviewIndex]));
+      if (_directoryScope.items.isNotEmpty) {
+        unawaited(
+          _loadPreviewMetadata(_directoryScope.items[_selectedPreviewIndex]),
+        );
       }
     } catch (error) {
       if (!mounted ||
@@ -1891,9 +1928,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       );
       if (index < 0) return;
       final previous = _previewItems[index];
-      final selectedPath = _previewItems.isEmpty
+      final selectedPath = _directoryScope.items.isEmpty
           ? null
-          : _previewItems[_safePreviewIndex(_previewItems)].path;
+          : _directoryScope
+                .items[_safePreviewIndex(_directoryScope.items)]
+                .path;
       final updated = List<DetectionItem>.from(_previewItems);
       updated[index] = fullItem;
       final orderingChanged =
@@ -1902,10 +1941,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() {
         _previewMetadataCache[item.path] = fullItem;
         _previewItems = orderingChanged
-            ? _sortMediaItemsForDisplay(updated)
+            ? replaceSortedMediaItem(_previewItems, index, fullItem)
             : updated;
+        _directoryScope.update(_previewItems, _inputController.text.trim());
         if (orderingChanged && selectedPath != null) {
-          final selected = _previewItems.indexWhere(
+          final selected = _directoryScope.items.indexWhere(
             (entry) => entry.path == selectedPath,
           );
           if (selected >= 0) _selectedPreviewIndex = selected;
@@ -1941,25 +1981,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _replacePreviewItems(
     List<DetectionItem> currentItems,
     Iterable<DetectionItem> updates,
-  ) {
-    final updateByPath = <String, DetectionItem>{
-      for (final item in updates)
-        if (item.path.isNotEmpty) item.path: item,
-    };
-    if (updateByPath.isEmpty) return currentItems;
-
-    var appended = false;
-    final seen = currentItems.map((item) => item.path).toSet();
-    final nextItems = <DetectionItem>[
-      for (final item in currentItems) updateByPath[item.path] ?? item,
-    ];
-    for (final item in updateByPath.values) {
-      if (seen.contains(item.path)) continue;
-      nextItems.add(item);
-      appended = true;
-    }
-    return appended ? _sortMediaItemsForDisplay(nextItems) : nextItems;
-  }
+  ) => replaceSortedMediaItems(currentItems, updates);
 
   DetectionItem _mergeValidationUpdate(
     DetectionItem fallback,
@@ -1972,71 +1994,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return current.mergeValidationUpdate(update);
   }
 
-  List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) {
-    return List<DetectionItem>.from(items)..sort(_compareMediaItemsForDisplay);
-  }
+  List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) =>
+      sortMediaItemsForDisplay(items);
 
-  int _compareMediaItemsForDisplay(DetectionItem a, DetectionItem b) {
-    final timeA = _mediaSortTimestamp(a);
-    final timeB = _mediaSortTimestamp(b);
-    if (timeA != null && timeB != null) {
-      final timeCompare = timeA.compareTo(timeB);
-      if (timeCompare != 0) return timeCompare;
-    } else if (timeA != null) {
-      return -1;
-    } else if (timeB != null) {
-      return 1;
-    }
-
-    final nameCompare = _naturalCompare(a.filename, b.filename);
-    if (nameCompare != 0) return nameCompare;
-    return _naturalCompare(a.path, b.path);
-  }
-
-  DateTime? _mediaSortTimestamp(DetectionItem item) {
-    final dateText = item.dateTaken?.trim();
-    if (dateText != null && dateText.isNotEmpty) {
-      final timeText = item.detectionData['拍摄时间']?.toString().trim();
-      if (dateText.contains(':') || dateText.contains('T')) {
-        final dateTime = DateTime.tryParse(dateText);
-        if (dateTime != null) return dateTime;
-      }
-      if (timeText != null && timeText.isNotEmpty) {
-        final dateTime = DateTime.tryParse('$dateText $timeText');
-        if (dateTime != null) return dateTime;
-      }
-    }
-    final modifiedAt = item.modifiedAt?.trim();
-    if (modifiedAt == null || modifiedAt.isEmpty) return null;
-    return DateTime.tryParse(modifiedAt);
-  }
-
-  int _naturalCompare(String a, String b) {
-    final segmentsA = _naturalSegments(a);
-    final segmentsB = _naturalSegments(b);
-    final length = segmentsA.length < segmentsB.length
-        ? segmentsA.length
-        : segmentsB.length;
-    for (var index = 0; index < length; index++) {
-      final partA = segmentsA[index];
-      final partB = segmentsB[index];
-      final numberA = int.tryParse(partA);
-      final numberB = int.tryParse(partB);
-      final compare = numberA != null && numberB != null
-          ? numberA.compareTo(numberB)
-          : partA.toLowerCase().compareTo(partB.toLowerCase());
-      if (compare != 0) return compare;
-    }
-    return segmentsA.length.compareTo(segmentsB.length);
-  }
-
-  List<String> _naturalSegments(String value) {
-    return RegExp(r'\d+|\D+')
-        .allMatches(value)
-        .map((match) => match.group(0) ?? '')
-        .where((part) => part.isNotEmpty)
-        .toList();
-  }
+  DateTime? _mediaSortTimestamp(DetectionItem item) => mediaSortTimestamp(item);
 
   List<DetectionItem> _jobResultsForInputPath(
     List<ProcessingJob> jobs,
@@ -2276,6 +2237,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           }
           _jobs = jobs;
           if (previewJobUpdates.isNotEmpty) {
+            final selectedPath = _directoryScope.items.isEmpty
+                ? null
+                : _directoryScope
+                      .items[_safePreviewIndex(_directoryScope.items)]
+                      .path;
             _previewItems = _mergePreviewItems(
               _previewItems,
               previewJobUpdates,
@@ -2283,7 +2249,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             for (final item in previewJobUpdates) {
               _previewMetadataCache[item.path] = item;
             }
-            _selectedPreviewIndex = _safePreviewIndex(_previewItems);
+            _directoryScope.update(_previewItems, _inputController.text.trim());
+            final selected = _directoryScope.items.indexWhere(
+              (item) => item.path == selectedPath,
+            );
+            _selectedPreviewIndex = selected < 0 ? 0 : selected;
           }
         });
       }
@@ -3187,10 +3157,12 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
+    _directoryScope.update(_previewItems, _inputController.text.trim());
     final colorScheme = Theme.of(context).colorScheme;
     final shellColor = colorScheme.surfaceContainer;
     final showGlobalProgress =
         _loading ||
+        _directorySwitching ||
         _previewDetecting ||
         _submitting ||
         _settingsSaving ||
@@ -3215,6 +3187,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                     _buildTitleLogo(size: 28),
                     const SizedBox(width: 10),
                     Text(_pageTitles[_selectedIndex]),
+                    if ((_selectedIndex == 1 || _selectedIndex == 2) &&
+                        _directoryScope.directories.isNotEmpty) ...[
+                      const SizedBox(width: 16),
+                      Flexible(child: _buildDirectorySelector()),
+                    ],
                   ],
                 ),
                 actions: [
@@ -3322,8 +3299,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                                   SizedBox(
                                     height: 4,
                                     child: showGlobalProgress
-                                        ? const ExcludeSemantics(
-                                            child: LinearProgressIndicator(),
+                                        ? ExcludeSemantics(
+                                            child: LinearProgressIndicator(
+                                              key: _directorySwitching
+                                                  ? const ValueKey(
+                                                      'directory-switch-progress',
+                                                    )
+                                                  : null,
+                                            ),
                                           )
                                         : null,
                                   ),
@@ -3628,16 +3611,167 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
   }
 
+  void _applyDirectorySelection(String? path) {
+    setState(() {
+      _directoryScope.select(path);
+      _selectedPreviewIndex = 0;
+      _previewContentVersion++;
+    });
+    if (_directoryScope.items.isNotEmpty) {
+      unawaited(_loadPreviewMetadata(_directoryScope.items.first));
+    }
+  }
+
+  Future<void> _selectBrowseDirectory(String? path) async {
+    if (!mounted || _directorySwitching || _directoryScope.selected == path) {
+      return;
+    }
+    final root = _inputController.text.trim();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    setState(() => _directorySwitching = true);
+    messenger?.clearSnackBars();
+    messenger?.removeCurrentSnackBar();
+    final notice = messenger?.showSnackBar(
+      SnackBar(
+        content: Text(path == null ? '正在加载全部目录…' : '正在加载目录…'),
+        duration: Duration(days: 1),
+        dismissDirection: DismissDirection.none,
+      ),
+    );
+    var noticeClosed = false;
+    unawaited(notice?.closed.then((_) => noticeClosed = true));
+    try {
+      // Paint the loading state and finish the Snackbar entrance before the
+      // directory contents change. Large validation preparation yields frames.
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          root != _inputController.text.trim()) {
+        return;
+      }
+      // A metadata response can replace the source while filtering. Retry on
+      // the new snapshot rather than silently losing the requested selection.
+      while (!await _directoryScope.selectAsync(path)) {
+        if (!mounted ||
+            _closeFlowBlocksBackendStartup ||
+            root != _inputController.text.trim())
+          return;
+        if (path != null && !_directoryScope.directories.contains(path)) return;
+      }
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          root != _inputController.text.trim())
+        return;
+      _applyDirectorySelection(path);
+      // Let the validation screen start its cancellable preparation, then
+      // retain feedback until the latest directory has been painted.
+      await WidgetsBinding.instance.endOfFrame;
+      if (_selectedIndex == 2) {
+        await _validationScreenKey.currentState?.waitUntilReady();
+      }
+      if (!mounted) return;
+      await WidgetsBinding.instance.endOfFrame;
+    } catch (_) {
+      _showSnackBar('目录加载失败，请重试');
+    } finally {
+      if (mounted) setState(() => _directorySwitching = false);
+      if (messenger?.mounted == true && !noticeClosed) notice?.close();
+    }
+  }
+
+  Widget _buildDirectorySelector() {
+    final label = _directoryScope.selected == null
+        ? '全部目录'
+        : _directoryScope.label(_directoryScope.selected!);
+    final enabled =
+        !_validationBusy && !_previewDetecting && !_directorySwitching;
+    final mediaQuery = MediaQuery.of(context);
+    // Leave room below the AppBar so long menus scroll instead of covering it.
+    final maxMenuHeight =
+        (mediaQuery.size.height -
+                mediaQuery.padding.vertical -
+                mediaQuery.viewInsets.vertical -
+                kToolbarHeight -
+                24)
+            .clamp(0.0, 480.0);
+    final options = [
+      const AppMenuOption(value: '', label: '全部目录'),
+      for (final path in _directoryScope.directories)
+        AppMenuOption(value: path, label: _directoryScope.label(path)),
+    ];
+    return MenuAnchor(
+      alignmentOffset: const Offset(0, 8),
+      style: appDropdownMenuStyle(context).copyWith(
+        alignment: AlignmentDirectional.bottomStart,
+        maximumSize: WidgetStatePropertyAll(
+          Size(double.infinity, maxMenuHeight),
+        ),
+      ),
+      menuChildren: [
+        for (final option in options)
+          MenuItemButton(
+            style: appMenuItemStyle(
+              context,
+              selected: option.value == (_directoryScope.selected ?? ''),
+            ),
+            leadingIcon: option.value == (_directoryScope.selected ?? '')
+                ? const Icon(Icons.check_rounded)
+                : const SizedBox(width: 24),
+            onPressed: enabled
+                ? () => unawaited(
+                    _selectBrowseDirectory(
+                      option.value.isEmpty ? null : option.value,
+                    ),
+                  )
+                : null,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Text(option.label, overflow: TextOverflow.ellipsis),
+            ),
+          ),
+      ],
+      builder: (context, controller, child) => Tooltip(
+        message: '切换浏览目录（包含子目录）',
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 300),
+          child: FilledButton.tonal(
+            key: const ValueKey('directory-scope-selector'),
+            onPressed: enabled
+                ? () {
+                    if (controller.isOpen) {
+                      controller.close();
+                    } else {
+                      controller.open();
+                    }
+                  }
+                : null,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.folder_outlined, size: 20),
+                const SizedBox(width: 8),
+                Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+                const SizedBox(width: 4),
+                const Icon(Icons.arrow_drop_down_rounded),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildPreviewPage() {
     final inputPath = _inputController.text.trim();
     final items = inputPath.isEmpty
         ? _sortMediaItemsForDisplay(_jobs.expand((job) => job.results).toList())
-        : _previewItems;
+        : _directoryScope.items;
     final selectedIndex = _safePreviewIndex(items);
     final selectedItem = items.isEmpty ? null : items[selectedIndex];
 
     return PreviewScreen(
-      inputPath: inputPath,
+      inputPath: _directoryScope.inputPath,
       items: items,
       selectedIndex: selectedIndex,
       selectedItem: selectedItem,
@@ -3669,12 +3803,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Widget _buildValidationPage() {
-    final inputPath = _inputController.text.trim();
+    final inputPath = _directoryScope.inputPath;
     final hasDinoFilter = _dinov2ValidationPaths.isNotEmpty;
     final items = _validationItemsCache.itemsFor(
-      _previewItems,
+      _directoryScope.items,
       inputPath,
       _dinov2ValidationPaths,
+      alreadyScoped: true,
     );
     final settings = _settingsOrEmpty();
     final quickMarkSpecies = _stringListSetting(
@@ -3684,6 +3819,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
 
     final validationScreen = SpeciesValidationScreen(
+      key: _validationScreenKey,
+      interactionBlocked: _directorySwitching,
       apiClient: widget.apiClient,
       inputPath: inputPath,
       classificationModelPath: _selectedDinoV2ValidationModelPath(),

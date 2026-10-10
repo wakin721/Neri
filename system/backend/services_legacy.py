@@ -31,6 +31,7 @@ from typing import Any, Iterable
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS, XPU_ENABLED
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
+from .preview_fast import load_media_indexes
 
 from .models import (
     CreateJobRequest,
@@ -402,32 +403,19 @@ def preview_media_items(
     if not files:
         return []
 
-    detection_db_roots = (
-        _preview_detection_db_roots(input_path, output_dir, files)
-        if include_cached
-        else []
-    )
-    detection_index = (
-        _load_detection_index(
-            detection_db_roots,
-            recursive=False,
-            filenames={path.name for path in files},
-        )
-        if include_cached
-        else {}
-    )
-    validation_index = (
-        _load_validation_index(detection_db_roots, recursive=False) if include_cached else {}
+    detection_index, validation_index = (
+        load_media_indexes(files, _candidate_detection_dbs_for_roots)
+        if include_cached else ({}, {})
     )
     items: list[DetectionItem] = []
     for path in files:
         _raise_if_cancelled(cancelled)
         item = _build_fast_metadata_item(path)
         if include_cached:
-            db_detection_data = detection_index.get(path.stem)
+            db_detection_data = detection_index.get(str(path))
             if db_detection_data:
                 item = _apply_detection_data(item, db_detection_data)
-            item = _apply_validation_state(item, path.name, validation_index)
+            item = _apply_validation_state(item, str(path), validation_index)
         items.append(item)
     return items
 
@@ -443,9 +431,6 @@ def preview_media_item(file_path: str, input_dir: str | None = None, output_dir:
 
     item = _build_metadata_item(path)
     roots: list[Path] = [path.parent]
-    if input_dir:
-        input_path = Path(input_dir).expanduser()
-        roots.extend(_detection_db_search_roots(input_path, output_dir))
     validation_index = _load_validation_index(roots, recursive=False)
     db_detection_data = _load_detection_data_for_path(path, roots, recursive=False)
     if db_detection_data:
@@ -864,18 +849,12 @@ class ProcessingJobManager:
                 ),
             )
 
-            detection_db_roots = (
-                _preview_detection_db_roots(input_path, request.output_dir, files)
-                if request.options.enable_detection
-                else []
-            )
-            detection_index = (
-                _load_detection_index(
-                    detection_db_roots,
-                    filenames={path.name for path in files},
+            detection_index, _ = (
+                load_media_indexes(
+                    files, _candidate_detection_dbs_for_roots,
+                    include_validation=False,
                 )
-                if request.options.enable_detection
-                else {}
+                if request.options.enable_detection else ({}, {})
             )
             if request.options.enable_detection:
                 detector = _load_detector(
@@ -977,7 +956,7 @@ class ProcessingJobManager:
                         batch_items: list[DetectionItem] = []
                         for path in batch:
                             item = _build_metadata_item(path)
-                            db_detection_data = detection_index.get(path.stem)
+                            db_detection_data = detection_index.get(str(path))
                             if db_detection_data:
                                 item = _apply_detection_data(item, db_detection_data)
                             batch_items.append(item)
@@ -1090,7 +1069,7 @@ class ProcessingJobManager:
                         batch_items: list[DetectionItem] = []
                         for path in batch:
                             item = _build_metadata_item(path)
-                            db_detection_data = detection_index.get(path.stem)
+                            db_detection_data = detection_index.get(str(path))
                             if db_detection_data:
                                 item = _apply_detection_data(item, db_detection_data)
                             batch_items.append(item)
@@ -1124,7 +1103,7 @@ class ProcessingJobManager:
                     video_items: list[DetectionItem] = []
                     for path in video_files:
                         item = _build_metadata_item(path)
-                        db_detection_data = detection_index.get(path.stem)
+                        db_detection_data = detection_index.get(str(path))
                         if db_detection_data:
                             item = _apply_detection_data(item, db_detection_data)
                         video_items.append(item)
@@ -1945,8 +1924,11 @@ def _load_detection_data_for_path(
     *,
     recursive: bool = True,
 ) -> dict[str, Any]:
+    """Read a source-local legacy DB; retain arguments for existing callers."""
     base_name = path.stem
-    for db_path in _candidate_detection_dbs(path, search_roots, recursive=recursive):
+    # A bare filename in another directory's legacy DB has no reliable
+    # association with this file, even when the selected input is its ancestor.
+    for db_path in _candidate_detection_dbs_for_roots([path.parent], recursive=False):
         try:
             with closing(sqlite3.connect(str(db_path))) as conn:
                 row = conn.execute(
@@ -2234,6 +2216,7 @@ def _save_detection_data_for_path(path: Path, detection_data: dict[str, Any], in
 
 
 def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]], input_path: Path) -> None:
+    """Keep old-format DBs beside media, without mirroring filename keys upward."""
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
     validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
     for path, detection_data in detections:
@@ -2241,8 +2224,6 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
             logger.info("Not saving detection data for deleted file: %s", path)
             continue
         roots = [path.parent]
-        if input_path.is_dir():
-            roots.append(input_path)
 
         seen: set[Path] = set()
         for root in roots:
@@ -2419,7 +2400,7 @@ def _detect_video_track(
             request.options.selected_species_names,
         )
         output_dir = _video_processing_temp_dir()
-        extra_db_dir = str(input_path if input_path.is_dir() else input_path.parent)
+        extra_db_dir = str(path.parent)
 
         def status_callback(*_args):
             if cancelled is not None and cancelled():
@@ -2453,11 +2434,14 @@ def _detect_video_track(
             except Exception:
                 detection_data = {}
         if not detection_data:
-            detection_data = _load_detection_data_for_path(
-                path,
-                [output_dir, Path(extra_db_dir)],
-                recursive=False,
-            )
+            # The processing directory belongs to this video invocation.
+            from .preview_fast import load_detection_index_for_filenames
+            detection_data = load_detection_index_for_filenames(
+                _candidate_detection_dbs_for_roots(
+                    [output_dir, path.parent], recursive=False,
+                ),
+                {path.name}, key_by_filename=True,
+            ).get(path.name, {})
         if detection_data:
             _save_detection_data_for_path(path, detection_data, input_path)
             return _apply_detection_data(item, detection_data)
@@ -3149,12 +3133,11 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
     if not paths:
         return []
 
-    roots = _preview_detection_db_roots(input_path, None, paths)
     detection_indexes: dict[Path, dict[str, dict[str, Any]]] = {}
     filenames = {path.name for path in paths}
 
     def detection_data_for(path: Path) -> dict[str, Any]:
-        for root in _unique_existing_dirs([path.parent, *roots]):
+        for root in _unique_existing_dirs([path.parent]):
             index = detection_indexes.get(root)
             if index is None:
                 index = _load_detection_index(
@@ -3315,32 +3298,36 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
     if not files:
         raise ValueError(f"输入路径中没有支持的媒体文件: {input_path}")
 
-    detection_roots = _detection_db_search_roots(input_path, None)
-    image_info_list: list[dict[str, Any]] = []
-    earliest_date: datetime | None = None
+    detection_index, _ = load_media_indexes(
+        files, _candidate_detection_dbs_for_roots, include_validation=False,
+    )
+    rows_by_directory: dict[Path, list[dict[str, Any]]] = {}
 
     for path in files:
         metadata = _build_export_metadata(path)
-        metadata["_source_path"] = str(path)
-        detection_data = _load_detection_data_for_path(path, detection_roots)
+        detection_data = detection_index.get(str(path))
         if detection_data:
             metadata.update(detection_data)
-        image_info_list.append(metadata)
-
-        date_taken = metadata.get("拍摄日期对象")
-        if isinstance(date_taken, datetime) and (earliest_date is None or date_taken < earliest_date):
-            earliest_date = date_taken
+        metadata["_source_path"] = str(path)
+        rows_by_directory.setdefault(path.parent, []).append(metadata)
 
     from system.data_processor import DataProcessor
 
     confidence_settings = dict(request.confidence_settings or {"global": 0.25})
-    processed_data = DataProcessor.process_independent_detection(
-        image_info_list,
-        confidence_settings,
-        min_frame_ratio=request.min_frame_ratio,
-    )
-    if earliest_date:
-        processed_data = DataProcessor.calculate_working_days(processed_data, earliest_date)
+    processed_data: list[dict[str, Any]] = []
+    # Camera folders have independent event timelines and deployment dates.
+    for rows in rows_by_directory.values():
+        camera_rows = DataProcessor.process_independent_detection(
+            rows, confidence_settings, min_frame_ratio=request.min_frame_ratio,
+        )
+        earliest_date = min(
+            (row["拍摄日期对象"] for row in rows
+             if isinstance(row.get("拍摄日期对象"), datetime)),
+            default=None,
+        )
+        if earliest_date:
+            camera_rows = DataProcessor.calculate_working_days(camera_rows, earliest_date)
+        processed_data.extend(camera_rows)
 
     processed_data.sort(key=_export_filename_sort_key)
 
@@ -3404,12 +3391,12 @@ def _export_filename_sort_key(row: dict[str, Any]) -> tuple[tuple[int, int | str
 
 
 def _reload_validation_item(path: Path, input_path: Path) -> DetectionItem:
-    roots = _detection_db_search_roots(input_path, None)
+    roots = [path.parent]
     item = _build_metadata_item(path)
     detection_data = _load_detection_data_for_path(path, roots)
     if detection_data:
         item = _apply_detection_data(item, detection_data)
-    validation_index = _load_validation_index(roots)
+    validation_index = _load_validation_index(roots, recursive=False)
     return _apply_validation_state(item, path.name, validation_index)
 
 
@@ -3440,7 +3427,6 @@ def _persist_validation_updates(
 
     for path, detection_data, validated in updates:
         roots = [path.parent]
-        roots.append(input_path if input_path.is_dir() else input_path.parent)
 
         seen: set[Path] = set()
         for root in roots:

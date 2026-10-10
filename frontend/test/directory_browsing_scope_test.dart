@@ -1,0 +1,656 @@
+import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:neri_flutter/src/screens/preview_screen.dart';
+import 'package:neri_flutter/src/screens/species_validation_screen.dart';
+import 'package:neri_flutter/src/screens/settings_screen.dart';
+import 'package:neri_flutter/src/models/job.dart';
+import 'package:neri_flutter/src/utils/directory_browsing_scope.dart';
+import 'package:neri_flutter/src/utils/local_detection_items.dart';
+import 'startup_loading_test.dart' as startup;
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final root = Directory('scope-test-root').absolute.path;
+  DetectionItem item(String relative) => DetectionItem(
+    filename: relative.split('/').last,
+    path: '$root/$relative',
+    fileType: 'jpg',
+  );
+
+  test(
+    'returning to a directory reuses its filtered list until data changes',
+    () {
+      final first = item('camera-a/photo.jpg');
+      final second = item('camera-b/photo.jpg');
+      final source = [first, second];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final all = scope.items;
+      scope.select(File(first.path).parent.path);
+      final camera = scope.items;
+      scope.select(null);
+      expect(identical(scope.items, all), isTrue);
+      scope.select(File(first.path).parent.path);
+      expect(identical(scope.items, camera), isTrue);
+      final next = item('camera-a/new.jpg');
+      scope.update([first, second, next], root);
+      expect(scope.items, [first, next]);
+      expect(identical(scope.items, camera), isFalse);
+    },
+  );
+
+  test(
+    'directory preparation leaves the old selection until its filter is ready',
+    () async {
+      final source = [
+        for (var i = 0; i < 20000; i++) item('camera-${i % 4}/$i.jpg'),
+      ];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final previous = scope.items;
+      final path = File(source.first.path).parent.path;
+      final future = scope.selectAsync(path);
+      expect(identical(scope.items, previous), isTrue);
+      expect(scope.selected, isNull);
+      var timerTicks = 0;
+      final timer = Timer.periodic(
+        const Duration(milliseconds: 1),
+        (_) => timerTicks++,
+      );
+      expect(await future, isTrue);
+      timer.cancel();
+      expect(timerTicks, greaterThan(1));
+      expect(scope.selected, path);
+      expect(scope.items.length, 5000);
+      expect(
+        scope.items.every((entry) => entry.path.contains('camera-0')),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'directory preparation cannot publish after its source changes',
+    () async {
+      final source = [for (var i = 0; i < 20000; i++) item('camera-a/$i.jpg')];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final future = scope.selectAsync(File(source.first.path).parent.path);
+      final replacement = item('camera-b/new.jpg');
+      scope.update([replacement], root);
+      expect(await future, isFalse);
+      expect(scope.items, [replacement]);
+      expect(scope.selected, isNull);
+    },
+  );
+
+  test(
+    'metadata updates reuse cached membership and preserve new media order',
+    () {
+      final source = [
+        item('camera-a/1.jpg'),
+        item('camera-a/2.jpg'),
+        item('camera-b/3.jpg'),
+      ];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final camera = File(source.first.path).parent.path;
+      scope.select(camera);
+      var pathReads = 0;
+      final next = [
+        for (final entry in source.reversed)
+          _CountingPathItem(entry.path, () => pathReads++),
+      ];
+      scope.update(next, root);
+      expect(
+        pathReads,
+        lessThanOrEqualTo(9),
+        reason:
+            'Metadata changes must reuse membership instead of parsing every file path again',
+      );
+      expect(scope.items, [next[1], next[2]]);
+      scope.select(null);
+      expect(identical(scope.items, next), isTrue);
+    },
+  );
+
+  testWidgets(
+    'loading one timestamp in a large root does not sort the whole root',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final backend = startup.StartupBackend();
+      await startup.mount(tester, backend);
+      final input = Directory('startup-test-input').absolute.path;
+      backend.preview.complete(
+        http.Response(
+          jsonEncode([
+            for (var i = 0; i < 10000; i++)
+              {
+                'filename': 'same.jpg',
+                'path': '$input/camera-$i/same.jpg',
+                'file_type': 'jpg',
+                'modified_at': '2026-10-10T12:00:00',
+              },
+          ]),
+          200,
+        ),
+      );
+      await startup.settleStartup(tester);
+      await tester.tap(find.text('预览').first);
+      await tester.pump();
+      await startup.settleStartup(tester);
+      // Background decoding/sorting uses real isolates; wait for the snapshot
+      // rather than assuming a fixed number of fake-clock frames completes it.
+      for (var attempt = 0; attempt < 200; attempt++) {
+        if (tester
+                .widget<PreviewScreen>(find.byType(PreviewScreen))
+                .items
+                .length ==
+            10000)
+          break;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+      final screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(screen.items.length, 10000);
+      final photo = screen.items.last;
+      backend.previewMetadata = {
+        'filename': photo.filename,
+        'path': photo.path,
+        'file_type': 'jpg',
+        'date_taken': '2020-01-01T12:00:00',
+        'modified_at': photo.modifiedAt,
+      };
+      final watch = Stopwatch()..start();
+      await tester.runAsync(() => screen.onLoadMetadata(photo));
+      watch.stop();
+      await tester.pump();
+      final updated = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(updated.items.first.path, photo.path);
+      expect(
+        watch.elapsedMilliseconds,
+        lessThan(700),
+        reason:
+            'A single metadata update must avoid seconds of synchronous root sorting',
+      );
+      expect(tester.takeException(), isNull);
+      await startup.cleanup(tester, backend);
+    },
+  );
+
+  test(
+    'only terminal directories are listed while all media remain accessible',
+    () {
+      final first = item('camera-a/photo.jpg');
+      final nested = item('camera-a/nested/photo.jpg');
+      final second = item('camera-b/photo.jpg');
+      final source = [first, nested, second];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      expect(scope.directories.map(scope.label), [
+        'camera-a/nested',
+        'camera-b',
+      ]);
+      expect(scope.items, source);
+      scope.select(File(nested.path).parent.path);
+      expect(scope.items, [nested]);
+      expect(
+        validationItemsInInputFolder(source, scope.inputPath),
+        scope.items,
+      );
+      scope.select(File(second.path).parent.path);
+      expect(scope.items, [second]);
+      final cached = scope.items;
+      scope.update(source, root);
+      expect(identical(cached, scope.items), isTrue);
+      scope.select(null);
+      expect(scope.inputPath, root);
+      expect(scope.items, source);
+    },
+  );
+
+  test('year and site ancestors are omitted from terminal camera choices', () {
+    final source = [
+      item('2021/1号样地巴尔峡-寒山样区czc/2/photo.jpg'),
+      item('2021/1号样地巴尔峡-寒山样区czc/10/photo.jpg'),
+      item('2021/2号样地/2/photo.jpg'),
+      item('2022/1号样地/2/photo.jpg'),
+    ];
+    final scope = DirectoryBrowsingScope()..update(source, root);
+    expect(scope.directories.map(scope.label), [
+      '2021/1号样地巴尔峡-寒山样区czc/10',
+      '2021/1号样地巴尔峡-寒山样区czc/2',
+      '2021/2号样地/2',
+      '2022/1号样地/2',
+    ]);
+    scope.select(File(source.first.path).parent.path);
+    expect(scope.items, [source.first]);
+  });
+
+  test('a newly nested media directory removes its ancestor choice', () {
+    final parent = item('camera/photo.jpg');
+    final child = item('camera/nested/photo.jpg');
+    final scope = DirectoryBrowsingScope()..update([parent], root);
+    scope.select(scope.directories.single);
+    scope.update([parent, child], root);
+    expect(scope.directories.map(scope.label), ['camera/nested']);
+    expect(scope.selected, isNull);
+    expect(scope.items, [parent, child]);
+  });
+
+  test('changed roots and removed directories clear obsolete selections', () {
+    final source = [item('camera-a/photo.jpg')];
+    final scope = DirectoryBrowsingScope()..update(source, root);
+    scope.select(scope.directories.single);
+    scope.update([], root);
+    expect(scope.selected, isNull);
+    scope.update(source, root);
+    scope.select(scope.directories.single);
+    scope.update(source, '$root-other');
+    expect(scope.selected, isNull);
+    expect(scope.items, isEmpty);
+  });
+
+  test('directory cache survives empty media loads and switching roots', () {
+    final photo = item('camera/photo.jpg');
+    final directory = File(photo.path).parent.path;
+    final scope = DirectoryBrowsingScope()..update([], root);
+    scope.cacheDirectories([directory], root);
+    scope.select(directory);
+    scope.update([], root);
+    expect(scope.selected, directory);
+    scope.update([photo], root);
+    expect(scope.items, [photo]);
+    expect(scope.selected, directory);
+    scope.update([], '$root-other');
+    expect(scope.directories, isEmpty);
+    scope.update([], root);
+    expect(scope.directories, [directory]);
+    scope.select(directory);
+    scope.cacheDirectories([], root);
+    expect(scope.selected, isNull);
+    expect(scope.directories, isEmpty);
+  });
+
+  testWidgets('directory choices work before media and during refresh', (
+    tester,
+  ) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('window_manager'),
+          (call) async => call.method == 'isMaximized' ? false : null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('neri/windows_shell'),
+          (_) async => null,
+        );
+    final input = Directory('startup-test-input').absolute.path;
+    final camera = Directory('$input/camera-b').path;
+    final backend = startup.StartupBackend()
+      ..directories = [
+        Directory('$input/camera-a').path,
+        camera,
+        for (var i = 0; i < 30; i++) Directory('$input/camera-extra-$i').path,
+      ];
+    await startup.mount(tester, backend);
+    await tester.tap(find.text('预览').first);
+    await tester.pump();
+    await startup.settleStartup(tester);
+    expect(backend.preview.isCompleted, isFalse);
+    expect(
+      tester.widget<PreviewScreen>(find.byType(PreviewScreen)).loading,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    final directoryButton = find.byKey(
+      const ValueKey('directory-scope-selector'),
+    );
+    for (final height in [1100.0, 520.0]) {
+      tester.view.physicalSize = Size(1400, height);
+      await tester.pump();
+      await tester.tap(directoryButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+      final menu = find.ancestor(
+        of: find.byType(MenuItemButton).first,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Material && widget.elevation == 8,
+        ),
+      );
+      final buttonRect = tester.getRect(directoryButton);
+      final menuRect = tester.getRect(menu);
+      expect(menuRect.top, greaterThanOrEqualTo(buttonRect.bottom + 8));
+      expect(menuRect.left, closeTo(buttonRect.left, 0.1));
+      expect(menuRect.height, lessThanOrEqualTo(480));
+      expect(menuRect.bottom, lessThan(height));
+      if (height == 1100) {
+        await tester.tap(directoryButton);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 700));
+      }
+    }
+    await tester.tap(find.text('camera-b').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    expect(
+      tester.widget<PreviewScreen>(find.byType(PreviewScreen)).inputPath,
+      camera,
+    );
+    final media = http.Response(
+      jsonEncode([
+        for (final dir in ['camera-a', 'camera-b'])
+          {
+            'filename': 'same.jpg',
+            'path': '$input/$dir/same.jpg',
+            'file_type': 'jpg',
+          },
+      ]),
+      200,
+    );
+    backend.preview.complete(media);
+    await startup.settleStartup(tester);
+    var screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+    expect(screen.items.single.path, '$input/camera-b/same.jpg');
+    backend.refreshedPreview = Completer<http.Response>();
+    screen.onRefresh();
+    await tester.pump();
+    screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+    expect(screen.loading, isTrue);
+    expect(screen.items.single.path, '$input/camera-b/same.jpg');
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    backend.refreshedPreview!.complete(media);
+    await startup.settleStartup(tester);
+    await startup.cleanup(tester, backend);
+  });
+
+  testWidgets('AppBar directory selector switches duplicate media paths', (
+    tester,
+  ) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('window_manager'),
+          (call) async => call.method == 'isMaximized' ? false : null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('neri/windows_shell'),
+          (_) async => null,
+        );
+    final backend = startup.StartupBackend();
+    await startup.mount(tester, backend);
+    final input = Directory('startup-test-input').absolute.path;
+    backend.preview.complete(
+      http.Response(
+        jsonEncode([
+          for (final directory in ['camera-a', 'camera-b'])
+            {
+              'filename': 'same.jpg',
+              'path': '$input/$directory/same.jpg',
+              'file_type': 'jpg',
+            },
+        ]),
+        200,
+      ),
+    );
+    await startup.settleStartup(tester);
+    await tester.tap(find.text('预览').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(
+      find.descendant(of: find.byType(AppBar), matching: find.text('全部目录')),
+      findsOneWidget,
+    );
+    final selector = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('directory-scope-selector')),
+    );
+    expect(selector.onPressed, isNotNull);
+    await tester.tap(find.byKey(const ValueKey('directory-scope-selector')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    await tester.tap(find.text('camera-b').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    final preview = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+    expect(preview.items.map((item) => item.path), [
+      '$input/camera-b/same.jpg',
+    ]);
+    expect(
+      preview.inputPath.replaceAll('\\', '/'),
+      '$input/camera-b'.replaceAll('\\', '/'),
+    );
+    expect(tester.takeException(), isNull);
+    await startup.cleanup(tester, backend);
+  });
+
+  testWidgets(
+    'directory switching shows feedback and blocks validation before source changes',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final backend = startup.StartupBackend();
+      await startup.mount(tester, backend);
+      final input = Directory('startup-test-input').absolute.path;
+      backend.preview.complete(
+        http.Response(
+          jsonEncode([
+            for (final directory in ['camera-a', 'camera-b'])
+              {
+                'filename': 'same.jpg',
+                'path': '$input/$directory/same.jpg',
+                'file_type': 'jpg',
+              },
+          ]),
+          200,
+        ),
+      );
+      await startup.settleStartup(tester);
+      await tester.tap(find.text('校验').first);
+      await tester.pump();
+      await startup.settleStartup(tester);
+      final selector = find.byKey(const ValueKey('directory-scope-selector'));
+      await tester.tap(selector);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('camera-b').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.text('正在加载目录…'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsOneWidget,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+      expect(
+        tester
+            .widget<AbsorbPointer>(
+              find.byKey(const ValueKey('validation-directory-content')),
+            )
+            .absorbing,
+        isTrue,
+        reason:
+            'Validation must be blocked while directory filtering still displays the old snapshot',
+      );
+      await tester.pump(const Duration(milliseconds: 350));
+      await startup.settleStartup(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      final child = tester.widget<SpeciesValidationScreen>(
+        find.byType(SpeciesValidationScreen),
+      );
+      expect(child.items, hasLength(1));
+      // An already-visible notice must not queue the loading feedback behind
+      // its exit animation while the root is rebuilding.
+      ScaffoldMessenger.of(
+        tester.element(find.byType(SpeciesValidationScreen)),
+      ).showSnackBar(
+        const SnackBar(
+          content: Text('Existing notification'),
+          duration: Duration(minutes: 1),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Existing notification'), findsOneWidget);
+      await tester.tap(selector);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('全部目录').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.text('正在加载全部目录…'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsOneWidget,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+      expect(
+        tester
+            .widget<AbsorbPointer>(
+              find.byKey(const ValueKey('validation-directory-content')),
+            )
+            .absorbing,
+        isTrue,
+        reason:
+            'Validation must be blocked while directory filtering still displays the old snapshot',
+      );
+      expect(
+        tester
+            .widget<SpeciesValidationScreen>(
+              find.byType(SpeciesValidationScreen),
+            )
+            .items,
+        same(child.items),
+        reason:
+            'The loading hint must get its own frame before rebuilding the root',
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+      await startup.settleStartup(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      final all = tester.widget<SpeciesValidationScreen>(
+        find.byType(SpeciesValidationScreen),
+      );
+      expect(all.items, hasLength(2));
+      expect(Directory(all.inputPath).absolute.path, input);
+      expect(find.text('正在加载全部目录…'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('directory-switch-progress')),
+        findsNothing,
+      );
+      expect(tester.widget<FilledButton>(selector).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+      await startup.cleanup(tester, backend);
+    },
+  );
+
+  testWidgets('interleaved camera timestamps preserve per-camera bursts', (
+    tester,
+  ) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('window_manager'),
+          (call) async => call.method == 'isMaximized' ? false : null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('neri/windows_shell'),
+          (_) async => null,
+        );
+    final backend = startup.StartupBackend();
+    await startup.mount(tester, backend);
+    final input = Directory('startup-test-input').absolute.path;
+    backend.preview.complete(
+      http.Response(
+        jsonEncode([
+          for (var second = 0; second < 2; second++)
+            for (final directory in ['camera-a', 'camera-b'])
+              {
+                'filename': '$second.jpg',
+                'path': '$input/$directory/$second.jpg',
+                'file_type': 'jpg',
+                'date_taken': '2026-10-10T12:00:0$second',
+              },
+        ]),
+        200,
+      ),
+    );
+    await startup.settleStartup(tester);
+    await tester.tap(find.text('校验').first);
+    await tester.pump();
+    await startup.settleStartup(tester);
+    await tester.tap(find.text('设置').first);
+    await tester.pump();
+    await startup.settleStartup(tester);
+    expect(
+      tester
+          .widget<SettingsScreen>(find.byType(SettingsScreen))
+          .autoGroupInferredBurstSize,
+      2,
+    );
+    await startup.cleanup(tester, backend);
+  });
+}
+
+class _CountingPathItem extends DetectionItem {
+  _CountingPathItem(this.originalPath, this.onRead)
+    : super(filename: 'updated.jpg', path: originalPath, fileType: 'jpg');
+  final String originalPath;
+  final void Function() onRead;
+  @override
+  String get path {
+    onRead();
+    return originalPath;
+  }
+}

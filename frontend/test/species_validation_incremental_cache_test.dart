@@ -124,6 +124,32 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
+    for (var attempt = 0; attempt < 500; attempt++) {
+      if (find
+          .byWidgetPredicate(
+            (widget) =>
+                widget is AbsorbPointer &&
+                widget.key == const ValueKey('validation-directory-content') &&
+                widget.absorbing,
+          )
+          .evaluate()
+          .isEmpty)
+        break;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is AbsorbPointer &&
+            widget.key == const ValueKey('validation-directory-content') &&
+            widget.absorbing,
+      ),
+      findsNothing,
+    );
+
     key.currentState!.resetReadCount();
     await tester.tap(find.text('正确').first);
     await tester.pump();

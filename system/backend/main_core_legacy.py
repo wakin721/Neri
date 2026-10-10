@@ -65,6 +65,7 @@ from .model_services import (
     model_directory,
 )
 from .preview_scan import PreviewScanCoordinator
+from .preview_directories import preview_directories
 from .services import (
     JobNotFoundError,
     ProcessingJobManager,
@@ -529,6 +530,15 @@ def clear_jobs() -> None:
     """Clear all jobs from the progress list."""
 
     job_manager.clear_jobs()
+
+
+@app.get("/api/preview/directories", response_model=list[str])
+def preview_directory_list(input_path: str = Query(..., min_length=1)) -> list[str]:
+    """List terminal media folders without waiting for the media snapshot."""
+    try:
+        return preview_directories(input_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/preview", response_model=list[DetectionItem])

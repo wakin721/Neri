@@ -15,7 +15,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class StartupBackend {
   final preview = Completer<http.Response>();
+  Completer<http.Response>? refreshedPreview;
+  List<String>? directories;
   final details = <String>[];
+  Map<String, Object?>? previewMetadata;
   int settingsRequests = 0;
   int summaryRequests = 0;
   int previewRequests = 0;
@@ -73,7 +76,13 @@ class StartupBackend {
       }
       if (path == '/api/preview') {
         previewRequests++;
-        return preview.future;
+        return (refreshedPreview ?? preview).future;
+      }
+      if (path == '/api/preview/directories' && directories != null) {
+        return http.Response(jsonEncode(directories), 200);
+      }
+      if (path == '/api/preview/item' && previewMetadata != null) {
+        return http.Response(jsonEncode(previewMetadata), 200);
       }
       // Optional component checks and update-source lookup fail safely.
       return http.Response('{}', 503);
