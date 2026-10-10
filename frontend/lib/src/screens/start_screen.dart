@@ -459,20 +459,18 @@ class _ModelSelector extends StatelessWidget {
               ? selectedModelPath
               : '');
 
-    return DropdownMenu<String>(
-      initialSelection: selectedValue,
-      expandedInsets: EdgeInsets.zero,
+    return AppFormMenu<String>(
+      value: selectedValue,
       enabled: enabled,
-      menuStyle: appDropdownMenuStyle(context),
-      label: const Text('探测模型'),
+      label: '探测模型',
       helperText: _modelSelectorHelperText(
         enabled: enabled,
         models: models,
         directory: modelDirectory,
       ),
       leadingIcon: const Icon(Icons.memory_rounded),
-      dropdownMenuEntries: _modelDropdownEntries(models),
-      onSelected: enabled ? onChanged : null,
+      options: _modelDropdownEntries(models),
+      onSelected: onChanged,
     );
   }
 }
@@ -505,20 +503,18 @@ class _ClassificationModelSelector extends StatelessWidget {
               ? selectedClassificationModelPath
               : '');
 
-    return DropdownMenu<String>(
-      initialSelection: selectedValue,
-      expandedInsets: EdgeInsets.zero,
+    return AppFormMenu<String>(
+      value: selectedValue,
       enabled: enabled,
-      menuStyle: appDropdownMenuStyle(context),
-      label: const Text('分类模型'),
+      label: '分类模型',
       helperText: _modelSelectorHelperText(
         enabled: enabled,
         models: models,
         directory: modelDirectory,
       ),
       leadingIcon: const Icon(Icons.account_tree_rounded),
-      dropdownMenuEntries: _modelDropdownEntries(models),
-      onSelected: enabled ? onChanged : null,
+      options: _modelDropdownEntries(models),
+      onSelected: onChanged,
     );
   }
 }
@@ -552,15 +548,13 @@ class _VideoModeSelector extends StatelessWidget {
             videoProcessingModeSkip => '任务中忽略视频文件',
             _ => '按帧间隔追踪',
           };
-    return DropdownMenu<String>(
-      initialSelection: selectedValue,
-      expandedInsets: EdgeInsets.zero,
+    return AppFormMenu<String>(
+      value: selectedValue,
       enabled: enabled,
-      menuStyle: appDropdownMenuStyle(context),
-      label: const Text('视频处理模式'),
+      label: '视频处理模式',
       helperText: helperText,
       leadingIcon: const Icon(Icons.video_collection_rounded),
-      dropdownMenuEntries: [
+      options: [
         DropdownMenuEntry<String>(
           value: videoProcessingModeAll,
           label: '全部识别',
@@ -575,11 +569,9 @@ class _VideoModeSelector extends StatelessWidget {
           label: '跳过视频',
         ),
       ],
-      onSelected: enabled
-          ? (value) {
-              if (value != null) onChanged(value);
-            }
-          : null,
+      onSelected: (value) {
+        if (value != null) onChanged(value);
+      },
     );
   }
 }
@@ -600,25 +592,21 @@ class _VideoStrideSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selectedValue = vidStride.clamp(1, 30).toInt();
-    return DropdownMenu<int>(
-      initialSelection: selectedValue,
-      expandedInsets: EdgeInsets.zero,
+    return AppFormMenu<int>(
+      value: selectedValue,
       enabled: enabled,
-      menuStyle: appDropdownMenuStyle(context),
-      label: const Text('视频跳帧'),
+      label: '视频跳帧',
       helperText: videoProcessingEnabled(videoMode)
           ? '全部识别为帧间隔，快速识别为抽帧数'
           : '跳过视频时不可用',
       leadingIcon: const Icon(Icons.skip_next_rounded),
-      dropdownMenuEntries: [
+      options: [
         for (var value = 1; value <= 30; value++)
           DropdownMenuEntry<int>(value: value, label: value.toString()),
       ],
-      onSelected: enabled
-          ? (value) {
-              if (value != null) onChanged(value);
-            }
-          : null,
+      onSelected: (value) {
+        if (value != null) onChanged(value);
+      },
     );
   }
 }

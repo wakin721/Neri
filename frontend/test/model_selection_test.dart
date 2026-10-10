@@ -19,6 +19,7 @@ import 'package:neri_flutter/src/utils/detection_species.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
 import 'package:neri_flutter/src/utils/validation_selection_modifiers.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
+import 'package:neri_flutter/src/widgets/app_menu_style.dart';
 import 'package:neri_flutter/src/widgets/input_folder_field.dart';
 import 'package:neri_flutter/src/widgets/selectable_list_card.dart';
 
@@ -106,15 +107,15 @@ void main() {
     );
 
     final dropdowns = tester
-        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .widgetList<AppFormMenu<String>>(find.byType(AppFormMenu<String>))
         .toList();
     final detectionModelDropdown = dropdowns.first;
 
-    expect(detectionModelDropdown.initialSelection, '');
-    expect(detectionModelDropdown.dropdownMenuEntries.first.value, '');
-    expect(detectionModelDropdown.dropdownMenuEntries.first.label, '不使用');
+    expect(detectionModelDropdown.value, '');
+    expect(detectionModelDropdown.options.first.value, '');
+    expect(detectionModelDropdown.options.first.label, '不使用');
 
-    detectionModelDropdown.onSelected?.call('');
+    detectionModelDropdown.onSelected('');
     expect(selectedModelPath, '');
   });
 
@@ -170,25 +171,22 @@ void main() {
     );
 
     final videoModeDropdown = tester
-        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .widgetList<AppFormMenu<String>>(find.byType(AppFormMenu<String>))
         .singleWhere(
-          (dropdown) => dropdown.dropdownMenuEntries.any(
+          (dropdown) => dropdown.options.any(
             (entry) => entry.value == videoProcessingModeSkip,
           ),
         );
-    final strideDropdown = tester.widget<DropdownMenu<int>>(
-      find.byType(DropdownMenu<int>),
+    final strideDropdown = tester.widget<AppFormMenu<int>>(
+      find.byType(AppFormMenu<int>),
     );
 
-    expect(videoModeDropdown.initialSelection, videoProcessingModeSkip);
+    expect(videoModeDropdown.value, videoProcessingModeSkip);
     expect(
-      videoModeDropdown.dropdownMenuEntries
-          .map((entry) => entry.label)
-          .toList(),
+      videoModeDropdown.options.map((entry) => entry.label).toList(),
       contains('跳过视频'),
     );
     expect(strideDropdown.enabled, isFalse);
-    expect(strideDropdown.onSelected, isNull);
   });
 
   testWidgets('检测设置使用弹出菜单选择视频模式并隐藏跳帧设置', (tester) async {
@@ -256,6 +254,69 @@ void main() {
     expect(find.text('全部识别'), findsWidgets);
     expect(find.text('快速识别'), findsWidgets);
     expect(find.text('跳过视频'), findsWidgets);
+  });
+
+  testWidgets('设置页长模型菜单不遮挡选择按钮', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((_) async => http.Response('{}', 200)),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: const <String>['.jpg'],
+              supportedVideoExtensions: const <String>['.mp4'],
+              modelDirectory: 'res/model/detect',
+              classificationModelDirectory: 'res/model/cls',
+              availableModels: [
+                for (var index = 0; index < 20; index++)
+                  ModelInfo(
+                    name: 'model-$index.pt',
+                    path: 'res/model/detect/model-$index.pt',
+                  ),
+              ],
+              availableClassificationModels: const <ModelInfo>[],
+              speciesTypes: const <String, String>{},
+              settings: const <String, dynamic>{},
+              gpuAvailable: false,
+              missingYoloDependencies: const <String>[],
+            ),
+            autoGroupInferredBurstSize: null,
+            apiClient: apiClient,
+            themeNotifier: themeNotifier,
+            onUpdateTheme: (_) {},
+            closeBehavior: 'ask',
+            onCloseBehaviorChanged: (_) {},
+            onSaveSettings: (_) async {},
+            onCheckForUpdates:
+                ({required channel, required downloadSource}) async {},
+            onShowMessage: (_) {},
+          ),
+        ),
+      ),
+    );
+    final trigger = find.widgetWithText(TextButton, '不使用').first;
+    await tester.ensureVisible(trigger);
+    await tester.pumpAndSettle();
+    await tester.tap(trigger);
+    await tester.pumpAndSettle();
+
+    final menuItem = find.widgetWithText(MenuItemButton, 'model-0.pt');
+    final menuScrollView = find
+        .ancestor(of: menuItem, matching: find.byType(SingleChildScrollView))
+        .first;
+    expect(
+      tester.getRect(menuScrollView).overlaps(tester.getRect(trigger)),
+      isFalse,
+    );
   });
 
   testWidgets('设置页有未保存修改时仍同步开始页的模型选择', (tester) async {

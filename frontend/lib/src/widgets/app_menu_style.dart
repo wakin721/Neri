@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 class AppMenuOption<T> {
@@ -97,6 +99,112 @@ class AppMenuButton<T> extends StatelessWidget {
     }
     return null;
   }
+}
+
+class AppFormMenu<T> extends StatelessWidget {
+  const AppFormMenu({
+    required this.value,
+    required this.label,
+    required this.helperText,
+    required this.leadingIcon,
+    required this.options,
+    required this.onSelected,
+    this.enabled = true,
+    super.key,
+  });
+
+  final T? value;
+  final String label;
+  final String helperText;
+  final Widget leadingIcon;
+  final List<DropdownMenuEntry<T>> options;
+  final ValueChanged<T?> onSelected;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = options.where((option) => option.value == value);
+    final selectedLabel = selected.isEmpty ? '请选择' : selected.first.label;
+    final menuWidth = MediaQuery.sizeOf(
+      context,
+    ).width.clamp(180.0, 360.0).toDouble();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.clamp(180.0, menuWidth).toDouble();
+        return MenuAnchor(
+          style: appMenuStyle(context, minWidth: width),
+          menuChildren: [
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: appMenuMaxHeight(context),
+                minWidth: width,
+              ),
+              child: SingleChildScrollView(
+                primary: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final option in options)
+                      MenuItemButton(
+                        style: appMenuItemStyle(
+                          context,
+                          selected: option.value == value,
+                          minWidth: width - 12,
+                        ),
+                        leadingIcon: option.value == value
+                            ? const Icon(Icons.check_rounded)
+                            : const SizedBox(width: 24),
+                        onPressed: enabled && option.enabled
+                            ? () => onSelected(option.value)
+                            : null,
+                        child: SizedBox(
+                          width: width - 60,
+                          child: Text(
+                            option.label,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          builder: (context, controller, child) => Semantics(
+            button: true,
+            enabled: enabled,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: enabled
+                  ? () => controller.isOpen
+                        ? controller.close()
+                        : controller.open()
+                  : null,
+              child: InputDecorator(
+                isFocused: controller.isOpen,
+                isEmpty: false,
+                decoration: InputDecoration(
+                  labelText: label,
+                  helperText: helperText,
+                  enabled: enabled,
+                  prefixIcon: leadingIcon,
+                  suffixIcon: const Icon(Icons.arrow_drop_down_rounded),
+                ),
+                child: Text(selectedLabel, overflow: TextOverflow.ellipsis),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+double appMenuMaxHeight(BuildContext context) {
+  final media = MediaQuery.of(context);
+  final availableHeight =
+      media.size.height - media.padding.vertical - media.viewInsets.vertical;
+  return math.min(320, math.max(64, availableHeight / 2 - 80));
 }
 
 MenuStyle appMenuStyle(

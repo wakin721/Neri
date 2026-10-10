@@ -1,3 +1,4 @@
+import 'package:neri_flutter/src/widgets/app_menu_style.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -110,15 +111,11 @@ void main() {
     await tester.pump();
 
     final dropdowns = tester
-        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .widgetList<AppFormMenu<String>>(find.byType(AppFormMenu<String>))
         .toList();
     final detection = dropdowns.first;
-    final labels = detection.dropdownMenuEntries
-        .map((entry) => entry.label)
-        .toList();
-    final values = detection.dropdownMenuEntries
-        .map((entry) => entry.value)
-        .toList();
+    final labels = detection.options.map((entry) => entry.label).toList();
+    final values = detection.options.map((entry) => entry.value).toList();
 
     expect(
       labels,
@@ -135,13 +132,11 @@ void main() {
       containsAll(<String>[_userDetectionPath, _cloudDetectionPath]),
     );
     expect(
-      detection.dropdownMenuEntries
-          .singleWhere((entry) => entry.label == '用户模型')
-          .enabled,
+      detection.options.singleWhere((entry) => entry.label == '用户模型').enabled,
       isFalse,
     );
     expect(
-      detection.dropdownMenuEntries
+      detection.options
           .singleWhere((entry) => entry.label == 'NeriCloud')
           .enabled,
       isFalse,
@@ -287,10 +282,7 @@ void main() {
           final decoration =
               tester.widget<Container>(notice).decoration! as BoxDecoration;
           final scheme = Theme.of(tester.element(status)).colorScheme;
-          expect(
-            decoration.color,
-            scheme.error.withValues(alpha: 0.10),
-          );
+          expect(decoration.color, scheme.error.withValues(alpha: 0.10));
           expect(
             find.text('安装依赖'),
             missingDependencies ? findsOneWidget : findsNothing,

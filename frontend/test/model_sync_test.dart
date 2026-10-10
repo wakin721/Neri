@@ -1,3 +1,4 @@
+import 'package:neri_flutter/src/widgets/app_menu_style.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -80,10 +81,10 @@ void main() {
     expect(status.state, 'checking');
     expect(started.runId, 'run-1');
     expect(requests.map((request) => request.method), <String>['GET', 'POST']);
-    expect(
-      requests.map((request) => request.url.path),
-      <String>['/api/model-sync/status', '/api/model-sync/run'],
-    );
+    expect(requests.map((request) => request.url.path), <String>[
+      '/api/model-sync/status',
+      '/api/model-sync/run',
+    ]);
   });
 
   testWidgets('duplicate model filenames show user and NeriCloud sources', (
@@ -153,58 +154,65 @@ void main() {
     );
 
     final modelMenu = tester
-        .widgetList<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .widgetList<AppFormMenu<String>>(find.byType(AppFormMenu<String>))
         .first;
-    final entries = modelMenu.dropdownMenuEntries;
+    final entries = modelMenu.options;
     final labels = entries.map((entry) => entry.label);
-    expect(labels, containsAllInOrder(<String>['用户模型', 'bird.pt', 'NeriCloud', 'bird.pt']));
-    expect(entries.singleWhere((entry) => entry.label == '用户模型').enabled, isFalse);
-    expect(entries.singleWhere((entry) => entry.label == 'NeriCloud').enabled, isFalse);
+    expect(
+      labels,
+      containsAllInOrder(<String>['用户模型', 'bird.pt', 'NeriCloud', 'bird.pt']),
+    );
+    expect(
+      entries.singleWhere((entry) => entry.label == '用户模型').enabled,
+      isFalse,
+    );
+    expect(
+      entries.singleWhere((entry) => entry.label == 'NeriCloud').enabled,
+      isFalse,
+    );
   });
 
-  testWidgets('sync controller refreshes catalog once when active run finishes', (
-    tester,
-  ) async {
-    var statusReads = 0;
-    var catalogRefreshes = 0;
-    final client = NeriApiClient(
-      httpClient: MockClient((request) async {
-        if (request.method == 'POST') {
+  testWidgets(
+    'sync controller refreshes catalog once when active run finishes',
+    (tester) async {
+      var statusReads = 0;
+      var catalogRefreshes = 0;
+      final client = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.method == 'POST') {
+            return http.Response('{"state":"checking","run_id":"run-1"}', 202);
+          }
+          statusReads++;
+          if (statusReads == 1) {
+            return http.Response(
+              '{"state":"downloading","run_id":"run-1",'
+              '"current_file":"detect/bird.pt","received_bytes":5,'
+              '"total_bytes":10}',
+              200,
+            );
+          }
           return http.Response(
-            '{"state":"checking","run_id":"run-1"}',
-            202,
-          );
-        }
-        statusReads++;
-        if (statusReads == 1) {
-          return http.Response(
-            '{"state":"downloading","run_id":"run-1",'
-            '"current_file":"detect/bird.pt","received_bytes":5,'
-            '"total_bytes":10}',
+            '{"state":"completed","run_id":"run-1",'
+            '"received_bytes":10,"total_bytes":10}',
             200,
           );
-        }
-        return http.Response(
-          '{"state":"completed","run_id":"run-1",'
-          '"received_bytes":10,"total_bytes":10}',
-          200,
-        );
-      }),
-    );
-    final controller = ModelSyncController(
-      client,
-      pollInterval: const Duration(milliseconds: 10),
-      onCatalogChanged: () async => catalogRefreshes++,
-    );
-    addTearDown(controller.dispose);
+        }),
+      );
+      final controller = ModelSyncController(
+        client,
+        pollInterval: const Duration(milliseconds: 10),
+        onCatalogChanged: () async => catalogRefreshes++,
+      );
+      addTearDown(controller.dispose);
 
-    await controller.runNow();
-    await tester.pump(const Duration(milliseconds: 15));
-    await tester.pump(const Duration(milliseconds: 15));
-    await tester.pump(const Duration(milliseconds: 15));
+      await controller.runNow();
+      await tester.pump(const Duration(milliseconds: 15));
+      await tester.pump(const Duration(milliseconds: 15));
+      await tester.pump(const Duration(milliseconds: 15));
 
-    expect(controller.status?.state, 'completed');
-    expect(catalogRefreshes, 1);
-    expect(statusReads, greaterThanOrEqualTo(2));
-  });
+      expect(controller.status?.state, 'completed');
+      expect(catalogRefreshes, 1);
+      expect(statusReads, greaterThanOrEqualTo(2));
+    },
+  );
 }

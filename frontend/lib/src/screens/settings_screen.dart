@@ -3262,25 +3262,41 @@ class _SettingsMenuButton<T> extends StatelessWidget {
       child: MenuAnchor(
         style: appMenuStyle(context, minWidth: minMenuWidth),
         menuChildren: [
-          for (final option in options)
-            MenuItemButton(
-              style: appMenuItemStyle(
-                context,
-                selected: option.value == value,
-                minWidth: minMenuWidth,
-              ),
-              leadingIcon: option.value == value
-                  ? const Icon(Icons.check_rounded)
-                  : const SizedBox(width: 24),
-              onPressed: option.enabled ? () => onChanged(option.value) : null,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: minMenuWidth,
-                  maxWidth: maxMenuWidth,
-                ),
-                child: Text(option.label, overflow: TextOverflow.ellipsis),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: appMenuMaxHeight(context)),
+            child: SingleChildScrollView(
+              primary: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final option in options)
+                    MenuItemButton(
+                      style: appMenuItemStyle(
+                        context,
+                        selected: option.value == value,
+                        minWidth: minMenuWidth,
+                      ),
+                      leadingIcon: option.value == value
+                          ? const Icon(Icons.check_rounded)
+                          : const SizedBox(width: 24),
+                      onPressed: option.enabled
+                          ? () => onChanged(option.value)
+                          : null,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: minMenuWidth,
+                          maxWidth: maxMenuWidth,
+                        ),
+                        child: Text(
+                          option.label,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
+          ),
         ],
         builder: (context, controller, child) {
           return TextButton(
