@@ -324,6 +324,6 @@
     "limitation": "Calibration diagnostics only; no independent test.123 images/117 acquisition proxies,43 sparse species; shared-camera exception explicitly retained."
   },
   "method": "seq_memory",
-  "display_name": "DINOv2 Seq Memory Val90 (42类)",
+  "display_name": "DINOv2 Seq",
   "default_rejection": "Val90"
 }

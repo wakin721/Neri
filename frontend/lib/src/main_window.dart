@@ -32,6 +32,7 @@ import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
 import 'utils/directory_browsing_scope.dart';
 import 'widgets/retained_tab.dart';
+import 'widgets/app_menu_style.dart';
 
 const _lastInputPathKey = 'last_input_path';
 
@@ -3683,42 +3684,71 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final label = _directoryScope.selected == null
         ? '全部目录'
         : _directoryScope.label(_directoryScope.selected!);
-    return PopupMenuButton<String>(
-      tooltip: '切换浏览目录（包含子目录）',
-      enabled: !_validationBusy && !_previewDetecting,
-      onSelected: (value) {
-        setState(() {
-          _directoryScope.select(value.isEmpty ? null : value);
-          _selectedPreviewIndex = 0;
-          _previewContentVersion++;
-        });
-        if (_directoryScope.items.isNotEmpty) {
-          unawaited(_loadPreviewMetadata(_directoryScope.items.first));
-        }
-      },
-      itemBuilder: (context) => [
-        const PopupMenuItem(value: '', child: Text('全部目录')),
-        for (final path in _directoryScope.directories)
-          PopupMenuItem(value: path, child: Text(_directoryScope.label(path))),
+    final enabled = !_validationBusy && !_previewDetecting;
+    final options = [
+      const AppMenuOption(value: '', label: '全部目录'),
+      for (final path in _directoryScope.directories)
+        AppMenuOption(value: path, label: _directoryScope.label(path)),
+    ];
+    return MenuAnchor(
+      style: appDropdownMenuStyle(context),
+      menuChildren: [
+        for (final option in options)
+          MenuItemButton(
+            style: appMenuItemStyle(
+              context,
+              selected: option.value == (_directoryScope.selected ?? ''),
+            ),
+            leadingIcon: option.value == (_directoryScope.selected ?? '')
+                ? const Icon(Icons.check_rounded)
+                : const SizedBox(width: 24),
+            onPressed: enabled
+                ? () {
+                    setState(() {
+                      _directoryScope.select(
+                        option.value.isEmpty ? null : option.value,
+                      );
+                      _selectedPreviewIndex = 0;
+                      _previewContentVersion++;
+                    });
+                    if (_directoryScope.items.isNotEmpty) {
+                      unawaited(
+                        _loadPreviewMetadata(_directoryScope.items.first),
+                      );
+                    }
+                  }
+                : null,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Text(option.label, overflow: TextOverflow.ellipsis),
+            ),
+          ),
       ],
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 300),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.folder_outlined, size: 20),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(
-                  label,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-              ),
-              const Icon(Icons.arrow_drop_down_rounded),
-            ],
+      builder: (context, controller, child) => Tooltip(
+        message: '切换浏览目录（包含子目录）',
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 300),
+          child: FilledButton.tonal(
+            key: const ValueKey('directory-scope-selector'),
+            onPressed: enabled
+                ? () {
+                    if (controller.isOpen) {
+                      controller.close();
+                    } else {
+                      controller.open();
+                    }
+                  }
+                : null,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.folder_outlined, size: 20),
+                const SizedBox(width: 8),
+                Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+                const SizedBox(width: 4),
+                const Icon(Icons.arrow_drop_down_rounded),
+              ],
+            ),
           ),
         ),
       ),

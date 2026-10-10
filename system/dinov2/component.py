@@ -271,7 +271,7 @@ def _replace_default_classifier(
     manifest = _read_json_object(paths.model_manifest)
     display_name = "DINOv2 Within-Seq" if checkpoint.head_type == "memory_within_seq" else "DINOv2 Memory"
     if checkpoint.head_type == "memory" and checkpoint.calibration.get("point") == "Val90":
-        display_name = f"DINOv2 Seq Memory Val90 ({len(checkpoint.classes)}类)"
+        display_name = "DINOv2 Seq"
     manifest.update(
         checkpoint=target.name,
         display_name=display_name,

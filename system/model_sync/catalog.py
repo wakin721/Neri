@@ -77,8 +77,13 @@ def _manifest_model(path: Path, source: ModelSource):
         return None
     dim = payload.get("feature_dim")
     dim = dim if isinstance(dim, int) else None
+    name = str(payload.get("display_name") or path.name)
+    # Keep existing installations on the current display name without rewriting
+    # their verified manifests or changing model paths.
+    if name == "DINOv2 Seq Memory Val90 (42类)":
+        name = "DINOv2 Seq"
     model = DiscoveredModel(
-        str(payload.get("display_name") or path.name),
+        name,
         str(path.resolve()),
         _size(checkpoint),
         source,

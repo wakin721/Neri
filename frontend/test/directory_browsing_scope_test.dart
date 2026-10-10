@@ -143,11 +143,13 @@ void main() {
     );
     expect(
       tester
-          .widget<PopupMenuButton<String>>(find.byType(PopupMenuButton<String>))
-          .enabled,
-      isTrue,
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          )
+          .onPressed,
+      isNotNull,
     );
-    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.tap(find.byKey(const ValueKey('directory-scope-selector')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump(const Duration(milliseconds: 350));
@@ -181,9 +183,11 @@ void main() {
     expect(screen.items.single.path, '$input/camera-b/same.jpg');
     expect(
       tester
-          .widget<PopupMenuButton<String>>(find.byType(PopupMenuButton<String>))
-          .enabled,
-      isTrue,
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          )
+          .onPressed,
+      isNotNull,
     );
     backend.refreshedPreview!.complete(media);
     await startup.settleStartup(tester);
@@ -227,11 +231,11 @@ void main() {
       find.descendant(of: find.byType(AppBar), matching: find.text('全部目录')),
       findsOneWidget,
     );
-    final selector = tester.widget<PopupMenuButton<String>>(
-      find.byType(PopupMenuButton<String>),
+    final selector = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('directory-scope-selector')),
     );
-    expect(selector.enabled, isTrue);
-    await tester.tap(find.byType(PopupMenuButton<String>));
+    expect(selector.onPressed, isNotNull);
+    await tester.tap(find.byKey(const ValueKey('directory-scope-selector')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump(const Duration(milliseconds: 350));
