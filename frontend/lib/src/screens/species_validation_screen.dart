@@ -400,8 +400,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   bool _marking = false;
   bool _exporting = false;
   String? _selectedObservationId;
-  DetectionBox? _selectedDetectionBox;
-  String? _selectedDetectionPath;
   int _feedbackOperationSequence = 0;
   final List<_MarkHistoryEntry> _markHistory = <_MarkHistoryEntry>[];
   final List<String> _pendingSpeciesNames = <String>[];
@@ -731,7 +729,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
-    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     // 将 220.0 修改为 200.0，与预览界面保持完全一致
     final listWidth = (availableWidth * 0.20).clamp(200.0, 300.0).toDouble();
     return Row(
@@ -747,10 +744,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(child: _buildImagePanel(selectedItem, visibleBoxes)),
-              if (selectedDinoBox != null) ...[
-                const SizedBox(height: 10),
-                _buildDinoFeedbackPanel(selectedDinoBox, visibleBoxes),
-              ],
               const SizedBox(height: 10),
               _buildSummaryPanel(selectedItem, visibleBoxes),
               const SizedBox(height: 10),
@@ -770,21 +763,16 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem selectedItem,
   ) {
     final visibleBoxes = _filteredBoxes(selectedItem);
-    final selectedDinoBox = _selectedDinoBox(visibleBoxes);
     return ListView(
       children: [
         SizedBox(
           height: 330,
           child: _buildImagePanel(selectedItem, visibleBoxes),
         ),
-        if (selectedDinoBox != null) ...[
-          const SizedBox(height: 10),
-          _buildDinoFeedbackPanel(selectedDinoBox, visibleBoxes),
-        ],
         const SizedBox(height: 10),
         SizedBox(height: 260, child: _buildLeftLists(buckets, visibleRows)),
         const SizedBox(height: 10),
-        SizedBox(height: 260, child: _buildRightActions(selectedItem)),
+        SizedBox(height: 330, child: _buildRightActions(selectedItem)),
         const SizedBox(height: 10),
         _buildSummaryPanel(selectedItem, visibleBoxes),
         const SizedBox(height: 10),
@@ -1029,9 +1017,10 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         onDetectionBoxSelected: (box) {
           setState(() {
             _selectedObservationId = box?.observationId;
-            _selectedDetectionBox = box;
-            _selectedDetectionPath = box == null ? null : item.path;
           });
+          if (box != null) {
+            unawaited(_showDinoBoxDialog(item, box, visibleBoxes));
+          }
         },
         isFavorite: _isFavoritePhoto(item),
         onToggleFavorite: _isImage(item) || _isVideo(item)
@@ -1041,14 +1030,91 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     );
   }
 
-  DetectionBox? _selectedDinoBox(List<DetectionBox> visibleBoxes) {
-    if (_selectedDetectionPath != _selectedPath) return null;
-    final selectedBox = _selectedDetectionBox;
-    if (selectedBox == null) return null;
-    for (final box in visibleBoxes) {
-      if (_sameDetectionBoxSelection(box, selectedBox)) return box;
-    }
-    return null;
+  Future<void> _showDinoBoxDialog(
+    DetectionItem item,
+    DetectionBox selectedBox,
+    List<DetectionBox> visibleBoxes,
+  ) async {
+    var busy = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final currentItem = _bucketCacheItemByPath[item.path] ?? item;
+          final box = currentItem.detectionBoxes.firstWhere(
+            (candidate) => _sameDetectionBoxSelection(candidate, selectedBox),
+            orElse: () => selectedBox,
+          );
+          final numberedBoxes = [
+            for (final candidate in visibleBoxes)
+              _sameDetectionBoxSelection(candidate, selectedBox)
+                  ? box
+                  : candidate,
+          ];
+          final classificationModelPath =
+              widget.classificationModelPath?.trim() ?? '';
+          final observationId = box.observationId?.trim() ?? '';
+
+          Future<void> runAction(Future<void> Function() action) async {
+            if (busy || _marking) return;
+            setDialogState(() => busy = true);
+            try {
+              await action();
+            } finally {
+              if (dialogContext.mounted) {
+                setDialogState(() => busy = false);
+              }
+            }
+          }
+
+          return AlertDialog(
+            key: const ValueKey('dinov2-detection-box-dialog'),
+            title: const Text('特征空间位置与最近类别'),
+            content: SizedBox(
+              width: 680,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildDinoFeedbackPanel(
+                      box,
+                      numberedBoxes,
+                      busy: busy,
+                      onFeedback: (action) => unawaited(
+                        runAction(() => _submitDinoBoxFeedback(box, action)),
+                      ),
+                      onEditSpecies: () => unawaited(
+                        runAction(() => _showDinoBoxSpeciesDialog(box)),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (classificationModelPath.isNotEmpty &&
+                        observationId.isNotEmpty)
+                      DinoV2FeatureExplanationPanel(
+                        apiClient: widget.apiClient,
+                        classificationModelPath: classificationModelPath,
+                        observationId: observationId,
+                      )
+                    else
+                      Text(
+                        classificationModelPath.isEmpty
+                            ? '请先选择 DINOv2 分类模型'
+                            : '该检测框没有可用的特征空间数据',
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   String _newFeedbackOperationId() {
@@ -1162,14 +1228,18 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   Widget _buildDinoFeedbackPanel(
     DetectionBox box,
-    List<DetectionBox> visibleBoxes,
-  ) {
+    List<DetectionBox> visibleBoxes, {
+    required bool busy,
+    required ValueChanged<String> onFeedback,
+    required VoidCallback onEditSpecies,
+  }) {
     final title = dinoV2FeedbackPanelTitle(box, visibleBoxes);
     final classificationModelPath =
         widget.classificationModelPath?.trim() ?? '';
     final observationId = box.observationId?.trim() ?? '';
     final canSubmit =
         !_marking &&
+        !busy &&
         classificationModelPath.isNotEmpty &&
         observationId.isNotEmpty;
     final bboxSummary = box.bbox
@@ -1192,52 +1262,26 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                Expanded(
-                  child: DefaultTextStyle.merge(
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                    child: Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            title.substring(0, title.length - '检测框校验'.length),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const Text('检测框校验'),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
                 OutlinedButton(
-                  onPressed: canSubmit
-                      ? () => unawaited(_submitDinoBoxFeedback(box, 'correct'))
-                      : null,
+                  onPressed: canSubmit ? () => onFeedback('correct') : null,
                   child: const Text('正确'),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton(
-                  onPressed: canSubmit
-                      ? () => unawaited(_showDinoBoxSpeciesDialog(box))
-                      : null,
+                  onPressed: canSubmit ? onEditSpecies : null,
                   child: const Text('修改物种'),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton(
-                  onPressed: canSubmit
-                      ? () => unawaited(_submitDinoBoxFeedback(box, 'empty'))
-                      : null,
+                  onPressed: canSubmit ? () => onFeedback('empty') : null,
                   child: const Text('空 / 误检'),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton(
-                  onPressed: canSubmit
-                      ? () =>
-                            unawaited(_submitDinoBoxFeedback(box, 'unverified'))
-                      : null,
+                  onPressed: canSubmit ? () => onFeedback('unverified') : null,
                   child: const Text('不参与学习'),
                 ),
               ],
@@ -1419,19 +1463,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final summary = _summaryFor(item, visibleBoxes);
     final colorScheme = Theme.of(context).colorScheme;
     final confidenceLabel = widget.useCombinedConfidence ? '综合置信度' : '置信度';
-    final selectedBox = _selectedDinoBox(visibleBoxes);
-    final observationId = selectedBox?.observationId?.trim() ?? '';
-    final classificationModelPath =
-        widget.classificationModelPath?.trim() ?? '';
-    final canExplain =
-        classificationModelPath.isNotEmpty && observationId.isNotEmpty;
-    final explanationTooltip = classificationModelPath.isEmpty
-        ? '请先选择 DINOv2 分类模型'
-        : selectedBox == null
-        ? '请先点击图像中的检测框'
-        : observationId.isEmpty
-        ? '该检测框没有可用的特征空间数据'
-        : '特征空间位置与最近类别';
 
     return _ValidationPanel(
       child: Padding(
@@ -1461,36 +1492,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   fontWeight: FontWeight.w600,
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.filledTonal(
-              key: const ValueKey('dinov2-feature-explanation-button'),
-              tooltip: explanationTooltip,
-              icon: const Icon(Icons.scatter_plot_rounded),
-              onPressed: canExplain
-                  ? () => showDialog<void>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('特征空间位置与最近类别'),
-                        content: SizedBox(
-                          width: 680,
-                          child: SingleChildScrollView(
-                            child: DinoV2FeatureExplanationPanel(
-                              apiClient: widget.apiClient,
-                              classificationModelPath: classificationModelPath,
-                              observationId: observationId,
-                            ),
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            child: const Text('关闭'),
-                          ),
-                        ],
-                      ),
-                    )
-                  : null,
             ),
           ],
         ),
