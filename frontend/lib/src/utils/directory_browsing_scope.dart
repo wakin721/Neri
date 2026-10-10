@@ -6,6 +6,8 @@ import 'local_detection_items.dart';
 /// Keeps a small per-root directory cache independently of media loading.
 class DirectoryBrowsingScope {
   final _directoryCache = <String, List<String>>{};
+  final _filteredCache = <String, List<DetectionItem>>{};
+  Set<String> _sourcePaths = const {};
   List<DetectionItem>? _source;
   String _root = '';
   String? _selected;
@@ -29,15 +31,25 @@ class DirectoryBrowsingScope {
 
   void update(List<DetectionItem> source, String root) {
     if (identical(source, _source) && root == _root) return;
+    final samePaths =
+        root == _root &&
+        source.length == _source?.length &&
+        source.every((item) => _sourcePaths.contains(item.path));
     if (root != _root) _selected = null;
+    _sourcePaths = {for (final item in source) item.path};
     _root = root;
     _source = source;
+    _filteredCache.clear();
     final cached = _directoryCache[root];
     if (cached != null) {
       directories = cached;
       if (_selected != null && !directories.contains(_selected)) {
         _selected = null;
       }
+      _filter();
+      return;
+    }
+    if (samePaths) {
       _filter();
       return;
     }
@@ -64,6 +76,7 @@ class DirectoryBrowsingScope {
   }
 
   void select(String? path) {
+    if (_selected == path) return;
     _selected = path;
     _filter();
   }
@@ -80,7 +93,13 @@ class DirectoryBrowsingScope {
   void _filter() {
     _items = inputPath.isEmpty
         ? (_source ?? const [])
-        : validationItemsInInputFolder(_source ?? const [], inputPath);
+        : _filteredCache.putIfAbsent(
+            inputPath,
+            () => validationItemsInInputFolder(_source ?? const [], inputPath),
+          );
+    if (_filteredCache.length > 8) {
+      _filteredCache.remove(_filteredCache.keys.first);
+    }
   }
 
   String _key(String path) {

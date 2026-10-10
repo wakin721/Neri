@@ -75,6 +75,7 @@ frontend/*
 !frontend/lib/**
 !frontend/test/
 frontend/test/*
+!frontend/test/media_display_order_test.dart
 !frontend/test/app_updater_test.dart
 !frontend/test/close_behavior_test.dart
 !frontend/test/job_result_refresh_test.dart

@@ -23,6 +23,102 @@ void main() {
   );
 
   test(
+    'returning to a directory reuses its filtered list until data changes',
+    () {
+      final first = item('camera-a/photo.jpg');
+      final second = item('camera-b/photo.jpg');
+      final source = [first, second];
+      final scope = DirectoryBrowsingScope()..update(source, root);
+      final all = scope.items;
+      scope.select(File(first.path).parent.path);
+      final camera = scope.items;
+      scope.select(null);
+      expect(identical(scope.items, all), isTrue);
+      scope.select(File(first.path).parent.path);
+      expect(identical(scope.items, camera), isTrue);
+      final next = item('camera-a/new.jpg');
+      scope.update([first, second, next], root);
+      expect(scope.items, [first, next]);
+      expect(identical(scope.items, camera), isFalse);
+    },
+  );
+
+  testWidgets(
+    'loading one timestamp in a large root does not sort the whole root',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final backend = startup.StartupBackend();
+      await startup.mount(tester, backend);
+      final input = Directory('startup-test-input').absolute.path;
+      backend.preview.complete(
+        http.Response(
+          jsonEncode([
+            for (var i = 0; i < 10000; i++)
+              {
+                'filename': 'same.jpg',
+                'path': '$input/camera-$i/same.jpg',
+                'file_type': 'jpg',
+                'modified_at': '2026-10-10T12:00:00',
+              },
+          ]),
+          200,
+        ),
+      );
+      await startup.settleStartup(tester);
+      await tester.tap(find.text('预览').first);
+      await tester.pump();
+      await startup.settleStartup(tester);
+      // Background decoding/sorting uses real isolates; wait for the snapshot
+      // rather than assuming a fixed number of fake-clock frames completes it.
+      for (var attempt = 0; attempt < 200; attempt++) {
+        if (tester
+                .widget<PreviewScreen>(find.byType(PreviewScreen))
+                .items
+                .length ==
+            10000)
+          break;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+      final screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(screen.items.length, 10000);
+      final photo = screen.items.last;
+      backend.previewMetadata = {
+        'filename': photo.filename,
+        'path': photo.path,
+        'file_type': 'jpg',
+        'date_taken': '2020-01-01T12:00:00',
+        'modified_at': photo.modifiedAt,
+      };
+      final watch = Stopwatch()..start();
+      await tester.runAsync(() => screen.onLoadMetadata(photo));
+      watch.stop();
+      await tester.pump();
+      final updated = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+      expect(updated.items.first.path, photo.path);
+      expect(
+        watch.elapsedMilliseconds,
+        lessThan(700),
+        reason:
+            'A single metadata update must avoid seconds of synchronous root sorting',
+      );
+      expect(tester.takeException(), isNull);
+      await startup.cleanup(tester, backend);
+    },
+  );
+
+  test(
     'only terminal directories are listed while all media remain accessible',
     () {
       final first = item('camera-a/photo.jpg');

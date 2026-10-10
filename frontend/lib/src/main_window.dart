@@ -30,6 +30,7 @@ import 'utils/job_result_refresh.dart';
 import 'utils/startup_timing.dart';
 import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
+import 'utils/media_display_order.dart';
 import 'utils/directory_browsing_scope.dart';
 import 'widgets/retained_tab.dart';
 import 'widgets/app_menu_style.dart';
@@ -1839,10 +1840,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
     unawaited(_refreshDirectoryChoices(inputPath));
     try {
-      final items = await widget.apiClient.fetchPreviewItems(
+      final fetchedItems = await widget.apiClient.fetchPreviewItems(
         inputPath: inputPath,
         includeCached: true,
       );
+      final sortedItems = await sortMediaItemsForDisplayAsync(fetchedItems);
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
           requestId != _previewRefreshRequestId ||
@@ -1851,7 +1853,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         if (finishGlobalLoading) _stopGlobalLoading();
         return;
       }
-      final sortedItems = _sortMediaItemsForDisplay(items);
       final selectedPath = _directoryScope.items.isEmpty
           ? null
           : _directoryScope
@@ -1938,7 +1939,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       setState(() {
         _previewMetadataCache[item.path] = fullItem;
         _previewItems = orderingChanged
-            ? _sortMediaItemsForDisplay(updated)
+            ? replaceSortedMediaItem(_previewItems, index, fullItem)
             : updated;
         _directoryScope.update(_previewItems, _inputController.text.trim());
         if (orderingChanged && selectedPath != null) {
@@ -1978,25 +1979,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   List<DetectionItem> _replacePreviewItems(
     List<DetectionItem> currentItems,
     Iterable<DetectionItem> updates,
-  ) {
-    final updateByPath = <String, DetectionItem>{
-      for (final item in updates)
-        if (item.path.isNotEmpty) item.path: item,
-    };
-    if (updateByPath.isEmpty) return currentItems;
-
-    var appended = false;
-    final seen = currentItems.map((item) => item.path).toSet();
-    final nextItems = <DetectionItem>[
-      for (final item in currentItems) updateByPath[item.path] ?? item,
-    ];
-    for (final item in updateByPath.values) {
-      if (seen.contains(item.path)) continue;
-      nextItems.add(item);
-      appended = true;
-    }
-    return appended ? _sortMediaItemsForDisplay(nextItems) : nextItems;
-  }
+  ) => replaceSortedMediaItems(currentItems, updates);
 
   DetectionItem _mergeValidationUpdate(
     DetectionItem fallback,
@@ -2009,71 +1992,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return current.mergeValidationUpdate(update);
   }
 
-  List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) {
-    return List<DetectionItem>.from(items)..sort(_compareMediaItemsForDisplay);
-  }
+  List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) =>
+      sortMediaItemsForDisplay(items);
 
-  int _compareMediaItemsForDisplay(DetectionItem a, DetectionItem b) {
-    final timeA = _mediaSortTimestamp(a);
-    final timeB = _mediaSortTimestamp(b);
-    if (timeA != null && timeB != null) {
-      final timeCompare = timeA.compareTo(timeB);
-      if (timeCompare != 0) return timeCompare;
-    } else if (timeA != null) {
-      return -1;
-    } else if (timeB != null) {
-      return 1;
-    }
-
-    final nameCompare = _naturalCompare(a.filename, b.filename);
-    if (nameCompare != 0) return nameCompare;
-    return _naturalCompare(a.path, b.path);
-  }
-
-  DateTime? _mediaSortTimestamp(DetectionItem item) {
-    final dateText = item.dateTaken?.trim();
-    if (dateText != null && dateText.isNotEmpty) {
-      final timeText = item.detectionData['拍摄时间']?.toString().trim();
-      if (dateText.contains(':') || dateText.contains('T')) {
-        final dateTime = DateTime.tryParse(dateText);
-        if (dateTime != null) return dateTime;
-      }
-      if (timeText != null && timeText.isNotEmpty) {
-        final dateTime = DateTime.tryParse('$dateText $timeText');
-        if (dateTime != null) return dateTime;
-      }
-    }
-    final modifiedAt = item.modifiedAt?.trim();
-    if (modifiedAt == null || modifiedAt.isEmpty) return null;
-    return DateTime.tryParse(modifiedAt);
-  }
-
-  int _naturalCompare(String a, String b) {
-    final segmentsA = _naturalSegments(a);
-    final segmentsB = _naturalSegments(b);
-    final length = segmentsA.length < segmentsB.length
-        ? segmentsA.length
-        : segmentsB.length;
-    for (var index = 0; index < length; index++) {
-      final partA = segmentsA[index];
-      final partB = segmentsB[index];
-      final numberA = int.tryParse(partA);
-      final numberB = int.tryParse(partB);
-      final compare = numberA != null && numberB != null
-          ? numberA.compareTo(numberB)
-          : partA.toLowerCase().compareTo(partB.toLowerCase());
-      if (compare != 0) return compare;
-    }
-    return segmentsA.length.compareTo(segmentsB.length);
-  }
-
-  List<String> _naturalSegments(String value) {
-    return RegExp(r'\d+|\D+')
-        .allMatches(value)
-        .map((match) => match.group(0) ?? '')
-        .where((part) => part.isNotEmpty)
-        .toList();
-  }
+  DateTime? _mediaSortTimestamp(DetectionItem item) => mediaSortTimestamp(item);
 
   List<DetectionItem> _jobResultsForInputPath(
     List<ProcessingJob> jobs,

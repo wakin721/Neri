@@ -8,6 +8,7 @@ import '../api_client.dart';
 import '../models/job.dart';
 import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
+import '../utils/media_display_order.dart';
 import '../utils/validation_cache_delta.dart';
 import '../utils/validation_selection_modifiers.dart';
 import '../widgets/app_menu_style.dart';
@@ -2756,26 +2757,8 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     return '第 $current/$total 组';
   }
 
-  List<DetectionItem> _sortValidationItems(List<DetectionItem> items) {
-    return List<DetectionItem>.from(items)..sort(_compareValidationItems);
-  }
-
-  int _compareValidationItems(DetectionItem a, DetectionItem b) {
-    final timeA = _mediaSortTimestamp(a);
-    final timeB = _mediaSortTimestamp(b);
-    if (timeA != null && timeB != null) {
-      final timeCompare = timeA.compareTo(timeB);
-      if (timeCompare != 0) return timeCompare;
-    } else if (timeA != null) {
-      return -1;
-    } else if (timeB != null) {
-      return 1;
-    }
-
-    final nameCompare = _naturalCompare(a.filename, b.filename);
-    if (nameCompare != 0) return nameCompare;
-    return _naturalCompare(a.path, b.path);
-  }
+  List<DetectionItem> _sortValidationItems(List<DetectionItem> items) =>
+      sortMediaItemsForDisplay(items);
 
   DateTime? _mediaSortTimestamp(DetectionItem item) {
     final dateText = item.dateTaken?.trim() ?? '';
@@ -2806,33 +2789,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       timestamp: timestamp,
     );
     return timestamp;
-  }
-
-  int _naturalCompare(String a, String b) {
-    final segmentsA = _naturalSegments(a);
-    final segmentsB = _naturalSegments(b);
-    final length = segmentsA.length < segmentsB.length
-        ? segmentsA.length
-        : segmentsB.length;
-    for (var index = 0; index < length; index++) {
-      final partA = segmentsA[index];
-      final partB = segmentsB[index];
-      final numberA = int.tryParse(partA);
-      final numberB = int.tryParse(partB);
-      final compare = numberA != null && numberB != null
-          ? numberA.compareTo(numberB)
-          : partA.toLowerCase().compareTo(partB.toLowerCase());
-      if (compare != 0) return compare;
-    }
-    return segmentsA.length.compareTo(segmentsB.length);
-  }
-
-  List<String> _naturalSegments(String value) {
-    return RegExp(r'\d+|\D+')
-        .allMatches(value)
-        .map((match) => match.group(0) ?? '')
-        .where((part) => part.isNotEmpty)
-        .toList();
   }
 
   double _thresholdForSpecies(String species) {
