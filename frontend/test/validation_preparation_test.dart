@@ -9,6 +9,91 @@ import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 
 void main() {
   testWidgets(
+    'an initial empty placeholder still shows first media preparation',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => http.Response('{}', 200)),
+      );
+      await tester.pumpWidget(
+        _GroupExpansionHarness(apiClient: api, initialItems: const []),
+      );
+      final state = tester.state<_GroupExpansionHarnessState>(
+        find.byType(_GroupExpansionHarness),
+      );
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      state.setLoading(true);
+      await tester.pump();
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      state.switchItems([
+        for (var i = 0; i < 600; i++)
+          DetectionItem(
+            filename: '$i.jpg',
+            path: '${Directory('initial-empty-input').absolute.path}/$i.jpg',
+            fileType: 'jpg',
+            dateTaken: '2026-10-10T12:00:00',
+          ),
+      ]);
+      await tester.pump();
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      for (var attempt = 0; attempt < 500; attempt++) {
+        if (_preparingContent().evaluate().isEmpty) break;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.text('正确'), findsWidgets);
+      expect(find.textContaining('150 组'), findsWidgets);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      api.close();
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    },
+  );
+  testWidgets('first large validation shows progress until grouping is ready', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    final api = NeriApiClient(
+      httpClient: MockClient((_) async => http.Response('{}', 200)),
+    );
+    await tester.pumpWidget(
+      _GroupExpansionHarness(
+        apiClient: api,
+        initialItems: [
+          for (var i = 0; i < 12000; i++)
+            DetectionItem(
+              filename: '$i.jpg',
+              path: '${Directory('preparation-input').absolute.path}/$i.jpg',
+              fileType: 'jpg',
+              dateTaken: '2026-10-10T12:00:00',
+            ),
+        ],
+      ),
+    );
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    for (var attempt = 0; attempt < 500; attempt++) {
+      if (find.byType(LinearProgressIndicator).evaluate().isEmpty) break;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(find.text('正确'), findsWidgets);
+    expect(find.textContaining('3000 组'), findsWidgets);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    api.close();
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+  testWidgets(
     'large regrouping yields frames and retains every per-camera group',
     (tester) async {
       tester.view.physicalSize = const Size(1280, 900);
@@ -50,6 +135,7 @@ void main() {
         isTrue,
       );
       expect(find.textContaining('4 组'), findsWidgets);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
       await tester.tap(find.text('正确').first, warnIfMissed: false);
       expect(
         state.markCalls,
@@ -215,8 +301,13 @@ class _GroupExpansionHarness extends StatefulWidget {
 class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   late List<DetectionItem> _items = widget.initialItems;
   int markCalls = 0;
+  bool _loading = false;
+  void setLoading(bool value) => setState(() => _loading = value);
   void switchItems(List<DetectionItem> next) {
-    setState(() => _items = next);
+    setState(() {
+      _items = next;
+      _loading = false;
+    });
   }
 
   @override
@@ -227,7 +318,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           apiClient: widget.apiClient,
           inputPath: r'I:\原始照片\安息',
           items: _items,
-          loading: false,
+          loading: _loading,
           refreshVersion: 0,
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,

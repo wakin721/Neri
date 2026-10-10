@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
 
@@ -218,6 +219,39 @@ void main() {
     expect(backend.details.where((id) => id == 'running').length, 2);
     await cleanup(tester, backend);
   });
+
+  for (final page in ['预览', '校验']) {
+    testWidgets('first opening $page shows loading until media arrives', (
+      tester,
+    ) async {
+      final backend = StartupBackend();
+      await mount(tester, backend);
+      await tester.tap(find.text(page).first);
+      await tester.pump();
+      await settleStartup(tester);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      expect(find.text('暂无预览图像。'), findsNothing);
+      expect(find.text('暂无可校验图像。'), findsNothing);
+      backend.preview.complete(
+        http.Response(
+          jsonEncode([
+            {
+              'filename': 'first.jpg',
+              'path':
+                  '${Directory('startup-test-input').absolute.path}/first.jpg',
+              'file_type': 'jpg',
+            },
+          ]),
+          200,
+        ),
+      );
+      await settleStartup(tester);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byIcon(Icons.open_in_new_rounded), findsWidgets);
+      expect(tester.takeException(), isNull);
+      await cleanup(tester, backend);
+    });
+  }
 
   testWidgets('privacy consent continues to gate settings and jobs', (
     tester,
