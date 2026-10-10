@@ -1286,15 +1286,6 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                 ),
               ),
             ],
-            if (classificationModelPath.isNotEmpty &&
-                observationId.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              DinoV2FeatureExplanationPanel(
-                apiClient: widget.apiClient,
-                classificationModelPath: classificationModelPath,
-                observationId: observationId,
-              ),
-            ],
           ],
         ),
       ),
@@ -1428,6 +1419,19 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final summary = _summaryFor(item, visibleBoxes);
     final colorScheme = Theme.of(context).colorScheme;
     final confidenceLabel = widget.useCombinedConfidence ? '综合置信度' : '置信度';
+    final selectedBox = _selectedDinoBox(visibleBoxes);
+    final observationId = selectedBox?.observationId?.trim() ?? '';
+    final classificationModelPath =
+        widget.classificationModelPath?.trim() ?? '';
+    final canExplain =
+        classificationModelPath.isNotEmpty && observationId.isNotEmpty;
+    final explanationTooltip = classificationModelPath.isEmpty
+        ? '请先选择 DINOv2 分类模型'
+        : selectedBox == null
+        ? '请先点击图像中的检测框'
+        : observationId.isEmpty
+        ? '该检测框没有可用的特征空间数据'
+        : '特征空间位置与最近类别';
 
     return _ValidationPanel(
       child: Padding(
@@ -1457,6 +1461,36 @@ class _SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   fontWeight: FontWeight.w600,
                 ),
               ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              key: const ValueKey('dinov2-feature-explanation-button'),
+              tooltip: explanationTooltip,
+              icon: const Icon(Icons.scatter_plot_rounded),
+              onPressed: canExplain
+                  ? () => showDialog<void>(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text('特征空间位置与最近类别'),
+                        content: SizedBox(
+                          width: 680,
+                          child: SingleChildScrollView(
+                            child: DinoV2FeatureExplanationPanel(
+                              apiClient: widget.apiClient,
+                              classificationModelPath: classificationModelPath,
+                              observationId: observationId,
+                            ),
+                          ),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('关闭'),
+                          ),
+                        ],
+                      ),
+                    )
+                  : null,
             ),
           ],
         ),

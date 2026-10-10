@@ -312,14 +312,13 @@ class _DinoV2FeatureExplanationPanelState
 
   @override
   Widget build(BuildContext context) {
-    return ExpansionTile(
+    return Column(
       key: ValueKey('dinov2-feature-explanation-${widget.observationId}'),
-      initiallyExpanded: true,
-      tilePadding: EdgeInsets.zero,
-      childrenPadding: const EdgeInsets.only(bottom: 4),
-      title: const Text('特征空间位置与最近类别'),
-      subtitle: const Text('局部二维投影 + 高维分类依据'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const Text('局部二维投影 + 高维分类依据'),
+        const SizedBox(height: 12),
         if (_loading)
           const Padding(
             padding: EdgeInsets.all(16),
