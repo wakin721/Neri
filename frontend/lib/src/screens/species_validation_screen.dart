@@ -915,12 +915,11 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       child: ExcludeFocus(
         excluding: _interactionBlocked,
         child: initialLoading
-            ? const Center(
-                child: SizedBox(
-                  width: 240,
-                  child: LinearProgressIndicator(
-                    key: ValueKey('validation-preparation-progress'),
-                  ),
+            ? Padding(
+                padding: const EdgeInsets.all(16),
+                child: _EmptyValidationState(
+                  loading: true,
+                  onRefresh: widget.onRefresh,
                 ),
               )
             : _lastReadyContent ?? const SizedBox.expand(),
