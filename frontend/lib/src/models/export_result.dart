@@ -1,8 +1,15 @@
+String normalizeExportFormatMode(String? value) => switch (value) {
+  'csv' => 'csv',
+  'excel' => 'excel',
+  _ => 'ask',
+};
+
 class ValidationExportResult {
   const ValidationExportResult({
     required this.outputPath,
     required this.fileFormat,
     required this.exportedCount,
+    this.outputPaths = const <String>[],
     this.favoriteOutputDir,
     this.favoriteExportedCount = 0,
     this.deletedEmptyPhotoCount = 0,
@@ -14,6 +21,14 @@ class ValidationExportResult {
       outputPath: json['output_path'] as String? ?? '',
       fileFormat: json['file_format'] as String? ?? '',
       exportedCount: json['exported_count'] as int? ?? 0,
+      outputPaths:
+          (json['output_paths'] as List<dynamic>?)
+              ?.map((item) => item.toString())
+              .toList() ??
+          [
+            if ((json['output_path'] as String? ?? '').isNotEmpty)
+              json['output_path'] as String,
+          ],
       favoriteOutputDir: json['favorite_output_dir'] as String?,
       favoriteExportedCount: json['favorite_exported_count'] as int? ?? 0,
       deletedEmptyPhotoCount: json['deleted_empty_photo_count'] as int? ?? 0,
@@ -25,6 +40,7 @@ class ValidationExportResult {
   final String outputPath;
   final String fileFormat;
   final int exportedCount;
+  final List<String> outputPaths;
   final String? favoriteOutputDir;
   final int favoriteExportedCount;
   final int deletedEmptyPhotoCount;

@@ -11,6 +11,7 @@ import '../crash_watchdog.dart';
 import '../local_debug_logs.dart';
 import '../local_maintenance_status.dart';
 import '../models/close_behavior.dart';
+import '../models/export_result.dart';
 import '../models/settings.dart';
 import '../models/theme_settings.dart';
 import '../models/video_processing_mode.dart';
@@ -285,6 +286,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         saved,
         'export_columns',
         _defaultExportColumns,
+      ),
+      'export_format_mode': normalizeExportFormatMode(
+        _stringSetting(saved, 'export_format_mode', 'ask'),
       ),
       'favorite_photo_paths': _stringListSetting(
         saved,
@@ -2004,6 +2008,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _buildExportColumns(showDivider: true),
+          _buildExportFormatMode(showDivider: true),
           _buildFavoritePhotoExportMode(showDivider: true),
           _buildEmptyPhotoDeleteMode(showDivider: true),
           _buildCloseBehaviorSettings(),
@@ -2873,6 +2878,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         onChanged: (value) => _set('favorite_photo_export_mode', value),
+      ),
+    );
+  }
+
+  Widget _buildExportFormatMode({bool showDivider = false}) {
+    return _SettingsPanel(
+      title: '导出格式',
+      subtitle: '选择校验表格的格式，或在每次导出时询问。',
+      icon: Icons.table_view_rounded,
+      showDivider: showDivider,
+      child: _SettingsMenuButton<String>(
+        value: normalizeExportFormatMode(_string('export_format_mode')),
+        options: const [
+          _SettingsOption<String>(value: 'csv', label: 'CSV'),
+          _SettingsOption<String>(value: 'excel', label: 'Excel'),
+          _SettingsOption<String>(value: 'ask', label: '每次询问'),
+        ],
+        onChanged: (value) => _set('export_format_mode', value),
       ),
     );
   }

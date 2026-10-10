@@ -255,6 +255,9 @@ Widget _screen(NeriApiClient api, String path, DetectionItem item) =>
         body: SpeciesValidationScreen(
           apiClient: api,
           inputPath: path,
+          rootInputPath: path,
+          rootItems: [item],
+          exportFormatMode: 'ask',
           classificationModelPath: 'model.dinov2',
           items: [item],
           loading: false,
@@ -303,6 +306,7 @@ Widget _screen(NeriApiClient api, String path, DetectionItem item) =>
           onRedetectItems: (_, {required confidence}) async {},
           onFavoritePhotoPathsChanged: (_) async {},
           onFavoritePhotoExportModeChanged: (_) async {},
+          onExportFormatModeChanged: (_) async {},
           onEmptyPhotoDeleteModeChanged: (_) async {},
           onAutoGroupInferredBurstSizeChanged: (_) {},
         ),

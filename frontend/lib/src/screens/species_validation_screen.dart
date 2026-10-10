@@ -240,6 +240,9 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.inputPath,
     this.classificationModelPath,
     required this.items,
+    required this.rootInputPath,
+    required this.rootItems,
+    required this.exportFormatMode,
     required this.loading,
     this.interactionBlocked = false,
     required this.refreshVersion,
@@ -271,6 +274,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onRedetectItems,
     required this.onFavoritePhotoPathsChanged,
     required this.onFavoritePhotoExportModeChanged,
+    required this.onExportFormatModeChanged,
     required this.onEmptyPhotoDeleteModeChanged,
     required this.onAutoGroupInferredBurstSizeChanged,
     super.key,
@@ -280,6 +284,9 @@ class SpeciesValidationScreen extends StatefulWidget {
   final String inputPath;
   final String? classificationModelPath;
   final List<DetectionItem> items;
+  final String rootInputPath;
+  final List<DetectionItem> rootItems;
+  final String exportFormatMode;
   final bool loading;
   final bool interactionBlocked;
   final int refreshVersion;
@@ -311,6 +318,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final RedetectValidationItems onRedetectItems;
   final Future<void> Function(List<String> paths) onFavoritePhotoPathsChanged;
   final Future<void> Function(String mode) onFavoritePhotoExportModeChanged;
+  final Future<void> Function(String mode) onExportFormatModeChanged;
   final Future<void> Function(String mode) onEmptyPhotoDeleteModeChanged;
   final ValueChanged<int?> onAutoGroupInferredBurstSizeChanged;
 
