@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/main_window.dart';
+import 'package:neri_flutter/src/frontend_version.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/privacy/privacy_status.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
@@ -25,6 +26,7 @@ class StartupBackend {
   );
   late final previewCache =
       _providedPreviewCache ?? PreviewSnapshotCache(directory: cacheDirectory);
+  Completer<http.Response>? healthResponse;
   final preview = Completer<http.Response>();
   Completer<http.Response>? refreshedPreview;
   final scopedPreviews = <String, Completer<http.Response>>{};
@@ -34,6 +36,7 @@ class StartupBackend {
   List<String>? directories;
   final details = <String>[];
   Map<String, Object?>? previewMetadata;
+  int dinoStatusRequests = 0;
   int settingsRequests = 0;
   int summaryRequests = 0;
   int previewRequests = 0;
@@ -57,6 +60,7 @@ class StartupBackend {
     httpClient: MockClient((request) async {
       final path = request.url.path;
       if (path == '/api/health') {
+        if (healthResponse != null && !stopped) return healthResponse!.future;
         return http.Response('{}', stopped ? 503 : 200);
       }
       if (path == '/api/shutdown') {
@@ -71,6 +75,18 @@ class StartupBackend {
             'participation_decided': consent,
           }),
           200,
+        );
+      }
+      if (path == '/api/environment/dinov2-status') {
+        dinoStatusRequests++;
+        return http.Response(
+          jsonEncode({
+            'installed': false,
+            'healthy': false,
+            'message': 'DINOv2 未安装。',
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
         );
       }
       if (path == '/api/settings') {
@@ -237,9 +253,17 @@ void main() {
   testWidgets(
     'startup and idle polling keep histories out of shell critical path',
     (tester) async {
-      final backend = StartupBackend();
+      final backend = StartupBackend()
+        ..healthResponse = Completer<http.Response>();
       await mount(tester, backend);
+      expect(backend.settingsRequests, 0);
+      expect(backend.dinoStatusRequests, 0);
+      expect(find.text('Neri $frontendVersion'), findsOneWidget);
+      backend.healthResponse!.complete(http.Response('{}', 200));
+      await settleStartup(tester);
+      expect(find.text('Neri $frontendVersion'), findsOneWidget);
       expect(backend.settingsRequests, 1);
+      expect(backend.dinoStatusRequests, 2);
       expect(backend.summaryRequests, 1);
       expect(backend.previewRequests, 1);
       expect(backend.details, isEmpty);

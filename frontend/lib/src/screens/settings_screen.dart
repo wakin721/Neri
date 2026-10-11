@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../api_client.dart';
 import '../crash_reporter.dart';
 import '../crash_watchdog.dart';
+import '../frontend_version.dart';
 import '../local_debug_logs.dart';
 import '../local_maintenance_status.dart';
 import '../models/close_behavior.dart';
@@ -78,10 +79,6 @@ const _releaseNotesUrl =
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
-const _frontendVersion = String.fromEnvironment(
-  'NERI_FRONTEND_VERSION',
-  defaultValue: '3.1.0-alpha1(e2971f)',
-);
 const _debugModeKey = 'debug_mode';
 const _debugTapThreshold = 5;
 const _debugTapResetDuration = Duration(seconds: 3);
@@ -124,6 +121,8 @@ class SettingsScreen extends StatefulWidget {
     required this.onShowMessage,
     this.onOpenDinoCandidateValidation,
     this.isActive = true,
+    this.backendReady = true,
+    this.backendGeneration = 0,
     super.key,
   });
 
@@ -139,6 +138,8 @@ class SettingsScreen extends StatefulWidget {
   final ValueChanged<String> onShowMessage;
   final ValueChanged<Set<String>>? onOpenDinoCandidateValidation;
   final bool isActive;
+  final bool backendReady;
+  final int backendGeneration;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -169,6 +170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _maintenanceStatusPath;
   DinoV2ComponentStatus? _dinoV2Status;
   bool _loadingDinoV2Status = true;
+  int _dinoV2StatusRequestId = 0;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -180,7 +182,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _loadModelClassesForSelection();
-      unawaited(_loadDinoV2Status());
+      if (widget.backendReady) unawaited(_loadDinoV2Status());
       unawaited(_resumeMaintenanceWatchIfActive());
     });
   }
@@ -188,6 +190,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.backendReady && oldWidget.backendReady) {
+      _dinoV2StatusRequestId++;
+      _dinoV2Status = null;
+      _loadingDinoV2Status = true;
+    } else if (widget.backendReady &&
+        (!oldWidget.backendReady ||
+            oldWidget.backendGeneration != widget.backendGeneration ||
+            oldWidget.apiClient != widget.apiClient ||
+            (!oldWidget.isActive &&
+                widget.isActive &&
+                !_loadingDinoV2Status &&
+                _dinoV2Status == null))) {
+      unawaited(_loadDinoV2Status());
+    }
     if (oldWidget.settings != widget.settings) {
       if (!_dirty && !_saving) {
         _resetDraft();
@@ -471,15 +487,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _loadDinoV2Status() async {
+    if (!mounted || !widget.backendReady) return;
+    final requestId = ++_dinoV2StatusRequestId;
+    setState(() => _loadingDinoV2Status = true);
     try {
-      final status = await widget.apiClient.fetchDinoV2ComponentStatus();
-      if (!mounted) return;
+      final status = await widget.apiClient
+          .fetchDinoV2ComponentStatus()
+          .timeout(const Duration(seconds: 10));
+      if (!mounted || requestId != _dinoV2StatusRequestId) return;
       setState(() {
         _dinoV2Status = status;
         _loadingDinoV2Status = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || requestId != _dinoV2StatusRequestId) return;
       setState(() {
         _dinoV2Status = null;
         _loadingDinoV2Status = false;
@@ -1870,7 +1891,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _SettingsPanel(
             title: 'DINOv2 ViT-B/14',
             subtitle: _loadingDinoV2Status
-                ? '正在读取 DINOv2 组件状态...'
+                ? widget.backendReady
+                      ? '正在读取 DINOv2 组件状态...'
+                      : '等待后端就绪...'
                 : _dinoV2Status == null
                 ? '无法读取 DINOv2 组件状态。'
                 : _dinoV2Status!.healthy &&
@@ -1887,7 +1910,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   );
                 }
                 final status = _dinoV2Status;
-                if (status?.healthy == true) {
+                if (status == null) {
+                  return OutlinedButton.icon(
+                    key: const Key('dinov2-status-retry'),
+                    onPressed: _maintenanceBusy ? null : _loadDinoV2Status,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('重试'),
+                  );
+                }
+                if (status.healthy) {
                   return OutlinedButton(
                     key: const Key('dinov2-component-action'),
                     onPressed: _maintenanceBusy ? null : _removeDinoV2,
@@ -1897,7 +1928,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 return FilledButton(
                   key: const Key('dinov2-component-action'),
                   onPressed: _maintenanceBusy ? null : _installDinoV2,
-                  child: Text(status?.installed == true ? '安装/修复' : '安装'),
+                  child: Text(status.installed ? '安装/修复' : '安装'),
                 );
               },
             ),
@@ -3971,7 +4002,7 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
           value:
               '${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
         ),
-        _DebugFactRow(label: '前端版本', value: _frontendVersion),
+        _DebugFactRow(label: '前端版本', value: frontendVersion),
         FutureBuilder<RuntimeDiagnostics>(
           future: _runtimeFuture,
           builder: (context, snapshot) {
@@ -4922,7 +4953,7 @@ String _debugInfoText({
       : settings?.appVersion ?? '';
   return <String>[
     'Neri debug information',
-    'Frontend version: $_frontendVersion',
+    'Frontend version: $frontendVersion',
     'Backend version: $backendVersion',
     'Backend URL: ${apiClient.baseUrl}',
     'Debug mode: $debugModeEnabled',

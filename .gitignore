@@ -123,3 +123,4 @@ frontend/windows/runner/*
 !frontend/test/directory_browsing_scope_test.dart
 !frontend/test/preview_snapshot_cache_test.dart
 !frontend/test/export_settings_test.dart
+!frontend/test/dinov2_status_loading_test.dart

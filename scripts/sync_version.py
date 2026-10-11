@@ -148,7 +148,7 @@ def main() -> None:
         f"version: {pubspec_version(build_number)}",
     )
     replace_once(
-        ROOT / "frontend" / "lib" / "src" / "screens" / "settings_screen.dart",
+        ROOT / "frontend" / "lib" / "src" / "frontend_version.dart",
         r"defaultValue:\s*'[^']+'",
         f"defaultValue: '{full_version}'",
     )

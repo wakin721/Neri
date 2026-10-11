@@ -14,6 +14,7 @@ import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
 import 'dinov2_startup_check.dart';
+import 'frontend_version.dart';
 import 'local_maintenance_status.dart';
 import 'models/close_behavior.dart';
 import 'models/export_result.dart';
@@ -114,7 +115,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     ),
   ];
 
-  static final _versionNumberPattern = RegExp(r'\d+(?:\.\d+)+');
   static const _backendOutputTailMaxCharacters = 12000;
 
   final _inputController = TextEditingController();
@@ -3454,13 +3454,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     ).where((name) => name.trim().isNotEmpty).toList();
   }
 
-  String _compactVersionLabel(String? version) {
-    final trimmed = version?.trim() ?? '';
-    if (trimmed.isEmpty) return 'Neri';
-    final versionNumber = _versionNumberPattern.firstMatch(trimmed)?.group(0);
-    return versionNumber == null ? trimmed : 'Neri $versionNumber';
-  }
-
   int _safePreviewIndex(List<DetectionItem> items) {
     if (items.isEmpty) return 0;
     if (_selectedPreviewIndex >= items.length) return items.length - 1;
@@ -3499,7 +3492,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   children: [
                     _buildTitleLogo(size: 28),
                     const SizedBox(width: 10),
-                    Text(_compactVersionLabel(_settings?.appVersion)),
+                    const Text('Neri $frontendVersion'),
                     if ((_selectedIndex == 1 || _selectedIndex == 2) &&
                         _directoryScope.directories.isNotEmpty) ...[
                       const SizedBox(width: 16),
@@ -3730,7 +3723,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       active: _selectedIndex == tabIndex,
       preload: tabIndex == 3,
       refreshKey: tabIndex == 3
-          ? (_settings, _closeBehavior, _autoGroupInferredBurstSize)
+          ? (
+              _settings,
+              _closeBehavior,
+              _autoGroupInferredBurstSize,
+              _backendReady,
+              _backendStartupGeneration,
+            )
           : null,
       builder: (_) => builder(),
     );
@@ -3870,6 +3869,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Widget _buildSettingsScreen() {
     return SettingsScreen(
       isActive: _selectedIndex == 3,
+      backendReady: _backendReady,
+      backendGeneration: _backendStartupGeneration,
       settings: _settings,
       autoGroupInferredBurstSize: _autoGroupInferredBurstSize,
       apiClient: widget.apiClient,
