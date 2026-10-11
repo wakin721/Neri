@@ -10,7 +10,7 @@ import '../models/job.dart';
 import 'media_display_order.dart';
 
 const previewCacheLimitSettingKey = 'preview_cache_max_mb';
-const defaultPreviewCacheLimitMb = 128;
+const defaultPreviewCacheLimitMb = 512;
 const maximumPreviewCacheLimitMb = 16384;
 const previewCacheMegabyte = 1024 * 1024;
 
@@ -38,13 +38,11 @@ class PreviewSnapshot {
 class PreviewSnapshotCache {
   PreviewSnapshotCache({
     Directory? directory,
-    this.maxEntries = 16,
     int maxBytes = defaultPreviewCacheLimitMb * previewCacheMegabyte,
   }) : _directory = directory,
        _maxBytes = maxBytes;
 
   final Directory? _directory;
-  final int maxEntries;
   int _maxBytes;
   bool _limitApplied = false;
   int get maxBytes => _maxBytes;
@@ -83,7 +81,6 @@ class PreviewSnapshotCache {
         scope: key,
         items: items,
         directories: directories,
-        maxEntries: maxEntries,
         maxBytes: _maxBytes,
       ));
     });
@@ -96,7 +93,7 @@ class PreviewSnapshotCache {
     _maxBytes = bytes;
     final directory = _directoryPath;
     return _pendingWrite = _pendingWrite.then(
-      (_) => compute(_trimSnapshots, (directory, maxEntries, _maxBytes)),
+      (_) => compute(_trimSnapshots, (directory, _maxBytes)),
     );
   }
 
@@ -146,7 +143,6 @@ typedef _WriteRequest = ({
   String scope,
   List<DetectionItem> items,
   List<String> directories,
-  int maxEntries,
   int maxBytes,
 });
 
@@ -169,11 +165,7 @@ Future<void> _writeSnapshot(_WriteRequest request) async {
       flush: true,
     );
     await temporary.rename(target.path);
-    await _trimSnapshots((
-      request.directory,
-      request.maxEntries,
-      request.maxBytes,
-    ));
+    await _trimSnapshots((request.directory, request.maxBytes));
   } on FileSystemException {
     // Read-only storage or cleanup failures must not interrupt browsing.
   } on JsonUnsupportedObjectError {
@@ -189,8 +181,8 @@ Future<void> _writeSnapshot(_WriteRequest request) async {
   }
 }
 
-Future<void> _trimSnapshots((String, int, int) request) async {
-  final (path, maxEntries, maxBytes) = request;
+Future<void> _trimSnapshots((String, int) request) async {
+  final (path, maxBytes) = request;
   try {
     final directory = Directory(path);
     if (!await directory.exists()) return;
@@ -203,13 +195,11 @@ Future<void> _trimSnapshots((String, int, int) request) async {
     }
     files.sort((a, b) => b.stat.modified.compareTo(a.stat.modified));
     var bytes = 0;
-    var retained = 0;
     for (final entry in files) {
-      if (retained >= maxEntries || bytes + entry.stat.size > maxBytes) {
+      if (maxBytes == 0 || bytes + entry.stat.size > maxBytes) {
         await entry.file.delete();
       } else {
         bytes += entry.stat.size;
-        retained++;
       }
     }
   } on FileSystemException {

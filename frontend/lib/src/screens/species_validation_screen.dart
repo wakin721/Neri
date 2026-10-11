@@ -1931,7 +1931,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
             : const Icon(Icons.ios_share_rounded),
-        label: const Text('导出'),
+        label: Text(switch (normalizeExportFormatMode(
+          widget.exportFormatMode,
+        )) {
+          'csv' => '导出为csv',
+          'excel' => '导出为excel',
+          _ => '导出',
+        }),
       ),
     );
   }

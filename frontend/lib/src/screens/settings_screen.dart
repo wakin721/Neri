@@ -2183,11 +2183,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            '最多保留16个目录的扫描结果，超过容量上限时自动清理较旧的结果；选择“不保留”会清除并关闭磁盘扫描缓存。',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
           const SizedBox(height: 12),
           Align(
             alignment: Alignment.centerRight,

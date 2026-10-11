@@ -50,8 +50,8 @@ void main() {
     ],
   );
 
-  Future<void> tapExport(WidgetTester tester) async {
-    final button = find.widgetWithText(FilledButton, '导出');
+  Future<void> tapExport(WidgetTester tester, {String label = '导出'}) async {
+    final button = find.widgetWithText(FilledButton, label);
     await tester.ensureVisible(button);
     await tester.pumpAndSettle();
     await tester.tap(button);
@@ -138,7 +138,7 @@ void main() {
       ),
     );
     await _waitForImage(tester);
-    await tapExport(tester);
+    await tapExport(tester, label: '导出为csv');
     await tester.tap(find.text('仅导出当前子文件夹'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('选择导出格式'), findsNothing);

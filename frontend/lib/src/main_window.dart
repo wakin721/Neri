@@ -91,7 +91,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     '.m4v',
     '.ts',
   };
-  static const _pageTitles = <String>['开始界面', '图像预览', '物种校验', '设置'];
   static const _navigationItems = <_NavigationRailEntry>[
     _NavigationRailEntry(
       label: '开始',
@@ -3500,7 +3499,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   children: [
                     _buildTitleLogo(size: 28),
                     const SizedBox(width: 10),
-                    Text(_pageTitles[_selectedIndex]),
+                    Text(_compactVersionLabel(_settings?.appVersion)),
                     if ((_selectedIndex == 1 || _selectedIndex == 2) &&
                         _directoryScope.directories.isNotEmpty) ...[
                       const SizedBox(width: 16),
@@ -3509,12 +3508,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   ],
                 ),
                 actions: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Center(
-                      child: Text(_compactVersionLabel(_settings?.appVersion)),
-                    ),
-                  ),
                   IconButton(
                     tooltip: '重启 Python 后端并刷新',
                     onPressed: _loading || _previewLoading

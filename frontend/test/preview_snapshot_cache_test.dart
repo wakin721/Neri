@@ -33,13 +33,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test('cache size setting handles saved integers and invalid values', () {
-    expect(normalizePreviewCacheLimitMb(null), 128);
+    expect(normalizePreviewCacheLimitMb(null), 512);
     expect(normalizePreviewCacheLimitMb(0), 0);
     expect(normalizePreviewCacheLimitMb(512), 512);
     expect(normalizePreviewCacheLimitMb('37'), 37);
     expect(normalizePreviewCacheLimitMb(256.0), 256);
     for (final invalid in [-1, 16385, 'unknown', 1.5, double.infinity]) {
-      expect(normalizePreviewCacheLimitMb(invalid), 128);
+      expect(normalizePreviewCacheLimitMb(invalid), 512);
     }
   });
 
@@ -183,8 +183,24 @@ void main() {
       });
     }
 
-    test('keeps recent directories within the entry limit', () async {
-      cache = PreviewSnapshotCache(directory: directory, maxEntries: 2);
+    test(
+      'retains more than sixteen directories within the byte limit',
+      () async {
+        expect(cache.maxBytes, 512 * previewCacheMegabyte);
+        final scopes = List.generate(20, (index) => '/camera-$index');
+        for (final scope in scopes) {
+          await cache.write(scope, []);
+        }
+        expect(
+          (await directory.list().toList()).whereType<File>(),
+          hasLength(20),
+        );
+        for (final scope in scopes) {
+          expect(await cache.read(scope), isNotNull, reason: scope);
+        }
+      },
+    );
+    test('keeps recent directories within the byte limit', () async {
       await cache.write('/first', []);
       final first = (await directory.list().toList()).whereType<File>().single;
       // Consecutive writes can share an mtime on Windows. Set explicit ages
@@ -195,6 +211,7 @@ void main() {
           .whereType<File>()
           .firstWhere((file) => file.path != first.path);
       await second.setLastModified(DateTime.utc(2001));
+      await cache.setMaxBytes(await first.length() + await second.length());
       await cache.write('/third', []);
       expect(await cache.read('/first'), isNull);
       expect(await cache.read('/second'), isNotNull);
@@ -387,10 +404,15 @@ void main() {
             await tester.pump();
           }
 
-          await choose('512 MB');
-          await save();
-          expect(backend.savedSettings[previewCacheLimitSettingKey], 512);
+          expect(
+            find.descendant(of: selector, matching: find.text('512 MB')),
+            findsOneWidget,
+          );
           expect(backend.previewCache.maxBytes, 512 * previewCacheMegabyte);
+          await choose('256 MB');
+          await save();
+          expect(backend.savedSettings[previewCacheLimitSettingKey], 256);
+          expect(backend.previewCache.maxBytes, 256 * previewCacheMegabyte);
           await choose('自定义…');
           final field = find.byKey(const ValueKey('preview-cache-limit-input'));
           for (final invalid in ['-1', '16385', '1.5', '']) {
