@@ -185,9 +185,17 @@ void main() {
 
     test('keeps recent directories within the entry limit', () async {
       cache = PreviewSnapshotCache(directory: directory, maxEntries: 2);
-      for (final scope in ['/first', '/second', '/third']) {
-        await cache.write(scope, []);
-      }
+      await cache.write('/first', []);
+      final first = (await directory.list().toList()).whereType<File>().single;
+      // Consecutive writes can share an mtime on Windows. Set explicit ages
+      // so this test checks recency without relying on filesystem clock ticks.
+      await first.setLastModified(DateTime.utc(2000));
+      await cache.write('/second', []);
+      final second = (await directory.list().toList())
+          .whereType<File>()
+          .firstWhere((file) => file.path != first.path);
+      await second.setLastModified(DateTime.utc(2001));
+      await cache.write('/third', []);
       expect(await cache.read('/first'), isNull);
       expect(await cache.read('/second'), isNotNull);
       expect(await cache.read('/third'), isNotNull);
@@ -222,6 +230,10 @@ void main() {
       'lowering the byte limit immediately keeps only recent fitting scans',
       () async {
         await cache.write('/first', []);
+        final oldest = (await directory.list().toList())
+            .whereType<File>()
+            .single;
+        await oldest.setLastModified(DateTime.utc(2000));
         await cache.write('/second', []);
         final files = (await directory.list().toList())
             .whereType<File>()
