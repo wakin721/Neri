@@ -324,7 +324,7 @@ void main() {
           );
           if (limit == 0) {
             expect(screen.items, isEmpty);
-            await tester.runAsync(() => cache.flush());
+            await startup.flushPreviewCache(tester, cache);
             expect(
               await tester.runAsync(() => directory.list().toList()),
               isEmpty,
@@ -371,7 +371,7 @@ void main() {
           Future<void> save() async {
             await tester.pump(const Duration(seconds: 1));
             await startup.settleStartup(tester);
-            await tester.runAsync(() => backend.previewCache.flush());
+            await startup.flushPreviewCache(tester, backend.previewCache);
             await tester.pump();
           }
 
@@ -527,8 +527,8 @@ void main() {
                   ? unorderedEquals(['new-root.jpg', 'stale-child.jpg'])
                   : ['new-child.jpg'],
             );
+            await startup.flushPreviewCache(tester, restartedCache);
             final persisted = await tester.runAsync(() async {
-              await restartedCache.flush();
               return PreviewSnapshotCache(
                 directory: cacheDirectory,
               ).read('startup-test-input');

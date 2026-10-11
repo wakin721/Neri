@@ -154,6 +154,32 @@ Future<void> mount(
   await settleStartup(tester);
 }
 
+Future<void> flushPreviewCache(
+  WidgetTester tester,
+  PreviewSnapshotCache cache,
+) async {
+  // Cache operations queue their continuations in the widget test's fake-async
+  // zone, but compute() completes on real isolates. Keep pumping that zone
+  // between real async turns instead of awaiting the queue inside runAsync().
+  final pending = cache.flush();
+  var completed = false;
+  pending.then<void>(
+    (_) => completed = true,
+    onError: (Object error, StackTrace stackTrace) {
+      completed = true;
+    },
+  );
+  final stopwatch = Stopwatch()..start();
+  while (!completed && stopwatch.elapsed < const Duration(seconds: 10)) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump();
+  }
+  expect(completed, isTrue, reason: 'Preview cache writes did not finish.');
+  await pending;
+}
+
 Future<void> cleanup(WidgetTester tester, StartupBackend backend) async {
   for (final preview in backend.scopedPreviews.values) {
     if (!preview.isCompleted) preview.complete(http.Response('[]', 200));
@@ -170,8 +196,8 @@ Future<void> cleanup(WidgetTester tester, StartupBackend backend) async {
   await tester.runAsync(
     () => Future<void>.delayed(const Duration(milliseconds: 50)),
   );
+  await flushPreviewCache(tester, backend.previewCache);
   await tester.runAsync(() async {
-    await backend.previewCache.flush();
     if (backend._providedPreviewCache == null) {
       await backend.cacheDirectory.delete(recursive: true);
     }
@@ -194,6 +220,19 @@ void main() {
           (_) async => null,
         );
   });
+
+  testWidgets(
+    'cleanup drains queued preview cache writes',
+    (tester) async {
+      final backend = StartupBackend();
+      for (var i = 0; i < 8; i++) {
+        unawaited(backend.previewCache.write('queued-$i', const []));
+      }
+      await cleanup(tester, backend);
+      expect(backend.cacheDirectory.existsSync(), isFalse);
+    },
+    timeout: const Timeout(Duration(seconds: 30)),
+  );
 
   testWidgets(
     'startup and idle polling keep histories out of shell critical path',
