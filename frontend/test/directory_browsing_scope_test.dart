@@ -12,6 +12,7 @@ import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/utils/directory_browsing_scope.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'startup_loading_test.dart' as startup;
 
 void main() {
@@ -21,6 +22,31 @@ void main() {
     filename: relative.split('/').last,
     path: '$root/$relative',
     fileType: 'jpg',
+  );
+
+  test(
+    'subtree refresh removes stale media and preserves sibling directories',
+    () {
+      final removed = item('camera-a/removed.jpg');
+      final nested = item('camera-a/nested/old.jpg');
+      final sibling = item('camera-b/same.jpg');
+      final similarName = item('camera-a-extra/same.jpg');
+      final replacement = item('camera-a/new.jpg');
+      final merged = replaceDirectoryPreviewItems(
+        [removed, nested, sibling, similarName],
+        [replacement],
+        File(removed.path).parent.path,
+      );
+      expect(merged, [sibling, similarName, replacement]);
+      expect(
+        replaceDirectoryPreviewItems(
+          merged,
+          [],
+          File(removed.path).parent.path,
+        ),
+        [sibling, similarName],
+      );
+    },
   );
 
   test(
@@ -398,6 +424,341 @@ void main() {
     await startup.settleStartup(tester);
     await startup.cleanup(tester, backend);
   });
+
+  for (final parentStatus in [200, 409]) {
+    testWidgets(
+      'child preview loads before pending parent finishes ($parentStatus)',
+      (tester) async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('window_manager'),
+              (call) async => call.method == 'isMaximized' ? false : null,
+            );
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('neri/windows_shell'),
+              (_) async => null,
+            );
+        final input = Directory('startup-test-input').absolute.path;
+        final camera = Directory('$input/camera-b').path;
+        final childResponse = Completer<http.Response>();
+        final backend = startup.StartupBackend()
+          ..directories = [Directory('$input/camera-a').path, camera];
+        backend.scopedPreviews[camera] = childResponse;
+        try {
+          await startup.mount(tester, backend);
+          await tester.tap(find.text('预览').first);
+          await tester.pump();
+          await startup.settleStartup(tester);
+          await tester.tap(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.text('camera-b').last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pump(const Duration(milliseconds: 350));
+          await startup.settleStartup(tester);
+          expect(backend.preview.isCompleted, isFalse);
+          expect(backend.previewPaths, contains(camera));
+          expect(backend.backgroundPreviewPaths, isNot(contains(camera)));
+          expect(backend.backgroundPreviewPaths, hasLength(1));
+          childResponse.complete(
+            http.Response(
+              jsonEncode([
+                {
+                  'filename': 'child.jpg',
+                  'path': '$camera/child.jpg',
+                  'file_type': 'jpg',
+                },
+              ]),
+              200,
+            ),
+          );
+          await startup.settleStartup(tester);
+          var screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+          expect(screen.inputPath, camera);
+          expect(screen.items.map((item) => item.filename), ['child.jpg']);
+          expect(screen.loading, isFalse);
+          expect(backend.preview.isCompleted, isFalse);
+
+          // Another child can take priority while the first child's request
+          // is still running. Its late response must not change the selection.
+          final sibling = Directory('$input/camera-a').path;
+          final siblingResponse = Completer<http.Response>();
+          backend.scopedPreviews[sibling] = siblingResponse;
+          final selector = find.byKey(
+            const ValueKey('directory-scope-selector'),
+          );
+          await tester.tap(selector);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.text('camera-a').last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pump(const Duration(milliseconds: 350));
+          await startup.settleStartup(tester);
+          expect(backend.previewPaths.last, sibling);
+          expect(siblingResponse.isCompleted, isFalse);
+          expect(tester.widget<FilledButton>(selector).onPressed, isNotNull);
+          await tester.tap(selector);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.text('camera-b').last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pump(const Duration(milliseconds: 350));
+          await startup.settleStartup(tester);
+          siblingResponse.complete(
+            http.Response(
+              jsonEncode([
+                {
+                  'filename': 'late-sibling.jpg',
+                  'path': '$sibling/late-sibling.jpg',
+                  'file_type': 'jpg',
+                },
+              ]),
+              200,
+            ),
+          );
+          await startup.settleStartup(tester);
+          screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+          expect(screen.inputPath, camera);
+          expect(screen.items.map((item) => item.filename), ['child.jpg']);
+          expect(screen.loading, isFalse);
+          backend.preview.complete(
+            http.Response(
+              parentStatus == 200
+                  ? jsonEncode([
+                      {
+                        'filename': 'stale.jpg',
+                        'path': '$camera/stale.jpg',
+                        'file_type': 'jpg',
+                      },
+                      {
+                        'filename': 'parent-sibling.jpg',
+                        'path': '$input/camera-a/parent-sibling.jpg',
+                        'file_type': 'jpg',
+                      },
+                    ])
+                  : '{"detail":"Preview scan superseded"}',
+              parentStatus,
+            ),
+          );
+          await startup.settleStartup(tester);
+          screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+          expect(screen.items.map((item) => item.filename), ['child.jpg']);
+          expect(screen.loading, isFalse);
+          expect(find.textContaining('无法读取输入文件夹预览'), findsNothing);
+
+          // A completed background parent is reused; a failed one is retried.
+          final requestsBeforeReturning = backend.previewRequests;
+          backend.refreshedPreview = Completer<http.Response>();
+          await tester.tap(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.text('全部目录').last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pump(const Duration(milliseconds: 350));
+          await startup.settleStartup(tester);
+          if (parentStatus == 200) {
+            expect(backend.previewRequests, requestsBeforeReturning);
+            screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+            expect(
+              screen.items.map((item) => item.filename),
+              unorderedEquals(['child.jpg', 'parent-sibling.jpg']),
+            );
+          } else {
+            expect(Directory(backend.previewPaths.last).absolute.path, input);
+            expect(backend.previewRequests, requestsBeforeReturning + 1);
+            expect(
+              tester.widget<PreviewScreen>(find.byType(PreviewScreen)).loading,
+              isTrue,
+            );
+            backend.refreshedPreview!.complete(
+              http.Response(
+                jsonEncode([
+                  for (final dir in ['camera-a', 'camera-b'])
+                    {
+                      'filename': 'complete.jpg',
+                      'path': '$input/$dir/complete.jpg',
+                      'file_type': 'jpg',
+                    },
+                ]),
+                200,
+              ),
+            );
+            await startup.settleStartup(tester);
+          }
+          screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+          expect(Directory(screen.inputPath).absolute.path, input);
+          expect(screen.items, hasLength(2));
+          expect(screen.loading, isFalse);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await startup.cleanup(tester, backend);
+        }
+      },
+    );
+  }
+
+  for (final scenario in [(false, true), (true, true), (false, false)]) {
+    final (rememberAll, indexed) = scenario;
+    testWidgets(
+      'restart restores the last directory (all: $rememberAll, index: $indexed)',
+      (tester) async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('window_manager'),
+              (call) async => call.method == 'isMaximized' ? false : null,
+            );
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('neri/windows_shell'),
+              (_) async => null,
+            );
+        final input = Directory('startup-test-input').absolute.path;
+        final camera = '$input/camera-b';
+        final media = http.Response(
+          jsonEncode([
+            {
+              'filename': 'child.jpg',
+              'path': '$camera/child.jpg',
+              'file_type': 'jpg',
+            },
+          ]),
+          200,
+        );
+        final backend = startup.StartupBackend()..directories = [camera];
+        late Map<String, Object> savedPreferences;
+
+        Future<void> choose(String label) async {
+          await tester.tap(
+            find.byKey(const ValueKey('directory-scope-selector')),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.text(label).last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pump(const Duration(milliseconds: 350));
+          await startup.settleStartup(tester);
+        }
+
+        try {
+          await startup.mount(tester, backend);
+          backend.preview.complete(media);
+          await startup.settleStartup(tester);
+          await tester.tap(find.text('预览').first);
+          await tester.pump();
+          await startup.settleStartup(tester);
+          await choose('camera-b');
+          if (rememberAll) await choose('全部目录');
+          final preferences = await SharedPreferences.getInstance();
+          savedPreferences = {
+            for (final key in ['last_input_path', 'last_browse_directory'])
+              key: preferences.getString(key)!,
+          };
+          final saved = jsonDecode(
+            savedPreferences['last_browse_directory'] as String,
+          );
+          expect(saved['root'], 'startup-test-input');
+          expect(saved['path'], rememberAll ? isNull : camera);
+        } finally {
+          await startup.cleanup(tester, backend);
+        }
+
+        final restarted = startup.StartupBackend()
+          ..directories = indexed ? [camera] : null;
+        restarted.scopedPreviews[camera] = Completer<http.Response>()
+          ..complete(media);
+        try {
+          await startup.mount(tester, restarted, preferences: savedPreferences);
+          if (!indexed) {
+            // Without the lightweight index, restore from the full snapshot.
+            restarted.preview.complete(media);
+            await startup.settleStartup(tester);
+          }
+          await tester.tap(find.text('预览').first);
+          await tester.pump();
+          await startup.settleStartup(tester);
+          final screen = tester.widget<PreviewScreen>(
+            find.byType(PreviewScreen),
+          );
+          expect(
+            Directory(screen.inputPath).absolute.path,
+            rememberAll ? input : camera,
+          );
+          expect(restarted.preview.isCompleted, !indexed);
+          if (indexed) expect(restarted.backgroundPreviewPaths, hasLength(1));
+          if (rememberAll) {
+            expect(restarted.previewPaths, isNot(contains(camera)));
+            expect(screen.loading, isTrue);
+          } else {
+            if (indexed) expect(restarted.previewPaths, contains(camera));
+            expect(screen.items.single.filename, 'child.jpg');
+            expect(screen.loading, isFalse);
+          }
+          expect(tester.takeException(), isNull);
+        } finally {
+          await startup.cleanup(tester, restarted);
+        }
+      },
+    );
+  }
+
+  for (final invalidSelection in ['removed', 'different-root', 'malformed']) {
+    testWidgets('startup ignores $invalidSelection saved directory', (
+      tester,
+    ) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final input = Directory('startup-test-input').absolute.path;
+      final savedPath = invalidSelection == 'different-root'
+          ? '$input/camera-b'
+          : '$input/removed-camera';
+      final backend = startup.StartupBackend()
+        ..directories = ['$input/camera-b'];
+      try {
+        await startup.mount(
+          tester,
+          backend,
+          preferences: {
+            'last_input_path': 'startup-test-input',
+            'last_browse_directory': invalidSelection == 'malformed'
+                ? '{invalid'
+                : jsonEncode({
+                    'root': invalidSelection == 'different-root'
+                        ? 'other-input'
+                        : 'startup-test-input',
+                    'path': savedPath,
+                  }),
+          },
+        );
+        await tester.tap(find.text('预览').first);
+        await tester.pump();
+        await startup.settleStartup(tester);
+        final screen = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
+        expect(Directory(screen.inputPath).absolute.path, input);
+        expect(backend.previewPaths, isNot(contains(savedPath)));
+        expect(tester.takeException(), isNull);
+      } finally {
+        await startup.cleanup(tester, backend);
+      }
+    });
+  }
 
   testWidgets('AppBar directory selector switches duplicate media paths', (
     tester,

@@ -33,10 +33,12 @@ import 'utils/async_refresh_gate.dart';
 import 'utils/local_detection_items.dart';
 import 'utils/media_display_order.dart';
 import 'utils/directory_browsing_scope.dart';
+import 'utils/preview_snapshot_cache.dart';
 import 'widgets/retained_tab.dart';
 import 'widgets/app_menu_style.dart';
 
 const _lastInputPathKey = 'last_input_path';
+const _lastBrowseDirectoryKey = 'last_browse_directory';
 
 String? resolveDinoV2ValidationModelPath(
   ModelInfo? model,
@@ -56,12 +58,14 @@ class MainWindow extends StatefulWidget {
     required this.apiClient,
     required this.themeNotifier,
     this.dinoV2StartupCheck,
+    this.previewCache,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
   final DinoV2StartupCheck? dinoV2StartupCheck;
+  final PreviewSnapshotCache? previewCache;
 
   @override
   State<MainWindow> createState() => _MainWindowState();
@@ -131,12 +135,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final _validationScreenKey = GlobalKey<SpeciesValidationScreenState>();
   final _directoryScope = DirectoryBrowsingScope();
   final _directoryRequests = <String>{};
+  late final _previewCache = widget.previewCache ?? PreviewSnapshotCache();
+  String? _directoryChoicesLoadedRoot;
+  String? _pendingBrowseDirectoryRoot;
+  String? _pendingBrowseDirectory;
   final Map<String, ProcessingJob> _completeJobsById = {};
   final _refreshGate = AsyncRefreshGate();
   final Set<String> _expandedJobIds = {};
   final Set<String> _loadingJobDetailIds = {};
   final Set<String> _failedJobDetailIds = {};
   Timer? _timer;
+  Timer? _snackBarCloseTimer;
   Timer? _previewRefreshTimer;
   Timer? _inputDirectoryChangeTimer;
   Timer? _modelSelectionSaveTimer;
@@ -146,6 +155,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Future<void>? _backendShutdownTask;
   Future<void>? _closeBackendShutdownTask;
   int _previewRefreshRequestId = 0;
+  int _rootPreviewRequestId = 0;
+  int _scopedPreviewVersion = 0;
+  String? _rootPreviewLoadingPath;
+  Future<void>? _rootPreviewTask;
+  final _scopedPreviewSnapshots = <String, List<DetectionItem>>{};
   int _previewContentVersion = 0;
   int _modelSelectionRevision = 0;
   int _backendStartupGeneration = 0;
@@ -205,6 +219,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   int _vidStride = defaultVideoSampleCount;
   int? _autoGroupInferredBurstSize;
   String? _previewLoadedPath;
+  String? _previewLoadedScopePath;
   String? _watchedInputDirectory;
   int _selectedIndex = 0;
   int _selectedPreviewIndex = 0;
@@ -249,6 +264,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _windowsShellChannel.setMethodCallHandler(null);
     }
     _timer?.cancel();
+    _snackBarCloseTimer?.cancel();
     _previewRefreshTimer?.cancel();
     _inputDirectoryChangeTimer?.cancel();
     _modelSelectionSaveTimer?.cancel();
@@ -553,6 +569,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Future<void> _finishCloseWindow(int flowId) async {
     if (!mounted || flowId != _closeFlowId) return;
+    await _flushPreviewCacheBeforeExit();
+    if (!mounted || flowId != _closeFlowId) return;
     try {
       await windowManager
           .setPreventClose(false)
@@ -566,6 +584,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     } catch (_) {}
     if (_closing && flowId == _closeFlowId) {
       exit(0);
+    }
+  }
+
+  Future<void> _flushPreviewCacheBeforeExit() async {
+    try {
+      await _previewCache.flush().timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Disposable cache writes must not prevent exiting the application.
     }
   }
 
@@ -621,6 +647,21 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final preferences = await SharedPreferences.getInstance();
     final lastPath = preferences.getString(_lastInputPathKey);
     if (!mounted || lastPath == null || lastPath.isEmpty) return;
+    final savedDirectory = preferences.getString(_lastBrowseDirectoryKey);
+    if (savedDirectory != null) {
+      try {
+        final saved = jsonDecode(savedDirectory);
+        if (saved is Map &&
+            saved['root'] == lastPath &&
+            saved['path'] is String &&
+            (saved['path'] as String).isNotEmpty) {
+          _pendingBrowseDirectoryRoot = lastPath;
+          _pendingBrowseDirectory = saved['path'] as String;
+        }
+      } on FormatException {
+        // Ignore an invalid saved selection and keep browsing all directories.
+      }
+    }
     setState(() => _inputController.text = lastPath);
     _schedulePreviewRefresh();
   }
@@ -1138,6 +1179,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     try {
       await _shutdownBackend().timeout(const Duration(seconds: 10));
     } catch (_) {}
+    await _flushPreviewCacheBeforeExit();
     try {
       await windowManager
           .setPreventClose(false)
@@ -1556,6 +1598,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     await preferences.setString(_lastInputPathKey, path);
   }
 
+  Future<void> _saveBrowseDirectory(String root, String? path) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _lastBrowseDirectoryKey,
+      jsonEncode({'root': root, 'path': path}),
+    );
+  }
+
   Future<void> _saveThemeSettings(ThemeSettings settings) async {
     final preferences = await SharedPreferences.getInstance();
     await preferences.setInt('theme_mode', settings.themeMode.index);
@@ -1624,6 +1674,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (!mounted) return;
       final messenger = ScaffoldMessenger.maybeOf(context);
       if (messenger == null) return;
+      _snackBarCloseTimer?.cancel();
       messenger.clearSnackBars();
 
       final controller = messenger.showSnackBar(
@@ -1637,7 +1688,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         ),
       );
       // 强制绕过无障碍模式驻留时间限制
-      Future.delayed(const Duration(seconds: 4), controller.close);
+      final closeTimer = Timer(const Duration(seconds: 4), controller.close);
+      _snackBarCloseTimer = closeTimer;
+      unawaited(
+        controller.closed.then((_) {
+          closeTimer.cancel();
+          if (identical(_snackBarCloseTimer, closeTimer)) {
+            _snackBarCloseTimer = null;
+          }
+        }),
+      );
     });
   }
 
@@ -1647,12 +1707,17 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final inputPath = _inputController.text.trim();
     if (inputPath.isEmpty) {
       _previewRefreshRequestId++;
+      _rootPreviewRequestId++;
+      _rootPreviewLoadingPath = null;
+      _rootPreviewTask = null;
+      _scopedPreviewSnapshots.clear();
       if (!mounted) return;
       setState(() {
         _previewItems = const <DetectionItem>[];
         _previewMetadataCache.clear();
         _previewMetadataLoading.clear();
         _previewLoadedPath = null;
+        _previewLoadedScopePath = null;
         _previewLoading = false;
       });
       return;
@@ -1794,7 +1859,25 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           _closeFlowBlocksBackendStartup) {
         return;
       }
-      setState(() => _directoryScope.cacheDirectories(paths, inputPath));
+      var selectionRemoved = false;
+      setState(() {
+        if (_inputController.text.trim() == inputPath) {
+          _directoryChoicesLoadedRoot = inputPath;
+          _directoryScope.update(_previewItems, inputPath);
+          final selected = _directoryScope.selected;
+          _directoryScope.cacheDirectories(paths, inputPath);
+          selectionRemoved =
+              selected != null && _directoryScope.selected == null;
+        } else {
+          _directoryScope.cacheDirectories(paths, inputPath);
+        }
+      });
+      if (selectionRemoved) {
+        _applyDirectorySelection(null);
+        // A cached directory may have been deleted since the previous session.
+        unawaited(_refreshPreviewItems(force: true));
+      }
+      _restoreBrowseDirectory(inputPath);
     } catch (_) {
       // Older backends or unavailable disks still fall back to media snapshots.
     } finally {
@@ -1819,7 +1902,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (finishGlobalLoading) _stopGlobalLoading();
       return;
     }
-    if (!force && _previewLoadedPath == inputPath && _previewItems.isNotEmpty) {
+    final scanPath = _previewLoadedPath == inputPath
+        ? _directoryScope.selected ?? inputPath
+        : inputPath;
+    if (!force &&
+        _previewLoadedPath == inputPath &&
+        (_previewLoadedScopePath == inputPath ||
+            _previewLoadedScopePath == scanPath) &&
+        _previewItems.isNotEmpty) {
       if (finishGlobalLoading) _stopGlobalLoading();
       return;
     }
@@ -1837,17 +1927,63 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _previewMetadataCache.clear();
         _previewMetadataLoading.clear();
         _previewLoadedPath = inputPath;
+        _previewLoadedScopePath = null;
+        _directoryChoicesLoadedRoot = null;
         _selectedPreviewIndex = 0;
       }
     });
 
     unawaited(_refreshDirectoryChoices(inputPath));
+    if (scanPath == inputPath) {
+      // Reuse the root scan when opening results or returning from a child.
+      // It keeps running even while the visible child has its own request.
+      if (_rootPreviewLoadingPath != inputPath || _rootPreviewTask == null) {
+        _rootPreviewLoadingPath = inputPath;
+        _rootPreviewTask = _refreshRootPreviewItems(
+          inputPath,
+          startupGeneration,
+        );
+      }
+      await _rootPreviewTask;
+      if (finishGlobalLoading) _stopGlobalLoading();
+      return;
+    }
+    if (_directoryScope.items.isEmpty) {
+      unawaited(
+        _loadCachedPreviewItems(
+          inputPath,
+          scanPath,
+          requestId,
+          startupGeneration,
+        ),
+      );
+    }
     try {
       final fetchedItems = await widget.apiClient.fetchPreviewItems(
-        inputPath: inputPath,
+        inputPath: scanPath,
         includeCached: true,
       );
-      final sortedItems = await sortMediaItemsForDisplayAsync(fetchedItems);
+      // Drop superseded child responses before sorting large snapshots.
+      if (!mounted ||
+          _inputController.text.trim() != inputPath ||
+          requestId != _previewRefreshRequestId ||
+          startupGeneration != _backendStartupGeneration ||
+          _closeFlowBlocksBackendStartup) {
+        if (finishGlobalLoading) _stopGlobalLoading();
+        return;
+      }
+      List<DetectionItem> sortedItems;
+      while (true) {
+        final previous = _previewItems;
+        sortedItems = await sortMediaItemsForDisplayAsync(
+          replaceDirectoryPreviewItems(previous, fetchedItems, scanPath),
+        );
+        // The background root may have completed while this child was sorted.
+        // Rebase on its snapshot so the child cannot discard loaded siblings.
+        if (identical(previous, _previewItems) ||
+            requestId != _previewRefreshRequestId)
+          break;
+      }
       if (!mounted ||
           _inputController.text.trim() != inputPath ||
           requestId != _previewRefreshRequestId ||
@@ -1867,6 +2003,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _previewMetadataCache.clear();
         _previewItems = sortedItems;
         _previewLoadedPath = inputPath;
+        if (_previewLoadedScopePath != inputPath) {
+          _previewLoadedScopePath = scanPath;
+        }
+        _scopedPreviewSnapshots[scanPath] = fetchedItems;
+        _scopedPreviewVersion++;
         _previewLoading = false;
         _previewContentVersion++;
         if (finishGlobalLoading) {
@@ -1878,6 +2019,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         );
         _selectedPreviewIndex = selected < 0 ? 0 : selected;
       });
+      unawaited(_previewCache.write(scanPath, fetchedItems));
+      if (_previewLoadedScopePath == inputPath) {
+        unawaited(
+          _previewCache.write(
+            inputPath,
+            _previewItems,
+            directories: _directoryScope.directories,
+          ),
+        );
+      }
       if (_directoryScope.items.isNotEmpty) {
         unawaited(
           _loadPreviewMetadata(_directoryScope.items[_selectedPreviewIndex]),
@@ -1899,6 +2050,149 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           _loading = false;
         }
       });
+    }
+  }
+
+  Future<void> _refreshRootPreviewItems(
+    String root,
+    int startupGeneration,
+  ) async {
+    final requestId = ++_rootPreviewRequestId;
+    _scopedPreviewSnapshots.clear();
+    _scopedPreviewVersion++;
+    bool current() =>
+        mounted &&
+        _inputController.text.trim() == root &&
+        requestId == _rootPreviewRequestId &&
+        startupGeneration == _backendStartupGeneration &&
+        !_closeFlowBlocksBackendStartup;
+    if (_previewLoadedScopePath == null) {
+      unawaited(
+        _loadCachedPreviewItems(
+          root,
+          root,
+          requestId,
+          startupGeneration,
+          rootScan: true,
+        ),
+      );
+    }
+    try {
+      final fetched = await widget.apiClient.fetchPreviewItems(
+        inputPath: root,
+        includeCached: true,
+        background: true,
+      );
+      while (current()) {
+        final version = _scopedPreviewVersion;
+        var snapshot = fetched;
+        for (final entry in _scopedPreviewSnapshots.entries) {
+          snapshot = replaceDirectoryPreviewItems(
+            snapshot,
+            entry.value,
+            entry.key,
+          );
+        }
+        final sorted = await sortMediaItemsForDisplayAsync(snapshot);
+        if (!current()) return;
+        // A child may have finished while the large parent was being sorted.
+        if (version != _scopedPreviewVersion) continue;
+        final selectedPath = _directoryScope.items.isEmpty
+            ? null
+            : _directoryScope
+                  .items[_safePreviewIndex(_directoryScope.items)]
+                  .path;
+        setState(() {
+          _previewItems = sorted;
+          _previewLoadedPath = root;
+          _previewLoadedScopePath = root;
+          if (_directoryScope.selected == null) _previewLoading = false;
+          _previewMetadataCache.clear();
+          _previewContentVersion++;
+          _directoryScope.update(_previewItems, root);
+          final selected = _directoryScope.items.indexWhere(
+            (item) => item.path == selectedPath,
+          );
+          _selectedPreviewIndex = selected < 0 ? 0 : selected;
+        });
+        _restoreBrowseDirectory(root);
+        unawaited(
+          _previewCache.write(
+            root,
+            _previewItems,
+            directories: _directoryScope.directories,
+          ),
+        );
+        if (_directoryScope.items.isNotEmpty) {
+          unawaited(
+            _loadPreviewMetadata(
+              _directoryScope.items[_safePreviewIndex(_directoryScope.items)],
+            ),
+          );
+        }
+        return;
+      }
+    } catch (error) {
+      if (current() && _directoryScope.selected == null) {
+        _showSnackBar('无法读取输入文件夹预览：$error');
+        setState(() => _previewLoading = false);
+      }
+    } finally {
+      if (requestId == _rootPreviewRequestId) {
+        _rootPreviewLoadingPath = null;
+        _rootPreviewTask = null;
+      }
+    }
+  }
+
+  Future<void> _loadCachedPreviewItems(
+    String root,
+    String scope,
+    int requestId,
+    int startupGeneration, {
+    bool rootScan = false,
+  }) async {
+    final version = _previewContentVersion;
+    bool current() =>
+        mounted &&
+        !_closeFlowBlocksBackendStartup &&
+        _inputController.text.trim() == root &&
+        startupGeneration == _backendStartupGeneration &&
+        version == _previewContentVersion &&
+        (rootScan
+            ? requestId == _rootPreviewRequestId
+            : requestId == _previewRefreshRequestId &&
+                  _directoryScope.selected == scope);
+    final cached = await _previewCache.read(scope);
+    if (cached == null || !current()) return;
+    final items = rootScan
+        ? cached.items
+        : await sortMediaItemsForDisplayAsync(
+            replaceDirectoryPreviewItems(_previewItems, cached.items, scope),
+          );
+    if (!current()) return;
+    setState(() {
+      _previewItems = items;
+      _previewLoadedPath = root;
+      if (rootScan || _previewLoadedScopePath != root) {
+        _previewLoadedScopePath = scope;
+      }
+      // Prefer the directory index from this session over an older snapshot.
+      if (rootScan && _directoryChoicesLoadedRoot != root) {
+        _directoryScope.cacheDirectories(cached.directories, root);
+      }
+      _directoryScope.update(_previewItems, root);
+      _previewMetadataCache.clear();
+      _selectedPreviewIndex = 0;
+      _previewContentVersion++;
+      // The already-started scan will replace this provisional snapshot.
+    });
+    if (rootScan &&
+        _directoryScope.directories.contains(_pendingBrowseDirectory)) {
+      _restoreBrowseDirectory(root);
+    }
+    if (_directoryScope.items.isNotEmpty) {
+      unawaited(_loadPreviewMetadata(_directoryScope.items.first));
     }
   }
 
@@ -2261,6 +2555,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (settingsChanged || jobsChanged) {
         unawaited(_updateWindowsShellStatus());
       }
+      if (settingsChanged) {
+        unawaited(_applyPreviewCacheSettings(settings));
+      }
 
       // 清理加载状态
       if (!silent && finishLoading && _loading) {
@@ -2312,6 +2609,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     try {
       final saved = await widget.apiClient.saveSettings(settings);
       if (!mounted) return;
+      await _applyPreviewCacheSettings(saved);
+      if (!mounted) return;
       setState(() {
         _settings = saved;
         _selectedModelPath = _savedModelSelection(
@@ -2354,6 +2653,14 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       if (mounted) setState(() => _settingsSaving = false);
     }
   }
+
+  Future<void> _applyPreviewCacheSettings(NeriSettings settings) =>
+      _previewCache.setMaxBytes(
+        normalizePreviewCacheLimitMb(
+              settings.settings[previewCacheLimitSettingKey],
+            ) *
+            previewCacheMegabyte,
+      );
 
   bool _boolSetting(NeriSettings settings, String key, bool fallback) {
     final value = settings.settings[key];
@@ -3618,12 +3925,30 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     });
   }
 
+  void _restoreBrowseDirectory(String root) {
+    if (!mounted ||
+        _closeFlowBlocksBackendStartup ||
+        _inputController.text.trim() != root ||
+        _pendingBrowseDirectoryRoot != root) {
+      return;
+    }
+    final saved = _pendingBrowseDirectory;
+    final path = _directoryScope.directories.contains(saved) ? saved : null;
+    _applyDirectorySelection(path);
+    if (path != null && (_previewLoading || _previewLoadedScopePath != root)) {
+      unawaited(_refreshPreviewItems(force: true));
+    }
+  }
+
   void _applyDirectorySelection(String? path) {
+    _pendingBrowseDirectoryRoot = null;
+    _pendingBrowseDirectory = null;
     setState(() {
       _directoryScope.select(path);
       _selectedPreviewIndex = 0;
       _previewContentVersion++;
     });
+    unawaited(_saveBrowseDirectory(_inputController.text.trim(), path));
     if (_directoryScope.items.isNotEmpty) {
       unawaited(_loadPreviewMetadata(_directoryScope.items.first));
     }
@@ -3635,6 +3960,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     }
     final root = _inputController.text.trim();
     final messenger = ScaffoldMessenger.maybeOf(context);
+    _snackBarCloseTimer?.cancel();
     setState(() => _directorySwitching = true);
     messenger?.clearSnackBars();
     messenger?.removeCurrentSnackBar();
@@ -3675,6 +4001,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           root != _inputController.text.trim())
         return;
       _applyDirectorySelection(path);
+      if (_previewLoading || _previewLoadedScopePath != root) {
+        // Request the visible child without waiting for the background root.
+        // Keep the selector usable while this request runs.
+        unawaited(_refreshPreviewItems(force: true));
+      }
       // Let the validation screen start its cancellable preparation, then
       // retain feedback until the latest directory has been painted.
       await WidgetsBinding.instance.endOfFrame;

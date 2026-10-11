@@ -12,11 +12,25 @@ import 'package:neri_flutter/src/main_window.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/privacy/privacy_status.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
+import 'package:neri_flutter/src/utils/preview_snapshot_cache.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class StartupBackend {
+  StartupBackend({PreviewSnapshotCache? previewCache})
+    : _providedPreviewCache = previewCache;
+
+  final PreviewSnapshotCache? _providedPreviewCache;
+  late final cacheDirectory = Directory.systemTemp.createTempSync(
+    'neri-preview-test-',
+  );
+  late final previewCache =
+      _providedPreviewCache ?? PreviewSnapshotCache(directory: cacheDirectory);
   final preview = Completer<http.Response>();
   Completer<http.Response>? refreshedPreview;
+  final scopedPreviews = <String, Completer<http.Response>>{};
+  final previewPaths = <String>[];
+  final savedSettings = <String, dynamic>{};
+  final backgroundPreviewPaths = <String>[];
   List<String>? directories;
   final details = <String>[];
   Map<String, Object?>? previewMetadata;
@@ -61,7 +75,17 @@ class StartupBackend {
       }
       if (path == '/api/settings') {
         settingsRequests++;
-        return http.Response('{}', 200);
+        if (request.method == 'PUT') {
+          savedSettings.addAll(
+            (jsonDecode(request.body) as Map<String, dynamic>)['settings']
+                as Map<String, dynamic>,
+          );
+        }
+        return http.Response(
+          jsonEncode({'settings': savedSettings}),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
       }
       if (path == '/api/jobs') {
         summaryRequests++;
@@ -77,6 +101,13 @@ class StartupBackend {
       }
       if (path == '/api/preview') {
         previewRequests++;
+        final inputPath = request.url.queryParameters['input_path']!;
+        previewPaths.add(inputPath);
+        if (request.url.queryParameters['background'] == 'true') {
+          backgroundPreviewPaths.add(inputPath);
+        }
+        final scoped = scopedPreviews[inputPath];
+        if (scoped != null) return scoped.future;
         return (refreshedPreview ?? preview).future;
       }
       if (path == '/api/preview/directories' && directories != null) {
@@ -101,10 +132,14 @@ Future<void> settleStartup(WidgetTester tester) async {
   }
 }
 
-Future<void> mount(WidgetTester tester, StartupBackend backend) async {
-  SharedPreferences.setMockInitialValues({
-    'last_input_path': 'startup-test-input',
-  });
+Future<void> mount(
+  WidgetTester tester,
+  StartupBackend backend, {
+  Map<String, Object>? preferences,
+}) async {
+  SharedPreferences.setMockInitialValues(
+    preferences ?? {'last_input_path': 'startup-test-input'},
+  );
   tester.view.physicalSize = const Size(1400, 1100);
   tester.view.devicePixelRatio = 1;
   await tester.pumpWidget(
@@ -112,6 +147,7 @@ Future<void> mount(WidgetTester tester, StartupBackend backend) async {
       home: MainWindow(
         apiClient: backend.api,
         themeNotifier: ValueNotifier(const ThemeSettings()),
+        previewCache: backend.previewCache,
       ),
     ),
   );
@@ -119,6 +155,12 @@ Future<void> mount(WidgetTester tester, StartupBackend backend) async {
 }
 
 Future<void> cleanup(WidgetTester tester, StartupBackend backend) async {
+  for (final preview in backend.scopedPreviews.values) {
+    if (!preview.isCompleted) preview.complete(http.Response('[]', 200));
+  }
+  if (backend.refreshedPreview?.isCompleted == false) {
+    backend.refreshedPreview!.complete(http.Response('[]', 200));
+  }
   if (!backend.preview.isCompleted) {
     backend.preview.complete(http.Response('[]', 200));
   }
@@ -128,6 +170,12 @@ Future<void> cleanup(WidgetTester tester, StartupBackend backend) async {
   await tester.runAsync(
     () => Future<void>.delayed(const Duration(milliseconds: 50)),
   );
+  await tester.runAsync(() async {
+    await backend.previewCache.flush();
+    if (backend._providedPreviewCache == null) {
+      await backend.cacheDirectory.delete(recursive: true);
+    }
+  });
   tester.view.resetPhysicalSize();
   tester.view.resetDevicePixelRatio();
 }

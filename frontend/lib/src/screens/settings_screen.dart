@@ -18,6 +18,7 @@ import '../models/video_processing_mode.dart';
 import '../privacy/privacy_settings_card.dart';
 import '../privacy/training_upload_debug_dialog.dart';
 import '../utils/quick_mark_sort.dart';
+import '../utils/preview_snapshot_cache.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/dinov2_registry_dialog.dart';
 import '../widgets/section_card.dart';
@@ -307,6 +308,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _stringSetting(saved, 'update_source', 'auto'),
       ),
       _debugModeKey: _boolSetting(saved, _debugModeKey, false),
+      previewCacheLimitSettingKey: normalizePreviewCacheLimitMb(
+        saved[previewCacheLimitSettingKey],
+      ),
     };
     final selectedClassificationInfo = _modelInfoForPath(
       settings?.availableClassificationModels ?? const <ModelInfo>[],
@@ -2140,24 +2144,80 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildClearCachePanel() {
+    const presets = [0, 64, 128, 256, 512, 1024, 2048];
+    final limit = normalizePreviewCacheLimitMb(
+      _draft[previewCacheLimitSettingKey],
+    );
     return _SettingsPanel(
       title: '清理缓存',
-      subtitle: '可清除软件日志、运行状态和崩溃标记等可再生缓存，不会删除设置和物种数据库。',
+      subtitle: '可清除软件日志、目录扫描结果和运行状态等可再生缓存，不会删除设置和物种数据库。',
       icon: Icons.cleaning_services_rounded,
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: FilledButton.tonalIcon(
-          onPressed: _clearingCache ? null : _showClearCacheDialog,
-          icon: _clearingCache
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.delete_sweep_rounded),
-          label: Text(_clearingCache ? '清理中' : '选择清理'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Expanded(child: Text('扫描缓存容量上限')),
+              const SizedBox(width: 12),
+              _SettingsMenuButton<int>(
+                key: const ValueKey('preview-cache-limit-selector'),
+                value: limit,
+                enabled: !_clearingCache,
+                options: [
+                  for (final value in presets)
+                    _SettingsOption(
+                      value: value,
+                      label: value == 0 ? '不保留' : '$value MB',
+                    ),
+                  if (!presets.contains(limit))
+                    _SettingsOption(value: limit, label: '$limit MB'),
+                  const _SettingsOption(value: -1, label: '自定义…'),
+                ],
+                onChanged: (value) {
+                  if (value == -1) {
+                    unawaited(_showCacheLimitDialog());
+                  } else {
+                    _set(previewCacheLimitSettingKey, value);
+                  }
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '最多保留16个目录的扫描结果，超过容量上限时自动清理较旧的结果；选择“不保留”会清除并关闭磁盘扫描缓存。',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.tonalIcon(
+              onPressed: _clearingCache ? null : _showClearCacheDialog,
+              icon: _clearingCache
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.delete_sweep_rounded),
+              label: Text(_clearingCache ? '清理中' : '选择清理'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showCacheLimitDialog() async {
+    final selected = await showDialog<int>(
+      context: context,
+      builder: (_) => _PreviewCacheLimitDialog(
+        initialLimit: normalizePreviewCacheLimitMb(
+          _draft[previewCacheLimitSettingKey],
         ),
       ),
     );
+    if (selected != null && mounted)
+      _set(previewCacheLimitSettingKey, selected);
   }
 
   Future<void> _showClearCacheDialog() async {
@@ -2191,7 +2251,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         () => clearSoftwareCache = value ?? false,
                       ),
                       title: const Text('清除软件缓存'),
-                      subtitle: const Text('清除运行状态、崩溃标记和 Python 缓存。'),
+                      subtitle: const Text('清除目录扫描结果、运行状态、崩溃标记和 Python 缓存。'),
                     ),
                   ],
                 ),
@@ -3242,6 +3302,64 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
   ];
 }
 
+class _PreviewCacheLimitDialog extends StatefulWidget {
+  const _PreviewCacheLimitDialog({required this.initialLimit});
+
+  final int initialLimit;
+
+  @override
+  State<_PreviewCacheLimitDialog> createState() =>
+      _PreviewCacheLimitDialogState();
+}
+
+class _PreviewCacheLimitDialogState extends State<_PreviewCacheLimitDialog> {
+  late final _controller = TextEditingController(
+    text: widget.initialLimit.toString(),
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = int.tryParse(_controller.text.trim());
+    final valid =
+        value != null && value >= 0 && value <= maximumPreviewCacheLimitMb;
+    return AlertDialog(
+      title: const Text('扫描缓存容量上限'),
+      content: SizedBox(
+        width: 360,
+        child: TextField(
+          key: const ValueKey('preview-cache-limit-input'),
+          controller: _controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: '最大保留大小（MB）',
+            helperText: '0表示不保留，最大$maximumPreviewCacheLimitMb MB',
+            errorText: valid ? null : '请输入0到$maximumPreviewCacheLimitMb之间的整数',
+            border: const OutlineInputBorder(),
+          ),
+          onChanged: (_) => setState(() {}),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: valid ? () => Navigator.of(context).pop(value) : null,
+          child: const Text('应用'),
+        ),
+      ],
+    );
+  }
+}
+
 class _SettingsOption<T> {
   const _SettingsOption({
     required this.value,
@@ -3263,6 +3381,7 @@ class _SettingsMenuButton<T> extends StatelessWidget {
     this.minMenuWidth = 180,
     this.maxMenuWidth = 360,
     this.enabled = true,
+    super.key,
   });
 
   final T? value;

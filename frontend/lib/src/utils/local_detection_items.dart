@@ -62,6 +62,21 @@ List<DetectionItem> validationItemsInInputFolder(
   ];
 }
 
+/// Replace one scanned subtree while retaining already loaded sibling media.
+List<DetectionItem> replaceDirectoryPreviewItems(
+  List<DetectionItem> previous,
+  List<DetectionItem> replacement,
+  String directory,
+) {
+  final prefix = '${_localPathKey(Directory(directory).absolute.path)}/';
+  return [
+    for (final item in previous)
+      if (!_localPathKey(File(item.path).absolute.path).startsWith(prefix))
+        item,
+    ...replacement,
+  ];
+}
+
 /// Yield while inspecting large directory snapshots before publishing them.
 Future<List<DetectionItem>> validationItemsInInputFolderAsync(
   Iterable<DetectionItem> items,

@@ -83,6 +83,7 @@ from .services import (
 configure_backend_crash_logging()
 logger = logging.getLogger(__name__)
 preview_scan_coordinator = PreviewScanCoordinator()
+background_preview_scan_coordinator = PreviewScanCoordinator()
 
 @asynccontextmanager
 async def app_lifespan(_app):
@@ -546,21 +547,25 @@ def preview(
     input_path: str = Query(..., min_length=1),
     output_dir: str | None = None,
     include_cached: bool = True,
+    background: bool = False,
 ) -> list[DetectionItem]:
     """List previewable media and cached DB detections without starting a job."""
 
-    generation = preview_scan_coordinator.begin()
+    # Visible child scans can supersede each other without cancelling the
+    # parent snapshot that continues to fill the directory cache.
+    coordinator = background_preview_scan_coordinator if background else preview_scan_coordinator
+    generation = coordinator.begin()
     try:
         return preview_media_items(
             input_path,
             output_dir,
             include_cached=include_cached,
-            cancelled=lambda: not preview_scan_coordinator.is_current(generation),
+            cancelled=lambda: not coordinator.is_current(generation),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        if not preview_scan_coordinator.is_current(generation):
+        if not coordinator.is_current(generation):
             raise HTTPException(
                 status_code=409,
                 detail="Preview scan superseded",

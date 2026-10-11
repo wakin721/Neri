@@ -611,11 +611,13 @@ class NeriApiClient {
     required String inputPath,
     String? outputDir,
     bool includeCached = true,
+    bool background = false,
   }) async {
     final uri = Uri.parse('$baseUrl/api/preview').replace(
       queryParameters: {
         'input_path': inputPath,
         'include_cached': includeCached.toString(),
+        if (background) 'background': 'true',
         if (outputDir != null && outputDir.isNotEmpty) 'output_dir': outputDir,
       },
     );
