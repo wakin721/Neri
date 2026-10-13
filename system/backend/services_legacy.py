@@ -725,18 +725,22 @@ class ProcessingJobManager:
             if job_id in self._deleted_jobs:
                 return
             self._active_job_ids.add(job_id)
-        request = _effective_processing_request(request)
-        _validate_dinov2_job_options(
-            request.options.model_path,
-            request.options.classification_model_path,
-            request.options.video_mode,
-        )
-        batch_log_session = _start_batch_log_session(job_id)
-        from system.dinov2.registry_examples import background_example_writes
-        example_session = background_example_writes()
-        example_writer = example_session.__enter__()
+        results = list(initial_results or [])
+        batch_log_session = None
+        example_session = None
+        example_writer = None
         detector = None
         try:
+            request = _effective_processing_request(request)
+            _validate_dinov2_job_options(
+                request.options.model_path,
+                request.options.classification_model_path,
+                request.options.video_mode,
+            )
+            batch_log_session = _start_batch_log_session(job_id)
+            from system.dinov2.registry_examples import background_example_writes
+            example_session = background_example_writes()
+            example_writer = example_session.__enter__()
             logger.info(
                 "Batch job started: job_id=%s input=%s output=%s resumed=%d options=%s",
                 job_id,
@@ -1247,7 +1251,7 @@ class ProcessingJobManager:
         except Exception as exc:  # noqa: BLE001 - converted to an API-visible job failure
             logger.exception("Batch job failed: job_id=%s error=%s", job_id, exc)
             if self._is_cancelled(job_id):
-                self._mark_cancelled(job_id)
+                self._mark_cancelled(job_id, results)
             else:
                 if isinstance(exc, OSError):
                     exc = MediaStorageError(
@@ -1257,15 +1261,21 @@ class ProcessingJobManager:
                     "存储访问失败，恢复访问后可继续任务"
                     if isinstance(exc, MediaStorageError) else "处理失败"
                 )
-                self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message=message)
+                # UI updates are throttled; completed local results may be newer
+                # than the last published snapshot when a later file fails.
+                self._mutate_job(
+                    job_id, state=JobState.FAILED, error=str(exc), message=message,
+                    results=results, processed=len(results),
+                )
         finally:
             try:
                 # Drain accepted writes on cancellation/failure too, before
                 # closing DINO state or marking this job inactive.
-                example_session.__exit__(None, None, None)
+                if example_writer is not None:
+                    example_session.__exit__(None, None, None)
             except Exception as exc:
                 logger.warning("Background example writes failed: %s", exc)
-            if example_writer.failed_sources:
+            if example_writer is not None and example_writer.failed_sources:
                 # Failed/unqueued example writes must be retried with their
                 # source media on resume; keep all other completed progress.
                 failed_keys = {_path_key(path) for path in example_writer.failed_sources}

@@ -4,7 +4,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
+import os
 from pathlib import Path
+import tempfile
 from typing import Iterable
 
 import cv2
@@ -51,7 +53,9 @@ def feedback_observation_example_path(
 
 
 def _source_cache_key(source: Path) -> str:
-    return str(source).replace("\\", "/").casefold()
+    # Respect the host filesystem's path semantics: distinct Linux sources
+    # must not share crops just because their names differ only by case.
+    return os.path.normcase(str(source))
 
 
 @contextmanager
@@ -199,14 +203,26 @@ def _write_example(path: Path, payload: bytes) -> bool:
     if not payload:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temp = None
     try:
-        temp.write_bytes(payload)
+        # Multiple jobs/API requests can persist the same example concurrently.
+        # Give each write its own sibling so replacement remains atomic without
+        # consuming or overwriting another writer's temporary payload.
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temp = Path(stream.name)
+            stream.write(payload)
         temp.replace(path)
         return True
     except OSError:
-        temp.unlink(missing_ok=True)
         return False
+    finally:
+        if temp is not None:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _persist_example(

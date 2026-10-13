@@ -110,6 +110,85 @@ def test_inexact_seeks_fall_back_to_counting_frames(seek_behavior, monkeypatch):
     assert len(captures) == 2 and all(capture.released for capture in captures)
 
 
+@pytest.mark.parametrize("reported_count", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("stride,expected", [(None, [25, 50, 75]), (20, [0, 20, 40, 60, 80])])
+def test_missing_frame_count_does_not_reduce_video_to_first_frame(reported_count, stride, expected, monkeypatch):
+    captures = []
+
+    class Capture:
+        def __init__(self):
+            self.index = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def get(self, key):
+            return {cv2.CAP_PROP_FRAME_COUNT: reported_count, cv2.CAP_PROP_FPS: 25,
+                    cv2.CAP_PROP_FRAME_WIDTH: 8, cv2.CAP_PROP_FRAME_HEIGHT: 8,
+                    cv2.CAP_PROP_POS_FRAMES: self.index}[key]
+
+        def set(self, key, value):
+            self.index = value
+            return True
+
+        def grab(self):
+            if self.index >= 100:
+                return False
+            self.index += 1
+            return True
+
+        def retrieve(self):
+            return True, np.full((8, 8, 3), self.index - 1, np.uint8)
+
+        def read(self):
+            return self.retrieve() if self.grab() else (False, None)
+
+        def release(self):
+            self.released = True
+
+    def open_video(*args):
+        capture = Capture()
+        captures.append(capture)
+        return capture
+
+    monkeypatch.setattr(video_frames, "_open_video", open_video)
+    frames = []
+    info = video_frames.sample_video_frames(
+        Path("no-frame-count.mp4"), 3,
+        lambda frame, index, order, fps: frames.append((index, int(frame[0, 0, 0]))),
+        frame_stride=stride,
+    )
+    assert info["frame_points"] == expected
+    assert info["total_frames"] == 100
+    assert frames == [(index, index) for index in expected]
+    assert len(captures) == (2 if stride is None else 1)
+    assert all(capture.released for capture in captures)
+
+
+def test_missing_frame_count_scan_is_cancellable_and_releases_decoder(monkeypatch):
+    grabbed, released = [], []
+    capture = SimpleNamespace(
+        isOpened=lambda: True,
+        get=lambda key: 0,
+        grab=lambda: grabbed.append(True) or True,
+        release=lambda: released.append(True),
+    )
+    monkeypatch.setattr(video_frames, "_open_video", lambda *args: capture)
+
+    def check_cancelled():
+        if len(grabbed) == 2:
+            raise video_frames.VideoPipelineCancelled("cancelled during count")
+
+    with pytest.raises(video_frames.VideoPipelineCancelled, match="during count"):
+        video_frames.sample_video_frames(
+            Path("no-frame-count.mp4"), 3, lambda *args: pytest.fail("emitted before count finished"),
+            check_cancelled=check_cancelled,
+        )
+    assert len(grabbed) == 2
+    assert released == [True]
+
+
 def preload(frames):
     return list(range(len(frames))), frames, frames
 

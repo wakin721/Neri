@@ -150,3 +150,38 @@ def test_job_waits_for_background_writes_before_completion(ending, tmp_path, mon
         release.set()
         manager._executor.shutdown(wait=True, cancel_futures=True)
     assert not any(thread.name == "neri-example-writer" for thread in threading.enumerate())
+
+
+def test_frame_cache_keeps_case_distinct_source_files_separate(tmp_path):
+    first, second = tmp_path / "Animal.jpg", tmp_path / "animal.jpg"
+    first.touch()
+    second.touch()
+    if first.samefile(second):
+        pytest.skip("The filesystem does not distinguish filename case")
+    first_frame = np.full((8, 8, 3), 20, np.uint8)
+    second_frame = np.full((8, 8, 3), 180, np.uint8)
+
+    with registry_examples.example_frame_cache({first: first_frame, second: second_frame}):
+        assert registry_examples._read_frame(first) is first_frame
+        assert registry_examples._read_frame(second) is second_frame
+
+
+def test_concurrent_example_writes_use_independent_temporary_files(tmp_path, monkeypatch):
+    output = tmp_path / "example.jpg"
+    ready = threading.Barrier(2)
+    replace = Path.replace
+
+    def simultaneous_replace(path, target):
+        if target == output:
+            ready.wait(timeout=3)
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", simultaneous_replace)
+    payloads = [b"first example", b"second example"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(registry_examples._write_example, output, payload)
+                   for payload in payloads]
+        assert all(future.result(timeout=5) for future in futures)
+
+    assert output.read_bytes() in payloads
+    assert sorted(tmp_path.iterdir()) == [output]

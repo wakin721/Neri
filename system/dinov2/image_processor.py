@@ -69,7 +69,7 @@ class ImageProcessor:
         self._dinov2_observations = []
         return observations
 
-    def _classify_dinov2_crops(self, det_results, original_imgs_rgb):
+    def _classify_dinov2_crops(self, det_results, original_imgs_rgb, *, source_indices=None):
         if self.dinov2_classifier is None:
             return [{} for _ in det_results], [{} for _ in det_results]
         crop_tasks = []
@@ -122,7 +122,12 @@ class ImageProcessor:
             )
             self._dinov2_observations.append(
                 DinoV2Observation(
-                    result_index=result_index,
+                    # Detection results omit unreadable images; persistence
+                    # indexes the original paths/items, including those gaps.
+                    result_index=(
+                        source_indices[result_index]
+                        if source_indices is not None else result_index
+                    ),
                     box_index=box_index,
                     embedding=prediction.embedding,
                     accepted=prediction.accepted,
@@ -212,7 +217,7 @@ class ImageProcessor:
         detect_elapsed = time.perf_counter() - detect_started
         classify_started = time.perf_counter()
         candidate_maps, selected_maps = self._classify_dinov2_crops(
-            det_results, original_imgs_rgb
+            det_results, original_imgs_rgb, source_indices=valid_indices
         )
         logger.info(
             "DINOv2 batch timing: images=%d observations=%d detect=%.3fs classify=%.3fs fp16=%s",

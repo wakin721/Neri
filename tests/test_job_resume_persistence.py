@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 
+import pytest
+
 from system.backend import services
 from system.backend.models import (
     CreateJobRequest,
@@ -212,5 +214,73 @@ def test_checkpoint_rebuilds_after_software_cache_is_removed(monkeypatch, tmp_pa
         manager._state_store.path.unlink()
         manager._save_state_unlocked()
         assert len(manager._state_store.load()["jobs"]["history"]["results"]) == 1
+    finally:
+        manager._executor.shutdown()
+
+
+@pytest.mark.parametrize("stage", ["_validate_dinov2_job_options", "_start_batch_log_session"])
+def test_startup_failure_releases_job_and_checkpoints_error(monkeypatch, tmp_path, stage):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    manager = services.ProcessingJobManager()
+    request = _request(tmp_path)
+    manager._jobs["startup"] = _job("startup", tmp_path)
+    manager._job_requests["startup"] = request
+
+    def fail(*args, **kwargs):
+        raise ValueError("startup fixture failure")
+
+    monkeypatch.setattr(services._legacy, stage, fail)
+    try:
+        manager._run_job("startup", request, [])
+        job = manager.get_job("startup")
+        assert job.state == JobState.FAILED
+        assert not job.active
+        assert job.error == "startup fixture failure"
+        assert manager._state_store.load()["jobs"]["startup"]["state"] == "failed"
+    finally:
+        manager._executor.shutdown()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_fast_video_interruption_keeps_unpublished_completed_results(monkeypatch, tmp_path, cancelled):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    legacy = services._legacy
+    paths = [tmp_path / f"video-{index}.mp4" for index in range(3)]
+    for path in paths:
+        path.write_bytes(b"video fixture")
+    request = _request(tmp_path)
+    request.options.video_mode = "fast"
+    manager = services.ProcessingJobManager()
+    manager._jobs["videos"] = _job("videos", tmp_path)
+    manager._job_requests["videos"] = request
+    monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args: None)
+    monkeypatch.setattr(legacy, "_resolve_job_inputs", lambda *args, **kwargs: (tmp_path, paths))
+    monkeypatch.setattr(legacy, "load_media_indexes", lambda *args, **kwargs: ({}, {}))
+    monkeypatch.setattr(legacy, "_load_detector", lambda *args: object())
+    monkeypatch.setattr(legacy, "_build_metadata_item", lambda path: DetectionItem(
+        filename=path.name, path=str(path), file_type="video"))
+    monkeypatch.setattr(legacy.time, "monotonic", lambda: 1000.0)
+
+    def interrupt_batch(detector, video_paths, items, *args, on_item_ready, **kwargs):
+        on_item_ready(0, items[0])
+        on_item_ready(1, items[1])
+        # The second completion is held back by the 200 ms UI throttle.
+        assert manager.get_job("videos").processed == 1
+        if cancelled:
+            manager._cancelled_jobs.add("videos")
+            raise RuntimeError("用户取消任务")
+        raise services.MediaStorageError(paths[2], "保存检测结果", OSError("disk disconnected"))
+
+    monkeypatch.setattr(legacy, "_detect_video_fast_batch", interrupt_batch)
+    try:
+        manager._run_job("videos", request, [])
+        job = manager.get_job("videos")
+        assert job.state == (JobState.CANCELLED if cancelled else JobState.FAILED)
+        assert not job.active
+        assert job.processed == 2
+        assert [item.path for item in job.results] == [str(path) for path in paths[:2]]
+        saved = manager._state_store.load()["jobs"]["videos"]
+        assert saved["processed"] == 2
+        assert len(saved["results"]) == 2
     finally:
         manager._executor.shutdown()

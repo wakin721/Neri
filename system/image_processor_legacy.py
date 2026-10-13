@@ -655,7 +655,7 @@ class ImageProcessor:
                                 )
                                 self._dinov2_observations.append(
                                     DinoV2Observation(
-                                        result_index=r_idx,
+                                        result_index=valid_indices[r_idx],
                                         box_index=b_idx,
                                         embedding=prediction.embedding,
                                         accepted=prediction.accepted,

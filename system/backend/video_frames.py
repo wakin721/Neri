@@ -123,7 +123,8 @@ def sample_video_frames(
         fps = capture.get(cv2.CAP_PROP_FPS)
         if not math.isfinite(fps) or fps <= 0:
             fps = 25
-        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        reported_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        total_frames = int(reported_frames) if math.isfinite(reported_frames) and reported_frames > 0 else 0
 
         def accept(frame, index):
             check_cancelled()
@@ -142,12 +143,30 @@ def sample_video_frames(
                     if ok:
                         accept(frame, index)
                 index += 1
+            if total_frames == 0:
+                total_frames = index
         else:
             sample_count = max(1, int(sample_count))
+            if total_frames == 0:
+                # Some playable containers do not expose a frame count. Count
+                # without retaining pixels, then reopen to sample the entire
+                # clip instead of silently treating frame zero as the video.
+                while True:
+                    check_cancelled()
+                    if not capture.grab():
+                        break
+                    total_frames += 1
+                if total_frames == 0:
+                    raise RuntimeError("无法从视频中提取有效帧")
+                capture.release()
+                check_cancelled()
+                capture = _open_video(path, decoder_threads)
+                if not capture.isOpened():
+                    raise RuntimeError("无法重新打开视频文件")
             points = sorted({
                 min(total_frames - 1, max(0, round(total_frames * (i + 1) / (sample_count + 1))))
                 for i in range(sample_count)
-            }) if total_frames > 0 else [0]
+            })
             # Measure this video's decoder instead of assuming a fixed GOP.
             # A small sequential probe estimates per-frame cost; the first
             # sparse seek measures keyframe/preroll overhead. Dense samples

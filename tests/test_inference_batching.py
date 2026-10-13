@@ -122,6 +122,65 @@ def test_legacy_detector_reports_oom_instead_of_returning_empty_results(monkeypa
         ))
 
 
+@pytest.mark.parametrize("legacy_processor", [False, True])
+def test_dinov2_observations_keep_source_indices_when_images_cannot_be_read(
+    legacy_processor, tmp_path, monkeypatch,
+):
+    import torch
+
+    from system import image_processor_legacy
+    from system.dinov2.classifier import DinoV2Prediction
+    from system.dinov2.image_processor import ImageProcessor
+
+    monkeypatch.setattr(image_processor_legacy, "_runtime_logs_dir", lambda *args: str(tmp_path))
+    if legacy_processor:
+        processor = image_processor_legacy.ImageProcessor(None)
+    else:
+        processor = ImageProcessor(None)
+    processor._determine_device = lambda enabled: ("cpu", False)
+    processor._sync_device = lambda device: None
+    processor.cleanup_runtime_cache = lambda **kwargs: None
+    processor._cuda_cache_pressure_high = lambda: False
+    processor._crop_single_box = lambda task: (task[0], task[1], task[3])
+
+    def detect(images, **kwargs):
+        return [SimpleNamespace(boxes=[SimpleNamespace(
+            conf=torch.tensor(0.9), xyxy=torch.tensor([[0, 0, 8, 8]]),
+        )]) for _ in images]
+
+    def classify(crops, **kwargs):
+        predictions = []
+        for crop in crops:
+            species = f"species-{int(crop[0, 0, 0])}"
+            embedding = np.zeros(768, np.float32)
+            embedding[int(crop[0, 0, 0])] = 1
+            predictions.append(DinoV2Prediction(
+                species=species, accepted=True, best_known_species=species,
+                head_species=species, prototype_species=species,
+                head_prototype_consistent=True, known_score=0.9, threshold=0.5,
+                candidates=(), embedding=embedding,
+            ))
+        return predictions
+
+    processor.model = detect
+    processor.load_dinov2_classifier(SimpleNamespace(classify_crops=classify, encoder=None))
+    paths = ["bad-first.jpg", "one.jpg", "bad-middle.jpg", "three.jpg"]
+    images = [np.full((8, 8, 3), value, np.uint8) for value in (1, 3)]
+    results = processor.detect_batch_species(
+        paths, preloaded_data=([1, 3], images, images),
+    )
+    observations = processor.drain_dinov2_observations()
+
+    assert [row["物种名称"] for row in results] == ["", "species-1", "", "species-3"]
+    assert [observation.result_index for observation in observations] == [1, 3]
+    for observation in observations:
+        result = results[observation.result_index]["detect_results"][0]
+        candidate = result.candidates_data[observation.box_index][0]
+        assert candidate["observation_id"] == observation.observation_id
+        assert candidate["name"] == observation.species
+        assert int(np.argmax(observation.embedding)) == observation.result_index
+
+
 @pytest.mark.parametrize("video", [False, True])
 def test_backend_auto_split_keeps_results_and_observations_aligned(video, tmp_path, monkeypatch):
     legacy = services._legacy
