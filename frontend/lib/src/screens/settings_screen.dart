@@ -3794,33 +3794,78 @@ class _SoftwareVersionInfo extends StatelessWidget {
 
     return Card.outlined(
       margin: EdgeInsets.zero,
+      color: Color.alphaBlend(
+        scheme.primaryContainer.withValues(alpha: 0.4),
+        scheme.surfaceContainerLow,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.55)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Icon(Icons.verified_rounded, color: scheme.primary),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('当前版本', style: Theme.of(context).textTheme.titleSmall),
-                  const SizedBox(height: 4),
-                  Text(
-                    version,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final versionInfo = Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                ],
-              ),
-            ),
-            TextButton.icon(
+                  child: Icon(Icons.verified_rounded, color: scheme.primary),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '当前版本',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        version,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+            final releaseNotes = OutlinedButton.icon(
               onPressed: onReleaseNotes,
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: scheme.primary.withValues(alpha: 0.3)),
+              ),
               icon: const Icon(Icons.article_outlined),
               label: const Text('更新说明'),
-            ),
-          ],
+            );
+            final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+            if (constraints.maxWidth < 480 * textScale) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  versionInfo,
+                  const SizedBox(height: 12),
+                  Align(alignment: Alignment.centerRight, child: releaseNotes),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: versionInfo),
+                const SizedBox(width: 16),
+                releaseNotes,
+              ],
+            );
+          },
         ),
       ),
     );
