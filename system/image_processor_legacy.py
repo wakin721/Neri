@@ -1,14 +1,15 @@
 # system/image_processor.py
 
+from __future__ import annotations
+
 import os
 import logging
 import concurrent.futures
 import gc
 import time
 import uuid
-from typing import Dict, Any, Optional, List, Union, Tuple
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
-from ultralytics import YOLO
 import json
 import torch
 import numpy as np
@@ -19,6 +20,9 @@ from system.confidence import (
 )
 from system.utils import resource_path
 import cv2
+
+if TYPE_CHECKING:
+    from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,8 @@ class ImageProcessor:
     def _load_model(self, model_path: str) -> Optional[YOLO]:
         """加载YOLO模型"""
         try:
+            from ultralytics import YOLO
+
             logger.info(f"正在加载模型: {model_path}")
             return YOLO(model_path)
         except Exception as e:
@@ -70,6 +76,8 @@ class ImageProcessor:
                 self.cls_model = None
                 logger.info("分类模型已卸载")
                 return
+            from ultralytics import YOLO
+
             logger.info(f"正在加载分类模型: {model_path}")
             self.cls_model = YOLO(model_path)
         except Exception as e:

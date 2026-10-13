@@ -1,5 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -8,6 +11,94 @@ from pydantic import ValidationError
 from system.backend import inference_batching, services, video_frames
 from system.backend.inference_batching import InferenceBatcher
 from system.backend.models import CreateJobRequest, DetectionItem, ProcessingOptions
+
+
+def test_legacy_helpers_work_without_optional_yolo_runtime():
+    # A fresh process prevents an earlier import or an installed YOLO runtime
+    # from hiding an eager dependency on Ultralytics.
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent("""
+            import importlib.abc
+            import sys
+
+            attempts = []
+
+            class MissingUltralytics(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname == "ultralytics" or fullname.startswith("ultralytics."):
+                        attempts.append(fullname)
+                        raise ModuleNotFoundError(
+                            "No module named 'ultralytics'", name="ultralytics",
+                        )
+
+            sys.meta_path.insert(0, MissingUltralytics())
+            from system.image_processor_legacy import ImageProcessor
+            from system.image_processor import ImageProcessor as ActiveImageProcessor
+            import numpy as np
+
+            for processor_type in (ImageProcessor, ActiveImageProcessor):
+                processor = processor_type(None)
+                assert processor.model is None
+                frame = np.full((8, 8, 3), [12, 90, 200], np.uint8)
+                indices, bgr, rgb = processor.preload_frame_data([frame])
+                assert indices == [0]
+                assert np.array_equal(bgr[0], frame)
+                assert np.array_equal(rgb[0], frame[:, :, ::-1])
+                processor.cleanup_runtime_cache(force_gc=False)
+            assert attempts == []
+
+            processor = ImageProcessor(None)
+            assert processor._load_model("detector.pt") is None
+            assert attempts == ["ultralytics"]
+            try:
+                processor.load_model("replacement.pt")
+            except Exception as exc:
+                assert "ultralytics" in str(exc)
+            else:
+                raise AssertionError("Missing detector runtime must report a load failure")
+            assert len(attempts) == 2
+            processor.load_cls_model("classifier.pt")
+            assert processor.cls_model is None and len(attempts) == 3
+            processor.load_cls_model("")
+            assert processor.cls_model is None and len(attempts) == 3
+        """)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("loader", ["initial", "replacement", "classifier"])
+def test_legacy_model_loading_still_uses_yolo(loader, monkeypatch):
+    from system.image_processor_legacy import ImageProcessor
+
+    loaded = []
+
+    def yolo(path):
+        model = SimpleNamespace(path=path)
+        loaded.append(model)
+        return model
+
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=yolo))
+    if loader == "initial":
+        processor = ImageProcessor("model.pt")
+    else:
+        processor = ImageProcessor(None)
+        assert loaded == []
+        if loader == "replacement":
+            processor.load_model("model.pt")
+        else:
+            processor.load_cls_model("model.pt")
+
+    assert len(loaded) == 1 and loaded[0].path == "model.pt"
+    if loader == "classifier":
+        assert processor.cls_model is loaded[0]
+        processor.load_cls_model("")
+        assert processor.cls_model is None and len(loaded) == 1
+    else:
+        assert processor.model is loaded[0] and processor.model_path == "model.pt"
 
 
 def test_auto_is_the_default_and_survives_cpu_request_normalization(monkeypatch):
