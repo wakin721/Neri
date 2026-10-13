@@ -102,9 +102,14 @@ class ImageProcessor:
         except Exception:
             pass
 
-    def cleanup_runtime_cache(self, clear_cuda_cache: bool = False) -> None:
+    def cleanup_runtime_cache(self, clear_cuda_cache: bool = False, *, force_gc: bool = True) -> None:
         try:
-            gc.collect()
+            now = time.monotonic()
+            last_gc = getattr(self, '_last_runtime_gc', now)
+            if force_gc or clear_cuda_cache or now - last_gc >= 30.0:
+                gc.collect()
+                last_gc = now
+            self._last_runtime_gc = last_gc
             if clear_cuda_cache and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             xpu = getattr(torch, 'xpu', None) if XPU_ENABLED else None
@@ -496,7 +501,7 @@ class ImageProcessor:
                     cleanup_cache or self._cuda_cache_pressure_high()
                 )
                 self.cleanup_runtime_cache(
-                    clear_cuda_cache=should_clear_cuda_cache
+                    clear_cuda_cache=should_clear_cuda_cache, force_gc=False,
                 )
                 return classification_results
             for _ in img_paths:
@@ -846,7 +851,7 @@ class ImageProcessor:
         run_batch_process()
 
         should_clear_cuda_cache = cleanup_cache or self._cuda_cache_pressure_high()
-        self.cleanup_runtime_cache(clear_cuda_cache=should_clear_cuda_cache)
+        self.cleanup_runtime_cache(clear_cuda_cache=should_clear_cuda_cache, force_gc=False)
 
         return batch_results_info
 

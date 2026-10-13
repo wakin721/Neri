@@ -2,14 +2,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
+import time
 from typing import Any, Callable, Iterator
 
 from system.config import XPU_ENABLED
+from system.adaptive_batch import AdaptiveBatchSize, accelerator_memory, is_accelerator_oom
 from .models import ProcessingOptions
 
 logger = logging.getLogger(__name__)
+
+
+def prefetched_path_batches(paths, batch_size: Callable[[], int], preload=None):
+    """Bounded photo lookahead that picks up learned sizes as the job advances."""
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="neri-image-preload") if preload else None
+    pending = deque()
+    offset = 0
+    try:
+        while pending or offset < len(paths):
+            while len(pending) < 3 and offset < len(paths):
+                end = min(len(paths), offset + max(1, batch_size()))
+                batch = paths[offset:end]
+                future = executor.submit(preload, [str(path) for path in batch]) if executor else None
+                pending.append((batch, future))
+                offset = end
+            yield pending.popleft()
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _gpu_memory_available() -> int | None:
@@ -48,16 +71,6 @@ def _automatic_batch_size(options: ProcessingOptions) -> int:
     return 1 << (limit.bit_length() - 1)
 
 
-def _is_accelerator_oom(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return isinstance(exc, RuntimeError) and (
-        type(exc).__name__ == "OutOfMemoryError"
-        or ("out of memory" in message and any(
-            device in message for device in ("cuda", "xpu", "gpu")
-        ))
-    )
-
-
 def _slice_preloaded(data, start: int, end: int, total: int):
     if data is None or (start == 0 and end == total):
         return data
@@ -83,11 +96,16 @@ class InferenceBatcher:
 
     def __init__(self, options: ProcessingOptions):
         self.automatic = options.batch_size == 0
-        self.batch_size = (
+        size = (
             _automatic_batch_size(options) if self.automatic else options.batch_size
         )
+        self._tuner = AdaptiveBatchSize(size, maximum=32, enabled=self.automatic, label="Detection")
         if self.automatic:
             logger.info("Automatic inference batch selected: size=%d", self.batch_size)
+
+    @property
+    def batch_size(self) -> int:
+        return self._tuner.size
 
     def detect(
         self,
@@ -105,19 +123,25 @@ class InferenceBatcher:
                 check_cancelled()
             end = min(len(paths), start + self.batch_size)
             loaded = _slice_preloaded(preloaded_data, start, end, len(paths))
+            memory_before = accelerator_memory() if self.automatic else None
+            started = time.perf_counter()
             try:
                 detections = detector.detect_batch_species(
                     paths[start:end], preloaded_data=loaded, **kwargs,
                 )
             except Exception as exc:
-                if not self.automatic or end - start <= 1 or not _is_accelerator_oom(exc):
+                if not self.automatic or end - start <= 1 or not is_accelerator_oom(exc):
                     raise
-                self.batch_size = max(1, (end - start) // 2)
+                self._tuner.reduce_after_oom(end - start)
                 logger.warning(
                     "GPU memory exhausted; retrying automatic batch with size=%d",
                     self.batch_size,
                 )
             else:
+                self._tuner.observe(
+                    end - start, time.perf_counter() - started, memory_before,
+                    accelerator_memory() if self.automatic else None,
+                )
                 yield InferenceBatch(start, end, detections, loaded)
                 start = end
                 continue

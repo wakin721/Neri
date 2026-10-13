@@ -18,6 +18,20 @@ _STILL_FRAME_CACHE: ContextVar[dict[tuple, np.ndarray] | None] = ContextVar(
     "neri_example_frame_cache",
     default=None,
 )
+_EXAMPLE_WRITER: ContextVar[object | None] = ContextVar("neri_example_writer", default=None)
+
+
+@contextmanager
+def background_example_writes():
+    from .example_writer import ExampleWriter
+
+    writer = ExampleWriter(_write_crop)
+    token = _EXAMPLE_WRITER.set(writer)
+    try:
+        yield writer
+    finally:
+        _EXAMPLE_WRITER.reset(token)
+        writer.close()
 
 
 def _examples_root(store_path: str | Path) -> Path:
@@ -164,12 +178,21 @@ def _encode_example(
     crop = _crop_example(frame, bbox)
     if crop is None:
         return None
+    return _encode_crop(crop)
+
+
+def _encode_crop(crop: np.ndarray) -> bytes | None:
     ok, encoded = cv2.imencode(
         ".jpg",
         crop,
         [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY],
     )
     return encoded.tobytes() if ok else None
+
+
+def _write_crop(path: Path, crop: np.ndarray) -> bool:
+    payload = _encode_crop(crop)
+    return _write_example(path, payload) if payload else False
 
 
 def _write_example(path: Path, payload: bytes) -> bool:
@@ -195,6 +218,14 @@ def _persist_example(
     timestamp_seconds: float | None = None,
 ) -> bool:
     if path.is_file() and path.stat().st_size > 0:
+        return True
+    writer = _EXAMPLE_WRITER.get()
+    if writer is not None:
+        frame = _read_frame(source_path, frame_index=frame_index, timestamp_seconds=timestamp_seconds)
+        crop = _crop_example(frame, bbox) if frame is not None else None
+        if crop is None:
+            return False
+        writer.submit(path, crop, source_path=source_path)
         return True
     payload = _encode_example(
         source_path,

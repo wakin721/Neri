@@ -126,4 +126,7 @@ frontend/windows/runner/*
 !frontend/test/dinov2_status_loading_test.dart
 !/tests/test_video_pipeline.py
 !/tests/test_inference_batching.py
+!/tests/test_adaptive_processing.py
+!/tests/test_adaptive_video.py
+!/tests/test_example_writer.py
 !frontend/test/video_processing_settings_test.dart

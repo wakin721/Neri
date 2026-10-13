@@ -32,7 +32,7 @@ from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 from .preview_fast import load_media_indexes
-from .inference_batching import InferenceBatcher
+from .inference_batching import InferenceBatcher, prefetched_path_batches
 
 from .models import (
     CreateJobRequest,
@@ -60,6 +60,23 @@ class MediaStorageError(RuntimeError):
         )
 
 
+class _LazyVideoItems:
+    """Read metadata when a decoded video first reaches inference, not all upfront."""
+
+    def __init__(self, paths, build):
+        self.paths = paths
+        self.build = build
+        self.cache = {}
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, index):
+        if index not in self.cache:
+            self.cache[index] = self.build(self.paths[index])
+        return self.cache[index]
+
+
 def _checked_media_file(path: Path) -> bool:
     # Unlike is_file on newer Python versions, do not suppress device errors.
     try:
@@ -75,6 +92,7 @@ _BATCH_LOGGER_NAMES = (
     __name__, "system.image_processor", "system.dinov2.image_processor",
     "system.backend.dinov2_persistence_fast",
     "system.backend.inference_batching",
+    "system.adaptive_batch",
 )
 
 
@@ -714,6 +732,9 @@ class ProcessingJobManager:
             request.options.video_mode,
         )
         batch_log_session = _start_batch_log_session(job_id)
+        from system.dinov2.registry_examples import background_example_writes
+        example_session = background_example_writes()
+        example_writer = example_session.__enter__()
         detector = None
         try:
             logger.info(
@@ -901,40 +922,12 @@ class ProcessingJobManager:
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
                 ]
                 inference_batcher = InferenceBatcher(request.options)
-                batch_size = inference_batcher.batch_size
-
-                image_batches = list(_chunked(image_files, batch_size))
-                image_preload_workers = 1
-                image_preload_lookahead = min(2, len(image_batches))
-                preload_executor = (
-                    ThreadPoolExecutor(max_workers=image_preload_workers)
-                    if image_batches and hasattr(detector, "preload_batch_data")
-                    else None
+                image_batches = prefetched_path_batches(
+                    image_files, lambda: inference_batcher.batch_size,
+                    getattr(detector, "preload_batch_data", None),
                 )
-                preload_futures: dict[int, Any] = {}
 
-                def submit_preload(batch_index: int) -> None:
-                    if preload_executor is None or batch_index >= len(image_batches):
-                        return
-                    if batch_index in preload_futures:
-                        return
-                    preload_futures[batch_index] = preload_executor.submit(
-                        detector.preload_batch_data,
-                        [str(path) for path in image_batches[batch_index]],
-                    )
-
-                def fill_preload_queue(current_batch_index: int) -> None:
-                    if preload_executor is None:
-                        return
-                    end_index = min(
-                        len(image_batches),
-                        current_batch_index + image_preload_lookahead,
-                    )
-                    for preload_index in range(current_batch_index, end_index):
-                        submit_preload(preload_index)
-
-                def take_preloaded(batch_index: int):
-                    future = preload_futures.pop(batch_index, None)
+                def take_preloaded(future):
                     if future is None:
                         return None
                     try:
@@ -943,14 +936,12 @@ class ProcessingJobManager:
                         logger.warning("Image batch preload failed: %s", exc)
                         return None
 
-                fill_preload_queue(0)
-                try:
-                    for batch_index, original_batch in enumerate(image_batches):
+                with closing(image_batches):
+                    for batch_index, (original_batch, preload_future) in enumerate(image_batches):
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
                             return
                         batch_started = time.perf_counter()
-                        fill_preload_queue(batch_index)
                         batch = existing_paths(original_batch)
                         metadata_paths = list(batch)
                         metadata_started = time.perf_counter()
@@ -964,9 +955,8 @@ class ProcessingJobManager:
                         metadata_elapsed = time.perf_counter() - metadata_started
 
                         preload_wait_started = time.perf_counter()
-                        preloaded_data = take_preloaded(batch_index)
+                        preloaded_data = take_preloaded(preload_future)
                         preload_wait_elapsed = time.perf_counter() - preload_wait_started
-                        fill_preload_queue(batch_index + 1)
                         batch = existing_paths(batch)
                         if batch != original_batch:
                             # Preloaded indices refer to the original batch.
@@ -997,11 +987,10 @@ class ProcessingJobManager:
                         detect_elapsed = time.perf_counter() - detect_started
                         logger.info(
                             (
-                                "Image batch timing: index=%d/%d size=%d "
+                                "Image batch timing: index=%d size=%d "
                                 "metadata=%.3fs preload_wait=%.3fs detect_save=%.3fs total=%.3fs"
                             ),
                             batch_index + 1,
-                            len(image_batches),
                             len(batch),
                             metadata_elapsed,
                             preload_wait_elapsed,
@@ -1025,10 +1014,6 @@ class ProcessingJobManager:
                                 f"(batch={len(batch)}): {last_path.name}"
                             ),
                         )
-                finally:
-                    if preload_executor is not None:
-                        preload_executor.shutdown(wait=False, cancel_futures=True)
-
                 video_files = existing_paths(video_files)
                 if video_files:
                     reset_speed_metrics(processed)
@@ -1051,54 +1036,42 @@ class ProcessingJobManager:
                     )
 
                 if request.options.video_mode == "fast":
-                    fast_video_group_size = max(
-                        batch_size,
-                        _fast_video_sample_worker_count(len(video_files)),
-                    )
-                    for original_batch in _chunked(
-                        video_files,
-                        fast_video_group_size,
-                    ):
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
-                        batch = existing_paths(original_batch)
-                        if not batch:
-                            continue
-                        batch_items: list[DetectionItem] = []
-                        for path in batch:
-                            item = _build_metadata_item(path)
-                            db_detection_data = detection_index.get(str(path))
-                            if db_detection_data:
-                                item = _apply_detection_data(item, db_detection_data)
-                            batch_items.append(item)
+                    last_video_publish = 0.0
 
-                        detected_items = _detect_video_fast_batch(
-                            detector,
-                            batch,
-                            batch_items,
-                            request,
-                            input_path,
-                            cancelled=lambda: self._is_cancelled(job_id),
-                            inference_batcher=inference_batcher,
-                        )
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
+                    def build_video_item(path):
+                        item = _build_metadata_item(path)
+                        data = detection_index.get(str(path))
+                        return _apply_detection_data(item, data) if data else item
+
+                    def video_completed(index, item):
+                        nonlocal processed, last_video_publish
+                        if not existing_paths([video_files[index]]):
                             return
-                        results.extend(detected_items)
-                        processed += len(detected_items)
-                        last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
+                        results.append(item)
+                        processed += 1
+                        now = time.monotonic()
+                        if processed < total_files and now - last_video_publish < 0.2:
+                            return
+                        last_video_publish = now
                         self._mutate_job(
-                            job_id,
-                            persist=False,
-                            processed=processed,
-                            results=results,
+                            job_id, persist=False, processed=processed, results=results,
                             **progress_metrics(processed),
-                            message=(
-                                f"正在批量快速处理视频 {processed}/{total_files} "
-                                f"(batch={len(batch)}): {last_path.name}"
-                            ),
+                            message=f"正在快速处理视频 {processed}/{total_files}: {item.filename}",
                         )
+
+                    base_results = list(results)
+                    detected_items = _detect_video_fast_batch(
+                        detector, video_files, _LazyVideoItems(video_files, build_video_item),
+                        request, input_path,
+                        cancelled=lambda: self._is_cancelled(job_id),
+                        inference_batcher=inference_batcher,
+                        on_item_ready=video_completed,
+                    )
+                    # Preserve input order in the final export; progress is
+                    # published as each video is saved, regardless of decode order.
+                    results = base_results + [
+                        item for item in detected_items if _path_key(item.path) not in missing_file_keys
+                    ]
                 else:
                     video_items: list[DetectionItem] = []
                     for path in video_files:
@@ -1246,6 +1219,11 @@ class ProcessingJobManager:
                 if item.path and _checked_media_file(Path(item.path))
             ]
             total_files = len(results)
+            # A completed job must include all accepted background image writes.
+            example_writer.flush()
+            if self._is_cancelled(job_id):
+                self._mark_cancelled(job_id, results)
+                return
             exported_path = _export_results(request.output_dir, results)
             message = "预扫描完成" if not request.options.enable_detection else "处理完成"
             if exported_path is not None:
@@ -1281,6 +1259,21 @@ class ProcessingJobManager:
                 )
                 self._mutate_job(job_id, state=JobState.FAILED, error=str(exc), message=message)
         finally:
+            try:
+                # Drain accepted writes on cancellation/failure too, before
+                # closing DINO state or marking this job inactive.
+                example_session.__exit__(None, None, None)
+            except Exception as exc:
+                logger.warning("Background example writes failed: %s", exc)
+            if example_writer.failed_sources:
+                # Failed/unqueued example writes must be retried with their
+                # source media on resume; keep all other completed progress.
+                failed_keys = {_path_key(path) for path in example_writer.failed_sources}
+                with self._lock:
+                    current = self._jobs.get(job_id)
+                    retained = [item for item in current.results if _path_key(item.path) not in failed_keys] if current else None
+                if retained is not None:
+                    self._mutate_job(job_id, results=retained, processed=len(retained))
             if detector is not None:
                 runtime = getattr(detector, "dinov2_runtime", None)
                 if runtime is not None:
@@ -2486,14 +2479,47 @@ def _detect_video_fast_batch(
     input_path: Path,
     cancelled=None,
     inference_batcher: InferenceBatcher | None = None,
+    on_item_ready=None,
 ) -> list[DetectionItem]:
     from .video_frames import VideoSampleResult, prepared_video_batches
 
-    result_items: list[DetectionItem | None] = [None for _ in items]
-    video_infos: list[dict[str, Any] | None] = [None for _ in items]
+    result_items: list[DetectionItem | None] = [None] * len(paths)
+    video_infos: list[dict[str, Any] | None] = [None] * len(paths)
     detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
-        [] for _ in items
+        [] for _ in paths
     ]
+    completed: set[int] = set()
+    save_elapsed = 0.0
+
+    def publish_finished(indices):
+        nonlocal save_elapsed
+        ready = []
+        payloads = []
+        for index in sorted(set(indices) - completed):
+            result = result_items[index]
+            info = video_infos[index]
+            if result is None:
+                if info is None or len(detections_by_video[index]) < len(info.get("frame_points", [])):
+                    continue
+                data = _build_fast_video_detection_data(
+                    detector, paths[index], info,
+                    sorted(detections_by_video[index], key=lambda record: record[0]),
+                    video_mode=request.options.video_mode,
+                )
+                result = _apply_detection_data(items[index], data)
+                payloads.append((paths[index], data))
+            ready.append((index, result))
+        if payloads:
+            started = time.perf_counter()
+            _save_detection_data_batch(payloads, input_path)
+            save_elapsed += time.perf_counter() - started
+        for index, result in ready:
+            result_items[index] = result
+            completed.add(index)
+            detections_by_video[index].clear()
+            if on_item_ready is not None:
+                on_item_ready(index, result)
+
     try:
         batch_started = time.perf_counter()
         sample_count = max(1, int(request.options.vid_stride or 1))
@@ -2516,7 +2542,7 @@ def _detect_video_fast_batch(
         inference_batcher = inference_batcher or InferenceBatcher(request.options)
         stream = prepared_video_batches(
             paths, sample_count=sample_count,
-            batch_size=inference_batcher.batch_size,
+            batch_size=lambda: inference_batcher.batch_size,
             workers=sample_workers, decoder_threads=decoder_threads,
             preload=detector.preload_frame_data,
             frame_stride=frame_stride, cancelled=cancelled,
@@ -2533,6 +2559,7 @@ def _detect_video_fast_batch(
                         )
                     else:
                         video_infos[value.video_index] = value.info
+                    publish_finished([value.video_index])
                     wait_started = time.perf_counter()
                     continue
 
@@ -2574,6 +2601,8 @@ def _detect_video_fast_batch(
                     _raise_if_cancelled(cancelled)
                     serialize_started = time.perf_counter()
                     for index, frame in enumerate(batch_frames):
+                        if frame.video_index in completed:
+                            continue
                         detection = batch.detections[index] if index < len(batch.detections) else {}
                         if not isinstance(detection, dict):
                             detection = {}
@@ -2582,35 +2611,22 @@ def _detect_video_fast_batch(
                             _serialize_detector_output(detector, detection),
                         ))
                     serialize_elapsed += time.perf_counter() - serialize_started
+                    publish_finished(frame.video_index for frame in batch_frames)
                     inference_started = time.perf_counter()
                 wait_started = time.perf_counter()
 
         _raise_if_cancelled(cancelled)
-        detection_payloads: list[tuple[Path, dict[str, Any]]] = []
         serialize_started = time.perf_counter()
         for index, (path, item) in enumerate(zip(paths, items)):
-            if result_items[index] is not None:
+            if index in completed:
                 continue
             info = video_infos[index]
-            if info is None:
+            if info is None or len(detections_by_video[index]) != len(info.get("frame_points", [])):
                 result_items[index] = item.model_copy(
                     update={"error": "视频快速检测失败: 无法从视频中提取有效帧"}
                 )
-                continue
-            detection_data = _build_fast_video_detection_data(
-                detector, path, info,
-                sorted(detections_by_video[index], key=lambda record: record[0]),
-                video_mode=request.options.video_mode,
-            )
-            detection_payloads.append((path, detection_data))
-            result_items[index] = _apply_detection_data(item, detection_data)
+        publish_finished(range(len(paths)))
         serialize_elapsed += time.perf_counter() - serialize_started
-
-        save_elapsed = 0.0
-        if detection_payloads:
-            save_started = time.perf_counter()
-            _save_detection_data_batch(detection_payloads, input_path)
-            save_elapsed = time.perf_counter() - save_started
         logger.info(
             (
                 "Fast video batch timing: videos=%d sample_workers=%d decoder_threads=%d "
@@ -2625,10 +2641,14 @@ def _detect_video_fast_batch(
     except MediaStorageError:
         raise
     except Exception as exc:
-        return [
-            item.model_copy(update={"error": f"视频批量快速检测失败: {exc}"})
-            for item in items
-        ]
+        _raise_if_cancelled(cancelled)
+        for index in range(len(paths)):
+            if index not in completed:
+                result_items[index] = items[index].model_copy(
+                    update={"error": f"视频批量快速检测失败: {exc}"},
+                )
+        publish_finished(range(len(paths)))
+        return result_items
 
 
 def _raise_if_cancelled(cancelled) -> None:

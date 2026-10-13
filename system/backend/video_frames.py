@@ -8,6 +8,8 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 import threading
 import time
+import math
+import statistics
 from typing import Any, Callable, Iterator
 
 import cv2
@@ -68,11 +70,15 @@ class _FrameBuffer:
             self._bytes += size
             self._condition.notify_all()
 
-    def get(self):
+    def get(self, timeout: float | None = None):
+        deadline = time.monotonic() + timeout if timeout is not None else None
         with self._condition:
             while not self._items:
                 self._check_cancelled()
-                self._condition.wait(0.05)
+                remaining = deadline - time.monotonic() if deadline is not None else 0.05
+                if remaining <= 0:
+                    raise Empty
+                self._condition.wait(min(0.05, remaining))
             self._check_cancelled()
             item, size = self._items.popleft()
             self._bytes -= size
@@ -114,7 +120,9 @@ def sample_video_frames(
             raise RuntimeError("无法打开视频文件")
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = capture.get(cv2.CAP_PROP_FPS) or 25
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if not math.isfinite(fps) or fps <= 0:
+            fps = 25
         total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
 
         def accept(frame, index):
@@ -140,28 +148,65 @@ def sample_video_frames(
                 min(total_frames - 1, max(0, round(total_frames * (i + 1) / (sample_count + 1))))
                 for i in range(sample_count)
             }) if total_frames > 0 else [0]
-            sequential = len(points) > 1 and points[-1] <= len(points) * 300
-            if sequential:
-                point_index = 0
-                frame_index = 0
-                while point_index < len(points):
+            # Measure this video's decoder instead of assuming a fixed GOP.
+            # A small sequential probe estimates per-frame cost; the first
+            # sparse seek measures keyframe/preroll overhead. Dense samples
+            # continue sequentially and sparse short-GOP samples use seeks.
+            next_index = 0
+            grab_times: list[float] = []
+            seek_seconds = None
+            seek_supported = True
+
+            def grab_until(point):
+                nonlocal next_index
+                while next_index <= point:
                     check_cancelled()
+                    started = time.perf_counter()
                     if not capture.grab():
-                        break
-                    if frame_index == points[point_index]:
-                        ok, frame = capture.retrieve()
-                        if ok:
-                            accept(frame, frame_index)
-                        point_index += 1
-                    frame_index += 1
-            else:
-                for point in points:
-                    check_cancelled()
-                    if point > 0:
-                        capture.set(cv2.CAP_PROP_POS_FRAMES, point)
-                    ok, frame = capture.read()
-                    if ok:
-                        accept(frame, point)
+                        return False, None
+                    if next_index >= 3:
+                        grab_times.append(time.perf_counter() - started)
+                        if len(grab_times) > 32:
+                            del grab_times[0]
+                    next_index += 1
+                return capture.retrieve()
+
+            if len(points) > 1 and points[0] >= 64:
+                grab_until(11)
+            for point in points:
+                check_cancelled()
+                gap = point - next_index
+                per_frame = statistics.median(grab_times) if grab_times else None
+                use_seek = seek_supported and gap >= 32 and (
+                    seek_seconds is None or per_frame is None
+                    # Keep sequential decoding when the expected costs are
+                    # close; seek/preroll timings vary with GOP position.
+                    or gap * per_frame > seek_seconds * 1.5
+                )
+                if use_seek:
+                    started = time.perf_counter()
+                    positioned = capture.set(cv2.CAP_PROP_POS_FRAMES, point)
+                    ok, frame = capture.read() if positioned else (False, None)
+                    actual_position = capture.get(cv2.CAP_PROP_POS_FRAMES)
+                    exact = (
+                        ok and math.isfinite(actual_position)
+                        and abs(actual_position - (point + 1)) < 0.5
+                    )
+                    if exact:
+                        seek_seconds = time.perf_counter() - started
+                        next_index = point + 1
+                    else:
+                        # Some backends ignore seeks or land on keyframes.
+                        # Restart and count frames so sample labels stay exact.
+                        seek_supported = False
+                        capture.release()
+                        capture = _open_video(path, decoder_threads)
+                        next_index = 0
+                        ok, frame = grab_until(point)
+                else:
+                    ok, frame = grab_until(point)
+                if ok:
+                    accept(frame, point)
         if not points_read:
             raise RuntimeError("无法从视频中提取有效帧")
         return dict(frame_points=points_read, width=width, height=height,
@@ -174,7 +219,7 @@ def prepared_video_batches(
     paths: list[Path],
     *,
     sample_count: int,
-    batch_size: int,
+    batch_size: int | Callable[[], int],
     workers: int,
     decoder_threads: int,
     preload: Callable,
@@ -195,7 +240,8 @@ def prepared_video_batches(
         if stop.is_set() or (cancelled is not None and cancelled()):
             raise VideoPipelineCancelled("用户取消任务")
 
-    raw = _FrameBuffer(max(2, batch_size * 2), buffer_bytes, check_cancelled)
+    current_batch_size = batch_size if callable(batch_size) else lambda: batch_size
+    raw = _FrameBuffer(max(2, current_batch_size() * 2), buffer_bytes, check_cancelled)
     ready: Queue = Queue(maxsize=1)
 
     def publish(value):
@@ -228,7 +274,10 @@ def prepared_video_batches(
     def produce():
         try:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="neri-video-decode") as executor:
-                for index in range(len(paths)):
+                # Keep only one task per decoder pending, including when a job
+                # contains hundreds of thousands of files.
+                next_video = min(workers, len(paths))
+                for index in range(next_video):
                     executor.submit(sample, index)
                 frames: list[VideoFrame] = []
                 size = 0
@@ -249,9 +298,18 @@ def prepared_video_batches(
 
                 try:
                     while completed < len(paths):
-                        value = raw.get()
+                        try:
+                            value = raw.get(timeout=0.05 if frames else None)
+                        except Empty:
+                            # Do not leave the GPU idle waiting for a slow file
+                            # to fill the last few slots of a partial batch.
+                            flush()
+                            continue
                         if isinstance(value, VideoSampleResult):
                             completed += 1
+                            if next_video < len(paths):
+                                executor.submit(sample, next_video)
+                                next_video += 1
                             publish(value)
                             continue
                         # BGR plus RGB preprocessing copies determine the
@@ -261,7 +319,7 @@ def prepared_video_batches(
                             flush()
                         frames.append(value)
                         size += frame_bytes
-                        if len(frames) >= batch_size or size >= batch_bytes:
+                        if len(frames) >= current_batch_size() or size >= batch_bytes:
                             flush()
                     flush()
                 except BaseException:
