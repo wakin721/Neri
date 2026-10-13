@@ -317,8 +317,14 @@ class ProcessingOptions(BaseModel):
             "both models are enabled."
         ),
     )
-    batch_size: int = Field(default=16, ge=1, le=64)
-    thread_count: int = Field(default=4, ge=1, le=8)
+    batch_size: int = Field(
+        default=0, ge=0, le=64,
+        description="Inference batch size; 0 selects automatically (CPU always uses 1).",
+    )
+    thread_count: int | None = Field(
+        default=None, ge=1, le=8, exclude=True,
+        description="Legacy option, ignored. Processing concurrency is selected automatically.",
+    )
     imgsz: int = Field(default=1920, ge=320, le=4096)
     vid_stride: int = Field(default=3, ge=1, le=120)
     video_mode: Literal["all", "fast", "skip"] = "fast"

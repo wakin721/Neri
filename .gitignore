@@ -124,3 +124,6 @@ frontend/windows/runner/*
 !frontend/test/preview_snapshot_cache_test.dart
 !frontend/test/export_settings_test.dart
 !frontend/test/dinov2_status_loading_test.dart
+!/tests/test_video_pipeline.py
+!/tests/test_inference_batching.py
+!frontend/test/video_processing_settings_test.dart

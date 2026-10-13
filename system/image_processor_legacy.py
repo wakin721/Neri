@@ -312,6 +312,14 @@ class ImageProcessor:
             logger.error(f"预加载数据失败: {e}")
             return None
 
+    def preload_frame_data(self, frames: List[Any]) -> Tuple:
+        """Prepare already decoded video frames without a JPEG round trip."""
+        processed = [self._preprocess_image(frame) for frame in frames]
+        if any(frame is None for frame in processed):
+            raise ValueError("视频帧预处理失败")
+        original_rgb = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in processed]
+        return (list(range(len(processed))), processed, original_rgb)
+
     def _crop_single_box(self, args):
         """辅助方法：处理单个检测框的裁剪与Padding任务"""
         r_idx, b_idx, box, orig_img_rgb = args
@@ -828,7 +836,9 @@ class ImageProcessor:
 
             except Exception as e:
                 logger.error(f"批量检测失败: {e}")
-                return False
+                # Let the backend reduce automatic batches on GPU OOM and
+                # report real inference failures instead of saving empty results.
+                raise
 
             finally:
                 pass

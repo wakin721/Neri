@@ -238,11 +238,12 @@ void main() {
     expect(find.text('视频处理模式'), findsOneWidget);
     expect(find.text('跳帧设置'), findsNothing);
     expect(find.byType(SegmentedButton<String>), findsNothing);
-    expect(find.text('CPU 模式下批处理数和线程数固定为 1'), findsOneWidget);
+    expect(find.text('CPU 模式下批处理数锁定为自动（=1）；处理线程由软件自动安排'), findsOneWidget);
+    expect(find.text('线程数'), findsNothing);
     final cpuLockedSliders = tester
         .widgetList<Slider>(find.byType(Slider))
-        .where((slider) => slider.value == 1 && slider.onChanged == null);
-    expect(cpuLockedSliders, hasLength(2));
+        .where((slider) => slider.value == 0 && slider.onChanged == null);
+    expect(cpuLockedSliders, hasLength(1));
 
     final modeButton = find.widgetWithText(TextButton, '跳过视频');
     expect(modeButton, findsOneWidget);

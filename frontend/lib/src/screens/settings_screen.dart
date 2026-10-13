@@ -228,7 +228,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = widget.settings;
     final saved = Map<String, dynamic>.from(
       settings?.settings ?? const <String, dynamic>{},
-    );
+    )..remove('thread_count');
     final savedQuickMarks = _stringListSetting(
       saved,
       'quick_mark_list',
@@ -256,8 +256,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
-      'batch_size': gpuAvailable ? _intSetting(saved, 'batch_size', 16) : 1,
-      'thread_count': gpuAvailable ? _intSetting(saved, 'thread_count', 4) : 1,
+      'batch_size': gpuAvailable ? _intSetting(saved, 'batch_size', 0) : 0,
       'use_fp16': !dependenciesReady
           ? _boolSetting(saved, 'use_fp16', false)
           : settings?.gpuAvailable == true &&
@@ -1268,8 +1267,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
     final gpuAvailable = settings?.gpuAvailable == true;
-    final batchSize = gpuAvailable ? _int('batch_size') : 1;
-    final threadCount = gpuAvailable ? _int('thread_count', 4) : 1;
+    final batchSize = gpuAvailable ? _int('batch_size') : 0;
     final combinedModelsEnabled =
         selectedModel?.isNotEmpty == true &&
         selectedClassificationModel?.isNotEmpty == true &&
@@ -1438,30 +1436,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _SettingsPanel(
             title: '模型加速选项',
             subtitle: gpuAvailable
-                ? '批处理数控制单次推理规模，线程数控制完整视频文件并发'
-                : 'CPU 模式下批处理数和线程数固定为 1',
+                ? '自动批处理按显存和输入尺寸选择；处理线程由软件根据硬件和任务自动安排'
+                : 'CPU 模式下批处理数锁定为自动（=1）；处理线程由软件自动安排',
             icon: Icons.bolt_rounded,
             child: Column(
               children: [
                 _LabeledSlider(
                   label: '批处理数',
                   value: batchSize.toDouble(),
-                  min: 1,
+                  min: 0,
                   max: 32,
-                  divisions: 31,
-                  valueLabel: batchSize.toString(),
+                  divisions: 32,
+                  valueLabel: !gpuAvailable
+                      ? '自动（=1）'
+                      : batchSize == 0
+                      ? '自动'
+                      : batchSize.toString(),
+                  valueLabelWidth: 90,
                   enabled: detectionEnabled && gpuAvailable,
                   onChanged: (value) => _set('batch_size', value.round()),
-                ),
-                _LabeledSlider(
-                  label: '线程数',
-                  value: threadCount.toDouble(),
-                  min: 1,
-                  max: 8,
-                  divisions: 7,
-                  valueLabel: threadCount.toString(),
-                  enabled: detectionEnabled && gpuAvailable,
-                  onChanged: (value) => _set('thread_count', value.round()),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -3645,6 +3638,7 @@ class _LabeledSlider extends StatelessWidget {
     required this.divisions,
     required this.onChanged,
     this.valueLabel,
+    this.valueLabelWidth = 56,
     this.enabled = true,
   });
 
@@ -3655,6 +3649,7 @@ class _LabeledSlider extends StatelessWidget {
   final int divisions;
   final ValueChanged<double> onChanged;
   final String? valueLabel;
+  final double valueLabelWidth;
   final bool enabled;
 
   @override
@@ -3675,7 +3670,10 @@ class _LabeledSlider extends StatelessWidget {
               onChanged: enabled ? onChanged : null,
             ),
           ),
-          SizedBox(width: 56, child: Text(display, textAlign: TextAlign.end)),
+          SizedBox(
+            width: valueLabelWidth,
+            child: Text(display, textAlign: TextAlign.end),
+          ),
         ],
       ),
     );

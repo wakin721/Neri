@@ -2702,18 +2702,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return availablePaths.contains(fallback) ? fallback : '';
   }
 
-  int _processingBatchSize({bool singleFile = false}) {
-    if (singleFile) return 1;
+  int _processingBatchSize() {
     final settings = _settingsOrEmpty();
-    final savedBatchSize = _intSetting(settings, 'batch_size', 16);
+    final savedBatchSize = _intSetting(settings, 'batch_size', 0);
     final gpuAvailable = _settings?.gpuAvailable == true;
-    return gpuAvailable ? savedBatchSize.clamp(1, 64).toInt() : 1;
-  }
-
-  int _processingThreadCount({bool singleFile = false}) {
-    if (singleFile || _settings?.gpuAvailable != true) return 1;
-    final settings = _settingsOrEmpty();
-    return _intSetting(settings, 'thread_count', 4).clamp(1, 8).toInt();
+    return gpuAvailable ? savedBatchSize.clamp(0, 64).toInt() : 0;
   }
 
   int _imageSizeSetting() {
@@ -2967,7 +2960,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAgnosticNms: _useAgnosticNms(),
         confidencePriority: _confidencePriority(),
         batchSize: _processingBatchSize(),
-        threadCount: _processingThreadCount(),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -3162,8 +3154,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         confidencePriority: _confidencePriority(),
-        batchSize: _processingBatchSize(singleFile: true),
-        threadCount: _processingThreadCount(singleFile: true),
+        batchSize: _processingBatchSize(),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),
@@ -3207,8 +3198,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         useAugment: _useAugment(),
         useAgnosticNms: _useAgnosticNms(),
         confidencePriority: _confidencePriority(),
-        batchSize: _processingBatchSize(singleFile: inputPaths.length == 1),
-        threadCount: _processingThreadCount(singleFile: inputPaths.length == 1),
+        batchSize: _processingBatchSize(),
         imageSize: _imageSizeSetting(),
         vidStride: _videoStride(),
         videoMode: _effectiveVideoMode(),

@@ -82,7 +82,7 @@ def test_completed_image_batch_is_checkpointed_while_job_is_running(
     monkeypatch.setattr(
         legacy,
         "_detect_image_batch",
-        lambda detector, batch, batch_items, request, input_path, preloaded_data=None: [item],
+        lambda detector, batch, batch_items, request, input_path, preloaded_data=None, inference_batcher=None: [item],
     )
     monkeypatch.setattr(legacy, "_export_results", lambda *args, **kwargs: None)
 

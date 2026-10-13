@@ -14,8 +14,8 @@ from system.config import SUPPORTED_VIDEO_EXTENSIONS
 
 _EXAMPLE_SIZE = 320
 _JPEG_QUALITY = 90
-_STILL_FRAME_CACHE: ContextVar[dict[str, np.ndarray] | None] = ContextVar(
-    "neri_example_still_frame_cache",
+_STILL_FRAME_CACHE: ContextVar[dict[tuple, np.ndarray] | None] = ContextVar(
+    "neri_example_frame_cache",
     default=None,
 )
 
@@ -41,16 +41,27 @@ def _source_cache_key(source: Path) -> str:
 
 
 @contextmanager
-def example_frame_cache(frames=None):
-    """Reuse decoded still frames within one explicit persistence operation."""
-    token = _STILL_FRAME_CACHE.set({
-        _source_cache_key(Path(path).expanduser().resolve()): frame
+def example_frame_cache(frames=None, *, video_frames=()):
+    """Reuse exact frames within a batch; video identity includes its frame index."""
+    cache = {
+        (_source_cache_key(Path(path).expanduser().resolve()), None, None): frame
         for path, frame in (frames or {}).items()
-    })
+    }
+    for path, index, timestamp, frame in video_frames:
+        cache[_frame_cache_key(Path(path).expanduser().resolve(), index, timestamp)] = frame
+    token = _STILL_FRAME_CACHE.set(cache)
     try:
         yield
     finally:
         _STILL_FRAME_CACHE.reset(token)
+
+
+def _frame_cache_key(source: Path, frame_index, timestamp_seconds):
+    return (
+        _source_cache_key(source),
+        int(frame_index) if frame_index is not None else None,
+        float(timestamp_seconds) if frame_index is None and timestamp_seconds is not None else None,
+    )
 
 
 def _read_frame(
@@ -65,11 +76,13 @@ def _read_frame(
 
     cache = _STILL_FRAME_CACHE.get()
     is_video = source.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
-    cache_key = _source_cache_key(source)
-    if cache is not None and not is_video and cache_key in cache:
+    cache_key = _frame_cache_key(source, frame_index, timestamp_seconds) if is_video else (
+        _source_cache_key(source), None, None
+    )
+    if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    frame = cv2.imread(str(source))
+    frame = None if is_video else cv2.imread(str(source))
     if frame is not None:
         if cache is not None and not is_video:
             cache[cache_key] = frame
@@ -84,7 +97,11 @@ def _read_frame(
         ok, frame = capture.read()
     finally:
         capture.release()
-    return frame if ok and frame is not None else None
+    if ok and frame is not None:
+        if cache is not None:
+            cache[cache_key] = frame
+        return frame
+    return None
 
 
 def _crop_example(frame: np.ndarray, bbox: Iterable[float]) -> np.ndarray | None:

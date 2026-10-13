@@ -189,14 +189,22 @@ def persist_runtime_observations(
     example_elapsed = 0.0
     registry_elapsed = 0.0
     frames = {}
-    if preloaded_data is not None and source_paths is None:
+    video_frames = []
+    if preloaded_data is not None:
         valid_indices, processed_imgs, _original_rgb = preloaded_data
-        frames = {
-            paths[index]: frame for index, frame in zip(valid_indices, processed_imgs)
-            if 0 <= index < len(paths)
-        }
+        for index, frame in zip(valid_indices, processed_imgs):
+            if not 0 <= index < len(roots):
+                continue
+            source = Path(roots[index])
+            if _media_kind(source) == "video":
+                video_frames.append((
+                    source, _indexed_value(frame_indices, index),
+                    _indexed_value(timestamp_seconds, index), frame,
+                ))
+            else:
+                frames[source] = frame
     matching_batch = getattr(registry, "matching_batch", None)
-    with example_frame_cache(frames), (matching_batch() if callable(matching_batch) else nullcontext()):
+    with example_frame_cache(frames, video_frames=video_frames), (matching_batch() if callable(matching_batch) else nullcontext()):
         for context in prepared:
             runtime_observation = context["runtime"]
             feedback_observation = context["feedback"]

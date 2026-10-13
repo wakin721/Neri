@@ -32,6 +32,7 @@ from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 from .preview_fast import load_media_indexes
+from .inference_batching import InferenceBatcher
 
 from .models import (
     CreateJobRequest,
@@ -73,6 +74,7 @@ _BATCH_LOG_RETENTION = 5
 _BATCH_LOGGER_NAMES = (
     __name__, "system.image_processor", "system.dinov2.image_processor",
     "system.backend.dinov2_persistence_fast",
+    "system.backend.inference_batching",
 )
 
 
@@ -349,8 +351,7 @@ def _effective_processing_request(
     if not request.options.enable_detection:
         return request
     if (
-        request.options.batch_size == 1
-        and request.options.thread_count == 1
+        request.options.batch_size in (0, 1)
         and not request.options.use_fp16
     ):
         return request
@@ -358,8 +359,7 @@ def _effective_processing_request(
         return request
     options = request.options.model_copy(
         update={
-            "batch_size": 1,
-            "thread_count": 1,
+            "batch_size": 0 if request.options.batch_size == 0 else 1,
             "use_fp16": False,
         }
     )
@@ -900,7 +900,8 @@ class ProcessingJobManager:
                 video_files = [
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
                 ]
-                batch_size = max(1, int(request.options.batch_size or 1))
+                inference_batcher = InferenceBatcher(request.options)
+                batch_size = inference_batcher.batch_size
 
                 image_batches = list(_chunked(image_files, batch_size))
                 image_preload_workers = 1
@@ -991,6 +992,7 @@ class ProcessingJobManager:
                             request,
                             input_path,
                             preloaded_data=preloaded_data,
+                            inference_batcher=inference_batcher,
                         )
                         detect_elapsed = time.perf_counter() - detect_started
                         logger.info(
@@ -1051,10 +1053,7 @@ class ProcessingJobManager:
                 if request.options.video_mode == "fast":
                     fast_video_group_size = max(
                         batch_size,
-                        min(
-                            len(video_files),
-                            max(1, int(request.options.thread_count or 1)),
-                        ),
+                        _fast_video_sample_worker_count(len(video_files)),
                     )
                     for original_batch in _chunked(
                         video_files,
@@ -1081,6 +1080,7 @@ class ProcessingJobManager:
                             request,
                             input_path,
                             cancelled=lambda: self._is_cancelled(job_id),
+                            inference_batcher=inference_batcher,
                         )
                         if self._is_cancelled(job_id):
                             self._mark_cancelled(job_id, results)
@@ -1110,7 +1110,6 @@ class ProcessingJobManager:
 
                     video_worker_count = _tracked_video_worker_count(
                         len(video_files),
-                        request.options.thread_count,
                     )
                     if video_worker_count <= 1:
                         for path, item in zip(video_files, video_items):
@@ -1409,25 +1408,20 @@ def _chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
         yield items[index : index + size]
 
 
-def _tracked_video_worker_count(item_count: int, thread_count: int) -> int:
-    if item_count <= 1:
+def _tracked_video_worker_count(item_count: int) -> int:
+    if item_count <= 1 or not detect_gpu_available():
         return 1
     cpu_count = os.cpu_count() or 1
-    configured = max(1, min(int(thread_count or 1), 8))
-    cpu_budget = max(1, cpu_count // 2)
-    # Full video tracking loads model state and decodes frames per worker, so
-    # keep the cap conservative even when a larger value is requested.
-    return max(1, min(item_count, configured, cpu_budget))
+    # Each tracking worker owns a separate model and tracker. Keep this more
+    # conservative than CPU-only decoding to avoid multiplying GPU memory use.
+    return max(1, min(item_count, 2, cpu_count // 4))
 
 
-def _fast_video_sample_worker_count(item_count: int, thread_count: int) -> int:
-    if item_count <= 1:
-        return 1
-    configured = max(1, min(int(thread_count or 1), 8))
+def _fast_video_sample_worker_count(item_count: int) -> int:
     cpu_count = os.cpu_count() or 1
-    # Video decoding is CPU and I/O heavy. A small cap avoids making HDD and
-    # network-drive workloads slower through excessive parallel seeking.
-    return max(1, min(item_count, configured, cpu_count, 4))
+    # Reserve CPU capacity for frame preprocessing. The pipeline also caps each
+    # codec's threads and applies backpressure when inference or storage is slow.
+    return max(1, min(item_count, 8, cpu_count // 2))
 
 
 def _unique_detection_items(items: Iterable[DetectionItem]) -> list[DetectionItem]:
@@ -2270,6 +2264,7 @@ def _detect_image_batch(
     request: CreateJobRequest,
     input_path: Path,
     preloaded_data: Any = None,
+    inference_batcher: InferenceBatcher | None = None,
 ) -> list[DetectionItem]:
     surviving_pairs = [
         (path, item)
@@ -2287,8 +2282,10 @@ def _detect_image_batch(
             detector,
             request.options.selected_species_names,
         )
+        inference_batcher = inference_batcher or InferenceBatcher(request.options)
         detect_started = time.perf_counter()
-        detections = detector.detect_batch_species(
+        batches = inference_batcher.detect(
+            detector,
             [str(path) for path in paths],
             conf=request.options.confidence,
             iou=request.options.iou,
@@ -2301,23 +2298,31 @@ def _detect_image_batch(
             selected_species_names=request.options.selected_species_names,
             preloaded_data=preloaded_data,
         )
-        detect_elapsed = time.perf_counter() - detect_started
+        detect_elapsed = 0.0
+        serialize_elapsed = 0.0
+        persist_elapsed = 0.0
         detected_items: list[DetectionItem] = []
         detection_payloads: list[tuple[Path, dict[str, Any]]] = []
-        serialize_started = time.perf_counter()
-        for index, (path, item) in enumerate(zip(paths, items)):
-            detection = detections[index] if index < len(detections) else {}
-            if not isinstance(detection, dict):
-                detection = {}
-            detection_data = _serialize_detector_output(detector, detection)
-            detection_payloads.append((path, detection_data))
-            detected_items.append(_apply_detection_data(item, detection_data))
-        serialize_elapsed = time.perf_counter() - serialize_started
-        persist_started = time.perf_counter()
-        _persist_dinov2_observations(
-            detector, paths, items, input_path, preloaded_data=preloaded_data,
-        )
-        persist_elapsed = time.perf_counter() - persist_started
+        for batch in batches:
+            detect_elapsed += time.perf_counter() - detect_started
+            batch_paths = paths[batch.start:batch.end]
+            batch_items = items[batch.start:batch.end]
+            serialize_started = time.perf_counter()
+            for index, (path, item) in enumerate(zip(batch_paths, batch_items)):
+                detection = batch.detections[index] if index < len(batch.detections) else {}
+                if not isinstance(detection, dict):
+                    detection = {}
+                detection_data = _serialize_detector_output(detector, detection)
+                detection_payloads.append((path, detection_data))
+                detected_items.append(_apply_detection_data(item, detection_data))
+            serialize_elapsed += time.perf_counter() - serialize_started
+            persist_started = time.perf_counter()
+            _persist_dinov2_observations(
+                detector, batch_paths, batch_items, input_path,
+                preloaded_data=batch.preloaded_data,
+            )
+            persist_elapsed += time.perf_counter() - persist_started
+            detect_started = time.perf_counter()
         save_started = time.perf_counter()
         _save_detection_data_batch(detection_payloads, input_path)
         save_elapsed = time.perf_counter() - save_started
@@ -2480,390 +2485,155 @@ def _detect_video_fast_batch(
     request: CreateJobRequest,
     input_path: Path,
     cancelled=None,
+    inference_batcher: InferenceBatcher | None = None,
 ) -> list[DetectionItem]:
-    import tempfile
+    from .video_frames import VideoSampleResult, prepared_video_batches
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="neri_video_frames_"))
     result_items: list[DetectionItem | None] = [None for _ in items]
     video_infos: list[dict[str, Any] | None] = [None for _ in items]
-
+    detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
+        [] for _ in items
+    ]
     try:
         batch_started = time.perf_counter()
-        sample_started = time.perf_counter()
         sample_count = max(1, int(request.options.vid_stride or 1))
         classification_only = (
             getattr(detector, "model", None) is None
             and getattr(detector, "cls_model", None) is not None
         )
-        frame_stride = (
-            max(1, int(request.options.vid_stride or 1))
-            if classification_only and request.options.video_mode == "all"
-            else None
-        )
-        detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
-            [] for _ in items
-        ]
-        pending_frame_records: list[dict[str, Any]] = []
-        frame_count = 0
-        inference_elapsed = 0.0
-        preload_elapsed = 0.0
-        frame_serialize_elapsed = 0.0
-        sample_worker_elapsed = 0.0
-        latest_sample_finished_at = sample_started
-        frame_batch_size = max(1, int(request.options.batch_size or 1))
+        frame_stride = sample_count if classification_only and request.options.video_mode == "all" else None
+        sample_workers = _fast_video_sample_worker_count(len(paths))
+        decoder_threads = max(1, min(4, (os.cpu_count() or 1) // sample_workers))
         selected_class_ids = _selected_inference_class_ids(
-            detector,
-            request.options.selected_species_names,
+            detector, request.options.selected_species_names,
         )
-
-        def sample_video(
-            video_index: int,
-        ) -> tuple[int, dict[str, Any], float, float]:
-            _raise_if_cancelled(cancelled)
-            started = time.perf_counter()
-            info = _sample_fast_video_frames(
-                paths[video_index],
-                temp_dir / f"video_{video_index}",
-                sample_count,
-                frame_stride=frame_stride,
-                cancelled=cancelled,
-            )
-            finished_at = time.perf_counter()
-            return (
-                video_index,
-                info,
-                finished_at - started,
-                finished_at,
-            )
-
-        def infer_frame_batch(frame_batch: list[dict[str, Any]]) -> None:
-            nonlocal inference_elapsed, preload_elapsed, frame_serialize_elapsed
-            if not frame_batch:
-                return
-
-            _raise_if_cancelled(cancelled)
-            frame_paths = [str(record["path"]) for record in frame_batch]
-            preload_started = time.perf_counter()
-            preloaded_data = (
-                detector.preload_batch_data(frame_paths)
-                if hasattr(detector, "preload_batch_data")
-                else None
-            )
-            preload_elapsed += time.perf_counter() - preload_started
-            inference_started = time.perf_counter()
-            detections = detector.detect_batch_species(
-                frame_paths,
-                conf=request.options.confidence,
-                iou=request.options.iou,
-                use_fp16=request.options.use_fp16,
-                augment=request.options.use_augment,
-                agnostic_nms=request.options.use_agnostic_nms,
-                classes=selected_class_ids,
-                imgsz=request.options.imgsz,
-                confidence_priority=request.options.confidence_priority,
-                selected_species_names=request.options.selected_species_names,
-                preloaded_data=preloaded_data,
-            )
-            inference_elapsed += time.perf_counter() - inference_started
-            frame_items = [items[record["video_index"]] for record in frame_batch]
-            original_video_paths = [paths[record["video_index"]] for record in frame_batch]
-            frame_indices = [int(record["frame_index"]) for record in frame_batch]
-            frame_timestamps = []
-            for record in frame_batch:
-                video_info = video_infos[record["video_index"]] or {}
-                fps = video_info.get("fps") or 25
-                frame_timestamps.append(
-                    float(record["frame_index"]) / float(fps) if fps else None
-                )
-            _persist_dinov2_observations(
-                detector,
-                [Path(record["path"]) for record in frame_batch],
-                frame_items,
-                input_path,
-                source_paths=original_video_paths,
-                frame_indices=frame_indices,
-                timestamp_seconds=frame_timestamps,
-            )
-            _raise_if_cancelled(cancelled)
-            frame_serialize_started = time.perf_counter()
-            for index, record in enumerate(frame_batch):
-                detection = detections[index] if index < len(detections) else {}
-                if not isinstance(detection, dict):
-                    detection = {}
-                detections_by_video[record["video_index"]].append(
-                    (
-                        record["frame_order"],
-                        record["frame_index"],
-                        _serialize_detector_output(detector, detection),
-                    )
-                )
-            frame_serialize_elapsed += (
-                time.perf_counter() - frame_serialize_started
-            )
-
-        def flush_full_frame_batches() -> None:
-            while len(pending_frame_records) >= frame_batch_size:
-                frame_batch = pending_frame_records[:frame_batch_size]
-                del pending_frame_records[:frame_batch_size]
-                infer_frame_batch(frame_batch)
-
-        def accept_sample_result(
-            video_index: int,
-            info: dict[str, Any],
-        ) -> None:
-            nonlocal frame_count
-            video_infos[video_index] = info
-            frame_paths = info.pop("frame_paths", [])
-            for frame_order, (frame_path, frame_index) in enumerate(
-                zip(frame_paths, info["frame_points"])
-            ):
-                pending_frame_records.append(
-                    {
-                        "video_index": video_index,
-                        "frame_order": frame_order,
-                        "frame_index": frame_index,
-                        "path": frame_path,
-                    }
-                )
-                frame_count += 1
-            flush_full_frame_batches()
-
-        sample_workers = _fast_video_sample_worker_count(
-            len(paths),
-            request.options.thread_count,
+        frame_count = 0
+        pipeline_wait = 0.0
+        preload_elapsed = 0.0
+        inference_elapsed = 0.0
+        persistence_elapsed = 0.0
+        serialize_elapsed = 0.0
+        inference_batcher = inference_batcher or InferenceBatcher(request.options)
+        stream = prepared_video_batches(
+            paths, sample_count=sample_count,
+            batch_size=inference_batcher.batch_size,
+            workers=sample_workers, decoder_threads=decoder_threads,
+            preload=detector.preload_frame_data,
+            frame_stride=frame_stride, cancelled=cancelled,
         )
-        if paths:
-            with ThreadPoolExecutor(
-                max_workers=sample_workers,
-                thread_name_prefix="neri-video-sample",
-            ) as sample_executor:
-                future_to_index: dict[Any, int] = {}
-                next_video_index = 0
-
-                def submit_next_video() -> None:
-                    nonlocal next_video_index
-                    if next_video_index >= len(paths):
-                        return
-                    video_index = next_video_index
-                    next_video_index += 1
-                    future_to_index[
-                        sample_executor.submit(sample_video, video_index)
-                    ] = video_index
-
-                for _ in range(min(sample_workers, len(paths))):
-                    submit_next_video()
-
-                while future_to_index:
-                    future = next(as_completed(tuple(future_to_index)))
-                    video_index = future_to_index.pop(future)
-                    # Refill the worker slot before GPU inference so decoding
-                    # of the next video can overlap with the current batch.
-                    submit_next_video()
-                    try:
-                        (
-                            completed_index,
-                            info,
-                            worker_elapsed,
-                            worker_finished_at,
-                        ) = future.result()
-                    except Exception as exc:  # noqa: BLE001 - isolate per-video failures
-                        if cancelled is not None and cancelled():
-                            raise
-                        result_items[video_index] = items[video_index].model_copy(
-                            update={"error": f"视频快速检测失败: {exc}"}
+        wait_started = time.perf_counter()
+        with closing(stream):
+            for value in stream:
+                pipeline_wait += time.perf_counter() - wait_started
+                _raise_if_cancelled(cancelled)
+                if isinstance(value, VideoSampleResult):
+                    if value.error is not None:
+                        result_items[value.video_index] = items[value.video_index].model_copy(
+                            update={"error": f"视频快速检测失败: {value.error}"}
                         )
                     else:
-                        sample_worker_elapsed += worker_elapsed
-                        latest_sample_finished_at = max(
-                            latest_sample_finished_at,
-                            worker_finished_at,
-                        )
-                        accept_sample_result(completed_index, info)
+                        video_infos[value.video_index] = value.info
+                    wait_started = time.perf_counter()
+                    continue
+
+                frames = value.frames
+                frame_count += len(frames)
+                preload_elapsed += value.preload_seconds
+                original_paths = [paths[frame.video_index] for frame in frames]
+                frame_items = [items[frame.video_index] for frame in frames]
+                inference_started = time.perf_counter()
+                batches = inference_batcher.detect(
+                    detector,
+                    [str(path) for path in original_paths],
+                    conf=request.options.confidence,
+                    iou=request.options.iou,
+                    use_fp16=request.options.use_fp16,
+                    augment=request.options.use_augment,
+                    agnostic_nms=request.options.use_agnostic_nms,
+                    classes=selected_class_ids,
+                    imgsz=request.options.imgsz,
+                    confidence_priority=request.options.confidence_priority,
+                    selected_species_names=request.options.selected_species_names,
+                    preloaded_data=value.preloaded_data,
+                    check_cancelled=lambda: _raise_if_cancelled(cancelled),
+                )
+                for batch in batches:
+                    inference_elapsed += time.perf_counter() - inference_started
+                    _raise_if_cancelled(cancelled)
+                    batch_frames = frames[batch.start:batch.end]
+                    batch_paths = original_paths[batch.start:batch.end]
+                    persistence_started = time.perf_counter()
+                    _persist_dinov2_observations(
+                        detector, batch_paths, frame_items[batch.start:batch.end], input_path,
+                        source_paths=batch_paths,
+                        frame_indices=[frame.frame_index for frame in batch_frames],
+                        timestamp_seconds=[frame.frame_index / frame.fps for frame in batch_frames],
+                        preloaded_data=batch.preloaded_data,
+                    )
+                    persistence_elapsed += time.perf_counter() - persistence_started
+                    _raise_if_cancelled(cancelled)
+                    serialize_started = time.perf_counter()
+                    for index, frame in enumerate(batch_frames):
+                        detection = batch.detections[index] if index < len(batch.detections) else {}
+                        if not isinstance(detection, dict):
+                            detection = {}
+                        detections_by_video[frame.video_index].append((
+                            frame.frame_order, frame.frame_index,
+                            _serialize_detector_output(detector, detection),
+                        ))
+                    serialize_elapsed += time.perf_counter() - serialize_started
+                    inference_started = time.perf_counter()
+                wait_started = time.perf_counter()
 
         _raise_if_cancelled(cancelled)
-        sample_elapsed = max(0.0, latest_sample_finished_at - sample_started)
-        infer_frame_batch(pending_frame_records)
-        pending_frame_records.clear()
-
         detection_payloads: list[tuple[Path, dict[str, Any]]] = []
         serialize_started = time.perf_counter()
-        for video_index, (path, item) in enumerate(zip(paths, items)):
-            if result_items[video_index] is not None:
+        for index, (path, item) in enumerate(zip(paths, items)):
+            if result_items[index] is not None:
                 continue
-            info = video_infos[video_index]
+            info = video_infos[index]
             if info is None:
-                result_items[video_index] = item.model_copy(
+                result_items[index] = item.model_copy(
                     update={"error": "视频快速检测失败: 无法从视频中提取有效帧"}
                 )
                 continue
-            frame_detections = sorted(
-                detections_by_video[video_index],
-                key=lambda record: record[0],
-            )
             detection_data = _build_fast_video_detection_data(
-                detector,
-                path,
-                info,
-                frame_detections,
+                detector, path, info,
+                sorted(detections_by_video[index], key=lambda record: record[0]),
                 video_mode=request.options.video_mode,
             )
             detection_payloads.append((path, detection_data))
-            result_items[video_index] = _apply_detection_data(item, detection_data)
-        serialize_elapsed = (
-            frame_serialize_elapsed
-            + time.perf_counter()
-            - serialize_started
-        )
+            result_items[index] = _apply_detection_data(item, detection_data)
+        serialize_elapsed += time.perf_counter() - serialize_started
 
         save_elapsed = 0.0
         if detection_payloads:
             save_started = time.perf_counter()
             _save_detection_data_batch(detection_payloads, input_path)
             save_elapsed = time.perf_counter() - save_started
-
         logger.info(
             (
-                "Fast video batch timing: videos=%d sample_workers=%d "
-                "frames=%d sample=%.3fs sample_worker=%.3fs preload=%.3fs "
-                "infer=%.3fs serialize=%.3fs save=%.3fs total=%.3fs"
+                "Fast video batch timing: videos=%d sample_workers=%d decoder_threads=%d "
+                "frames=%d pipeline_wait=%.3fs preload=%.3fs infer=%.3fs "
+                "persistence=%.3fs serialize=%.3fs save=%.3fs total=%.3fs"
             ),
-            len(paths),
-            sample_workers,
-            frame_count,
-            sample_elapsed,
-            sample_worker_elapsed,
-            preload_elapsed,
-            inference_elapsed,
-            serialize_elapsed,
-            save_elapsed,
-            time.perf_counter() - batch_started,
+            len(paths), sample_workers, decoder_threads, frame_count,
+            pipeline_wait, preload_elapsed, inference_elapsed, persistence_elapsed,
+            serialize_elapsed, save_elapsed, time.perf_counter() - batch_started,
         )
-
-        return [
-            result_item if result_item is not None else item
-            for item, result_item in zip(items, result_items)
-        ]
+        return [result if result is not None else item for item, result in zip(items, result_items)]
     except MediaStorageError:
         raise
-    except Exception as exc:  # noqa: BLE001 - preserve metadata and report detection failure per file
+    except Exception as exc:
         return [
             item.model_copy(update={"error": f"视频批量快速检测失败: {exc}"})
             for item in items
         ]
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _raise_if_cancelled(cancelled) -> None:
     if cancelled is not None and cancelled():
         raise RuntimeError("用户取消任务")
-
-
-def _sample_fast_video_frames(
-    path: Path,
-    temp_dir: Path,
-    sample_count: int,
-    frame_stride: int | None = None,
-    cancelled=None,
-) -> dict[str, Any]:
-    import cv2
-
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    frame_paths: list[Path] = []
-    frame_points: list[int] = []
-    cap = cv2.VideoCapture(str(path))
-    try:
-        if not cap.isOpened():
-            raise RuntimeError("无法打开视频文件")
-        _raise_if_cancelled(cancelled)
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        def save_frame(frame, frame_index: int) -> None:
-            frame_path = temp_dir / f"frame_{len(frame_paths)}.jpg"
-            if cv2.imwrite(str(frame_path), frame):
-                frame_paths.append(frame_path)
-                frame_points.append(frame_index)
-
-        if frame_stride is not None:
-            stride = max(1, int(frame_stride))
-            frame_index = 0
-            while True:
-                if frame_index % 32 == 0:
-                    _raise_if_cancelled(cancelled)
-                if not cap.grab():
-                    break
-                if frame_index % stride == 0:
-                    ok, frame = cap.retrieve()
-                    if ok:
-                        save_frame(frame, frame_index)
-                frame_index += 1
-        else:
-            points = (
-                sorted(
-                    {
-                        min(
-                            total_frames - 1,
-                            max(
-                                0,
-                                round(
-                                    total_frames
-                                    * (index + 1)
-                                    / (sample_count + 1)
-                                ),
-                            ),
-                        )
-                        for index in range(sample_count)
-                    }
-                )
-                if total_frames > 0
-                else [0]
-            )
-            # For short videos, one forward pass is more predictable than
-            # repeatedly reopening the codec's keyframe chain. Some camera
-            # codecs can block for a long time on random frame seeks.
-            use_sequential_sampling = (
-                len(points) > 1 and points[-1] <= len(points) * 300
-            )
-            if use_sequential_sampling:
-                point_index = 0
-                frame_index = 0
-                while point_index < len(points):
-                    if frame_index % 32 == 0:
-                        _raise_if_cancelled(cancelled)
-                    if not cap.grab():
-                        break
-                    if frame_index == points[point_index]:
-                        ok, frame = cap.retrieve()
-                        if ok:
-                            save_frame(frame, frame_index)
-                        point_index += 1
-                    frame_index += 1
-            else:
-                for point in points:
-                    _raise_if_cancelled(cancelled)
-                    if point > 0:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, point)
-                    ok, frame = cap.read()
-                    if ok:
-                        save_frame(frame, point)
-
-        if not frame_paths:
-            raise RuntimeError("无法从视频中提取有效帧")
-
-        return {
-            "frame_paths": frame_paths,
-            "frame_points": frame_points,
-            "width": width,
-            "height": height,
-            "fps": fps,
-            "total_frames": total_frames,
-        }
-    finally:
-        cap.release()
 
 
 def _build_fast_video_detection_data(
