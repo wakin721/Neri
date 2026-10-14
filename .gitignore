@@ -117,6 +117,7 @@ frontend/windows/runner/*
 !/tests/test_processing_performance.py
 
 !frontend/test/startup_loading_test.dart
+!frontend/test/widget_test.dart
 
 !/tests/test_media_storage_failures.py
 !/tests/test_directory_results.py

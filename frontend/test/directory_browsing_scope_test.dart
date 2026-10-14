@@ -606,6 +606,133 @@ void main() {
     );
   }
 
+  for (final page in ['预览', '校验']) {
+    testWidgets('all-directory feedback waits for the root scan on $page', (
+      tester,
+    ) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            (call) async => call.method == 'isMaximized' ? false : null,
+          );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('neri/windows_shell'),
+            (_) async => null,
+          );
+      final input = Directory('startup-test-input').absolute.path;
+      final camera = Directory('$input/camera-b').path;
+      final backend = startup.StartupBackend()..directories = [camera];
+      backend.scopedPreviews[camera] = Completer<http.Response>()
+        ..complete(
+          http.Response(
+            jsonEncode([
+              {
+                'filename': 'child.jpg',
+                'path': '$camera/child.jpg',
+                'file_type': 'jpg',
+              },
+            ]),
+            200,
+          ),
+        );
+      final selector = find.byKey(const ValueKey('directory-scope-selector'));
+      Future<void> choose(String label) async {
+        await tester.tap(selector);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.tap(find.text(label).last);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.pump(const Duration(milliseconds: 350));
+        await startup.settleStartup(tester);
+      }
+
+      try {
+        await startup.mount(tester, backend);
+        await tester.tap(find.text(page).first);
+        await tester.pump();
+        await startup.settleStartup(tester);
+        await choose('camera-b');
+        expect(tester.widget<FilledButton>(selector).onPressed, isNotNull);
+        expect(backend.preview.isCompleted, isFalse);
+        final requestsBeforeReturning = backend.previewRequests;
+        await choose('全部目录');
+        await tester.pump(const Duration(seconds: 8));
+        await startup.settleStartup(tester);
+        expect(backend.previewRequests, requestsBeforeReturning);
+        expect(find.text('正在加载全部目录…'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('directory-switch-progress')),
+          findsOneWidget,
+        );
+        expect(tester.widget<FilledButton>(selector).onPressed, isNull);
+        if (page == '校验') {
+          expect(
+            tester
+                .widget<AbsorbPointer>(
+                  find.byKey(const ValueKey('validation-directory-content')),
+                )
+                .absorbing,
+            isTrue,
+          );
+        }
+
+        // A large root needs asynchronous grouping after the scan completes.
+        backend.preview.complete(
+          http.Response(
+            jsonEncode([
+              for (var index = 0; index < 600; index++)
+                {
+                  'filename': 'root-$index.jpg',
+                  'path': '$input/camera-a/root-$index.jpg',
+                  'file_type': 'jpg',
+                },
+            ]),
+            200,
+          ),
+        );
+        for (var frame = 0; frame < 100; frame++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          if (tester.widget<FilledButton>(selector).onPressed != null) break;
+          expect(find.text('正在加载全部目录…'), findsOneWidget);
+        }
+        await startup.settleStartup(tester);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(find.text('正在加载全部目录…'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('directory-switch-progress')),
+          findsNothing,
+        );
+        expect(tester.widget<FilledButton>(selector).onPressed, isNotNull);
+        if (page == '校验') {
+          final screen = tester.widget<SpeciesValidationScreen>(
+            find.byType(SpeciesValidationScreen),
+          );
+          expect(screen.items, hasLength(601));
+          expect(screen.loading, isFalse);
+          expect(
+            tester
+                .widget<AbsorbPointer>(
+                  find.byKey(const ValueKey('validation-directory-content')),
+                )
+                .absorbing,
+            isFalse,
+          );
+        } else {
+          final screen = tester.widget<PreviewScreen>(
+            find.byType(PreviewScreen),
+          );
+          expect(screen.items, hasLength(601));
+          expect(screen.loading, isFalse);
+        }
+        expect(tester.takeException(), isNull);
+      } finally {
+        await startup.cleanup(tester, backend);
+      }
+    });
+  }
+
   for (final scenario in [(false, true), (true, true), (false, false)]) {
     final (rememberAll, indexed) = scenario;
     testWidgets(

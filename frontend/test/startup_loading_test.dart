@@ -258,10 +258,16 @@ void main() {
       await mount(tester, backend);
       expect(backend.settingsRequests, 0);
       expect(backend.dinoStatusRequests, 0);
-      expect(find.text('Neri $frontendVersion'), findsOneWidget);
+      expect(
+        find.text('Neri ${frontendVersion.split('-').first}'),
+        findsOneWidget,
+      );
       backend.healthResponse!.complete(http.Response('{}', 200));
       await settleStartup(tester);
-      expect(find.text('Neri $frontendVersion'), findsOneWidget);
+      expect(
+        find.text('Neri ${frontendVersion.split('-').first}'),
+        findsOneWidget,
+      );
       expect(backend.settingsRequests, 1);
       expect(backend.dinoStatusRequests, 2);
       expect(backend.summaryRequests, 1);

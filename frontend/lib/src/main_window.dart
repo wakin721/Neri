@@ -3482,7 +3482,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   children: [
                     _buildTitleLogo(size: 28),
                     const SizedBox(width: 10),
-                    const Text('Neri $frontendVersion'),
+                    Text('Neri ${frontendVersion.split('-').first}'),
                     if ((_selectedIndex == 1 || _selectedIndex == 2) &&
                         _directoryScope.directories.isNotEmpty) ...[
                       const SizedBox(width: 16),
@@ -3986,9 +3986,20 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         return;
       _applyDirectorySelection(path);
       if (_previewLoading || _previewLoadedScopePath != root) {
-        // Request the visible child without waiting for the background root.
-        // Keep the selector usable while this request runs.
-        unawaited(_refreshPreviewItems(force: true));
+        final refresh = _refreshPreviewItems(force: true);
+        if (path == null) {
+          // Cached child items can render before the root scan is complete.
+          // Keep feedback until the full snapshot arrives and is prepared.
+          await refresh;
+        } else {
+          // Keep child selection usable independently of the background root.
+          unawaited(refresh);
+        }
+      }
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          root != _inputController.text.trim()) {
+        return;
       }
       // Let the validation screen start its cancellable preparation, then
       // retain feedback until the latest directory has been painted.
