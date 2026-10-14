@@ -1,3 +1,3 @@
 DINOv2 implementation verification passed.
-Source commit: b7d378bded41472b2b2c5e12e67527a9c71c9f76
-Workflow run: 38094028262
+Source commit: 0594d9ce6ebaebbdd1166eb7f9bf06721e4cbd37
+Workflow run: 38545078230
