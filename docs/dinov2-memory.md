@@ -6,7 +6,7 @@ Nightly 当前默认头为 **Seq Memory Val90（42 类）**，`head_type=memory`
 
 默认模型 SHA-256 为 `b469920e78e5bae3c8751c9ae49cfbb2c1ea50e970f41de3aa23557d93e7a180`，来源、类别计数及校准证据保存在 `res/dinov2/memory_head_manifest.json`。
 
-新的 DINOv2 组件安装会把下载到的旧多原型分类头替换为随应用附带的 `res/dinov2/memory_head.npz`。已有安装需在环境页面重新安装 DINOv2 组件，才会使用新默认头。显式选择的旧多原型模型和原去质心 Memory 模型仍可读取。
+2026-10-14 已将完整 Seq Memory Val90 组件发布到 NeriCloud 的 `Neri_Data/Model/DINOv2`，匿名模型分发接口提供七个组件文件及其哈希。组件安装会下载并校验这些文件，再应用随软件附带的 `res/dinov2/memory_head.npz`；本次云端与软件默认头完全一致。已有安装需重新安装 DINOv2 组件，才会使用新默认头。当前健康组件在环境页面仅提供“删除”入口，尚无直接更新按钮。显式选择的旧多原型模型和原去质心 Memory 模型仍可读取。发布与后端更新实测记录见 [模型同步部署记录](model-sync-deployment.md)。
 
 标准导出配置为 `neighbors=1`、`centroid_weight=0.5`、相机池化和 `margin_weight=1`。特征使用冻结的类均衡中心做 CL2N 变换。每个类别先在每台相机内取最高记忆相似度，再取最高一台相机的分数；该分数与冻结的类别质心相似度各占一半。取混合分数最高的类别，拒识分数为获胜混合分数加上第一、第二类别的混合分数差，低于独立校准阈值才拒识。
 

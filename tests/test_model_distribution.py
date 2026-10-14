@@ -4,11 +4,82 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
 from server.model_distribution.manifest import ManifestBuilder, ManifestError
 from server.model_distribution.storage import RemoteEntry, UpstreamLink
+
+
+class DinoV2DownloadProgressTests(unittest.TestCase):
+    def test_component_download_reports_progress_compatible_with_maintenance(self):
+        from system.backend.dinov2_maintenance import _progress
+        from system.dinov2.public_distribution import (
+            DinoV2DistributionClient, DinoV2DistributionEntry,
+            DinoV2DistributionManifest,
+        )
+        entries = (
+            DinoV2DistributionEntry('DINOv2/a.json', 'a.json', 4, 'a' * 64),
+            DinoV2DistributionEntry('DINOv2/model/b.bin', 'model/b.bin', 12, 'b' * 64),
+        )
+        client = DinoV2DistributionClient()
+        updates = []
+        download_updates = []
+        maintenance_progress = _progress(55, 92)
+
+        def report_progress(percent, message):
+            download_updates.append((percent, message))
+            maintenance_progress(percent, message)
+
+        def download(_manifest, entry, target, on_progress):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # A failed direct attempt can restart at zero through the proxy.
+            for received in (entry.size // 2, 0, entry.size):
+                on_progress(received, entry.size)
+            target.write_bytes(b'x' * entry.size)
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            client, 'fetch_manifest', return_value=DinoV2DistributionManifest('c' * 64, entries)
+        ), patch.object(client, '_download_entry', side_effect=download), patch(
+            'system.backend.maintenance._write_status', side_effect=updates.append
+        ):
+            client.download_tree('', Path(directory), on_progress=report_progress)
+        self.assertEqual(
+            [percent for percent, _ in download_updates],
+            [12, 12, 25, 62, 62, 99, 100],
+        )
+        self.assertTrue(all('a.json' in message for _, message in download_updates[:3]))
+        self.assertTrue(all('model/b.bin' in message for _, message in download_updates[3:6]))
+        self.assertTrue(updates)
+        self.assertTrue(all(isinstance(item['message'], str) for item in updates))
+        values = [item['progress'] for item in updates]
+        self.assertEqual(values, sorted(values))
+        self.assertGreater(len(set(values)), 2)
+        self.assertEqual(values[-1], 92)
+
+    def test_failed_component_download_does_not_report_completion(self):
+        from system.dinov2.public_distribution import (
+            DinoV2DistributionClient, DinoV2DistributionEntry,
+            DinoV2DistributionManifest,
+        )
+        entry = DinoV2DistributionEntry('DINOv2/a.json', 'a.json', 4, 'a' * 64)
+        client = DinoV2DistributionClient()
+        updates = []
+
+        def download(_manifest, _entry, _target, on_progress):
+            on_progress(2, 4)
+            raise OSError('download failed')
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            client, 'fetch_manifest',
+            return_value=DinoV2DistributionManifest('c' * 64, (entry,)),
+        ), patch.object(client, '_download_entry', side_effect=download):
+            with self.assertRaisesRegex(OSError, 'download failed'):
+                client.download_tree(
+                    '', Path(directory),
+                    on_progress=lambda percent, message: updates.append((percent, message)),
+                )
+        self.assertEqual([percent for percent, _ in updates], [50])
 
 
 class FakeStore:

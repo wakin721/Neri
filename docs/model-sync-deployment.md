@@ -50,3 +50,47 @@ run `nginx -t`, then reload nginx. The backup captures the predeployment site;
 compare it before restoring so later website changes are not overwritten.
 Existing local models remain available when synchronization cannot reach the
 service. No OpenList credential is stored in this repository or sent to clients.
+
+## DINOv2 Seq publication — 2026-10-14
+
+Published the complete seven-file DINOv2 ViT-B/14 component to
+`/Neri_Data/Model/DINOv2`. The active classifier is Seq Memory Val90, displayed
+as `DINOv2 Seq`, with 42 classes and 3,311 memory exemplars. Classifier SHA-256:
+`b469920e78e5bae3c8751c9ae49cfbb2c1ea50e970f41de3aa23557d93e7a180`.
+Encoder SHA-256:
+`d73036b56966966d07975d696bde331762f37297e2f095de8cea0040c3aa0841`.
+
+All files were uploaded to a temporary cloud directory and downloaded back for
+byte-size and SHA-256 verification before renaming it to `DINOv2`. The installed
+model service previously returned 404 for the DINOv2 protocol. Backed up its
+`app.py`, `manifest.py`, and `service.py` to
+`/var/backups/neri-models-seq-20261014`, deployed the repository versions, and
+restarted only `neri-models.service`. Existing nginx and credential configuration
+were retained. Model, training, and NeriCloud health checks returned HTTP 200.
+
+The public DINOv2 manifest is
+`https://myneri.top/api/models/v1/dinov2/manifest`; direct capabilities use
+`POST /api/models/v1/dinov2/direct`, with the existing proxy endpoint as fallback.
+DINOv2 installation is separate from the ordinary detection/classification sync.
+
+Fixed the desktop download progress contract: report cumulative percentages and
+text messages to the maintenance worker, including when a direct attempt retries
+through the proxy. Previously it received per-file byte counts and a numeric
+message. The installed desktop downloader was backed up under
+`D:/Application/Neri/repair-backups/seq-cloud-20261014` before updating that file.
+The targeted suite passed 40 tests and 18 subtests.
+
+The installed Windows Neri Python runtime then updated an isolated, healthy
+76-class Memory installation to the published 42-class Seq model. All seven
+files downloaded directly from OneDrive, matched the published inventory, and
+were activated by the real component installer. A deliberately unavailable
+service preserved the working old installation. A separate forced direct-transfer
+failure automatically fell back to the public proxy and verified the full
+classifier hash. The downloaded encoder and classifier loaded offline on CPU
+and completed one synthetic-image inference; this was a runtime smoke check,
+not an accuracy evaluation. The model catalog exposed the result as `DINOv2 Seq`.
+
+Detailed evidence is saved locally in
+`temp/seq-memory-cloud-20261014/verification.json`. The user requested backend
+verification only. No GUI click test or frontend update was performed; a healthy
+component currently exposes only the Delete action in Environment Maintenance.

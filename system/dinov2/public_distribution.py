@@ -297,13 +297,34 @@ class DinoV2DistributionClient:
         target = Path(target)
         target.mkdir(parents=True, exist_ok=True)
         base_parts = len(PurePosixPath(raw).parts) if raw else 0
+        total_bytes = sum(entry.size for entry in selected)
+        completed_bytes = 0
+        reported_percent = 0
         for entry in selected:
             parts = PurePosixPath(entry.relative_path).parts
             local_parts = parts[base_parts:] if raw else parts
             if local_parts:
+                def report_bytes(received, _file_size):
+                    nonlocal reported_percent
+                    if on_progress is None:
+                        return
+                    percent = (
+                        min(99, (completed_bytes + received) * 100 // total_bytes)
+                        if total_bytes else 0
+                    )
+                    # A proxy retry can restart a partially downloaded file.
+                    reported_percent = max(reported_percent, percent)
+                    on_progress(
+                        reported_percent,
+                        f"正在下载 DINOv2: {entry.relative_path}",
+                    )
+
                 self._download_entry(
                     manifest,
                     entry,
                     target.joinpath(*local_parts),
-                    on_progress=on_progress,
+                    on_progress=report_bytes,
                 )
+                completed_bytes += entry.size
+        if on_progress is not None:
+            on_progress(100, "DINOv2 下载完成，正在校验组件。")

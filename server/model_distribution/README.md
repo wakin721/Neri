@@ -10,6 +10,13 @@ The service only exposes these logical paths:
 - `cls/*.pt`, `cls/*.onnx`, `cls/*.engine`
 - `tracker.yaml`
 
+The dedicated DINOv2 protocol also publishes the complete component under
+`DINOv2/`: `memory_head.npz`, `classifier.neri.json`, `install.json`,
+`LICENSE_DINOv2.md`, and the encoder's `model/config.json`,
+`model/preprocessor_config.json`, and `model/model.safetensors`. These files use
+the recursive DINOv2 manifest and are installed through the desktop's DINOv2
+install/repair action, separately from detection/classification model sync.
+
 No client-supplied OpenList root or arbitrary remote path is accepted.
 
 ## Environment
@@ -78,6 +85,8 @@ The desktop protocol uses:
 ```text
 GET  /api/models/v1/manifest
 POST /api/models/v1/direct
+GET  /api/models/v1/dinov2/manifest
+POST /api/models/v1/dinov2/direct
 GET  /api/models/v1/proxy/<opaque capability>
 ```
 
