@@ -26,6 +26,8 @@ def select_classification_candidate(
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
+        if candidate.get('accepted') is False:
+            continue
         name = str(candidate.get("name") or "").strip()
         if not name:
             continue
@@ -39,6 +41,55 @@ def select_classification_candidate(
         if confidence >= threshold:
             return name, confidence
     return None
+
+
+def select_image_detections(
+    info: Dict,
+    confidence_settings: Dict[str, float],
+) -> tuple[Counter, list[float]]:
+    """Use final boxes/candidates; only pre-box-format data may use detector arrays."""
+    counts = Counter()
+    confidences = []
+    global_threshold = confidence_settings.get('global', 0.25)
+    boxes = info.get('检测框') or []
+    if boxes:
+        for box in boxes:
+            species = box.get('物种')
+            if species == '拒识/Unknown':
+                # Rejection is a final decision, with no numeric confidence.
+                counts[species] += 1
+                continue
+            if box.get('候选项'):
+                chosen = select_classification_candidate(box['候选项'], confidence_settings)
+                if chosen is None:
+                    continue
+                species, confidence = chosen
+            else:
+                if not species or species == '空':
+                    continue
+                raw_confidence = box.get('置信度', 0)
+                confidence = float(raw_confidence) if raw_confidence is not None else None
+                if confidence is not None and confidence < confidence_settings.get(species, global_threshold):
+                    continue
+            counts[species] += 1
+            if confidence is not None:
+                confidences.append(confidence)
+    elif info.get('分类候选项'):
+        # Classifier-only jobs have candidates but no detection boxes.
+        chosen = select_classification_candidate(info['分类候选项'], confidence_settings)
+        if chosen is not None:
+            species, confidence = chosen
+            counts[species] += 1
+            confidences.append(confidence)
+    elif '检测框' not in info:
+        names = info.get('names_map', {})
+        for cls, confidence in zip(info.get('all_classes', []), info.get('all_confidences', [])):
+            class_id = int(cls)
+            species = names.get(str(class_id), names.get(class_id))
+            if species and confidence >= confidence_settings.get(species, global_threshold):
+                counts[species] += 1
+                confidences.append(confidence)
+    return counts, confidences
 
 
 class DataProcessor:
@@ -116,36 +167,11 @@ class DataProcessor:
                 species_names = list(set(track_species_list)) if track_species_list else ['空']
 
             else:
-                classification_candidate = select_classification_candidate(
-                    img_info.get('分类候选项'),
-                    confidence_settings,
-                )
-                if classification_candidate is not None:
-                    species_names = [classification_candidate[0]]
-                elif img_info.get('分类候选项'):
-                    species_names = ['空']
-                else:
-                    # 图片文件处理 (保持原有逻辑)
-                    confidences = img_info.get('all_confidences', [])
-                    classes = img_info.get('all_classes', [])
-                    names_map = img_info.get('names_map', {})
-
-                    if not confidences or not classes or not names_map:
-                        img_info['独立探测首只'] = ''
-                        continue
-
-                    final_species_counts = Counter()
-                    for cls, conf in zip(classes, confidences):
-                        species_name = names_map.get(str(int(cls)))
-                        if species_name:
-                            threshold = confidence_settings.get(species_name, confidence_settings.get("global", 0.25))
-                            if conf >= threshold:
-                                final_species_counts[species_name] += 1
-
-                    if not final_species_counts:
-                        species_names = ['空']
-                    else:
-                        species_names = list(final_species_counts.keys())
+                final_species_counts, _ = select_image_detections(img_info, confidence_settings)
+                species_names = [
+                    name for name in final_species_counts
+                    if name not in {'空', 'Unknown', '拒识/Unknown'}
+                ]
             # --- 过滤逻辑结束 ---
 
             current_time = img_info.get('拍摄日期对象')
@@ -301,80 +327,9 @@ class DataProcessor:
 
 
                 else:
-                    # === 图片文件处理 [修改核心部分] ===
-                    # 优先检查是否存在详细的 '检测框' 信息 (新版 JSON 结构)
-                    boxes_info = info.get('检测框', [])
-                    final_species_counts = Counter()
-                    valid_confidences = []
-
-                    if boxes_info:
-                        for box in boxes_info:
-                            # 默认使用主结果
-                            chosen_species = box.get('物种')
-                            chosen_conf = float(box.get('置信度', 0))
-
-                            # [新增逻辑] 如果存在候选项，根据阈值筛选最佳物种
-                            if '候选项' in box and box['候选项']:
-                                candidates = box['候选项']  # 假设格式: [{'name': 'A', 'conf': 0.6}, ...]
-                                selected_candidate = None
-
-                                # 遍历候选 (例如: A 60%, B 50%)
-                                for cand in candidates:
-                                    cand_name = cand.get('name')
-                                    cand_conf = float(cand.get('conf', 0))
-
-                                    # 获取该候选物种对应的阈值
-                                    thresh = confidence_settings.get(cand_name, confidence_settings.get("global", 0.25))
-                                    # 检查是否满足条件 (例如: A(0.6) < 0.8 [Skip], B(0.5) > 0.4 [Pick])
-                                    if cand_conf >= thresh:
-                                        selected_candidate = cand_name
-                                        chosen_conf = cand_conf  # 更新为该候选的置信度
-                                        break  # 找到满足条件的最高置信度物种，停止
-
-                                if selected_candidate:
-                                    chosen_species = selected_candidate
-                                else:
-                                    # 如果所有候选都不满足阈值，则视为该检测框无效（被过滤掉）
-                                    continue
-
-                            else:
-                                # 没有候选项，使用原始的主物种逻辑
-                                if not chosen_species: continue
-                                thresh = confidence_settings.get(chosen_species,
-                                                                 confidence_settings.get("global", 0.25))
-                                if chosen_conf < thresh:
-                                    continue
-
-                            # 统计有效框
-                            final_species_counts[chosen_species] += 1
-                            valid_confidences.append(chosen_conf)
-
-
-                    elif info.get('分类候选项'):
-                        selected_candidate = select_classification_candidate(
-                            info.get('分类候选项'),
-                            confidence_settings,
-                        )
-                        if selected_candidate is not None:
-                            chosen_species, chosen_confidence = selected_candidate
-                            final_species_counts[chosen_species] += 1
-                            valid_confidences.append(chosen_confidence)
-
-                    # 兼容旧逻辑 (如果没有 '检测框' 字段)
-                    elif 'all_confidences' in info and 'all_classes' in info:
-                        confidences = info.get('all_confidences', [])
-                        classes = info.get('all_classes', [])
-                        names_map = info.get('names_map', {})
-
-                        if confidences and classes and names_map:
-                            for cls, conf in zip(classes, confidences):
-                                species_name = names_map.get(str(int(cls)))
-                                if species_name:
-                                    threshold = confidence_settings.get(species_name,
-                                                                        confidence_settings.get("global", 0.25))
-                                    if conf >= threshold:
-                                        final_species_counts[species_name] += 1
-                                        valid_confidences.append(conf)
+                    final_species_counts, valid_confidences = select_image_detections(
+                        info, confidence_settings,
+                    )
 
                     # 更新 info 中的统计结果
                     species_list = list(final_species_counts.keys())
