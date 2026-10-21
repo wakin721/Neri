@@ -304,11 +304,20 @@ void main() {
 
         final installedMarker = File('${installDirectory.path}\\updated.txt');
         final deadline = DateTime.now().add(const Duration(seconds: 10));
-        while (!await installedMarker.exists() &&
-            DateTime.now().isBefore(deadline)) {
+        String? installedContents;
+        while (true) {
+          try {
+            // Copy-Item can create the file before releasing its write handle.
+            // Wait for readable, complete contents rather than existence alone.
+            installedContents = await installedMarker.readAsString();
+            if (installedContents == 'updated') break;
+          } on FileSystemException {
+            if (!DateTime.now().isBefore(deadline)) rethrow;
+          }
+          if (!DateTime.now().isBefore(deadline)) break;
           await Future<void>.delayed(const Duration(milliseconds: 100));
         }
-        expect(await installedMarker.readAsString(), 'updated');
+        expect(installedContents, 'updated');
       } finally {
         blocker?.kill();
         updater.close();
