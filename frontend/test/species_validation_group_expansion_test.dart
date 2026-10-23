@@ -144,7 +144,7 @@ void main() {
               )
               .map((tile) => (tile.title! as Text).data!.replaceAll('、', ','))
               .toList();
-          expect(titles(), ['野猪', '斑羚', '豹猫,$rejected', rejected, '空', '空']);
+          expect(titles(), ['野猪', '斑羚', '豹猫,拒识（未分簇）', '拒识（未分簇）', '空', '空']);
           await tester.tap(
             find.descendant(of: speciesList, matching: find.text('斑羚')),
           );
@@ -152,12 +152,175 @@ void main() {
           await tester.tap(find.text('正确').first);
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 150));
-          expect(titles(), ['斑羚', '野猪', '豹猫,$rejected', rejected, '空', '空']);
+          expect(titles(), ['斑羚', '野猪', '豹猫,拒识（未分簇）', '拒识（未分簇）', '空', '空']);
           expect(tester.takeException(), isNull);
           await tester.pump(const Duration(seconds: 5));
         },
       );
     }
+  }
+
+  for (final autoGroup in [false, true]) {
+    testWidgets(
+      'rejected observations use stable cluster buckets ($autoGroup)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1600, 2200);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        apiClient.close();
+        var requests = 0;
+        apiClient = NeriApiClient(
+          httpClient: MockClient((request) async {
+            expect(request.url.path, '/api/dinov2/feedback/rejection-clusters');
+            requests++;
+            final ids =
+                (jsonDecode(request.body) as Map)['observation_ids'] as List;
+            expect(
+              ids,
+              containsAll([
+                'a',
+                'a2',
+                'b',
+                'mixed',
+                'reverse',
+                'both-a',
+                'both-b',
+                'missing',
+              ]),
+            );
+            return http.Response(
+              jsonEncode({
+                for (final id in ids.where((id) => id != 'missing'))
+                  id: {
+                    'cluster_id':
+                        'registry:fp:${id == 'b' || id == 'both-b' ? 10 : 2}:0',
+                    'candidate_number': id == 'b' || id == 'both-b' ? 10 : 2,
+                    'model_fingerprint': 'fp',
+                  },
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }),
+        );
+        final png = File(items.first.path).readAsBytesSync();
+        final fixtures = <DetectionItem>[];
+        void add(
+          String name,
+          List<String> labels,
+          List<String> observations, {
+          bool validated = false,
+        }) {
+          final file = File('${tempDir.path}/$name.jpg')..writeAsBytesSync(png);
+          fixtures.add(
+            DetectionItem(
+              filename: '$name.jpg',
+              path: file.path,
+              fileType: 'jpg',
+              width: 10,
+              height: 10,
+              dateTaken: '2026-09-${10 + fixtures.length}T12:00:00Z',
+              species: labels,
+              confidence: 0.95,
+              validated: validated,
+              detectionData: {'物种名称': labels.join(',')},
+              detectionBoxes: [
+                for (final label in labels.where(
+                  (s) => s != '拒识/Unknown' && s != '空',
+                ))
+                  DetectionBox(
+                    species: label,
+                    bbox: [0, 0, 10, 10],
+                    confidence: 0.95,
+                  ),
+                for (final oid in observations)
+                  DetectionBox(
+                    species: '拒识/Unknown',
+                    bbox: [0, 0, 10, 10],
+                    observationId: oid,
+                  ),
+              ],
+            ),
+          );
+        }
+
+        add('a', ['拒识/Unknown'], ['a']);
+        add('a2', ['拒识/Unknown'], ['a2']);
+        add('b', ['拒识/Unknown'], ['b']);
+        add('mixed', ['家羊', '拒识/Unknown'], ['mixed']);
+        add('reverse', ['拒识/Unknown', '家羊'], ['reverse']);
+        add('both', ['拒识/Unknown'], ['both-a', 'both-b']);
+        add('missing', ['拒识/Unknown'], ['missing']);
+        add('no-id', ['拒识/Unknown'], []);
+        add('known', ['斑羚'], []);
+        add('manual', ['野猪'], [], validated: true);
+        add('empty', ['空'], []);
+        final harness = GlobalKey<_GroupExpansionHarnessState>();
+        await tester.pumpWidget(
+          _GroupExpansionHarness(
+            key: harness,
+            apiClient: apiClient,
+            initialItems: fixtures,
+            autoGroup: autoGroup,
+            reorderMetadata: false,
+            classificationModelPath: 'model.neri.json',
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        final list = find.byKey(const ValueKey('validation-species-list'));
+        for (
+          var attempt = 0;
+          attempt < 100 && list.evaluate().isEmpty;
+          attempt++
+        ) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        List<ListTile> tiles() => tester
+            .widgetList<ListTile>(
+              find.descendant(of: list, matching: find.byType(ListTile)),
+            )
+            .toList();
+        List<String> titles() =>
+            tiles().map((tile) => (tile.title! as Text).data!).toList();
+        expect(titles(), [
+          '野猪',
+          '斑羚',
+          '家羊、拒识簇 #2',
+          '拒识簇 #2',
+          '拒识簇 #10',
+          '拒识（未分簇）',
+          '空',
+        ]);
+        String subtitle(String label) =>
+            (tiles()
+                        .firstWhere((t) => (t.title! as Text).data == label)
+                        .subtitle!
+                    as Text)
+                .data!;
+        expect(subtitle('家羊、拒识簇 #2'), endsWith('2 个文件'));
+        expect(subtitle('拒识簇 #2'), endsWith('3 个文件'));
+        expect(subtitle('拒识簇 #10'), endsWith('2 个文件'));
+        expect(subtitle('拒识（未分簇）'), endsWith('2 个文件'));
+        expect(requests, 1);
+        harness.currentState!._replaceSpecies(fixtures[5], '岩羊');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(subtitle('拒识簇 #2'), endsWith('2 个文件'));
+        expect(subtitle('拒识簇 #10'), endsWith('1 个文件'));
+        expect(titles().first, '岩羊');
+        expect(
+          requests,
+          1,
+          reason: 'metadata changes must reuse already loaded cluster links',
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
   }
 }
 
@@ -167,12 +330,15 @@ class _GroupExpansionHarness extends StatefulWidget {
     required this.initialItems,
     this.autoGroup = true,
     this.reorderMetadata = true,
+    this.classificationModelPath,
+    super.key,
   });
 
   final NeriApiClient apiClient;
   final List<DetectionItem> initialItems;
   final bool autoGroup;
   final bool reorderMetadata;
+  final String? classificationModelPath;
 
   @override
   State<_GroupExpansionHarness> createState() => _GroupExpansionHarnessState();
@@ -182,6 +348,25 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   late List<DetectionItem> _items = widget.initialItems;
   int _metadataRequests = 0;
   bool _metadataApplied = false;
+
+  void _replaceSpecies(DetectionItem item, String species) {
+    final updated = item.mergeValidationUpdate(
+      DetectionItem(
+        filename: item.filename,
+        path: item.path,
+        fileType: item.fileType,
+        species: [species],
+        validated: true,
+        detectionData: {'物种名称': species, '最低置信度': '人工校验'},
+      ),
+    );
+    setState(() {
+      _items = [
+        for (final current in _items)
+          current.path == item.path ? updated : current,
+      ];
+    });
+  }
 
   Future<void> _loadMetadata(DetectionItem item) async {
     if (!widget.reorderMetadata) return;
@@ -244,6 +429,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
       home: Scaffold(
         body: SpeciesValidationScreen(
           apiClient: widget.apiClient,
+          classificationModelPath: widget.classificationModelPath,
           inputPath: File(widget.initialItems.first.path).parent.path,
           rootInputPath: File(widget.initialItems.first.path).parent.path,
           rootItems: _items,

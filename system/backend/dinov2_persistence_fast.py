@@ -188,6 +188,7 @@ def persist_runtime_observations(
 
     example_elapsed = 0.0
     registry_elapsed = 0.0
+    cluster_assignments = {}
     frames = {}
     video_frames = []
     if preloaded_data is not None:
@@ -256,7 +257,7 @@ def persist_runtime_observations(
                 # Runtime inference may collect candidate evidence, but it must
                 # never mutate an existing learned prototype. Only explicit
                 # human feedback owns that authority.
-                registry.record_unknown(
+                entry = registry.record_unknown(
                     runtime_observation.embedding,
                     candidate_kind=(
                         "new_mode_candidate"
@@ -270,9 +271,21 @@ def persist_runtime_observations(
                     ),
                     **registry_kwargs,
                 )
+                if feedback_observation is not None and entry is not None:
+                    from .rejection_clusters import cluster_assignment
+                    fingerprint = getattr(registry, "model_fingerprint", "")
+                    if fingerprint:
+                        cluster_assignments[feedback_observation.id] = cluster_assignment(fingerprint, entry)
             except Exception as exc:  # noqa: BLE001 - inference remains non-fatal
                 logger.warning("Failed to persist DINOv2 Registry evidence: %s", exc)
             registry_elapsed += time.perf_counter() - started
+
+    if cluster_assignments:
+        try:
+            from .rejection_clusters import persist_cluster_assignments
+            persist_cluster_assignments(feedback, cluster_assignments)
+        except Exception:
+            logger.warning("Failed to persist rejection cluster links", exc_info=True)
 
     logger.info(
         (

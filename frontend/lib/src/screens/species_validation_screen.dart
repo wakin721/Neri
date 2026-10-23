@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../api_client.dart';
 import '../models/export_result.dart';
 import '../models/job.dart';
+import '../models/rejection_cluster.dart';
 import '../utils/detection_species.dart';
 import '../utils/quick_mark_sort.dart';
 import '../utils/media_display_order.dart';
@@ -436,6 +437,11 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   Map<String, int> _bucketCacheBucketItemIndexByPath = const <String, int>{};
   final Set<String> _pendingValidationEchoPaths = <String>{};
   List<_SpeciesBucket> _bucketCache = const <_SpeciesBucket>[];
+  bool _bucketCacheHasRepeatedPaths = false;
+  final Map<String, RejectionCluster?> _rejectionClusters = {};
+  String? _clusterModelPath;
+  int? _clusterRefreshVersion;
+  bool _clusterLookupFailed = false;
   Map<String, DetectionItem> _bucketCacheItemByPath =
       const <String, DetectionItem>{};
   Map<String, _ValidationGroupIndexEntry> _bucketCacheGroupByPath =
@@ -478,6 +484,72 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _preparationFuture = _prepareBuckets(generation);
   }
 
+  bool get _requiresPreparation {
+    if (widget.items.length >= 512) return true;
+    final model = widget.classificationModelPath?.trim() ?? '';
+    if (model.isEmpty) return false;
+    final changed =
+        _clusterModelPath != model ||
+        _clusterRefreshVersion != widget.refreshVersion;
+    return widget.items.any(
+      (item) => item.detectionBoxes.any(
+        (box) =>
+            _isRejectedSpeciesName(box.species) &&
+            box.observationId != null &&
+            (changed || !_rejectionClusters.containsKey(box.observationId)),
+      ),
+    );
+  }
+
+  Future<void> _loadRejectionClusters(
+    List<DetectionItem> items,
+    int generation,
+    _ValidationWorkBudget budget,
+  ) async {
+    final model = widget.classificationModelPath?.trim() ?? '';
+    if (_clusterModelPath != model ||
+        _clusterRefreshVersion != widget.refreshVersion) {
+      _rejectionClusters.clear();
+      _clusterModelPath = model;
+      _clusterRefreshVersion = widget.refreshVersion;
+      _clusterLookupFailed = false;
+    }
+    if (model.isEmpty) return;
+    final pendingIds = <String>{};
+    for (var index = 0; index < items.length; index++) {
+      for (final box in items[index].detectionBoxes) {
+        if (_isRejectedSpeciesName(box.species) &&
+            box.observationId != null &&
+            !_rejectionClusters.containsKey(box.observationId)) {
+          pendingIds.add(box.observationId!);
+        }
+      }
+      if (index % 128 == 0) await budget.checkpoint();
+    }
+    final ids = pendingIds.toList();
+    try {
+      for (var offset = 0; offset < ids.length; offset += 10000) {
+        final batch = ids.sublist(
+          offset,
+          (offset + 10000).clamp(0, ids.length),
+        );
+        final resolved = await widget.apiClient.fetchDinoV2RejectionClusters(
+          model,
+          batch,
+        );
+        if (!mounted || generation != _preparationGeneration) return;
+        for (final id in batch) {
+          _rejectionClusters[id] = resolved[id];
+        }
+      }
+      _clusterLookupFailed = false;
+    } catch (error) {
+      if (!mounted || generation != _preparationGeneration) return;
+      _clusterLookupFailed = true;
+      debugPrint('Unable to load rejection clusters: $error');
+    }
+  }
+
   Future<void> _prepareBuckets(int generation) async {
     final items = widget.items;
     final budget = _ValidationWorkBudget(
@@ -486,6 +558,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     try {
       // Yield before any large traversal so the loading frame reaches paint.
       await Future<void>.delayed(Duration.zero);
+      await budget.checkpoint(force: true);
+      await _loadRejectionClusters(items, generation, budget);
       await budget.checkpoint(force: true);
       final indices = await mediaDisplayIndicesAsync(
         items,
@@ -574,19 +648,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         labels[group.signature] = species;
         groupIndices[group.signature] = i;
         final validated = group.items.every(_isItemValidated);
-        final key = '${validated ? 1 : 0}::$species';
-        final bucket = bucketMap.putIfAbsent(
-          key,
-          () => _SpeciesBucket(
-            key: key,
-            isValidated: validated,
-            species: species,
-            items: [],
-            groups: [],
-          ),
-        );
-        bucket.items.addAll(group.items);
-        bucket.groups.add(group);
+        for (final label in _clusterBucketLabels(group, species)) {
+          final key = '${validated ? 1 : 0}::${label.$1}';
+          final bucket = bucketMap.putIfAbsent(
+            key,
+            () => _SpeciesBucket(
+              key: key,
+              isValidated: validated,
+              species: label.$2,
+              clusterNumber: label.$3,
+              items: [],
+              groups: [],
+            ),
+          );
+          bucket.items.addAll(group.items);
+          bucket.groups.add(group);
+        }
         if (i % 128 == 0) await budget.checkpoint();
       }
       final buckets = bucketMap.values.toList()..sort(_SpeciesBucket.compare);
@@ -614,6 +691,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         if (i % 128 == 0) await budget.checkpoint();
       }
       final bucketByPath = <String, _SpeciesBucket>{};
+      var repeatedPaths = false;
       final bucketItemIndices = <String, int>{};
       final groupByPath = <String, _ValidationGroupIndexEntry>{};
       final groupBySignature = <String, _ValidationMediaGroup>{};
@@ -621,6 +699,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       for (final bucket in buckets) {
         for (var i = 0; i < bucket.items.length; i++) {
           final path = bucket.items[i].path;
+          if (bucketByPath.containsKey(path)) repeatedPaths = true;
           bucketByPath[path] = bucket;
           bucketItemIndices[path] = i;
           if (++traversed % 128 == 0) await budget.checkpoint();
@@ -668,6 +747,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _bucketCachePathSignature = pathSignature;
       _bucketCacheGroupingSignature = groupingSignature;
       _bucketCache = buckets;
+      _bucketCacheHasRepeatedPaths = repeatedPaths;
       _bucketCacheGroupCount = groups.length;
       _bucketCacheGroupIndexBySignature = groupIndices;
       _bucketCacheItemByPath = itemByPath;
@@ -719,7 +799,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (widget.items.length >= 512) _startPreparation();
+    if (_requiresPreparation) _startPreparation();
   }
 
   @override
@@ -777,6 +857,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final preparationChanged =
         !identical(oldWidget.items, widget.items) ||
         oldWidget.inputPath != widget.inputPath ||
+        oldWidget.classificationModelPath != widget.classificationModelPath ||
         oldWidget.refreshVersion != widget.refreshVersion ||
         oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
@@ -785,7 +866,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         oldWidget.minFrameRatio != widget.minFrameRatio;
     if (preparationChanged) _preparationError = null;
     if (preparationChanged &&
-        widget.items.length >= 512 &&
+        _requiresPreparation &&
         (_preparing || _pendingValidationEchoPaths.isEmpty)) {
       _startPreparation();
     } else if (preparationChanged && _preparing) {
@@ -1172,11 +1253,18 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     selectedIndex: selectedBucketIndex,
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     // 使用 Icon 区分已校验和未校验状态
-                    leadingBuilder: (bucket) => Icon(
-                      bucket.isValidated
-                          ? Icons.check_circle_rounded
-                          : Icons.pending_actions_rounded,
-                      color: bucket.isValidated ? Colors.green : Colors.orange,
+                    leadingBuilder: (bucket) => Tooltip(
+                      message: bucket.clusterId == null
+                          ? bucket.species
+                          : '${bucket.species}\n${bucket.clusterId}',
+                      child: Icon(
+                        bucket.isValidated
+                            ? Icons.check_circle_rounded
+                            : Icons.pending_actions_rounded,
+                        color: bucket.isValidated
+                            ? Colors.green
+                            : Colors.orange,
+                      ),
                     ),
                     titleBuilder: (bucket) => bucket.species,
                     subtitleBuilder: (bucket) => widget.autoGroup
@@ -2414,6 +2502,58 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     ];
   }
 
+  List<(String, String, int?)> _clusterBucketLabels(
+    _ValidationMediaGroup group,
+    String rawSpecies,
+  ) {
+    final names = _splitGroupSpeciesNames(rawSpecies).toSet().toList()..sort();
+    if (!names.any(_isRejectedSpeciesName)) {
+      final label = names.join('、');
+      return [(label, label, null)];
+    }
+    final known = names
+        .where(
+          (name) => !_isFallbackSpecies(name) && !_isRejectedSpeciesName(name),
+        )
+        .toList();
+    final clusters = <String, RejectionCluster>{};
+    var unassigned = false;
+    for (final item in group.items) {
+      if (!_splitGroupSpeciesNames(
+        _primarySpeciesAfterConfidenceFilter(item),
+      ).any(_isRejectedSpeciesName)) {
+        continue;
+      }
+      final boxes = _confidenceFilteredBoxes(
+        item,
+      ).where((box) => _isRejectedSpeciesName(box.species)).toList();
+      if (boxes.isEmpty) unassigned = true;
+      for (final box in boxes) {
+        final cluster = _rejectionClusters[box.observationId];
+        if (cluster == null) {
+          unassigned = true;
+        } else {
+          clusters[cluster.id] = cluster;
+        }
+      }
+    }
+    final prefix = known.isEmpty ? '' : '${known.join('、')}、';
+    return [
+      for (final cluster in clusters.values)
+        (
+          '${known.join('、')}::${cluster.id}',
+          '$prefix拒识簇 #${cluster.number}',
+          cluster.number,
+        ),
+      if (unassigned || clusters.isEmpty)
+        (
+          '${known.join('、')}::unassigned',
+          '$prefix${_clusterLookupFailed ? '拒识（簇信息未加载）' : '拒识（未分簇）'}',
+          null,
+        ),
+    ];
+  }
+
   List<_SpeciesBucket> _buildBuckets(List<_ValidationMediaGroup> groups) {
     final map = <String, _SpeciesBucket>{};
 
@@ -2422,20 +2562,23 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           ? _groupSpeciesLabel(group)
           : _primarySpeciesAfterConfidenceFilter(group.items.first);
       final isValidated = group.items.every(_isItemValidated);
-      final key = '${isValidated ? 1 : 0}::$species';
-      map.putIfAbsent(
-        key,
-        () => _SpeciesBucket(
-          key: key,
-          isValidated: isValidated,
-          species: species,
-          items: <DetectionItem>[],
-          groups: <_ValidationMediaGroup>[],
-        ),
-      );
-      map[key]!
-        ..items.addAll(group.items)
-        ..groups.add(group);
+      for (final label in _clusterBucketLabels(group, species)) {
+        final key = '${isValidated ? 1 : 0}::${label.$1}';
+        map.putIfAbsent(
+          key,
+          () => _SpeciesBucket(
+            key: key,
+            isValidated: isValidated,
+            species: label.$2,
+            clusterNumber: label.$3,
+            items: [],
+            groups: [],
+          ),
+        );
+        map[key]!
+          ..items.addAll(group.items)
+          ..groups.add(group);
+      }
     }
     final buckets = map.values.toList()..sort(_SpeciesBucket.compare);
     return buckets;
@@ -2633,6 +2776,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   bool _tryAdoptValidationEchoWithoutGlobalSignatures() {
+    // A file can belong to multiple cluster buckets. Rebuild those memberships
+    // together rather than updating only the last bucket indexed by its path.
+    if (_bucketCacheHasRepeatedPaths) return false;
     if (_pendingValidationEchoPaths.isEmpty) return false;
     final previousItems = _bucketCacheItemsIdentity;
     if (previousItems == null || previousItems.length != widget.items.length) {
@@ -2759,6 +2905,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   void _rebuildBucketLookups() {
+    _bucketCacheHasRepeatedPaths = false;
     _bucketCacheItemByPath = <String, DetectionItem>{
       for (final item in widget.items) item.path: item,
     };
@@ -2776,6 +2923,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     for (final bucket in _bucketCache) {
       for (var itemIndex = 0; itemIndex < bucket.items.length; itemIndex++) {
         final item = bucket.items[itemIndex];
+        if (bucketByPath.containsKey(item.path)) {
+          _bucketCacheHasRepeatedPaths = true;
+        }
         bucketByPath[item.path] = bucket;
         bucketItemIndexByPath[item.path] = itemIndex;
       }
@@ -5049,6 +5199,7 @@ class _SpeciesBucket {
     required this.species,
     required this.items,
     required this.groups,
+    this.clusterNumber,
   });
 
   factory _SpeciesBucket.empty() {
@@ -5066,6 +5217,8 @@ class _SpeciesBucket {
   final String species;
   final List<DetectionItem> items;
   final List<_ValidationMediaGroup> groups;
+  final int? clusterNumber;
+  String? get clusterId => clusterNumber == null ? null : key.split('::').last;
 
   late final int _sortPriority = _priority();
 
@@ -5093,10 +5246,16 @@ class _SpeciesBucket {
   static int compare(_SpeciesBucket a, _SpeciesBucket b) {
     final priority = a._sortPriority.compareTo(b._sortPriority);
     if (priority != 0) return priority;
+    if (a.clusterNumber != null &&
+        b.clusterNumber != null &&
+        a.species.split('拒识簇 #').first == b.species.split('拒识簇 #').first) {
+      final cluster = a.clusterNumber!.compareTo(b.clusterNumber!);
+      if (cluster != 0) return cluster;
+    }
     final species = a.species.compareTo(b.species);
     if (species != 0) return species;
     if (a.isValidated != b.isValidated) return a.isValidated ? -1 : 1;
-    return 0;
+    return a.key.compareTo(b.key);
   }
 }
 

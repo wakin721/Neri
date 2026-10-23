@@ -125,3 +125,18 @@ class RegistryMatchIndex:
         # just below a threshold that would round upward in float32 comparisons.
         eligible = np.flatnonzero(scores.astype(np.float64) >= minimum_score)
         return ((self._rows[index][0], float(scores[index])) for index in eligible)
+
+    def match_batch(self, vectors, minimum_score):
+        """Match one historical feature batch, preserving Registry ID tie order."""
+        if not self.entries:
+            return [None] * len(vectors)
+        # Initialize the same normalized prototype matrix as scalar matching.
+        self.scores(vectors[0])
+        similarities = self._matrix @ vectors.T
+        scores = np.maximum.reduceat(similarities, self._offsets, axis=0)
+        winners = np.argmax(scores, axis=0)
+        return [
+            self._rows[int(winner)][0]
+            if float(scores[winner, column]) >= minimum_score else None
+            for column, winner in enumerate(winners)
+        ]

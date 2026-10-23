@@ -8,6 +8,7 @@ import 'models/dinov2_feedback.dart';
 import 'models/dinov2_registry.dart';
 import 'models/export_result.dart';
 import 'models/job.dart';
+import 'models/rejection_cluster.dart';
 import 'models/settings.dart';
 import 'models/video_processing_mode.dart';
 import 'privacy/privacy_status.dart';
@@ -52,6 +53,30 @@ class NeriApiClient {
     _ensureSuccess(response);
     return NeriSettings.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<Map<String, RejectionCluster>> fetchDinoV2RejectionClusters(
+    String classificationModelPath,
+    List<String> observationIds,
+  ) async {
+    final response = await _httpClient
+        .post(
+          _uri('/api/dinov2/feedback/rejection-clusters'),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode({
+            'classification_model_path': classificationModelPath,
+            'observation_ids': observationIds,
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
+    _ensureSuccess(response);
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return decoded.map(
+      (key, value) => MapEntry(
+        key,
+        RejectionCluster.fromJson(value as Map<String, dynamic>),
+      ),
     );
   }
 
