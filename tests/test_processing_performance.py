@@ -158,6 +158,111 @@ def test_batch_and_sequential_candidate_routing_agree(tmp_path):
         batched.close()
 
 
+def _assert_fresh_index_scores(index, registry, vector):
+    from system.dinov2.registry_match_index import RegistryMatchIndex
+    expected = list(RegistryMatchIndex(registry._conn, index.statuses, index.candidate_kinds).scores(vector))
+    actual = list(index.scores(vector))
+    assert [row["id"] for row, _ in actual] == [row["id"] for row, _ in expected]
+    np.testing.assert_array_equal([score for _, score in actual], [score for _, score in expected])
+    assert [row for row, _ in actual] == [row for row, _ in expected]
+
+
+def test_match_matrix_updates_and_appends_without_full_bank_copies(tmp_path):
+    from system.dinov2.registry_match_index import RegistryMatchIndex
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint="1" * 64)
+    try:
+        first = registry.record_unknown(_unit(), camera_id="c", captured_at=None, source_path="first.jpg")
+        index = RegistryMatchIndex(registry._conn, ("candidate",), ("candidate",))
+        _assert_fresh_index_scores(index, registry, _unit())
+        storage = index._storage
+        registry.record_observation(first.id, _unit() + _unit(1) * 0.1,
+                                    camera_id="c", captured_at=None, source_path="update.jpg")
+        index.refresh(first.id)
+        assert index._storage is storage
+        _assert_fresh_index_scores(index, registry, _unit(1))
+        for number in range(2, 22):
+            entry_id = registry._create()
+            registry.record_observation(entry_id, _unit(number), camera_id="c",
+                                        captured_at=None, source_path=f"{number}.jpg")
+            index.refresh(entry_id)
+            if number < 16:
+                assert index._storage is storage
+            _assert_fresh_index_scores(index, registry, _unit(number))
+        # Reserve growth must preserve earlier evidence as well as new candidates.
+        assert index._storage is not storage
+        _assert_fresh_index_scores(index, registry, _unit())
+        registry.set_identity(first.id, common_name="Renamed")
+        index.refresh(first.id)
+        _assert_fresh_index_scores(index, registry, _unit())
+        registry.delete(first.id)
+        index.refresh(first.id)
+        _assert_fresh_index_scores(index, registry, _unit())
+    finally:
+        registry.close()
+
+
+def test_match_matrix_keeps_filters_and_rebuilds_changed_prototype_offsets(tmp_path):
+    from system.dinov2.registry_match_index import RegistryMatchIndex
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint="2" * 64)
+    try:
+        first = registry.record_unknown(_unit(), camera_id="c", captured_at=None, source_path="a.jpg")
+        other = registry.record_unknown(_unit(1), camera_id="c", captured_at=None,
+                                        source_path="b.jpg", candidate_kind="new_mode_candidate")
+        index = RegistryMatchIndex(registry._conn, ("candidate",), ("candidate",))
+        _assert_fresh_index_scores(index, registry, _unit())
+        storage = index._storage
+        index.refresh(other.id)
+        assert index._storage is storage
+        # Move from one prototype to two, then update both in place.
+        registry._replace_prototypes(first.id, np.stack([_unit(), _unit(2)]), 4)
+        registry._conn.commit()
+        index.refresh(first.id)
+        _assert_fresh_index_scores(index, registry, _unit(2))
+        storage = index._storage
+        registry._replace_prototypes(first.id, np.stack([_unit(3), _unit(4)]), 4)
+        registry._conn.commit()
+        index.refresh(first.id)
+        assert index._storage is storage
+        _assert_fresh_index_scores(index, registry, _unit(4))
+        # A previously excluded, smaller ID must return in the original ID order.
+        registry._conn.execute("UPDATE registrations SET candidate_kind='new_mode_candidate' WHERE id=?", (first.id,))
+        registry._conn.commit()
+        index.refresh(first.id)
+        assert list(index.scores(_unit())) == []
+        registry._conn.execute("UPDATE registrations SET candidate_kind='candidate' WHERE id=?", (other.id,))
+        registry._conn.commit()
+        index.refresh(other.id)
+        _assert_fresh_index_scores(index, registry, _unit(1))
+        registry._conn.execute("UPDATE registrations SET candidate_kind='candidate' WHERE id=?", (first.id,))
+        registry._conn.commit()
+        index.refresh(first.id)
+        _assert_fresh_index_scores(index, registry, _unit(3))
+    finally:
+        registry.close()
+
+
+def test_match_score_filter_preserves_float_threshold_boundaries_and_ties(tmp_path):
+    from system.dinov2.registry_match_index import RegistryMatchIndex
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint="3" * 64)
+    try:
+        for _ in range(2):
+            entry_id = registry._create()
+            registry.record_observation(entry_id, _unit() + _unit(1) * 0.5, camera_id="c",
+                                        captured_at=None, source_path=f"{entry_id}.jpg")
+        index = RegistryMatchIndex(registry._conn)
+        scores = list(index.scores(_unit()))
+        score = scores[0][1]
+        assert len(list(index.scores(_unit(), minimum_score=score))) == 2
+        assert list(index.scores(_unit(), minimum_score=np.nextafter(score, np.inf))) == []
+        registry.join_threshold = registry.registration_threshold = score
+        assert registry.match(_unit())["id"] == scores[0][0]["id"]
+        assert registry.match(_unit(), exclude_entry_ids={scores[0][0]["id"]})["id"] == scores[1][0]["id"]
+        registry.join_threshold = registry.registration_threshold = float(np.nextafter(score, np.inf))
+        assert registry.match(_unit()) is None
+    finally:
+        registry.close()
+
+
 def test_feedback_example_reuses_preloaded_bgr_frame(tmp_path, monkeypatch):
     from system.backend.dinov2_persistence_fast import persist_runtime_observations
     from system.dinov2.registry_examples import feedback_observation_example_path

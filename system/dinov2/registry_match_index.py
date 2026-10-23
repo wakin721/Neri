@@ -60,6 +60,8 @@ class RegistryMatchIndex:
         self.entries[key] = (dict(row), values)
 
     def refresh(self, entry_id):
+        entry_id = int(entry_id)
+        previous = self.entries.get(entry_id)
         row = self.conn.execute(
             "SELECT id,candidate_number,status,candidate_kind,common_name FROM registrations WHERE id=?",
             (entry_id,),
@@ -76,15 +78,50 @@ class RegistryMatchIndex:
                 "SELECT embedding FROM events WHERE registration_id=? ORDER BY id", (entry_id,)
             )]
             self._set(row, prototypes, events)
-        self._matrix = None
+        if self._matrix is None:
+            return
+        updated = self.entries.get(entry_id)
+        if previous is None and updated is None:
+            return
+        if previous is not None and updated is not None and len(previous[1]) == len(updated[1]):
+            position = self._positions[entry_id]
+            start = self._offsets[position]
+            self._matrix[start:start + len(updated[1])] = updated[1]
+            self._rows[position] = updated
+        elif previous is None and updated is not None and entry_id > self._rows[-1][0]["id"]:
+            # AUTOINCREMENT candidates can append to reserved matrix storage.
+            # Do not copy/re-sort the entire bank after every observation.
+            start = len(self._matrix)
+            required = start + len(updated[1])
+            if required > len(self._storage):
+                storage = np.empty((max(required, len(self._storage) * 2), self._matrix.shape[1]), dtype=np.float32)
+                storage[:start] = self._matrix
+                self._storage = storage
+            self._matrix = self._storage[:required]
+            self._matrix[start:] = updated[1]
+            self._positions[entry_id] = len(self._rows)
+            self._rows.append(updated)
+            self._offsets = np.append(self._offsets, start)
+        else:
+            # Deletions, older IDs entering a filter, and prototype count changes
+            # require rebuilding offsets; ordinary candidate updates do not.
+            self._matrix = None
 
-    def scores(self, vector):
+    def scores(self, vector, *, minimum_score=-np.inf):
         if not self.entries:
             return ()
         if self._matrix is None:
             self._rows = [self.entries[key] for key in sorted(self.entries)]
             self._offsets = np.cumsum([0] + [len(values) for _, values in self._rows[:-1]])
-            self._matrix = np.concatenate([values for _, values in self._rows])
+            self._positions = {int(row["id"]): index for index, (row, _) in enumerate(self._rows)}
+            count = sum(len(values) for _, values in self._rows)
+            dimension = self._rows[0][1].shape[1]
+            self._storage = np.empty((max(16, count + count // 4), dimension), dtype=np.float32)
+            self._matrix = self._storage[:count]
+            np.concatenate([values for _, values in self._rows], out=self._matrix)
         similarities = self._matrix @ vector
         scores = np.maximum.reduceat(similarities, self._offsets)
-        return ((row, float(score)) for (row, _), score in zip(self._rows, scores))
+        # Match the previous Python-float threshold comparison, including scores
+        # just below a threshold that would round upward in float32 comparisons.
+        eligible = np.flatnonzero(scores.astype(np.float64) >= minimum_score)
+        return ((self._rows[index][0], float(scores[index])) for index in eligible)

@@ -1230,7 +1230,11 @@ class SpeciesRegistry:
             if key not in indexes:
                 indexes[key] = RegistryMatchIndex(self._conn, *key)
             index = indexes[key]
-            scores = tuple(index.scores(vector))
+            # Only materialize rows that could pass either stage's threshold.
+            # fmin keeps a NaN threshold from hiding valid matches at the other stage.
+            scores = tuple(index.scores(
+                vector, minimum_score=float(np.fmin(self.join_threshold, self.registration_threshold)),
+            ))
 
         for row, score in scores:
             entry_id = int(row["id"])
