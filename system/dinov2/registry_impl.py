@@ -163,6 +163,28 @@ class SpeciesRegistry:
             );
             CREATE INDEX IF NOT EXISTS idx_events_registry_camera_time
                 ON events(registration_id,camera_id,started_at,ended_at);
+            INSERT OR IGNORE INTO metadata(key,value) VALUES('rejection_density_revision_v1','0');
+            CREATE TRIGGER IF NOT EXISTS rejection_density_event_insert_v1 AFTER INSERT ON events
+            BEGIN
+                UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='rejection_density_revision_v1';
+            END;
+            CREATE TRIGGER IF NOT EXISTS rejection_density_event_update_v1 AFTER UPDATE ON events
+            BEGIN
+                UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='rejection_density_revision_v1';
+            END;
+            CREATE TRIGGER IF NOT EXISTS rejection_density_event_delete_v1 AFTER DELETE ON events
+            BEGIN
+                UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='rejection_density_revision_v1';
+            END;
+            CREATE TRIGGER IF NOT EXISTS rejection_density_status_update_v1
+            AFTER UPDATE OF status,candidate_kind ON registrations
+            BEGIN
+                UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='rejection_density_revision_v1';
+            END;
+            CREATE TRIGGER IF NOT EXISTS rejection_density_registration_delete_v1 AFTER DELETE ON registrations
+            BEGIN
+                UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='rejection_density_revision_v1';
+            END;
             """
         )
         existing_event_columns = {

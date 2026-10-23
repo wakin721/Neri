@@ -7,6 +7,7 @@ class RejectionCluster {
     required this.modelFingerprint,
     required this.eventCount,
     required this.minClusterEvents,
+    required this.densityVerified,
   });
 
   factory RejectionCluster.fromJson(Map<String, dynamic> json) =>
@@ -15,7 +16,9 @@ class RejectionCluster {
         number: (json['candidate_number'] as num).toInt(),
         modelFingerprint: json['model_fingerprint'] as String,
         eventCount: (json['event_count'] as num?)?.toInt() ?? 0,
-        minClusterEvents: (json['min_cluster_events'] as num?)?.toInt() ?? 4,
+        minClusterEvents: (json['min_cluster_events'] as num?)?.toInt() ?? 5,
+        densityVerified:
+            json['density_verified'] == true && json['is_noise'] == false,
       );
 
   final String id;
@@ -23,7 +26,8 @@ class RejectionCluster {
   final String modelFingerprint;
   final int eventCount;
   final int minClusterEvents;
-  bool get isNoise => eventCount < minClusterEvents;
+  final bool densityVerified;
+  bool get isNoise => eventCount < minClusterEvents || !densityVerified;
 }
 
 class ClusterLearningResult {

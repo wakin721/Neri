@@ -284,8 +284,13 @@ void main() {
                         ? (id == 'noise-other' ? 21 : 20)
                         : (id == 'b' || id == 'both-b' ? 10 : 2),
                     'model_fingerprint': 'fp',
-                    'event_count': id.toString().startsWith('noise') ? 1 : 10,
-                    'min_cluster_events': 4,
+                    // A large candidate is still noise when density fails.
+                    'event_count': id == 'noise-other'
+                        ? 20
+                        : (id.toString().startsWith('noise') ? 4 : 10),
+                    'min_cluster_events': 5,
+                    'is_noise': id.toString().startsWith('noise'),
+                    'density_verified': !id.toString().startsWith('noise'),
                   },
               }),
               200,

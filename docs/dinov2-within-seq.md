@@ -41,7 +41,7 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/dinov2/discovery/within-
 3. 序列记忆先平均原始单位特征并归一化，再白化和归一化。自适应 k 由不同序列最近邻距离的最大相对间隔确定，范围 1–16，使用第 17 个邻居确定最后一个间隔；并列选择较小 k。距离下限为 `1e-6`。
 4. 拒识分数为 `2 * s_top1 - s_top2`，再在查询序列内对图像分数取平均。分类结果仍来自独立的固定 k 分类分支。
 5. Val90 对辅助未知图像对应的序列平均分数取第 `ceil(0.9 * M)` 个顺序统计量，并用 `nextafter(value, +inf)` 构造阈值。严格 `score < threshold` 为未知；并列可能使辅助未知召回超过目标。校准按图像计数，长序列保留其图像权重。
-6. 仅对被拒识序列的**原始、未白化**特征均值归一化后聚类，使用外部 `hdbscan` 包的 `min_cluster_size=5`、`min_samples=3`、`allow_single_cluster=False`、Euclidean 距离和 EOM。不要求预先给定簇数。少于 5 个候选序列全部记为噪声。
+6. 仅对被拒识序列的**原始、未白化**特征均值归一化后聚类，使用外部 `hdbscan` 包的 `min_cluster_size=5`、`min_samples=3`、`allow_single_cluster=False`、Euclidean 距离和 EOM。不要求预先给定簇数。少于 5 个候选序列全部记为噪声。该密度策略与物种校验界面共用 `rejection_clustering.py`；校验界面还要求一个 Registry 候选的全部事件属于同一个非噪声密度簇，才展示该候选的编号，避免把混合候选整体用于学习。
 
 查询相似度按 128 行分批计算，类别和相机索引在模型构建时预计算，避免逐图重复构建索引。HDBSCAN 的输入是序列均值，减少连拍图像对聚类规模的影响。
 

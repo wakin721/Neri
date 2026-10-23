@@ -12,6 +12,8 @@ import math
 
 import numpy as np
 
+from .rejection_clustering import rejected_event_labels
+
 
 def _unit(values: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(values, axis=1, keepdims=True)
@@ -242,17 +244,7 @@ def cluster_rejected_sequences(features, cameras, sequences, rejected):
     if not candidates:
         return labels, 0
     means = _unit(np.stack([features[g].mean(axis=0) for g in candidates]))
-    if len(means) < 5:
-        partition = np.full(len(means), -1, dtype=np.int64)
-    else:
-        try:
-            from hdbscan import HDBSCAN
-        except ImportError as exc:
-            raise RuntimeError("Install requirements-within-seq.txt to use HDBSCAN") from exc
-        partition = HDBSCAN(
-            min_cluster_size=5, min_samples=3, allow_single_cluster=False,
-            metric="euclidean", cluster_selection_method="eom", core_dist_n_jobs=1,
-        ).fit_predict(means)
+    partition = rejected_event_labels(means)
     for group, label in zip(candidates, partition):
         for index in group:
             labels[int(index)] = int(label)

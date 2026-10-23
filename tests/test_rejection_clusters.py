@@ -48,13 +48,15 @@ def test_old_observations_match_real_clusters_and_links_survive_reopen(stores, m
     before = registry._conn.total_changes
     result = _resolve(feedback, registry._conn, ["a", "b", "noise", "known", "missing"])
     assert set(result) == {"a", "b"}
-    assert result["a"] == cluster_assignment(feedback.model_fingerprint, first)
-    assert result["b"] == cluster_assignment(feedback.model_fingerprint, second)
+    assert result["a"] == {**cluster_assignment(feedback.model_fingerprint, first), "density_reason": "insufficient_events"}
+    assert result["b"] == {**cluster_assignment(feedback.model_fingerprint, second), "density_reason": "insufficient_events"}
     assert result["a"]["cluster_id"] != result["b"]["cluster_id"]
     assert registry._conn.total_changes == before
     from system.dinov2 import registry_match_index
     monkeypatch.setattr(registry_match_index, "RegistryMatchIndex",
                         lambda *args: pytest.fail("cached links must not rematch feature vectors"))
+    monkeypatch.setattr("system.backend.rejection_density.rejected_event_labels",
+                        lambda *args: pytest.fail("unchanged cached density must not be recomputed"))
     reopened = HumanFeedbackStore(feedback.path, model_fingerprint=feedback.model_fingerprint,
                                  checkpoint_classes=("A", "B"), threshold=0.5)
     try:
@@ -77,6 +79,10 @@ def test_deleted_cluster_is_unassigned_and_other_models_are_rejected(stores):
 
 def test_burst_is_noise_and_cached_link_promotes_after_independent_events(stores, monkeypatch):
     registry, feedback = stores
+    # Same pool context as discovery: allow_single_cluster=False requires
+    # separable density groups, not a forced cluster for one homogeneous pool.
+    for index in range(10):
+        registry.record_unknown(unit(1), camera_id="background", captured_at=None, source_path=f"background-{index}.jpg")
     # Four photos in the same trigger still contribute just one event.
     for index in range(4):
         entry = registry.record_unknown(unit(), camera_id="c", captured_at=datetime(2026, 10, 1, 12, 0, index, tzinfo=timezone.utc),
@@ -87,19 +93,20 @@ def test_burst_is_noise_and_cached_link_promotes_after_independent_events(stores
     link = result[ids[0]]
     assert all(value == link for value in result.values())
     assert link["event_count"] == 1
-    assert link["min_cluster_events"] == 4
+    assert link["min_cluster_events"] == 5
     assert link["is_noise"] is True
     # Retain candidate identity/evidence; refresh cached links without re-matching.
     from system.dinov2 import registry_match_index
     monkeypatch.setattr(registry_match_index, "RegistryMatchIndex",
                         lambda *args: pytest.fail("support changes must not rematch cached links"))
-    for day in range(2, 5):
+    for day in range(2, 6):
         registry.record_observation(entry.id, unit(), camera_id="c", captured_at=datetime(2026, 10, day, 12, tzinfo=timezone.utc),
                                     source_path=f"event-{day}.jpg")
         current = _resolve(feedback, registry._conn, ids)[ids[0]]
         assert current["cluster_id"] == link["cluster_id"]
         assert current["event_count"] == day
-        assert current["is_noise"] is (day < 4)
+        assert current["is_noise"] is (day < 5)
+        assert current["density_verified"] is (day >= 5)
 
 
 def test_small_candidate_is_not_reassigned_to_a_supported_neighbor(stores):
@@ -116,6 +123,66 @@ def test_small_candidate_is_not_reassigned_to_a_supported_neighbor(stores):
     assert result["is_noise"] is True
 
 
+@pytest.mark.parametrize("legacy_registry", [False, True])
+def test_enough_events_are_still_noise_until_density_passes_and_cache_tracks_features(stores, legacy_registry, monkeypatch):
+    registry, feedback = stores
+    if legacy_registry:
+        with registry._conn:
+            registry._conn.execute("DELETE FROM metadata WHERE key='rejection_density_revision_v1'")
+    for index in range(10):
+        first = registry.record_unknown(unit(), camera_id="c", captured_at=None, source_path=f"first-{index}.jpg")
+    observe(feedback, "first", unit())
+    isolated = _resolve(feedback, registry._conn, ["first"])["first"]
+    assert isolated["event_count"] == 10
+    assert isolated["is_noise"] is True  # allow_single_cluster=False, not a size-only check
+    assert isolated["density_reason"] == "density_noise"
+    for index in range(10):
+        second = registry.record_unknown(unit(1), camera_id="c", captured_at=None, source_path=f"second-{index}.jpg")
+    supported = _resolve(feedback, registry._conn, ["first"])["first"]
+    assert supported["is_noise"] is False
+    assert supported["density_verified"] is True
+    assert supported["cluster_id"] == isolated["cluster_id"]
+    with monkeypatch.context() as cached:
+        cached.setattr("system.backend.rejection_density.rejected_event_labels",
+                       lambda *args: pytest.fail("unchanged supported density must reuse its persisted result"))
+        assert _resolve(feedback, registry._conn, ["first"])["first"] == supported
+    # Same event IDs/counts, different geometry. Both revision-based and legacy
+    # caches must re-evaluate actual features instead of keeping old support.
+    with registry._conn:
+        registry._conn.execute("UPDATE events SET embedding=? WHERE registration_id=?",
+                               (unit().astype('<f4').tobytes(), second.id))
+    assert _resolve(feedback, registry._conn, ["first"])["first"]["is_noise"] is True
+    assert registry.get(first.id).event_count == 10
+
+
+def test_small_view_does_not_trigger_full_pool_density(stores, monkeypatch):
+    registry, feedback = stores
+    for index in range(10):
+        registry.record_unknown(unit(1), camera_id="c", captured_at=None, source_path=f"large-{index}.jpg")
+    registry.record_unknown(unit(), camera_id="c", captured_at=None, source_path="small.jpg")
+    observe(feedback, "small", unit())
+    monkeypatch.setattr("system.backend.rejection_density.candidate_density_support",
+                        lambda *args: pytest.fail("undersized candidates need no expensive full-pool fit"))
+    result = _resolve(feedback, registry._conn, ["small"])["small"]
+    assert result["event_count"] == 1
+    assert result["is_noise"] is True
+
+
+def test_candidate_mixing_density_groups_is_not_presented_as_one_coherent_cluster(stores):
+    registry, feedback = stores
+    eid = registry._create()
+    for axis in range(2):
+        for index in range(6):
+            registry.record_observation(eid, unit(axis), camera_id="c", captured_at=None,
+                                        source_path=f"{axis}-{index}.jpg")
+    observe(feedback, "mixed", unit())
+    persist_cluster_assignments(feedback, {"mixed": cluster_assignment(feedback.model_fingerprint, registry.get(eid))})
+    result = _resolve(feedback, registry._conn, ["mixed"])["mixed"]
+    assert result["event_count"] == 12
+    assert result["is_noise"] is True
+    assert result["density_reason"] == "multiple_density_groups"
+
+
 def test_service_opens_registry_read_only_and_closes_feedback(stores, monkeypatch):
     from system.backend.rejection_clusters import resolve_rejection_clusters
     registry, feedback = stores
@@ -126,7 +193,9 @@ def test_service_opens_registry_read_only_and_closes_feedback(stores, monkeypatc
                                   checkpoint_classes=("A", "B"), threshold=0.5), None
     monkeypatch.setattr("system.backend.dinov2_feedback_service._open_feedback_state", open_feedback)
     before = registry._conn.total_changes
-    assert resolve_rejection_clusters("model.neri.json", ["a"])["a"] == cluster_assignment(feedback.model_fingerprint, entry)
+    assert resolve_rejection_clusters("model.neri.json", ["a"])["a"] == {
+        **cluster_assignment(feedback.model_fingerprint, entry), "density_reason": "insufficient_events",
+    }
     assert registry._conn.total_changes == before
 
 
@@ -201,6 +270,8 @@ def learning_cluster(tmp_path, monkeypatch):
         path.write_bytes(b"source pixels must not be decoded")
         entry = registry.record_unknown(unit(4), camera_id=f"c-{index % 2}",
                                         captured_at=None, source_path=str(path), bbox=(0, 0, 16, 16))
+    for index in range(10):
+        registry.record_unknown(unit(6), camera_id="background", captured_at=None, source_path=f"background-{index}.jpg")
     other = registry.record_unknown(unit(5), camera_id="other", captured_at=None, source_path="other.jpg")
     path = root / "image-0.jpg"
     for oid, vector in [("view-a", unit(4)), ("view-b", unit(5))]:
@@ -281,13 +352,46 @@ def test_noise_candidate_cannot_apply_cluster_learning(learning_cluster):
         "cluster_id": cluster_assignment(case.checkpoint.fingerprint, case.other)["cluster_id"],
         "observation_ids": ["view-b"],
     })
-    with pytest.raises(ValueError, match="不足 4 个独立事件"):
+    with pytest.raises(ValueError, match="不足 5 个独立事件"):
         confirm_rejection_cluster(request)
     assert not case.feedback.memory_bank().formal
     assert case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0] == 0
     from system.backend import services
     restored = services._reload_validation_item(case.path, case.root)
     assert all(box["species"] == "拒识/Unknown" for box in restored.detection_boxes)
+
+
+def test_density_failure_blocks_learning_even_with_enough_events(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    case = learning_cluster
+    # Remove the second dense mode: the remaining pool has no supported split.
+    with case.registry._conn:
+        case.registry._conn.execute("DELETE FROM registrations WHERE id NOT IN (?,?)", (case.entry.id, case.other.id))
+    with pytest.raises(ValueError, match="HDBSCAN 密度"):
+        confirm_rejection_cluster(case.request)
+    assert not case.feedback.memory_bank().formal
+    assert case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0] == 0
+
+
+def test_learning_uses_verified_snapshot_while_runtime_adds_an_unverified_event(learning_cluster, monkeypatch):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    from system.backend import dinov2_registry_service
+    case = learning_cluster
+    writer = SpeciesRegistry(case.registry.path, model_fingerprint=case.checkpoint.fingerprint)
+    original = dinov2_registry_service._candidate_feedback_observations
+
+    def with_runtime_write(registry, entry_id, *, checkpoint):
+        writer.record_observation(entry_id, unit(7), camera_id="later", captured_at=None, source_path="arriving-later.jpg")
+        return original(registry, entry_id, checkpoint=checkpoint)
+
+    monkeypatch.setattr(dinov2_registry_service, "_candidate_feedback_observations", with_runtime_write)
+    try:
+        result = confirm_rejection_cluster(case.request)
+    finally:
+        writer.close()
+    assert result["feature_events"] == 10
+    assert case.registry.get(case.entry.id).event_count == 11
+    assert case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0] == 10
 
 
 def test_changing_cluster_label_removes_old_learning_and_undo_reactivates_it(learning_cluster):

@@ -8,7 +8,7 @@ import sqlite3
 
 import numpy as np
 
-from system.dinov2.clustering import DEFAULT_MIN_CLUSTER_SIZE
+from system.dinov2.rejection_clustering import MIN_REJECTION_CLUSTER_EVENTS
 
 
 def cluster_assignment(fingerprint, entry):
@@ -21,8 +21,11 @@ def cluster_assignment(fingerprint, entry):
         "prototype_index": 0,
         "model_fingerprint": fingerprint,
         "event_count": int(entry.event_count),
-        "min_cluster_events": DEFAULT_MIN_CLUSTER_SIZE,
-        "is_noise": entry.event_count < DEFAULT_MIN_CLUSTER_SIZE,
+        "min_cluster_events": MIN_REJECTION_CLUSTER_EVENTS,
+        # Collection-time links do not prove density support. Only the review
+        # resolver may turn this flag off after checking the shared policy.
+        "is_noise": True,
+        "density_verified": False,
     }
 
 
@@ -139,4 +142,13 @@ def _resolve(feedback, conn, observation_ids):
                     if entry is not None:
                         assignments[oid] = cluster_assignment(fingerprint, entry)
         persist_cluster_assignments(feedback, {oid: assignments[oid] for oid, _ in pending if oid in assignments})
+    if any(value["event_count"] >= MIN_REJECTION_CLUSTER_EVENTS for value in assignments.values()):
+        from .rejection_density import candidate_density_support
+        support = candidate_density_support(feedback, conn)
+        for assignment in assignments.values():
+            assignment.update(support.get(str(assignment["registry_id"]), {}))
+    else:
+        # A view containing only undersized candidates needs no full-pool fit.
+        for assignment in assignments.values():
+            assignment["density_reason"] = "insufficient_events"
     return assignments

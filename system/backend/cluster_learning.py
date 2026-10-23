@@ -27,14 +27,42 @@ def confirm_rejection_cluster(request):
         registry.close()
 
 
+def _verified_cluster_evidence(request, checkpoint, registry, feedback):
+    from system.dinov2.rejection_clustering import MIN_REJECTION_CLUSTER_EVENTS
+    from .dinov2_registry_service import _candidate_feedback_observations
+    from .rejection_clusters import _resolve, cluster_assignment
+
+    # Verify density and freeze its evidence in one WAL read snapshot. Runtime
+    # writes may continue during a long fit, but newly arriving, unverified
+    # events must not be swept into the subsequent human-learning operation.
+    registry._conn.execute("BEGIN")
+    try:
+        entry = registry.get(int(request.cluster_id.split(":")[2]))
+        if entry.status != "candidate":
+            raise ValueError("已注册物种请通过物种注册界面修改；此入口用于确认拒识候选簇")
+        if entry.event_count < MIN_REJECTION_CLUSTER_EVENTS:
+            raise ValueError(f"该候选不足 {MIN_REJECTION_CLUSTER_EVENTS} 个独立事件，暂按噪声/证据不足处理；可逐框人工校验")
+        links = _resolve(feedback, registry._conn, list(set(request.observation_ids)))
+        expected = cluster_assignment(checkpoint.fingerprint, entry)["cluster_id"]
+        if any(links.get(oid, {}).get("cluster_id") != expected for oid in request.observation_ids):
+            raise ValueError("所选检测框不全部属于当前簇，未修改其他簇")
+        if any(value.get("is_noise", True) for value in links.values()):
+            raise ValueError("该候选未通过 HDBSCAN 密度成簇校验，暂按噪声/证据不足处理；可逐框人工校验")
+        observations = _candidate_feedback_observations(registry, entry.id, checkpoint=checkpoint)
+        if not observations:
+            raise ValueError("该簇没有可学习的已保存特征")
+        return entry, observations
+    finally:
+        registry._conn.rollback()
+
+
 def _confirm(request, checkpoint, registry, feedback):
     from . import services
-    from .dinov2_registry_service import _candidate_feedback_observations, _feature_center_array
+    from .dinov2_registry_service import _feature_center_array
     from .dinov2_feedback_service import (
         _journal_ecological_state, _raw_box_for_observation, _recompute_detection_summary,
         revert_feedback_operation,
     )
-    from .rejection_clusters import _resolve, cluster_assignment
 
     species = request.species_name.strip()
     if not species or species.lower() in {"unknown", "empty"} or species == "空" or "拒识" in species:
@@ -63,15 +91,7 @@ def _confirm(request, checkpoint, registry, feedback):
         if cached["result_json"]:
             return json.loads(cached["result_json"])
         raise ValueError("该学习操作未完成，请撤回后重试")
-    if entry.status != "candidate":
-        raise ValueError("已注册物种请通过物种注册界面修改；此入口用于确认拒识候选簇")
-    from system.dinov2.clustering import DEFAULT_MIN_CLUSTER_SIZE
-    if entry.event_count < DEFAULT_MIN_CLUSTER_SIZE:
-        raise ValueError(f"该候选不足 {DEFAULT_MIN_CLUSTER_SIZE} 个独立事件，暂按噪声/证据不足处理；可逐框人工校验")
-    links = _resolve(feedback, registry._conn, list(set(request.observation_ids)))
-    if any(links.get(oid, {}).get("cluster_id") != cluster_assignment(checkpoint.fingerprint, entry)["cluster_id"]
-           for oid in request.observation_ids):
-        raise ValueError("所选检测框不全部属于当前簇，未修改其他簇")
+    entry, observations = _verified_cluster_evidence(request, checkpoint, registry, feedback)
 
     # Validate and prepare every visible file before learning or writing labels.
     updates = {}
@@ -91,9 +111,6 @@ def _confirm(request, checkpoint, registry, feedback):
         box = _raw_box_for_observation(updates[path]["data"], oid)
         box["物种"] = species
         box["feedback_status"] = "confirmed"
-    observations = _candidate_feedback_observations(registry, entry.id, checkpoint=checkpoint)
-    if not observations:
-        raise ValueError("该簇没有可学习的已保存特征")
     feedback._conn.execute("INSERT INTO cluster_feedback_operations VALUES(?,?,NULL)", (operation_id, signature))
     feedback._conn.commit()
     renamed = False

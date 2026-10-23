@@ -467,7 +467,8 @@ Finder _preparingContent() => find.byWidgetPredicate(
 void _expectInitialValidationLoading(WidgetTester tester) {
   expect(find.byType(LinearProgressIndicator), findsNothing);
   expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
-  expect(find.text('暂无待校验图像。'), findsOneWidget);
+  expect(find.textContaining('正在'), findsWidgets);
+  expect(find.text('暂无待校验图像。'), findsNothing);
   final refresh = find.widgetWithText(FilledButton, '重新获取');
   expect(tester.widget<FilledButton>(refresh).onPressed, isNull);
   expect(

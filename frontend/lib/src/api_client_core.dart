@@ -97,7 +97,9 @@ class NeriApiClient {
             'observation_ids': observationIds,
           }),
         )
-        .timeout(const Duration(seconds: 60));
+        // First density verification can be expensive for large saved pools;
+        // subsequent requests reuse the backend's revision-scoped cache.
+        .timeout(const Duration(minutes: 15));
     _ensureSuccess(response);
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     return decoded.map(

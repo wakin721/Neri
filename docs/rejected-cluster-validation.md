@@ -1,24 +1,48 @@
 # Rejected clusters in species validation
 
-The validation list uses the existing DINOv2 Registry candidate numbers. Runtime
-rejections are collected into candidate registrations, which have a single
-prototype budget. Their cluster is the same prototype index 0 exposed by the
-Registry cluster inspector. The stable identity includes the model fingerprint,
-registration ID and prototype index; the visible label is `拒识簇 #N`.
+The validation list retains DINOv2 Registry collection identities and candidate
+numbers after density verification; these are not the transient integer labels
+returned by a particular HDBSCAN run. Runtime rejections are collected into
+candidate registrations, which have a single prototype budget. The stable
+identity includes the model fingerprint, registration ID and prototype index;
+the visible label for verified candidates is `拒识簇 #N`.
 
-Only candidates with at least four independent Registry events (the shared
-`DEFAULT_MIN_CLUSTER_SIZE`) receive a numbered list entry. Smaller candidates
-are grouped under `拒识（噪声/证据不足）`; photos/frames from one trigger do not
-multiply the event count. This is a minimum-evidence gate, not another density
-clustering pass. Event membership uses the existing Registry time/camera rules;
-when timestamps are absent, different source files remain separate events.
-Support is counted across the candidate's saved evidence, not just the current
-folder. Evidence and stable links are retained; every metadata refresh recounts
-events, allowing candidates to acquire a numbered entry as they grow. Matching
-still considers small candidates so noise cannot be reassigned to a neighboring
-supported group. No source media is rescanned. Noise buckets have no cluster
-learning action, and the backend enforces the same minimum for that action;
-individual manual box review remains available.
+Numbered candidates must pass the same density policy as Within-Seq discovery:
+raw normalized independent-event means, external `hdbscan`, `min_cluster_size=5`,
+`min_samples=3`, Euclidean distance, EOM, and `allow_single_cluster=False`.
+The policy is implemented once in `system/dinov2/rejection_clustering.py`.
+Having five events alone is insufficient; a homogeneous isolated pool can still
+be entirely noise. Density is evaluated across all saved candidate events for
+the model, not just the visible folder. A Registry collection candidate receives
+a numbered entry only if it contains at least five events and every event is
+in the same non-noise HDBSCAN group. A collection mixing supported groups or
+containing noise is conservatively kept under `拒识（噪声/证据不足）`, rather than
+claiming that the whole collection is one coherent learned species. Distinct
+Registry collection identities remain distinct; this check does not rewrite
+collection membership, merge candidates, or propagate HDBSCAN labels to training.
+
+Photos/frames from one trigger do not multiply the event count. Event membership
+uses the existing Registry time/camera rules; when timestamps are absent,
+different source files remain separate events. Evidence and stable links are
+retained. A feedback-DB cache stores density results keyed by the shared policy
+and a transactionally maintained Registry revision. Event inserts, updates,
+deletions and status changes invalidate it, including changes to features with
+unchanged counts. Older read-only registries use an exact event-content hash.
+Unchanged evidence reuses cached density results across requests and restarts;
+concurrent requests share a separate density lock without blocking Registry
+writes. Views containing only undersized candidates skip the full-pool fit.
+First verification of a large pool can take minutes; the client shows a loading
+message and allows that first request up to 15 minutes. Density is never
+computed in the inference persistence loop or by opening source
+media. Registry matching still includes small candidates. Noise buckets have no
+cluster learning action, and the backend enforces both size and density checks;
+individual manual box review remains available. The UI requires explicit density
+verification, so metadata from an older backend cannot silently enable learning.
+Density verification and collection of learning evidence share one WAL read
+snapshot; later runtime arrivals are excluded from that human-learning operation.
+The existing four-event learning/prototype-summary rules are separate from this
+rejection-discovery policy; their arithmetic-mean fallback never verifies a
+rejected candidate for the numbered review list.
 
 New inference persists an observation-to-cluster link in the fingerprint-scoped
 feedback database after the Registry accepts the evidence. These writes are

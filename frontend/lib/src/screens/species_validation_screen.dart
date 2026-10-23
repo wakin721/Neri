@@ -1007,6 +1007,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                 child: _EmptyValidationState(
                   loading: true,
                   onRefresh: widget.onRefresh,
+                  loadingMessage: _preparing
+                      ? (widget.classificationModelPath?.trim().isNotEmpty ??
+                                false)
+                            ? '正在整理校验分组；首次核验较大拒识库可能需要几分钟，结果会缓存。'
+                            : '正在整理校验分组…'
+                      : null,
                 ),
               )
             : _lastReadyContent ?? const SizedBox.expand(),
@@ -5330,10 +5336,15 @@ class _QuantityButton extends StatelessWidget {
 }
 
 class _EmptyValidationState extends StatelessWidget {
-  const _EmptyValidationState({required this.loading, required this.onRefresh});
+  const _EmptyValidationState({
+    required this.loading,
+    required this.onRefresh,
+    this.loadingMessage,
+  });
 
   final bool loading;
   final Future<void> Function() onRefresh;
+  final String? loadingMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -5343,7 +5354,7 @@ class _EmptyValidationState extends StatelessWidget {
         children: [
           const Icon(Icons.fact_check_outlined, size: 56),
           const SizedBox(height: 12),
-          const Text('暂无待校验图像。'),
+          Text(loading ? loadingMessage ?? '正在读取待校验图像…' : '暂无待校验图像。'),
           const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: loading ? null : onRefresh,
