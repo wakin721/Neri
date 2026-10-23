@@ -65,6 +65,9 @@ def _confirm(request, checkpoint, registry, feedback):
         raise ValueError("该学习操作未完成，请撤回后重试")
     if entry.status != "candidate":
         raise ValueError("已注册物种请通过物种注册界面修改；此入口用于确认拒识候选簇")
+    from system.dinov2.clustering import DEFAULT_MIN_CLUSTER_SIZE
+    if entry.event_count < DEFAULT_MIN_CLUSTER_SIZE:
+        raise ValueError(f"该候选不足 {DEFAULT_MIN_CLUSTER_SIZE} 个独立事件，暂按噪声/证据不足处理；可逐框人工校验")
     links = _resolve(feedback, registry._conn, list(set(request.observation_ids)))
     if any(links.get(oid, {}).get("cluster_id") != cluster_assignment(checkpoint.fingerprint, entry)["cluster_id"]
            for oid in request.observation_ids):

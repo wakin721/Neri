@@ -8,6 +8,8 @@ import sqlite3
 
 import numpy as np
 
+from system.dinov2.clustering import DEFAULT_MIN_CLUSTER_SIZE
+
 
 def cluster_assignment(fingerprint, entry):
     # Runtime rejections only enter candidate registrations, whose prototype
@@ -18,6 +20,9 @@ def cluster_assignment(fingerprint, entry):
         "candidate_number": int(entry.candidate_number),
         "prototype_index": 0,
         "model_fingerprint": fingerprint,
+        "event_count": int(entry.event_count),
+        "min_cluster_events": DEFAULT_MIN_CLUSTER_SIZE,
+        "is_noise": entry.event_count < DEFAULT_MIN_CLUSTER_SIZE,
     }
 
 
@@ -72,6 +77,21 @@ def _resolve(feedback, conn, observation_ids):
         raise ValueError("Registry model fingerprint does not match feedback")
     _schema(feedback._conn)
     assignments = {}
+    entries = {}
+
+    def find_entry(entry_id):
+        # Count independent Registry events, never frames/boxes or photos in
+        # a burst. Refresh support on every lookup, including persisted links;
+        # small candidates can grow without changing their stable identity.
+        if entry_id not in entries:
+            row = conn.execute(
+                "SELECT id,candidate_number,(SELECT COUNT(*) FROM events "
+                "WHERE registration_id=r.id) AS event_count FROM registrations r WHERE id=?",
+                (entry_id,),
+            ).fetchone()
+            entries[entry_id] = SimpleNamespace(**dict(row)) if row is not None else None
+        return entries[entry_id]
+
     cached_ids = set()
     pending = []
     # Only fetch requested observations. Neither source media nor all historical
@@ -87,10 +107,9 @@ def _resolve(feedback, conn, observation_ids):
             cached_ids.add(oid)
             # Deleted clusters stay unassigned rather than silently acquiring
             # an unrelated cluster's number.
-            entry = conn.execute("SELECT id,candidate_number FROM registrations WHERE id=?",
-                                 (row["registration_id"],)).fetchone()
+            entry = find_entry(row["registration_id"])
             if entry is not None and row["model_fingerprint"] == fingerprint:
-                assignments[oid] = cluster_assignment(fingerprint, SimpleNamespace(**dict(entry)))
+                assignments[oid] = cluster_assignment(fingerprint, entry)
         missing = [oid for oid in ids if oid not in cached_ids]
         if not missing:
             continue
@@ -114,6 +133,10 @@ def _resolve(feedback, conn, observation_ids):
             batch = pending[offset:offset + 64]
             for (oid, _), match in zip(batch, index.match_batch(np.stack([v for _, v in batch]), 0.82)):
                 if match is not None:
-                    assignments[oid] = cluster_assignment(fingerprint, SimpleNamespace(**match))
+                    # Match all candidates first: filtering small candidates
+                    # out of the index could attach noise to a different group.
+                    entry = find_entry(match["id"])
+                    if entry is not None:
+                        assignments[oid] = cluster_assignment(fingerprint, entry)
         persist_cluster_assignments(feedback, {oid: assignments[oid] for oid, _ in pending if oid in assignments})
     return assignments

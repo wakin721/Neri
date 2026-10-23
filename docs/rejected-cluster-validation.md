@@ -6,6 +6,20 @@ prototype budget. Their cluster is the same prototype index 0 exposed by the
 Registry cluster inspector. The stable identity includes the model fingerprint,
 registration ID and prototype index; the visible label is `拒识簇 #N`.
 
+Only candidates with at least four independent Registry events (the shared
+`DEFAULT_MIN_CLUSTER_SIZE`) receive a numbered list entry. Smaller candidates
+are grouped under `拒识（噪声/证据不足）`; photos/frames from one trigger do not
+multiply the event count. This is a minimum-evidence gate, not another density
+clustering pass. Event membership uses the existing Registry time/camera rules;
+when timestamps are absent, different source files remain separate events.
+Support is counted across the candidate's saved evidence, not just the current
+folder. Evidence and stable links are retained; every metadata refresh recounts
+events, allowing candidates to acquire a numbered entry as they grow. Matching
+still considers small candidates so noise cannot be reassigned to a neighboring
+supported group. No source media is rescanned. Noise buckets have no cluster
+learning action, and the backend enforces the same minimum for that action;
+individual manual box review remains available.
+
 New inference persists an observation-to-cluster link in the fingerprint-scoped
 feedback database after the Registry accepts the evidence. These writes are
 batched and do not invalidate the Registry matching cache.

@@ -2668,6 +2668,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         .toList();
     final clusters = <String, RejectionCluster>{};
     var unassigned = false;
+    var noise = false;
     for (final item in group.items) {
       if (!_splitGroupSpeciesNames(
         _primarySpeciesAfterConfidenceFilter(item),
@@ -2682,6 +2683,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         final cluster = _rejectionClusters[box.observationId];
         if (cluster == null) {
           unassigned = true;
+        } else if (cluster.isNoise) {
+          noise = true;
         } else {
           clusters[cluster.id] = cluster;
         }
@@ -2695,7 +2698,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           '$prefix拒识簇 #${cluster.number}',
           cluster.number,
         ),
-      if (unassigned || clusters.isEmpty)
+      if (noise) ('${known.join('、')}::noise', '$prefix拒识（噪声/证据不足）', null),
+      if (unassigned || (clusters.isEmpty && !noise))
         (
           '${known.join('、')}::unassigned',
           '$prefix${_clusterLookupFailed ? '拒识（簇信息未加载）' : '拒识（未分簇）'}',

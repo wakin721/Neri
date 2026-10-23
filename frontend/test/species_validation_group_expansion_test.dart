@@ -279,9 +279,13 @@ void main() {
                 for (final id in ids.where((id) => id != 'missing'))
                   id: {
                     'cluster_id':
-                        'registry:fp:${id == 'b' || id == 'both-b' ? 10 : 2}:0',
-                    'candidate_number': id == 'b' || id == 'both-b' ? 10 : 2,
+                        'registry:fp:${id.toString().startsWith('noise') ? (id == 'noise-other' ? 21 : 20) : (id == 'b' || id == 'both-b' ? 10 : 2)}:0',
+                    'candidate_number': id.toString().startsWith('noise')
+                        ? (id == 'noise-other' ? 21 : 20)
+                        : (id == 'b' || id == 'both-b' ? 10 : 2),
                     'model_fingerprint': 'fp',
+                    'event_count': id.toString().startsWith('noise') ? 1 : 10,
+                    'min_cluster_events': 4,
                   },
               }),
               200,
@@ -295,6 +299,7 @@ void main() {
           List<String> labels,
           List<String> observations, {
           bool validated = false,
+          String? dateTaken,
         }) {
           final file = File('${tempDir.path}/$name.jpg')..writeAsBytesSync(png);
           fixtures.add(
@@ -304,7 +309,7 @@ void main() {
               fileType: 'jpg',
               width: 10,
               height: 10,
-              dateTaken: '2026-09-${10 + fixtures.length}T12:00:00Z',
+              dateTaken: dateTaken ?? '2026-09-${10 + fixtures.length}T12:00:00Z',
               species: labels,
               confidence: 0.95,
               validated: validated,
@@ -340,6 +345,20 @@ void main() {
         add('known', ['斑羚'], []);
         add('manual', ['野猪'], [], validated: true);
         add('empty', ['空'], []);
+        for (var index = 0; index < 4; index++) {
+          add(
+            'noise-$index',
+            ['拒识/Unknown'],
+            ['noise-$index'],
+            dateTaken: '2026-10-01T12:00:0${index}Z',
+          );
+        }
+        add(
+          'noise-other',
+          ['拒识/Unknown'],
+          ['noise-other'],
+          dateTaken: '2026-10-02T12:00:00Z',
+        );
         final harness = GlobalKey<_GroupExpansionHarnessState>();
         await tester.pumpWidget(
           _GroupExpansionHarness(
@@ -377,20 +396,28 @@ void main() {
           '家羊、拒识簇 #2',
           '拒识簇 #2',
           '拒识簇 #10',
+          '拒识（噪声/证据不足）',
           '拒识（未分簇）',
           '空',
         ]);
         String subtitle(String label) =>
-            (tiles()
-                        .firstWhere((t) => (t.title! as Text).data == label)
-                        .subtitle!
+            (tiles().firstWhere((t) => (t.title! as Text).data == label).subtitle!
                     as Text)
                 .data!;
         expect(subtitle('家羊、拒识簇 #2'), endsWith('2 个文件'));
         expect(subtitle('拒识簇 #2'), endsWith('3 个文件'));
         expect(subtitle('拒识簇 #10'), endsWith('2 个文件'));
         expect(subtitle('拒识（未分簇）'), endsWith('2 个文件'));
+        expect(
+          subtitle('拒识（噪声/证据不足）'),
+          autoGroup ? '2 组 / 5 个文件' : '5 个文件',
+        );
         expect(requests, 1);
+        await tester.tap(
+          find.descendant(of: list, matching: find.text('拒识（噪声/证据不足）')),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byTooltip('确认簇物种并学习'), findsNothing);
         await tester.tap(
           find.descendant(of: list, matching: find.text('拒识簇 #2')),
         );

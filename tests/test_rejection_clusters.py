@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import numpy as np
 import pytest
@@ -72,6 +73,47 @@ def test_deleted_cluster_is_unassigned_and_other_models_are_rejected(stores):
     feedback.model_fingerprint = "d" * 64
     with pytest.raises(ValueError, match="fingerprint"):
         _resolve(feedback, registry._conn, ["a"])
+
+
+def test_burst_is_noise_and_cached_link_promotes_after_independent_events(stores, monkeypatch):
+    registry, feedback = stores
+    # Four photos in the same trigger still contribute just one event.
+    for index in range(4):
+        entry = registry.record_unknown(unit(), camera_id="c", captured_at=datetime(2026, 10, 1, 12, 0, index, tzinfo=timezone.utc),
+                                        source_path=f"burst-{index}.jpg")
+        observe(feedback, f"burst-{index}", unit())
+    ids = [f"burst-{index}" for index in range(4)]
+    result = _resolve(feedback, registry._conn, ids)
+    link = result[ids[0]]
+    assert all(value == link for value in result.values())
+    assert link["event_count"] == 1
+    assert link["min_cluster_events"] == 4
+    assert link["is_noise"] is True
+    # Retain candidate identity/evidence; refresh cached links without re-matching.
+    from system.dinov2 import registry_match_index
+    monkeypatch.setattr(registry_match_index, "RegistryMatchIndex",
+                        lambda *args: pytest.fail("support changes must not rematch cached links"))
+    for day in range(2, 5):
+        registry.record_observation(entry.id, unit(), camera_id="c", captured_at=datetime(2026, 10, day, 12, tzinfo=timezone.utc),
+                                    source_path=f"event-{day}.jpg")
+        current = _resolve(feedback, registry._conn, ids)[ids[0]]
+        assert current["cluster_id"] == link["cluster_id"]
+        assert current["event_count"] == day
+        assert current["is_noise"] is (day < 4)
+
+
+def test_small_candidate_is_not_reassigned_to_a_supported_neighbor(stores):
+    registry, feedback = stores
+    larger = registry._create()
+    neighbor = unit() + unit(1) * 0.2
+    for index in range(4):
+        registry.record_observation(larger, neighbor, camera_id="c", captured_at=None, source_path=f"large-{index}.jpg")
+    small = registry._create()
+    registry.record_observation(small, unit(), camera_id="c", captured_at=None, source_path="small.jpg")
+    observe(feedback, "small", unit())
+    result = _resolve(feedback, registry._conn, ["small"])["small"]
+    assert result["registry_id"] == small
+    assert result["is_noise"] is True
 
 
 def test_service_opens_registry_read_only_and_closes_feedback(stores, monkeypatch):
@@ -230,6 +272,22 @@ def test_cluster_confirmation_rejects_other_clusters_and_models(learning_cluster
     with pytest.raises(ValueError, match="不一致"):
         confirm_rejection_cluster(request)
     assert not case.feedback.memory_bank().formal
+
+
+def test_noise_candidate_cannot_apply_cluster_learning(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    case = learning_cluster
+    request = case.request.model_copy(update={
+        "cluster_id": cluster_assignment(case.checkpoint.fingerprint, case.other)["cluster_id"],
+        "observation_ids": ["view-b"],
+    })
+    with pytest.raises(ValueError, match="不足 4 个独立事件"):
+        confirm_rejection_cluster(request)
+    assert not case.feedback.memory_bank().formal
+    assert case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0] == 0
+    from system.backend import services
+    restored = services._reload_validation_item(case.path, case.root)
+    assert all(box["species"] == "拒识/Unknown" for box in restored.detection_boxes)
 
 
 def test_changing_cluster_label_removes_old_learning_and_undo_reactivates_it(learning_cluster):

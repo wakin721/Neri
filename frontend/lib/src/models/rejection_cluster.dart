@@ -5,6 +5,8 @@ class RejectionCluster {
     required this.id,
     required this.number,
     required this.modelFingerprint,
+    required this.eventCount,
+    required this.minClusterEvents,
   });
 
   factory RejectionCluster.fromJson(Map<String, dynamic> json) =>
@@ -12,11 +14,16 @@ class RejectionCluster {
         id: json['cluster_id'] as String,
         number: (json['candidate_number'] as num).toInt(),
         modelFingerprint: json['model_fingerprint'] as String,
+        eventCount: (json['event_count'] as num?)?.toInt() ?? 0,
+        minClusterEvents: (json['min_cluster_events'] as num?)?.toInt() ?? 4,
       );
 
   final String id;
   final int number;
   final String modelFingerprint;
+  final int eventCount;
+  final int minClusterEvents;
+  bool get isNoise => eventCount < minClusterEvents;
 }
 
 class ClusterLearningResult {
