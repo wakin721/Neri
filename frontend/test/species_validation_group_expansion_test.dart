@@ -90,16 +90,89 @@ void main() {
     expect(find.text('ECSP0279.JPG'), findsWidgets);
     expect(find.text('ECSP0280.JPG'), findsWidgets);
   });
+
+  for (final autoGroup in [false, true]) {
+    for (final rejected in ['拒识/Unknown', 'Unknown']) {
+      testWidgets(
+        'species buckets follow review priority before and after marking ($autoGroup, $rejected)',
+        (tester) async {
+          tester.view.physicalSize = const Size(1600, 1600);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          final png = File(items.first.path).readAsBytesSync();
+          final labels = ['空', rejected, '豹猫,$rejected', '斑羚', '野猪', '空'];
+          final fixtures = <DetectionItem>[];
+          for (var index = 0; index < labels.length; index++) {
+            final file = File('${tempDir.path}/priority-$index.jpg');
+            file.writeAsBytesSync(png);
+            fixtures.add(
+              DetectionItem(
+                filename: 'priority-$index.jpg',
+                path: file.path,
+                fileType: 'jpg',
+                dateTaken: '2026-09-${10 + index}T12:00:00Z',
+                width: 10,
+                height: 10,
+                species: labels[index].split(','),
+                confidence: 0.95,
+                detectionData: {'物种名称': labels[index]},
+                validated: index >= 4,
+              ),
+            );
+          }
+          await tester.pumpWidget(
+            _GroupExpansionHarness(
+              apiClient: apiClient,
+              initialItems: fixtures,
+              autoGroup: autoGroup,
+              reorderMetadata: false,
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+
+          final speciesList = find.byKey(
+            const ValueKey('validation-species-list'),
+          );
+          List<String> titles() => tester
+              .widgetList<ListTile>(
+                find.descendant(
+                  of: speciesList,
+                  matching: find.byType(ListTile),
+                ),
+              )
+              .map((tile) => (tile.title! as Text).data!.replaceAll('、', ','))
+              .toList();
+          expect(titles(), ['野猪', '斑羚', '豹猫,$rejected', rejected, '空', '空']);
+          await tester.tap(
+            find.descendant(of: speciesList, matching: find.text('斑羚')),
+          );
+          await tester.pump();
+          await tester.tap(find.text('正确').first);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 150));
+          expect(titles(), ['斑羚', '野猪', '豹猫,$rejected', rejected, '空', '空']);
+          expect(tester.takeException(), isNull);
+          await tester.pump(const Duration(seconds: 5));
+        },
+      );
+    }
+  }
 }
 
 class _GroupExpansionHarness extends StatefulWidget {
   const _GroupExpansionHarness({
     required this.apiClient,
     required this.initialItems,
+    this.autoGroup = true,
+    this.reorderMetadata = true,
   });
 
   final NeriApiClient apiClient;
   final List<DetectionItem> initialItems;
+  final bool autoGroup;
+  final bool reorderMetadata;
 
   @override
   State<_GroupExpansionHarness> createState() => _GroupExpansionHarnessState();
@@ -111,6 +184,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   bool _metadataApplied = false;
 
   Future<void> _loadMetadata(DetectionItem item) async {
+    if (!widget.reorderMetadata) return;
     _metadataRequests += 1;
     if (_metadataRequests < 2 || _metadataApplied) return;
     _metadataApplied = true;
@@ -143,6 +217,27 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
     });
   }
 
+  DetectionItem _confirmItem(DetectionItem item) {
+    final updated = item.mergeValidationUpdate(
+      DetectionItem(
+        filename: item.filename,
+        path: item.path,
+        fileType: item.fileType,
+        species: item.species,
+        confidence: item.confidence,
+        detectionData: {...item.detectionData, '最低置信度': '人工校验'},
+        validated: true,
+      ),
+    );
+    setState(() {
+      _items = [
+        for (final current in _items)
+          if (current.path == updated.path) updated else current,
+      ];
+    });
+    return updated;
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -159,7 +254,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,
           minFrameRatio: 0,
-          autoGroup: true,
+          autoGroup: widget.autoGroup,
           collapseGroups: true,
           autoGroupDetectBurst: false,
           autoGroupBurstSize: 4,
@@ -185,7 +280,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
                 speciesCount,
                 speciesType,
                 remark,
-              }) async => candidate,
+              }) async => _confirmItem(candidate),
           onMarkItems:
               (
                 candidates,
@@ -194,7 +289,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
                 speciesCount,
                 speciesType,
                 remark,
-              }) async => candidates,
+              }) async => candidates.map(_confirmItem).toList(),
           onQuickMarkUsed: (_) async {},
           onQuickMarkReverted: (_) async {},
           onRedetectItems: (_, {required confidence}) async {},

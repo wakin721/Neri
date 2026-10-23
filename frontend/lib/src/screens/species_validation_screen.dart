@@ -589,12 +589,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         bucket.groups.add(group);
         if (i % 128 == 0) await budget.checkpoint();
       }
-      final buckets = bucketMap.values.toList()
-        ..sort(
-          (a, b) => a.isValidated != b.isValidated
-              ? (a.isValidated ? 1 : -1)
-              : a.species.compareTo(b.species),
-        );
+      final buckets = bucketMap.values.toList()..sort(_SpeciesBucket.compare);
       final itemByPath = <String, DetectionItem>{};
       final itemIndices = <String, int>{};
       final paths = <String>[];
@@ -1172,6 +1167,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                 SizedBox(
                   height: usableHeight * ratio,
                   child: SelectableListCard<_SpeciesBucket>(
+                    key: const ValueKey('validation-species-list'),
                     items: buckets,
                     selectedIndex: selectedBucketIndex,
                     padding: const EdgeInsets.symmetric(vertical: 6),
@@ -2441,13 +2437,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         ..items.addAll(group.items)
         ..groups.add(group);
     }
-    final buckets = map.values.toList()
-      ..sort((a, b) {
-        if (a.isValidated != b.isValidated) {
-          return a.isValidated ? 1 : -1;
-        }
-        return a.species.compareTo(b.species);
-      });
+    final buckets = map.values.toList()..sort(_SpeciesBucket.compare);
     return buckets;
   }
 
@@ -2974,7 +2964,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _primarySpeciesAfterConfidenceFilter(item),
       );
       final validSpeciesNames = speciesNames
-          .where((species) => !_isFallbackSpecies(species))
+          .where(
+            (species) =>
+                !_isFallbackSpecies(species) || _isRejectedSpeciesName(species),
+          )
           .toList();
 
       if (validSpeciesNames.isNotEmpty) {
@@ -5041,6 +5034,14 @@ class _EmptyValidationInputState extends StatelessWidget {
   }
 }
 
+bool _isRejectedSpeciesName(String species) {
+  final name = species.trim();
+  return name.toLowerCase() == 'unknown' ||
+      name.contains('拒识') ||
+      name.startsWith('未知物种 #') ||
+      name.startsWith('新模式候选 #');
+}
+
 class _SpeciesBucket {
   _SpeciesBucket({
     required this.key,
@@ -5065,6 +5066,38 @@ class _SpeciesBucket {
   final String species;
   final List<DetectionItem> items;
   final List<_ValidationMediaGroup> groups;
+
+  late final int _sortPriority = _priority();
+
+  int _priority() {
+    final names = species
+        .split(RegExp('[,，、]'))
+        .map((name) => name.trim())
+        .where(
+          (name) =>
+              name.isNotEmpty && name != '空' && name.toLowerCase() != 'empty',
+        )
+        .toList();
+    if (names.isEmpty) return 4;
+    if (isValidated) return 0;
+    final rejected = names.any(_isRejectedSpeciesName);
+    final known = names.any(
+      (name) =>
+          !_isRejectedSpeciesName(name) &&
+          !const {'未检测', '错误', '需人工校验'}.contains(name),
+    );
+    if (known) return rejected ? 2 : 1;
+    return 3;
+  }
+
+  static int compare(_SpeciesBucket a, _SpeciesBucket b) {
+    final priority = a._sortPriority.compareTo(b._sortPriority);
+    if (priority != 0) return priority;
+    final species = a.species.compareTo(b.species);
+    if (species != 0) return species;
+    if (a.isValidated != b.isValidated) return a.isValidated ? -1 : 1;
+    return 0;
+  }
 }
 
 class _ValidationMediaGroup {
