@@ -49,6 +49,96 @@ def test_batch_matching_detects_updates_from_other_connection(tmp_path):
         registry.close()
 
 
+def test_matching_reuses_snapshot_across_batches_and_nested_contexts(tmp_path):
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint="d" * 64)
+    sql = []
+    registry._conn.set_trace_callback(sql.append)
+    try:
+        for batch in range(3):
+            with registry.matching_batch():
+                with registry.matching_batch():
+                    entry = registry.record_unknown(
+                        _unit(), camera_id="c", captured_at=None, source_path=f"{batch}.jpg",
+                    )
+                assert registry.match(_unit(), statuses={"candidate"},
+                                      candidate_kinds={"candidate"})["id"] == entry.id
+        snapshots = [query for query in sql if query.startswith("SELECT r.id")]
+        assert len(snapshots) == 1
+        assert entry.event_count == 3
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_matching_cache_sees_identity_changes_and_deletions_between_batches(tmp_path, external):
+    path = tmp_path / "registry.sqlite3"
+    registry = SpeciesRegistry(path, model_fingerprint="e" * 64)
+    writer = SpeciesRegistry(path, model_fingerprint="e" * 64) if external else registry
+    try:
+        entry = registry.record_unknown(_unit(), camera_id="c", captured_at=None, source_path="a.jpg")
+        with registry.matching_batch():
+            assert registry.match(_unit())["id"] == entry.id
+        writer.set_identity(entry.id, common_name="Changed")
+        with registry.matching_batch():
+            assert registry.match(_unit())["display_name"] == "Changed"
+        writer.delete(entry.id)
+        with registry.matching_batch():
+            assert registry.match(_unit()) is None
+    finally:
+        if external:
+            writer.close()
+        registry.close()
+
+
+def test_memory_bank_reads_only_registered_evidence_in_existing_order(tmp_path, monkeypatch):
+    from system.dinov2.memory_bank import MemoryBank, MemoryExample
+    from system.dinov2.registry import _from_blob
+
+    registry = SpeciesRegistry(tmp_path / "registry.sqlite3", model_fingerprint="f" * 64)
+    try:
+        # Include named/unnamed candidates, all learned states, and an entry
+        # with insufficient evidence. Candidate pixels/vectors must stay cold.
+        for index, (status, name, count) in enumerate([
+            ("candidate", "Candidate", 5), ("provisional", "P", 4),
+            ("confirmed", "C", 5), ("mature", "", 4),
+            ("confirmed", "Too few", 3), ("candidate", "", 1),
+        ]):
+            entry_id = registry._create()
+            for event in range(count):
+                registry.record_observation(entry_id, _unit(index), camera_id=f"c-{event}",
+                                            captured_at=None, source_path=f"{index}-{event}.jpg")
+            registry._conn.execute("UPDATE registrations SET status=?,common_name=? WHERE id=?",
+                                   (status, name, entry_id))
+            registry._conn.commit()
+        formal, provisional = [], []
+        for entry in registry.list():
+            if entry.status == "candidate" or entry.event_count < 4:
+                continue
+            destination = provisional if entry.status == "provisional" else formal
+            destination.extend(MemoryExample(
+                species=entry.display_name, embedding=_from_blob(row["embedding"]),
+                camera_id=str(row["camera_id"]), source="overlay", registry_id=entry.id,
+                registration_status=entry.status,
+            ) for row in registry._event_rows(entry.id))
+        expected = MemoryBank(tuple(formal), tuple(provisional))
+        monkeypatch.setattr(registry, "list", lambda **kwargs: pytest.fail("must not load the UI list"))
+        bank = registry.memory_bank()
+        for actual, previous in ((bank.formal, expected.formal), (bank.provisional, expected.provisional)):
+            assert len(actual) == len(previous)
+            for sample, old in zip(actual, previous):
+                assert (sample.species, sample.camera_id, sample.registry_id, sample.registration_status) == (
+                    old.species, old.camera_id, old.registry_id, old.registration_status,
+                )
+                np.testing.assert_array_equal(sample.embedding, old.embedding)
+        # No candidate entry has to be deserialized, even if its old blob is corrupt.
+        registry._conn.execute("UPDATE events SET embedding=x'00' WHERE registration_id IN "
+                               "(SELECT id FROM registrations WHERE status='candidate')")
+        registry._conn.commit()
+        assert len(registry.memory_bank().formal) == len(expected.formal)
+    finally:
+        registry.close()
+
+
 def test_batch_and_sequential_candidate_routing_agree(tmp_path):
     sequential = SpeciesRegistry(tmp_path / "sequential.sqlite3", model_fingerprint="c" * 64)
     batched = SpeciesRegistry(tmp_path / "batched.sqlite3", model_fingerprint="c" * 64)

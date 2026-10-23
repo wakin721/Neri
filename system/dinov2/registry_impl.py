@@ -113,6 +113,8 @@ class SpeciesRegistry:
         self._write_lock = _path_lock(self.path)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._match_indexes = {}
+        self._match_indexes_revision = None
         with self._write_lock:
             self._init()
             self._run_legacy_named_candidate_merge_migration()
@@ -351,6 +353,7 @@ class SpeciesRegistry:
         }
 
     def close(self) -> None:
+        self._match_indexes.clear()
         self._conn.close()
 
     def _row(self, entry_id: int):
@@ -1176,32 +1179,26 @@ class SpeciesRegistry:
 
     @contextmanager
     def matching_batch(self):
-        """Reuse matching evidence while retaining sequential candidate updates."""
+        """Serialize candidate updates; matching snapshots outlive individual batches."""
         with self._write_lock:
-            previous = getattr(self, "_batch_match_indexes", None)
-            previous_revision = getattr(self, "_batch_match_revision", None)
-            self._batch_match_indexes = {}
-            self._batch_match_revision = self._match_revision()
-            try:
-                yield
-            finally:
-                self._batch_match_indexes = previous
-                self._batch_match_revision = previous_revision
+            yield
 
     def _match_revision(self):
         return (self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0])
 
     def _refresh_match_indexes(self, entry_id):
-        indexes = getattr(self, "_batch_match_indexes", None)
-        if indexes is None:
+        indexes = self._match_indexes
+        if not indexes:
             return
         revision = self._match_revision()
-        if revision[1] != self._batch_match_revision[1]:
+        # record_unknown matched immediately before its own writes. Refresh
+        # that entry only, unless another connection has also changed the DB.
+        if revision[1] != self._match_indexes_revision[1]:
             indexes.clear()
         else:
             for index in indexes.values():
                 index.refresh(entry_id)
-        self._batch_match_revision = revision
+        self._match_indexes_revision = revision
 
     def match(
         self,
@@ -1223,17 +1220,16 @@ class SpeciesRegistry:
         if key[0] == () or key[1] == ():
             return None
         with self._write_lock:
-            indexes = getattr(self, "_batch_match_indexes", None)
-            if indexes is None:
-                index = RegistryMatchIndex(self._conn, *key)
-            else:
-                revision = self._match_revision()
-                if revision != self._batch_match_revision:
-                    indexes.clear()
-                self._batch_match_revision = revision
-                if key not in indexes:
-                    indexes[key] = RegistryMatchIndex(self._conn, *key)
-                index = indexes[key]
+            indexes = self._match_indexes
+            revision = self._match_revision()
+            # total_changes catches writes through this connection; data_version
+            # catches commits through another connection, including UI feedback.
+            if revision != self._match_indexes_revision:
+                indexes.clear()
+            self._match_indexes_revision = revision
+            if key not in indexes:
+                indexes[key] = RegistryMatchIndex(self._conn, *key)
+            index = indexes[key]
             scores = tuple(index.scores(vector))
 
         for row, score in scores:

@@ -93,22 +93,38 @@ class SpeciesRegistry(_base.SpeciesRegistry):
         """Return registered raw event vectors with their distinct camera IDs."""
         formal: list[MemoryExample] = []
         provisional: list[MemoryExample] = []
-        for entry in self.list():
-            if entry.status == "candidate":
-                continue
-            rows = self._event_rows(entry.id)
-            if len(rows) < 4:
-                continue
-            destination = provisional if entry.status == "provisional" else formal
-            for row in rows:
-                destination.append(
-                    MemoryExample(
-                        species=entry.display_name,
-                        embedding=_from_blob(row["embedding"]),
-                        camera_id=str(row["camera_id"]),
-                        source="overlay",
-                        registry_id=entry.id,
-                        registration_status=entry.status,
-                    )
+        with self._write_lock:
+            # The UI list also loads every candidate's vectors and computes
+            # registration diagnostics. Inference needs only learned evidence.
+            entries = self._conn.execute(
+                "SELECT r.id,r.status,r.common_name,r.candidate_number,"
+                "(SELECT COUNT(*) FROM events e WHERE e.registration_id=r.id) AS event_count "
+                "FROM registrations r WHERE r.status<>'candidate'"
+            ).fetchall()
+            # Keep the UI list's order: ties in Memory classification depend on it.
+            entries = sorted(entries, key=lambda row: (
+                0 if str(row["common_name"]).strip() else 1,
+                -int(row["event_count"]), int(row["candidate_number"]), int(row["id"]),
+            ))
+            for entry in entries:
+                if int(entry["event_count"]) < 4:
+                    continue
+                status = str(entry["status"])
+                common = str(entry["common_name"]).strip()
+                display = (
+                    f"{common}（临时注册，待确认）" if status == "provisional"
+                    else common or f"未知物种 #{entry['candidate_number']}"
                 )
+                destination = provisional if status == "provisional" else formal
+                for row in self._event_rows(entry["id"]):
+                    destination.append(
+                        MemoryExample(
+                            species=display,
+                            embedding=_from_blob(row["embedding"]),
+                            camera_id=str(row["camera_id"]),
+                            source="overlay",
+                            registry_id=int(entry["id"]),
+                            registration_status=status,
+                        )
+                    )
         return MemoryBank(tuple(formal), tuple(provisional))
