@@ -137,3 +137,152 @@ def test_bulk_api_returns_cluster_ids_and_bounds_request_size(monkeypatch):
     assert client.post("/api/dinov2/feedback/rejection-clusters", json={
         "classification_model_path": "model.neri.json", "observation_ids": ["a"] * 10001,
     }).status_code == 422
+
+
+@pytest.fixture
+def learning_cluster(tmp_path, monkeypatch):
+    from tests.test_dinov2_memory import _memory_model
+    from system.dinov2.checkpoint import load_checkpoint
+    from system.backend.dinov2_registry_service import open_registry_for_model, _open_candidate_feedback
+    from system.backend import services
+    from system.backend.dinov2_feedback_api import DinoV2ClusterFeedbackRequest
+    monkeypatch.setenv("NERI_DINOV2_STATE_DIR", str(tmp_path / "state"))
+    model, _ = _memory_model(tmp_path)
+    checkpoint = load_checkpoint(model)
+    root = tmp_path / "media"
+    root.mkdir()
+    registry = open_registry_for_model(str(model))
+    feedback = _open_candidate_feedback(registry, checkpoint)
+    entry = None
+    for index in range(10):
+        path = root / f"image-{index}.jpg"
+        path.write_bytes(b"source pixels must not be decoded")
+        entry = registry.record_unknown(unit(4), camera_id=f"c-{index % 2}",
+                                        captured_at=None, source_path=str(path), bbox=(0, 0, 16, 16))
+    other = registry.record_unknown(unit(5), camera_id="other", captured_at=None, source_path="other.jpg")
+    path = root / "image-0.jpg"
+    for oid, vector in [("view-a", unit(4)), ("view-b", unit(5))]:
+        feedback.persist_observation(FeedbackObservation(
+            id=oid, source_path=str(path), media_kind="image", box_index=0,
+            frame_index=None, timestamp_seconds=None, bbox=(0, 0, 16, 16),
+            camera_id="c-0", captured_at=None, predicted_species="Unknown",
+            best_known_species="A", accepted=False, prediction_source="base",
+            registry_id=None, known_score=0.1, threshold=1, embedding=vector,
+        ))
+    persist_cluster_assignments(feedback, {
+        "view-a": cluster_assignment(checkpoint.fingerprint, entry),
+        "view-b": cluster_assignment(checkpoint.fingerprint, other),
+    })
+    data = {"物种名称": "拒识/Unknown", "物种数量": "2", "检测框": [
+        {"物种": "拒识/Unknown", "边界框": [0, 0, 16, 16], "observation_id": oid, "候选项": []}
+        for oid in ("view-a", "view-b")
+    ]}
+    services._persist_validation_update(path, root, data, None)
+    request = DinoV2ClusterFeedbackRequest(input_path=str(root), classification_model_path=str(model),
+        cluster_id=cluster_assignment(checkpoint.fingerprint, entry)["cluster_id"],
+        observation_ids=["view-a"], species_name="A", feedback_operation_id="cluster-learn-A")
+    try:
+        yield SimpleNamespace(model=model, checkpoint=checkpoint, registry=registry, feedback=feedback,
+                              root=root, path=path, request=request, entry=entry, other=other)
+    finally:
+        feedback.close()
+        registry.close()
+
+
+def test_cluster_confirmation_changes_head_predictions_and_undo_restores_them(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    from system.backend.dinov2_feedback_service import revert_feedback_operation
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+    case = learning_cluster
+    classifier = MemoryDinoV2Classifier(case.checkpoint, feedback=case.feedback)
+    assert not classifier.classify_features(unit(4)[None, :])[0].accepted
+    original_events = case.registry.get(case.entry.id).event_count
+    result = confirm_rejection_cluster(case.request)
+    assert result["feature_events"] == 10
+    assert result["learning"]["formal"] and result["learning"]["active"]
+    assert len(case.feedback.memory_bank().formal) == 10
+    prediction = classifier.classify_features(unit(4)[None, :])[0]
+    assert prediction.accepted and prediction.species == "A"
+    boxes = result["items"][0]["detection_boxes"]
+    assert boxes[0]["species"] == "A" and boxes[0]["feedback_status"] == "confirmed"
+    assert boxes[1]["species"] == "拒识/Unknown"
+    assert not result["items"][0]["validated"]
+    count = case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0]
+    assert confirm_rejection_cluster(case.request) == result
+    assert case.feedback._conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0] == count
+    assert case.registry.get(case.entry.id).event_count == original_events
+    revert_feedback_operation(case.request)
+    assert not classifier.classify_features(unit(4)[None, :])[0].accepted
+    from system.backend import services
+    restored = services._reload_validation_item(case.path, case.root)
+    assert all(box["species"] == "拒识/Unknown" for box in restored.detection_boxes)
+    with pytest.raises(ValueError, match="已撤回"):
+        confirm_rejection_cluster(case.request)
+
+
+def test_cluster_confirmation_rejects_other_clusters_and_models(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    case = learning_cluster
+    request = case.request.model_copy(update={"observation_ids": ["view-b"]})
+    with pytest.raises(ValueError, match="不全部属于"):
+        confirm_rejection_cluster(request)
+    request = case.request.model_copy(update={"cluster_id": case.request.cluster_id.replace(case.checkpoint.fingerprint, "f" * 64)})
+    with pytest.raises(ValueError, match="不一致"):
+        confirm_rejection_cluster(request)
+    assert not case.feedback.memory_bank().formal
+
+
+def test_changing_cluster_label_removes_old_learning_and_undo_reactivates_it(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    from system.backend.dinov2_feedback_service import revert_feedback_operation
+    from system.dinov2.memory_classifier import MemoryDinoV2Classifier
+    case = learning_cluster
+    confirm_rejection_cluster(case.request)
+    changed = case.request.model_copy(update={"species_name": "B", "feedback_operation_id": "cluster-learn-B"})
+    confirm_rejection_cluster(changed)
+    classifier = MemoryDinoV2Classifier(case.checkpoint, feedback=case.feedback)
+    assert classifier.classify_features(unit(4)[None, :])[0].species == "B"
+    assert all(example.species == "B" for example in case.feedback.memory_bank().formal)
+    revert_feedback_operation(changed)
+    assert classifier.classify_features(unit(4)[None, :])[0].species == "A"
+    assert all(example.species == "A" for example in case.feedback.memory_bank().formal)
+
+
+def test_new_species_cluster_stays_candidate_until_registration_and_can_undo(learning_cluster):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    from system.backend.dinov2_feedback_service import revert_feedback_operation
+    case = learning_cluster
+    request = case.request.model_copy(update={"species_name": "新物种", "feedback_operation_id": "cluster-new"})
+    result = confirm_rejection_cluster(request)
+    assert result["learning"]["status"] == "candidate"
+    assert not result["learning"]["active"]
+    entry = case.registry.get(case.entry.id)
+    assert entry.common_name == "新物种" and entry.status == "candidate"
+    assert not case.registry.memory_bank().formal
+    revert_feedback_operation(request)
+    assert not case.registry.get(case.entry.id).common_name
+
+
+def test_cluster_learning_rolls_back_if_local_result_write_fails(learning_cluster, monkeypatch):
+    from system.backend.cluster_learning import confirm_rejection_cluster
+    from system.backend import services
+    case = learning_cluster
+    original = services._persist_validation_update
+    calls = []
+    def fail_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("simulated disk failure")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(services, "_persist_validation_update", fail_once)
+    with pytest.raises(OSError, match="disk failure"):
+        confirm_rejection_cluster(case.request)
+    assert not case.feedback.memory_bank().formal
+    assert all(box["species"] == "拒识/Unknown" for box in services._reload_validation_item(case.path, case.root).detection_boxes)
+
+
+def test_cluster_box_update_keeps_video_counts_as_per_frame_maxima():
+    from system.backend.dinov2_feedback_service import _recompute_detection_summary
+    data = {"检测框": [{"物种": "A", "frame_index": frame} for frame in (0, 1, 2)]}
+    _recompute_detection_summary(data)
+    assert data["物种名称"] == "A" and data["物种数量"] == "1"

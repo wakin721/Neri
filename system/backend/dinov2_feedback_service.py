@@ -245,6 +245,8 @@ def _raw_box_for_observation(detection_data: dict, observation_id: str) -> dict:
     for box in boxes:
         if not isinstance(box, dict):
             continue
+        if str(box.get("observation_id") or "") == observation_id:
+            return box
         candidates = box.get("候选项")
         if not isinstance(candidates, list):
             continue
@@ -256,13 +258,21 @@ def _raw_box_for_observation(detection_data: dict, observation_id: str) -> dict:
 
 def _recompute_detection_summary(detection_data: dict) -> None:
     counts: Counter[str] = Counter()
+    by_frame: dict[object, Counter[str]] = {}
     boxes = detection_data.get("检测框")
     if isinstance(boxes, list):
         for box in boxes:
             if isinstance(box, dict):
                 species = str(box.get("物种") or "").strip()
                 if species not in {"", "空", "Unknown", "unknown"}:
-                    counts[species] += 1
+                    if box.get("frame_index") is not None:
+                        frame = by_frame.setdefault(box["frame_index"], Counter())
+                        frame[species] += 1
+                    else:
+                        counts[species] += 1
+    for frame in by_frame.values():
+        for species, count in frame.items():
+            counts[species] = max(counts[species], count)
     detection_data["物种名称"] = ",".join(counts.keys()) if counts else "空"
     detection_data["物种数量"] = ",".join(str(counts[name]) for name in counts) if counts else "空"
 
@@ -367,7 +377,15 @@ def revert_feedback_operation(request):
     feedback, feature_center = _open_feedback_state(request.classification_model_path)
     try:
         assignments = feedback.registry_assignments_for_restore(request.feedback_operation_id)
+        # Undo can reactivate evidence for an earlier label. Recompute those
+        # classes as well as the label being withdrawn, so memory stays current.
+        previous_labels = feedback._conn.execute(
+            "SELECT DISTINCT positive_species,hard_negative_species FROM human_feedback "
+            "WHERE observation_id IN (SELECT observation_id FROM human_feedback WHERE operation_id=?)",
+            (request.feedback_operation_id,),
+        ).fetchall()
         affected = feedback.revert_operation(request.feedback_operation_id)
+        affected.update(value for row in previous_labels for value in row if value)
         for species in sorted(affected):
             if species in feedback.checkpoint_classes:
                 feedback.recompute_species(species, feature_center)

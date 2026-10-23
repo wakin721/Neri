@@ -1,3 +1,5 @@
+import 'job.dart';
+
 class RejectionCluster {
   const RejectionCluster({
     required this.id,
@@ -15,4 +17,19 @@ class RejectionCluster {
   final String id;
   final int number;
   final String modelFingerprint;
+}
+
+class ClusterLearningResult {
+  ClusterLearningResult.fromJson(Map<String, dynamic> json)
+    : operationId = json['operation_id'] as String,
+      featureEvents = (json['feature_events'] as num).toInt(),
+      learning = json['learning'] as Map<String, dynamic>,
+      items = (json['items'] as List)
+          .map((item) => DetectionItem.fromJson(item as Map<String, dynamic>))
+          .toList();
+
+  final String operationId;
+  final int featureEvents;
+  final Map<String, dynamic> learning;
+  final List<DetectionItem> items;
 }

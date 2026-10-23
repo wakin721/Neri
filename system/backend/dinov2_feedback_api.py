@@ -33,6 +33,15 @@ class DinoV2RejectionClustersRequest(BaseModel):
     observation_ids: list[str] = Field(..., max_length=10000)
 
 
+class DinoV2ClusterFeedbackRequest(BaseModel):
+    input_path: str = Field(..., min_length=1)
+    classification_model_path: str = Field(..., min_length=1)
+    cluster_id: str = Field(..., min_length=1)
+    observation_ids: list[str] = Field(..., min_length=1, max_length=10000)
+    species_name: str = Field(..., min_length=1)
+    feedback_operation_id: str = Field(..., min_length=1)
+
+
 def _apply_selection_feedback(request: DinoV2SelectionFeedbackRequest) -> dict:
     from .dinov2_feedback_service import (
         _affected_learning_species,
@@ -81,6 +90,14 @@ def _apply_selection_feedback(request: DinoV2SelectionFeedbackRequest) -> dict:
 
 def dinov2_feedback_router() -> APIRouter:
     router = APIRouter(prefix="/api/dinov2", tags=["dinov2", "feedback"])
+
+    @router.post("/feedback/cluster")
+    def cluster(request: DinoV2ClusterFeedbackRequest):
+        from .cluster_learning import confirm_rejection_cluster
+        try:
+            return confirm_rejection_cluster(request)
+        except (ValueError, KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/feedback/rejection-clusters")
     def rejection_clusters(request: DinoV2RejectionClustersRequest):

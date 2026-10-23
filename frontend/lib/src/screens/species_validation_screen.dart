@@ -335,6 +335,7 @@ class _MarkHistoryEntry {
   _MarkHistoryEntry(
     Iterable<DetectionItem> items, {
     this.feedbackOperationId,
+    this.clusterFeedback = false,
     Iterable<String>? quickMarkSpecies,
   }) : items = items.toList(),
        quickMarkSpecies = List<String>.from(
@@ -344,6 +345,7 @@ class _MarkHistoryEntry {
   final List<DetectionItem> items;
   final List<String> quickMarkSpecies;
   final String? feedbackOperationId;
+  final bool clusterFeedback;
 }
 
 class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
@@ -408,6 +410,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   // 临时状态（标记中、导出中不需要跨界面保存）
   bool _marking = false;
+  Timer? _snackBarCloseTimer;
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>?
+  _snackBarController;
   bool _exporting = false;
   String? _selectedObservationId;
   int _feedbackOperationSequence = 0;
@@ -804,6 +809,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   @override
   void dispose() {
+    _snackBarCloseTimer?.cancel();
     _preparationGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -1273,6 +1279,15 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     // 取消物种栏后面的数字
                     trailingBuilder: (bucket) {
                       if (bucket.key != _selectedBucketKey) return null;
+                      if (bucket.clusterId != null) {
+                        return IconButton(
+                          tooltip: '确认簇物种并学习',
+                          icon: const Icon(Icons.school_outlined),
+                          onPressed: _marking || _interactionBlocked
+                              ? null
+                              : () => _confirmClusterSpecies(bucket),
+                        );
+                      }
                       return Icon(
                         Icons.check_circle_rounded,
                         color: colorScheme.primary,
@@ -1557,9 +1572,144 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     );
   }
 
+  Future<void> _confirmClusterSpecies(_SpeciesBucket bucket) async {
+    final model = widget.classificationModelPath?.trim() ?? '';
+    final clusterId = bucket.clusterId;
+    if (_marking || _interactionBlocked || model.isEmpty || clusterId == null) {
+      return;
+    }
+    final ids = <String>{};
+    final targets = <String, DetectionItem>{};
+    for (final source in widget.items) {
+      final item = _bucketCacheItemByPath[source.path] ?? source;
+      for (final box in _confidenceFilteredBoxes(item)) {
+        if (box.observationId != null &&
+            _isRejectedSpeciesName(box.species) &&
+            _rejectionClusters[box.observationId]?.id == clusterId) {
+          ids.add(box.observationId!);
+          targets[item.path] = item;
+        }
+      }
+    }
+    if (ids.isEmpty) return;
+    var draft = '';
+    final species = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: Text('确认拒识簇 #${bucket.clusterNumber} 并学习'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '当前视图：${targets.length} 个文件。只更新属于此簇的检测框，同文件其他簇保持原样。\n'
+                  '学习使用此簇全部已保存的独立事件特征。新物种需完成注册后参与识别。',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  autofocus: true,
+                  decoration: const InputDecoration(labelText: '人工确认物种'),
+                  onChanged: (value) => update(() => draft = value),
+                  onSubmitted: (value) {
+                    if (value.trim().isNotEmpty) {
+                      Navigator.of(dialogContext).pop(value.trim());
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: draft.trim().isEmpty
+                  ? null
+                  : () => Navigator.of(dialogContext).pop(draft.trim()),
+              child: const Text('确认并学习'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || species == null) return;
+    final operationId = _newFeedbackOperationId();
+    _setMarking(true);
+    try {
+      final result = await widget.apiClient.confirmDinoV2Cluster(
+        inputPath: widget.inputPath,
+        classificationModelPath: model,
+        clusterId: clusterId,
+        observationIds: ids.toList(),
+        speciesName: species,
+        feedbackOperationId: operationId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _mergeClusterFeedbackItems(result.items);
+        _recordMarkHistory(
+          targets.values,
+          feedbackOperationId: result.operationId,
+          clusterFeedback: true,
+        );
+      });
+      unawaited(widget.onRefresh().catchError((_) {}));
+      final learning = result.learning;
+      final message = learning['needs_review'] == true
+          ? '特征已保存，待复核；沿用原学习结果'
+          : learning['status'] == 'candidate'
+          ? '新物种特征已确认，请完成物种注册后启用'
+          : learning['formal'] == true
+          ? '已更新分类头增量记忆，参与后续识别'
+          : learning['active'] == true
+          ? '特征已收集，处于临时辅助学习阶段'
+          : '特征已保存，待积累更多独立事件后启用';
+      _showSnackBar('$message（${result.featureEvents} 个事件）');
+    } catch (error) {
+      if (mounted) _showSnackBar('簇确认或学习失败：$error');
+    } finally {
+      _setMarking(false);
+    }
+  }
+
   String _newFeedbackOperationId() {
     _feedbackOperationSequence += 1;
     return 'feedback-${DateTime.now().microsecondsSinceEpoch}-$_feedbackOperationSequence';
+  }
+
+  void _mergeClusterFeedbackItems(List<DetectionItem> updates) {
+    _currentBuckets();
+    final authoritative = <String, DetectionItem>{..._bucketCacheItemByPath};
+    for (final update in updates) {
+      authoritative[update.path] =
+          authoritative[update.path]?.mergeValidationUpdate(update) ?? update;
+    }
+    final groups = _bucketCacheGroupBySignature.values.toList()
+      ..sort(
+        (a, b) => _globalGroupIndexForSignature(
+          a.signature,
+        ).compareTo(_globalGroupIndexForSignature(b.signature)),
+      );
+    for (final group in groups) {
+      for (var index = 0; index < group.items.length; index++) {
+        group.items[index] =
+            authoritative[group.items[index].path] ?? group.items[index];
+      }
+    }
+    _groupSpeciesLabelCache.clear();
+    _bucketCache = _buildBuckets(groups);
+    _rebuildBucketLookups();
+    _bucketCacheItemByPath = authoritative;
+    _bucketCacheGroupingSignature = null;
+    _pendingValidationEchoPaths.addAll(updates.map((item) => item.path));
+    final selected = _bucketCache.where(
+      (bucket) => bucket.items.any((item) => item.path == _selectedPath),
+    );
+    if (selected.isNotEmpty) _selectedBucketKey = selected.first.key;
   }
 
   void _mergeDinoFeedbackItem(DetectionItem authoritative) {
@@ -3287,6 +3437,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   DetectionBox? _boxAfterConfidenceFilter(DetectionBox box) {
+    if (box.feedbackStatus == 'confirmed') return box;
     if (box.candidates.isNotEmpty) {
       for (final candidate in box.candidates) {
         final species = candidate['name']?.toString().trim() ?? '';
@@ -3400,7 +3551,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionBox box,
     Map<String, int>? trackFrameCounts,
   ) {
-    if (!_isVideo(item) || _isManualDetection(item) || _minFrameRatio <= 0) {
+    if (box.feedbackStatus == 'confirmed' ||
+        !_isVideo(item) ||
+        _isManualDetection(item) ||
+        _minFrameRatio <= 0) {
       return true;
     }
     final trackId = box.trackId?.trim();
@@ -4042,6 +4196,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     Iterable<DetectionItem> items, {
     String? quickMarkSpeciesName,
     String? feedbackOperationId,
+    bool clusterFeedback = false,
   }) {
     final itemsByPath = <String, DetectionItem>{};
     for (final item in items) {
@@ -4049,11 +4204,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     }
     if (itemsByPath.isEmpty) return;
 
-    _discardMarkHistoryForPaths(itemsByPath.keys.toSet());
+    if (!clusterFeedback) _discardMarkHistoryForPaths(itemsByPath.keys.toSet());
     _markHistory.add(
       _MarkHistoryEntry(
         itemsByPath.values,
         feedbackOperationId: feedbackOperationId,
+        clusterFeedback: clusterFeedback,
         quickMarkSpecies: quickMarkSpeciesName == null
             ? const <String>[]
             : _splitSpeciesNames(quickMarkSpeciesName),
@@ -4119,6 +4275,28 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _markHistory.last.quickMarkSpecies,
     );
     final feedbackOperationId = _markHistory.last.feedbackOperationId?.trim();
+
+    if (_markHistory.last.clusterFeedback && feedbackOperationId != null) {
+      _setMarking(true);
+      try {
+        await widget.apiClient.revertDinoV2Feedback(
+          classificationModelPath: widget.classificationModelPath!,
+          feedbackOperationId: feedbackOperationId,
+        );
+        if (!mounted) return;
+        setState(() {
+          _mergeClusterFeedbackItems(targets);
+          _markHistory.removeLast();
+        });
+        unawaited(widget.onRefresh().catchError((_) {}));
+        _showSnackBar('已撤回簇确认和学习反馈');
+      } catch (error) {
+        if (mounted) _showSnackBar('撤回簇学习失败：$error');
+      } finally {
+        _setMarking(false);
+      }
+      return;
+    }
 
     final visibleBefore = _visibleItems(_currentBuckets());
     final nextPath = _nextPathAfterBatch(visibleBefore, targets);
@@ -4339,6 +4517,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }) {
     if (!mounted || message.isEmpty) return;
     final messenger = ScaffoldMessenger.of(context);
+    _snackBarCloseTimer?.cancel();
     messenger.hideCurrentSnackBar();
 
     final controller = messenger.showSnackBar(
@@ -4352,7 +4531,20 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       ),
     );
     // 强制绕过无障碍模式的驻留时间
-    Future.delayed(const Duration(seconds: 4), controller.close);
+    _snackBarController = controller;
+    _snackBarCloseTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted && identical(_snackBarController, controller)) {
+        controller.close();
+      }
+    });
+    unawaited(
+      controller.closed.then((_) {
+        if (identical(_snackBarController, controller)) {
+          _snackBarCloseTimer?.cancel();
+          _snackBarController = null;
+        }
+      }),
+    );
   }
 
   List<DetectionItem> _favoriteMediaItemsForExport(List<DetectionItem> items) {

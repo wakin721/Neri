@@ -170,8 +170,93 @@ void main() {
         addTearDown(tester.view.resetDevicePixelRatio);
         apiClient.close();
         var requests = 0;
+        var learningRequests = 0;
+        var undoRequests = 0;
+        String? operationId;
+        final fixtures = <DetectionItem>[];
         apiClient = NeriApiClient(
           httpClient: MockClient((request) async {
+            final body = jsonDecode(request.body) as Map;
+            if (request.url.path == '/api/dinov2/feedback/cluster') {
+              learningRequests++;
+              operationId = body['feedback_operation_id'] as String;
+              final selected = (body['observation_ids'] as List)
+                  .cast<String>()
+                  .toSet();
+              expect(selected, {'a', 'a2', 'mixed', 'reverse', 'both-a'});
+              expect(body['cluster_id'], 'registry:fp:2:0');
+              expect(body['species_name'], '岩羊');
+              final updated = <Map<String, dynamic>>[];
+              for (final item in fixtures) {
+                if (!item.detectionBoxes.any(
+                  (box) => selected.contains(box.observationId),
+                )) {
+                  continue;
+                }
+                final boxes = [
+                  for (final box in item.detectionBoxes)
+                    {
+                      'species': selected.contains(box.observationId)
+                          ? '岩羊'
+                          : box.species,
+                      'bbox': box.bbox,
+                      'confidence': selected.contains(box.observationId)
+                          ? 0.01
+                          : box.confidence,
+                      if (selected.contains(box.observationId))
+                        'candidates': [
+                          {'name': '旧模型结果', 'conf': 0.01},
+                        ],
+                      'observation_id': box.observationId,
+                      if (selected.contains(box.observationId))
+                        'feedback_status': 'confirmed',
+                    },
+                ];
+                final names = boxes
+                    .map((box) => box['species'] as String)
+                    .toSet()
+                    .toList();
+                updated.add({
+                  'filename': item.filename,
+                  'path': item.path,
+                  'file_type': item.fileType,
+                  'date_taken': item.dateTaken,
+                  'species': names,
+                  'detection_boxes': boxes,
+                  'detection_data': {'物种名称': names.join(',')},
+                  'validated': boxes.every(
+                    (box) => box['feedback_status'] == 'confirmed',
+                  ),
+                });
+              }
+              return http.Response(
+                jsonEncode({
+                  'operation_id': operationId,
+                  'feature_events': 10,
+                  'learning': {
+                    'status': 'confirmed',
+                    'active': true,
+                    'formal': true,
+                    'needs_review': false,
+                  },
+                  'items': updated,
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (request.url.path == '/api/dinov2/feedback/revert') {
+              undoRequests++;
+              expect(body['feedback_operation_id'], operationId);
+              return http.Response(
+                jsonEncode({
+                  'operation_id': operationId,
+                  'affected_species': ['岩羊'],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
             expect(request.url.path, '/api/dinov2/feedback/rejection-clusters');
             requests++;
             final ids =
@@ -205,7 +290,6 @@ void main() {
           }),
         );
         final png = File(items.first.path).readAsBytesSync();
-        final fixtures = <DetectionItem>[];
         void add(
           String name,
           List<String> labels,
@@ -307,6 +391,36 @@ void main() {
         expect(subtitle('拒识簇 #10'), endsWith('2 个文件'));
         expect(subtitle('拒识（未分簇）'), endsWith('2 个文件'));
         expect(requests, 1);
+        await tester.tap(
+          find.descendant(of: list, matching: find.text('拒识簇 #2')),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.byTooltip('确认簇物种并学习'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.enterText(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is TextField && widget.decoration?.labelText == '人工确认物种',
+          ),
+          '岩羊',
+        );
+        await tester.pump();
+        await tester.tap(find.text('确认并学习'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(learningRequests, 1);
+        expect(titles(), isNot(contains('拒识簇 #2')));
+        expect(titles(), contains('岩羊、拒识簇 #10'));
+        expect(subtitle('拒识簇 #10'), endsWith('1 个文件'));
+        expect(find.textContaining('已更新分类头增量记忆'), findsOneWidget);
+        await tester.tap(find.byTooltip('撤回上一步校验'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(undoRequests, 1);
+        expect(titles(), contains('拒识簇 #2'));
+        expect(subtitle('拒识簇 #2'), endsWith('3 个文件'));
+        expect(subtitle('拒识簇 #10'), endsWith('2 个文件'));
         harness.currentState!._replaceSpecies(fixtures[5], '岩羊');
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
@@ -319,6 +433,7 @@ void main() {
           reason: 'metadata changes must reuse already loaded cluster links',
         );
         expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 5));
       },
     );
   }

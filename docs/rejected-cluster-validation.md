@@ -28,3 +28,27 @@ hovering over an entry's status icon.
 
 Human review updates rebuild all memberships for multi-cluster files together.
 Ordinary single-membership groups retain the existing incremental update path.
+
+## Confirming a cluster and learning its features
+
+Select a numbered cluster and use the school icon, `确认簇物种并学习`. The dialog
+states the file-update scope and requires one explicit species name. The backend
+validates the model fingerprint and every selected observation's cluster before
+making any changes. It updates only that cluster's boxes in the current view;
+other clusters in the same file retain their labels. Reviewed boxes remain visible
+even when their original model confidence is below the display threshold.
+
+For a checkpoint species, all saved independent-event embeddings from the cluster
+are added as human feedback and the affected Memory generations are recomputed.
+Event grouping, camera requirements, quality gates and rollback to the previous
+generation follow the existing learning policy. The UI distinguishes collecting,
+provisional assistance, enabled formal learning and evidence needing review. A
+new species is named in the Registry candidate state; the separate registration
+flow still controls when it participates in inference. No encoder or checkpoint
+weight file is retrained or overwritten.
+
+The operation is journaled and retryable under its original operation ID. Undo
+restores the affected box labels and feedback generations. Reconfirming a cluster
+as another species also recomputes the previous species, so superseded event
+features are removed from its active memory. Video summaries retain per-frame
+maximum counts instead of summing repeated detections across frames.

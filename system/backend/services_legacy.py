@@ -2062,6 +2062,9 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
             box_data["registry_id"] = registry_id
         if predicted_species is not None:
             box_data["predicted_species"] = str(predicted_species)
+        feedback_status = _value_from_keys(raw_box, ("feedback_status",))
+        if feedback_status is not None:
+            box_data["feedback_status"] = str(feedback_status)
         if frame_index is not None:
             box_data["frame_index"] = frame_index
         if timestamp is not None:

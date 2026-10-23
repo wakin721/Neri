@@ -56,6 +56,34 @@ class NeriApiClient {
     );
   }
 
+  Future<ClusterLearningResult> confirmDinoV2Cluster({
+    required String inputPath,
+    required String classificationModelPath,
+    required String clusterId,
+    required List<String> observationIds,
+    required String speciesName,
+    required String feedbackOperationId,
+  }) async {
+    final response = await _httpClient
+        .post(
+          _uri('/api/dinov2/feedback/cluster'),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode({
+            'input_path': inputPath,
+            'classification_model_path': classificationModelPath,
+            'cluster_id': clusterId,
+            'observation_ids': observationIds,
+            'species_name': speciesName,
+            'feedback_operation_id': feedbackOperationId,
+          }),
+        )
+        .timeout(const Duration(minutes: 2));
+    _ensureSuccess(response);
+    return ClusterLearningResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   Future<Map<String, RejectionCluster>> fetchDinoV2RejectionClusters(
     String classificationModelPath,
     List<String> observationIds,
