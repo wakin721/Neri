@@ -43,6 +43,134 @@ def _patch_state_path(monkeypatch, state_path: Path) -> None:
     monkeypatch.setattr(services._legacy, "job_state_path", resolver)
 
 
+def test_resume_reuses_first_scan_after_restart_and_skips_deleted_pending_files(monkeypatch, tmp_path):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    root = tmp_path / "media"
+    root.mkdir()
+    first, second, deleted = [root / name for name in ("1.jpg", "2.jpg", "3.jpg")]
+    for path in (first, second, deleted):
+        path.write_bytes(b"fixture")
+    request = _request(root)
+    request.options.enable_detection = False
+    manager = services.ProcessingJobManager()
+    manager._jobs["cached"] = _job("cached", root)
+    manager._job_requests["cached"] = request
+    legacy = services._legacy
+    monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args: None)
+    metadata = legacy._build_fast_metadata_item
+
+    def cancel_after_first(path):
+        item = metadata(path)
+        manager._cancelled_jobs.add("cached")
+        return item
+
+    monkeypatch.setattr(legacy, "_build_fast_metadata_item", cancel_after_first)
+    restarted = None
+    try:
+        manager._run_job("cached", request, [])
+        paused = manager.get_job("cached")
+        assert paused.state == JobState.CANCELLED and paused.processed == 1
+        (root / "new.jpg").write_bytes(b"new file belongs to a new task")
+        deleted.unlink()
+        monkeypatch.setattr(legacy, "_build_fast_metadata_item", metadata)
+        monkeypatch.setattr(legacy, "_resolve_job_inputs",
+                            lambda *args, **kwargs: pytest.fail("resume must not scan source directories"))
+        restarted = services.ProcessingJobManager()
+        messages = []
+        mutate = restarted._mutate_job
+        def capture_message(*args, **kwargs):
+            messages.append(kwargs.get("message", ""))
+            return mutate(*args, **kwargs)
+        monkeypatch.setattr(restarted, "_mutate_job", capture_message)
+        restarted.resume_job("cached")
+        restarted._executor.shutdown(wait=True)
+        finished = restarted.get_job("cached")
+        assert finished.state == JobState.COMPLETED
+        assert finished.processed == finished.total == 2
+        assert [item.path for item in finished.results] == [str(first), str(second)]
+        assert "正在预扫描输入文件" not in messages
+        restarted.delete_job("cached")
+        import sqlite3
+        with sqlite3.connect(restarted._state_store.path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM job_inputs").fetchone()[0] == 0
+    finally:
+        manager._executor.shutdown()
+        if restarted is not None:
+            restarted._executor.shutdown()
+
+
+def test_cached_inputs_are_scoped_to_task_and_video_filter(monkeypatch, tmp_path):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    (tmp_path / "photo.jpg").write_bytes(b"photo")
+    (tmp_path / "video.mp4").write_bytes(b"video")
+    manager = services.ProcessingJobManager()
+    request = _request(tmp_path)
+    manager._jobs["one"] = _job("one", tmp_path)
+    manager._job_requests["one"] = request
+    try:
+        _, paths = manager._resolve_inputs("one", request)
+        assert [path.name for path in paths] == ["photo.jpg"]
+        (tmp_path / "new.jpg").write_bytes(b"new")
+        assert manager._resolve_inputs("one", request)[1] == paths
+        changed = request.model_copy(deep=True)
+        changed.options.video_mode = "fast"
+        assert {path.name for path in manager._resolve_inputs("one", changed)[1]} == {
+            "photo.jpg", "new.jpg", "video.mp4",
+        }
+        manager._jobs["two"] = _job("two", tmp_path)
+        manager._job_requests["two"] = request
+        assert {path.name for path in manager._resolve_inputs("two", request)[1]} == {"photo.jpg", "new.jpg"}
+    finally:
+        manager._executor.shutdown()
+
+
+def test_failed_or_missing_snapshot_falls_back_to_one_complete_scan(monkeypatch, tmp_path):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    manager = services.ProcessingJobManager()
+    request = _request(tmp_path)
+    manager._jobs["old"] = _job("old", tmp_path)
+    manager._job_requests["old"] = request
+    calls = []
+    def scan(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise services.MediaStorageError(tmp_path, "扫描", OSError("disconnected"))
+        return tmp_path, [tmp_path / "photo.jpg"]
+    monkeypatch.setattr(services._legacy, "_resolve_job_inputs", scan)
+    try:
+        with pytest.raises(services.MediaStorageError):
+            manager._resolve_inputs("old", request)
+        manager._resolve_inputs("old", request)
+        manager._resolve_inputs("old", request)
+        assert len(calls) == 2
+        import sqlite3
+        with sqlite3.connect(manager._state_store.path) as conn:
+            conn.execute("UPDATE job_inputs SET paths='broken json'")
+        manager._resolve_inputs("old", request)
+        manager._resolve_inputs("old", request)
+        assert len(calls) == 3
+    finally:
+        manager._executor.shutdown()
+
+
+def test_cached_inputs_do_not_treat_offline_root_as_deleted_files(monkeypatch, tmp_path):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "photo.jpg").write_bytes(b"fixture")
+    manager = services.ProcessingJobManager()
+    request = _request(root)
+    manager._jobs["offline"] = _job("offline", root)
+    manager._job_requests["offline"] = request
+    try:
+        manager._resolve_inputs("offline", request)
+        root.rename(tmp_path / "disconnected")
+        with pytest.raises(ValueError, match="输入路径不存在"):
+            manager._resolve_inputs("offline", request)
+    finally:
+        manager._executor.shutdown()
+
+
 def test_completed_image_batch_is_checkpointed_while_job_is_running(
     monkeypatch,
     tmp_path,

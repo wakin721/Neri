@@ -715,6 +715,10 @@ class ProcessingJobManager:
         except Exception:
             pass
 
+    def _resolve_inputs(self, job_id: str, request: CreateJobRequest) -> tuple[Path, list[Path]]:
+        self._mutate_job(job_id, persist=False, message="正在预扫描输入文件")
+        return _resolve_job_inputs(request, cancelled=lambda: self._is_cancelled(job_id))
+
     def _run_job(
         self,
         job_id: str,
@@ -760,12 +764,9 @@ class ProcessingJobManager:
                 job_id,
                 persist=False,
                 state=JobState.RUNNING,
-                message="正在预扫描输入文件",
+                message="正在读取任务文件清单",
             )
-            input_path, files = _resolve_job_inputs(
-                request,
-                cancelled=lambda: self._is_cancelled(job_id),
-            )
+            input_path, files = self._resolve_inputs(job_id, request)
             image_count = sum(
                 path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
                 for path in files
@@ -876,7 +877,7 @@ class ProcessingJobManager:
 
             detection_index, _ = (
                 load_media_indexes(
-                    files, _candidate_detection_dbs_for_roots,
+                    remaining_files, _candidate_detection_dbs_for_roots,
                     include_validation=False,
                 )
                 if request.options.enable_detection else ({}, {})

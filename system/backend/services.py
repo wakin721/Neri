@@ -98,6 +98,43 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
         except Exception:
             logger.warning("Failed to checkpoint job progress", exc_info=True)
 
+    def _resolve_inputs(self, job_id: str, request: CreateJobRequest) -> tuple[Path, list[Path]]:
+        # Scope the snapshot to this task and the settings that affect discovery.
+        # Continuing a task processes its original files; a new task discovers additions.
+        input_key = json.dumps({
+            "version": 1, "input_dir": request.input_dir, "input_paths": request.input_paths,
+            "skip_videos": request.options.video_mode == "skip",
+        }, sort_keys=True, ensure_ascii=False)
+        try:
+            cached = self._state_store.load_inputs(job_id, input_key)
+        except Exception:
+            logger.warning("Failed to read cached job inputs; scanning again", exc_info=True)
+            cached = None
+        if cached is not None:
+            # Check only the selected roots. Do not mistake a disconnected
+            # source directory for thousands of individually deleted files.
+            for raw in request.input_paths or [request.input_dir]:
+                if raw:
+                    try:
+                        Path(raw).expanduser().stat()
+                    except (FileNotFoundError, NotADirectoryError) as exc:
+                        raise ValueError(f"输入路径不存在: {raw}") from exc
+            logger.info("Reusing cached job inputs: job_id=%s files=%d", job_id, len(cached[1]))
+            return cached
+
+        root, files = super()._resolve_inputs(job_id, request)
+        _raise_if_cancelled(lambda: self._is_cancelled(job_id))
+        with self._lock:
+            if job_id not in self._jobs or job_id in self._deleted_jobs:
+                raise RuntimeError("用户取消任务")
+            try:
+                self._save_state_unlocked()
+                self._state_store.save_inputs(job_id, input_key, root, files)
+            except Exception:
+                # A cache write failure must not lose completed detection progress.
+                logger.warning("Failed to cache discovered job inputs", exc_info=True)
+        return root, files
+
 
 def _dinov2_manifest_payload(model_path: str | Path | None):
     if not model_path:

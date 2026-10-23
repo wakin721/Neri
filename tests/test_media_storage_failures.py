@@ -49,6 +49,11 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
     monkeypatch.setattr(legacy, "_selected_inference_class_ids", lambda *args: None)
     monkeypatch.setattr(legacy, "_export_results", lambda *args: None)
     detected = []
+    indexed = []
+    def load_indexes(paths, *args, **kwargs):
+        indexed.append(list(paths))
+        return {}, {}
+    monkeypatch.setattr(legacy, "load_media_indexes", load_indexes)
     class Detector:
         def detect_batch_species(self, paths, **kwargs):
             detected.extend(paths)
@@ -92,6 +97,7 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
         assert finished.state == JobState.COMPLETED
         assert finished.processed == 2
         assert detected == [str(photos[1])]
+        assert indexed == [photos, photos[1:]]
         assert writes == ["first.jpg", "second.jpg"]
     finally:
         manager._executor.shutdown()

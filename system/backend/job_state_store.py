@@ -45,6 +45,39 @@ class JobStateStore:
         previous = self._saved.get(job_id)
         return previous is not None and previous[0] is job
 
+    def load_inputs(self, job_id: str, input_key: str):
+        """Load a completed discovery snapshot without traversing source media."""
+        if not self.path.exists():
+            return None
+        with closing(sqlite3.connect(self.path)) as conn:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_inputs'"
+            ).fetchone():
+                return None
+            row = conn.execute(
+                "SELECT root,paths FROM job_inputs WHERE job_id=? AND input_key=?",
+                (job_id, input_key),
+            ).fetchone()
+        if row is None:
+            return None
+        paths = json.loads(row[1])
+        if not isinstance(row[0], str) or not row[0] or not isinstance(paths, list) or not paths or not all(
+            isinstance(path, str) and path for path in paths
+        ):
+            raise ValueError("Invalid cached job input snapshot")
+        return Path(row[0]), [Path(path) for path in paths]
+
+    def save_inputs(self, job_id: str, input_key: str, root: Path, paths: list[Path]):
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            with conn:
+                conn.execute(
+                    "INSERT INTO job_inputs(job_id,input_key,root,paths) VALUES(?,?,?,?) "
+                    "ON CONFLICT(job_id) DO UPDATE SET "
+                    "input_key=excluded.input_key,root=excluded.root,paths=excluded.paths",
+                    (job_id, input_key, str(root), json.dumps([str(path) for path in paths], ensure_ascii=False)),
+                )
+
     def save(self, jobs, requests):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=5)
@@ -60,6 +93,11 @@ class JobStateStore:
                     "CREATE TABLE IF NOT EXISTS results("
                     "job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,position INTEGER,payload TEXT NOT NULL,"
                     "PRIMARY KEY(job_id,position))"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS job_inputs("
+                    "job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,"
+                    "input_key TEXT NOT NULL,root TEXT NOT NULL,paths TEXT NOT NULL)"
                 )
                 # Also remove persisted rows after a clear/restart, when _saved can be empty.
                 persisted_ids = {row[0] for row in conn.execute("SELECT id FROM jobs")}
