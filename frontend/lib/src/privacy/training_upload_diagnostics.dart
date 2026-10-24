@@ -40,11 +40,14 @@ class TrainingUploadDiagnostics {
       '上传前打码': blurring?['required'] != true
           ? '服务未确认强制打码状态，请检查后端版本。'
           : blurring?['dependencies_available'] != true
-          ? '等待安装 YOLO 依赖（设置—依赖安装）；完成前不会上传照片。'
+          ? 'LiteRT 隐私运行库不可用，请更新或修复程序；完成前不会上传照片，无需安装 PyTorch。'
           : '本机检测并整体打码人物、车辆、屏幕和书本；打码失败不上传，自动检测仍可能漏检。',
       '打码模型': blurring?['model'] is String
           ? '${blurring!['model']} · ${blurring['model_cached'] == true ? '已缓存（使用前校验）' : '首次处理时从 Ultralytics 官方 GitHub 下载'}'
           : '未知',
+      '打码运行库': blurring?['runtime'] == 'LiteRT'
+          ? 'LiteRT CPU · 无需安装 PyTorch'
+          : '当前后端未提供运行库信息',
       '排除规则': '排除已标记为人或车辆、未确认、未知物种及无效标签的照片。',
       '空照片配额': '每个物理文件夹最多 ${number('max_empty_per_folder')} 张，跨重启保留。',
       '分类与标注': '每个物种分别保存照片、YOLO 检测框 .txt 和类别 .classes.txt；模型检测框未经人工验证。',

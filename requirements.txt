@@ -1,4 +1,5 @@
 # Core machine learning and computer vision
+-r requirements-privacy.txt
 pillow>=11.2.1
 opencv-python>=4.5.5
 openpyxl>=3.1.5

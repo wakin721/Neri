@@ -8,9 +8,12 @@ Every eligible photo, including a confirmed empty photo, goes through
 
 1. Read the primary frame, apply EXIF orientation, convert to RGB and resize to
    a maximum long edge of 2048 pixels. Source files are never modified.
-2. Run an independent Ultralytics YOLO11n prediction on the in-memory copy on
-   CPU (`imgsz=1280`, confidence 0.15). No source paths, tracking state or cloud
-   inference are used.
+2. Run the official pre-exported YOLO26n w8a32 model with LiteRT on CPU
+   (640-pixel letterbox, confidence 0.15, per-class NMS IoU 0.5). The pinned
+   model has NCHW float32 input and normalized `(1,84,8400)` raw output;
+   metadata and tensor shapes are checked before processing. Restore boxes
+   using the exact resize/padding geometry. No source paths, tracking state,
+   PyTorch, Ultralytics Python package or cloud inference are used.
 3. Expand detected privacy regions by 10% (at least four pixels), clip to image
    bounds, reduce each to at most 8×8 mosaic cells and apply a 51×51 box blur.
    Detection targets are whole people, vehicles, screens and books. Animals
@@ -22,25 +25,26 @@ Every eligible photo, including a confirmed empty photo, goes through
 
 This adapts the detection/ROI box-blur approach from the
 [Ultralytics object-blurring guide](https://docs.ultralytics.com/guides/object-blurring/).
-It deliberately uses `YOLO.predict` instead of `ObjectBlurrer.process`, which
-tracks objects between frames and draws bounding boxes/labels. Independent
+It uses independent LiteRT predictions rather than `ObjectBlurrer.process`,
+which tracks objects between frames and draws bounding boxes/labels. Independent
 training photographs should not share tracking state or contain overlays.
 
 ## Runtime and model
 
-Install the existing **YOLO dependencies** in Neri's settings. Developers can
-use `python -m pip install -r requirements-privacy.txt` in their backend
-environment (Neri's installer chooses the appropriate PyTorch build separately).
-The lite package keeps these dependencies optional; missing dependencies block
-contributions without affecting local core functions. Upload details show the
-missing dependency state and whether model bytes are cached; presence in the
-cache does not replace checksum validation.
+The base requirements include `ai-edge-litert==2.3.0` through
+`requirements-privacy.txt`. The Windows x64 lite package retains this runtime
+when pruning PyTorch; its import check loads the native LiteRT interpreter and
+asserts PyTorch is absent. Developers can install the same requirements directly.
+No model conversion or PyTorch download is performed on user devices. Missing
+or broken LiteRT runtimes block contributions and show a repair/update hint in
+upload details. Cache presence does not replace checksum validation. Windows
+x64 / Python 3.13 is verified; native Windows ARM64 is not verified.
 
 After explicit participation, the first actual sample downloads
-[`yolo11n.pt` from Ultralytics' official release](https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt)
+[`yolo26n_w8a32.tflite` from the official Flutter project's v0.6.6 release](https://github.com/ultralytics/yolo-flutter-app/releases/download/v0.6.6/yolo26n_w8a32.tflite)
 to `privacy-models` inside the existing local training-state directory. The
 fixed SHA-256 is
-`0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1`.
+`d9cef07ce652ccfa9ce58e4ac8a4df98ff037739a9dad20a8afcae21b545df73`.
 Downloads are size-bounded, checked and atomically installed. Cached bytes are
 checked before loading; the class map must match the expected COCO targets.
 The detector is cached in memory within the worker after successful loading.
@@ -70,7 +74,7 @@ Users must still screen sensitive photographs before confirming them.
 Run the upload/privacy tests without real user data or remote storage writes:
 
 ```powershell
-python -m pytest -q tests/test_training_upload.py tests/test_training_privacy_blurring.py tests/test_training_privacy_api.py tests/test_training_transport.py tests/test_training_broker.py
+python -m pytest -q tests/test_training_upload.py tests/test_training_privacy_blurring.py tests/test_training_litert.py tests/test_training_privacy_api.py tests/test_training_transport.py tests/test_training_broker.py
 cd frontend
 flutter test test/privacy_test.dart test/training_upload_debug_test.dart
 ```
@@ -124,3 +128,8 @@ found and fixed the 0-byte negative-label upload issue: whitespace-only labels
 now contain one newline, which Ultralytics still parses as zero objects. After
 the fix, 69 Python tests and 33 subtests passed, and both real synthetic uploads
 were verified and cleaned up.
+
+The `codex/litert-upload-privacy` experiment then replaced the client detector
+with LiteRT. See [LiteRT verification](litert-privacy-verification.md) for its
+clean runtime, model output checks, disk measurements and live upload results.
+Earlier YOLO11/PyTorch test records above remain historical observations.

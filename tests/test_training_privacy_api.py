@@ -12,6 +12,7 @@ from system.backend import services
 from system.backend.models import ValidationBatchMarkRequest
 from system.training.api import privacy_router
 from system.training.policy import AGREEMENT_VERSION
+from system.training.privacy import MODEL_NAME
 from system.training.queue import TrainingQueue
 
 
@@ -87,7 +88,9 @@ class PrivacyApiTests(unittest.TestCase):
         self.assertEqual(details['max_image_edge'], 2048)
         self.assertEqual(details['jpeg_quality'], 82)
         self.assertTrue(details['privacy_blurring']['required'])
-        self.assertEqual(details['privacy_blurring']['model'], 'yolo11n.pt')
+        self.assertEqual(details['privacy_blurring']['model'], MODEL_NAME)
+        self.assertEqual(details['privacy_blurring']['runtime'], 'LiteRT')
+        self.assertFalse(details['privacy_blurring']['requires_pytorch'])
         self.assertFalse(details['worker_running'])
         serialized = json.dumps(details)
         for private_value in ('private.example', 'secret-destination', str(photo), 'secret', 'url', 'source_path'):

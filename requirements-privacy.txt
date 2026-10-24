@@ -1,3 +1,2 @@
-# Optional upload privacy processing; also installed by Settings > YOLO dependencies.
-# PyTorch is installed separately by Neri's hardware-aware installer.
-ultralytics>=8.4.13
+# Local upload privacy inference; no torch, ultralytics or TensorFlow dependency.
+ai-edge-litert==2.3.0

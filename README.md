@@ -187,7 +187,7 @@ python -m uvicorn system.backend.main:app --reload --app-dir . --host 127.0.0.1 
 
 后端文档地址：<http://127.0.0.1:721/docs>
 
-参加模型改进计划后，上传副本会在本机移除元数据，并对检测到的人物、车辆、屏幕和书本整体打码；打码失败不会上传。此功能需要在设置中安装 YOLO 依赖，首次实际处理时从 Ultralytics 官方 GitHub 下载检测模型。自动检测可能漏检，仍需自行检查敏感内容。开发环境可安装 `requirements-privacy.txt`，详见[上传前隐私处理](docs/upload-privacy-blurring.md)。
+参加模型改进计划后，上传副本会在本机移除元数据，并通过 LiteRT 对检测到的人物、车辆、屏幕和书本整体打码；打码失败不会上传。打码运行库随轻量版程序提供，无需安装 PyTorch，首次实际处理时从 Ultralytics 官方 GitHub 下载约 2.9 MB 的检测模型。自动检测可能漏检，仍需自行检查敏感内容。开发环境可安装 `requirements-privacy.txt`，详见[上传前隐私处理](docs/upload-privacy-blurring.md)。
 
 ### 启动 Flutter 前端
 

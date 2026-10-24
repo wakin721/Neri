@@ -51,7 +51,9 @@ void main() {
       final data = diagnostics();
       data['privacy_blurring'] = {
         'required': true,
-        'model': 'yolo11n.pt',
+        'model': 'yolo26n_w8a32.tflite',
+        'runtime': 'LiteRT',
+        'requires_pytorch': false,
         'dependencies_available': false,
         'model_cached': false,
       };
@@ -61,6 +63,7 @@ void main() {
         contains('设备匿名 ID：0123456789abcdef0123456789abcdef'),
       );
       expect(missing.copyText, contains('完成前不会上传照片'));
+      expect(missing.copyText, contains('无需安装 PyTorch'));
       expect(missing.copyText, contains('首次处理时从 Ultralytics 官方 GitHub 下载'));
       (data['privacy_blurring']
               as Map<String, dynamic>)['dependencies_available'] =

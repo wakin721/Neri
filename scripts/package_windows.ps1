@@ -97,5 +97,5 @@ if (Test-Path $generatedExe) {
   throw "The legacy neri_flutter.exe name is still present in the package."
 }
 
-& "$toolkit\python.exe" -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; import system.model_sync.manager; from hdbscan import HDBSCAN as WithinSeqHDBSCAN"
+& "$toolkit\python.exe" -c "import importlib.util; assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; import system.model_sync.manager; from hdbscan import HDBSCAN as WithinSeqHDBSCAN"
 if ($LASTEXITCODE -ne 0) { throw "Packaged Python import check failed." }

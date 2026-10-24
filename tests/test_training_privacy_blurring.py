@@ -3,7 +3,6 @@ import hashlib
 import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -15,12 +14,9 @@ from system.training.privacy import (
 )
 
 
-def tensor(values):
-    return SimpleNamespace(cpu=lambda: SimpleNamespace(tolist=lambda: values))
-
-
 def detections(coordinates, classes):
-    return [SimpleNamespace(boxes=SimpleNamespace(xyxy=tensor(coordinates), cls=tensor(classes)))]
+    return np.asarray([list(box) + [0.9, class_id] for box, class_id in zip(coordinates, classes)],
+                      dtype=np.float32).reshape(-1, 6)
 
 
 class PrivacyBlurringTests(unittest.TestCase):
@@ -36,10 +32,10 @@ class PrivacyBlurringTests(unittest.TestCase):
     def test_people_vehicles_and_screens_are_redacted_without_overlays(self):
         for class_id in (0, 2, 3, 5, 7, 62, 63, 67, 73):
             with self.subTest(class_id=class_id):
-                def predict(**kwargs):
+                def predict(source):
                     # The output ROI is modified after prediction; snapshot
                     # the input at call time rather than retaining its reference.
-                    np.testing.assert_array_equal(kwargs['source'], self.pixels[:, :, ::-1])
+                    np.testing.assert_array_equal(source, self.pixels)
                     return detections([[20, 20, 80, 80]], [class_id])
                 self.model.predict.side_effect = predict
                 clean, count = self.blurrer(self.image)
@@ -50,10 +46,7 @@ class PrivacyBlurringTests(unittest.TestCase):
                 # Padding also covers the detection's outer border.
                 self.assertFalse(np.array_equal(actual[15:20, 25:70], self.pixels[15:20, 25:70]))
                 np.testing.assert_array_equal(np.asarray(self.image), self.pixels)
-                args = self.model.predict.call_args.kwargs
-                self.assertEqual(args['classes'], list(PRIVACY_CLASSES))
-                self.assertEqual(args['device'], 'cpu')
-                self.assertFalse(args['save'])
+                self.assertEqual(self.model.predict.call_args.kwargs, {})
 
     def test_zero_detections_preserves_pixels_and_color(self):
         self.model.predict.return_value = detections([], [])
@@ -69,8 +62,7 @@ class PrivacyBlurringTests(unittest.TestCase):
 
     def test_incomplete_malformed_or_saturated_detection_never_returns_pixels(self):
         invalid = [
-            [], [SimpleNamespace(boxes=None)],
-            detections([[0, 0, 10, 10]], []),
+            None, np.zeros((1, 5)),
             detections([[0, 0, 10, 10]], [16]),
             detections([[0, 0, float('nan'), 10]], [0]),
             detections([[10, 0, 0, 10]], [0]),
@@ -97,7 +89,7 @@ class PrivacyBlurringTests(unittest.TestCase):
 
     def test_missing_runtime_is_retryable(self):
         self.blurrer._model = None
-        with patch.object(self.blurrer, '_load_model', side_effect=ImportError('ultralytics')):
+        with patch.object(self.blurrer, '_load_model', side_effect=ImportError('ai_edge_litert')):
             with self.assertRaises(PrivacyProcessingError):
                 self.blurrer(self.image)
 
@@ -131,9 +123,16 @@ class PrivacyBlurringTests(unittest.TestCase):
 
     def test_wrong_class_schema_rejected_even_if_runtime_loads(self):
         model = Mock(names={0: 'wildlife'})
-        with patch.dict('sys.modules', {'ultralytics': SimpleNamespace(YOLO=lambda *a, **kw: model)}), \
-                patch.object(self.blurrer, '_model_path', return_value=Path('verified.pt')):
+        with patch('system.training.litert_detector.LiteRtDetector', return_value=model), \
+                patch.object(self.blurrer, '_model_path', return_value=Path('verified.tflite')), \
+                patch.object(self.blurrer, 'status', return_value={'dependencies_available': True}):
             with self.assertRaisesRegex(PrivacyProcessingError, 'classes_mismatch'):
+                self.blurrer._load_model()
+
+    def test_missing_litert_does_not_download_or_try_torch(self):
+        with patch.object(self.blurrer, 'status', return_value={'dependencies_available': False}), \
+                patch.object(self.blurrer, '_model_path', side_effect=AssertionError('download')):
+            with self.assertRaisesRegex(PrivacyProcessingError, 'runtime_unavailable'):
                 self.blurrer._load_model()
 
 

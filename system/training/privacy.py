@@ -1,7 +1,7 @@
 """Local upload-copy redaction, adapted from Ultralytics' object-blurring guide.
 
 https://docs.ultralytics.com/guides/object-blurring/
-Use prediction rather than ObjectBlurrer's tracking/annotation for independent
+Use LiteRT prediction rather than ObjectBlurrer's tracking/annotation for independent
 photos: never draw labels, keep tracker state, or send images to an inference API.
 COCO detects whole people/vehicles, not separate faces/plates. Redact the whole
 object conservatively, plus screens/books; this is not an anonymity guarantee.
@@ -19,9 +19,9 @@ import urllib.request
 
 from PIL import Image
 
-MODEL_NAME = "yolo11n.pt"
-MODEL_URL = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt"
-MODEL_SHA256 = "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1"
+MODEL_NAME = "yolo26n_w8a32.tflite"
+MODEL_URL = "https://github.com/ultralytics/yolo-flutter-app/releases/download/v0.6.6/yolo26n_w8a32.tflite"
+MODEL_SHA256 = "d9cef07ce652ccfa9ce58e4ac8a4df98ff037739a9dad20a8afcae21b545df73"
 MAX_MODEL_BYTES = 16 * 1024 * 1024
 MAX_DETECTIONS = 1000
 PRIVACY_CLASSES = {
@@ -29,7 +29,7 @@ PRIVACY_CLASSES = {
     5: "bus", 6: "train", 7: "truck", 8: "boat", 62: "tv",
     63: "laptop", 67: "cell phone", 73: "book",
 }
-PROCESSING_VERSION = "metadata_removed_local_object_blurring_v1"
+PROCESSING_VERSION = "metadata_removed_local_litert_blurring_v1"
 
 
 class PrivacyProcessingError(RuntimeError):
@@ -54,9 +54,11 @@ class PrivacyBlurrer:
         return {
             "required": True,
             "model": MODEL_NAME,
+            "runtime": "LiteRT",
+            "requires_pytorch": False,
             "dependencies_available": all(
                 importlib.util.find_spec(name) is not None
-                for name in ("ultralytics", "torch", "cv2", "numpy")
+                for name in ("ai_edge_litert", "cv2", "numpy")
             ),
             "model_cached": (self.cache_dir / MODEL_NAME).is_file(),
         }
@@ -85,9 +87,11 @@ class PrivacyBlurrer:
         return path
 
     def _load_model(self):
-        from ultralytics import YOLO
+        from .litert_detector import LiteRtDetector
 
-        model = YOLO(str(self._model_path()), task="detect")
+        if not self.status()["dependencies_available"]:
+            raise PrivacyProcessingError("privacy_runtime_unavailable")
+        model = LiteRtDetector(self._model_path(), classes=PRIVACY_CLASSES, max_detections=MAX_DETECTIONS)
         if any(model.names.get(key) != name for key, name in PRIVACY_CLASSES.items()):
             raise PrivacyProcessingError("privacy_model_classes_mismatch")
         return model
@@ -100,27 +104,18 @@ class PrivacyBlurrer:
 
                 if self._model is None:
                     self._model = self._load_model()
-                # Never pass a source filename (including paths/GPS) to YOLO.
-                frame = np.asarray(image.convert("RGB"))[:, :, ::-1].copy()
-                results = self._model.predict(
-                    source=frame, device="cpu", imgsz=1280, conf=0.15, iou=0.5,
-                    classes=list(PRIVACY_CLASSES), max_det=MAX_DETECTIONS,
-                    verbose=False, save=False, stream=False, augment=False,
-                )
-                if len(results) != 1 or results[0].boxes is None:
+                # Never pass source filenames (including paths/GPS) to inference.
+                frame = np.asarray(image.convert("RGB")).copy()
+                results = np.asarray(self._model.predict(frame))
+                if results.ndim != 2 or results.shape[1] != 6:
                     raise PrivacyProcessingError("privacy_detection_incomplete")
-                boxes = results[0].boxes
-                coordinates = boxes.xyxy.cpu().tolist()
-                classes = boxes.cls.cpu().tolist()
-                if len(coordinates) != len(classes) or len(coordinates) >= MAX_DETECTIONS:
+                if len(results) >= MAX_DETECTIONS or not np.isfinite(results).all():
                     raise PrivacyProcessingError("privacy_detection_incomplete")
                 height, width = frame.shape[:2]
                 regions = 0
-                for box, class_id in zip(coordinates, classes):
-                    if (class_id not in PRIVACY_CLASSES or len(box) != 4
-                            or not all(math.isfinite(value) for value in box)):
+                for x1, y1, x2, y2, confidence, class_id in results:
+                    if class_id not in PRIVACY_CLASSES or not 0 <= confidence <= 1:
                         raise PrivacyProcessingError("privacy_detection_invalid")
-                    x1, y1, x2, y2 = box
                     if x2 <= x1 or y2 <= y1:
                         raise PrivacyProcessingError("privacy_detection_invalid")
                     # Expand edges to cover borders of faces/plates near a box.
@@ -138,7 +133,7 @@ class PrivacyBlurrer:
                     mosaic = cv2.resize(small, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_NEAREST)
                     frame[top:bottom, left:right] = cv2.blur(mosaic, (51, 51))
                     regions += 1
-                return Image.fromarray(frame[:, :, ::-1].copy()), regions
+                return Image.fromarray(frame), regions
             except PrivacyProcessingError:
                 raise
             except Exception:
