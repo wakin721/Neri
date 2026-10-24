@@ -13,6 +13,7 @@ from system.version import (  # noqa: E402
     BASE_VERSION,
     DEFAULT_BUILD_CODE,
     DEFAULT_BUILD_NUMBER,
+    format_app_version,
 )
 
 BUILD_CODE_PATTERN = re.compile(r"^[0-9a-fA-F]{6}$")
@@ -97,7 +98,7 @@ def choose_build_number(args: argparse.Namespace) -> int:
 
 
 def app_version(build_code: str) -> str:
-    return f"{BASE_VERSION}({build_code})"
+    return format_app_version(build_code)
 
 
 def pubspec_version(build_number: int) -> str:

@@ -1,4 +1,4 @@
-const privacyAgreementVersion = '2026-09-05';
+const privacyAgreementVersion = '2026-10-25';
 const privacyAgreementAsset = 'assets/legal/user_agreement.md';
 const privacyStatusRefreshInterval = Duration(seconds: 2);
 
@@ -9,12 +9,18 @@ class PrivacyStatus {
     required this.participationDecided,
     required this.trainingEnabled,
     required this.stats,
+    this.deviceId = '',
   });
 
   factory PrivacyStatus.fromJson(Map<String, dynamic> json) {
     final rawStats = json['stats'];
     return PrivacyStatus(
       agreementVersion: json['agreement_version'] as String? ?? '',
+      deviceId:
+          json['device_id'] is String &&
+              RegExp(r'^[a-f0-9]{32}$').hasMatch(json['device_id'] as String)
+          ? json['device_id'] as String
+          : '',
       agreementAccepted: json['agreement_accepted'] as bool? ?? false,
       participationDecided: json['participation_decided'] as bool? ?? false,
       trainingEnabled: json['training_enabled'] as bool? ?? false,
@@ -25,6 +31,8 @@ class PrivacyStatus {
   }
 
   final String agreementVersion;
+  final String deviceId;
+  bool get hasDeviceId => RegExp(r'^[a-f0-9]{32}$').hasMatch(deviceId);
   final bool agreementAccepted;
   final bool participationDecided;
   final bool trainingEnabled;

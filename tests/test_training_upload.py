@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import sqlite3
 import unittest
@@ -9,13 +10,24 @@ from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
+from functools import partial
+from unittest.mock import patch
 
 from PIL import Image
 
-from system.training.media import prepare_sample
+from system.training.media import prepare_sample as _prepare_sample
 from system.training.policy import AGREEMENT_VERSION
+from system.training.privacy import PrivacyProcessingError, PROCESSING_VERSION
 from system.training.queue import TrainingQueue
 from system.training.transport import UploadCancelled
+
+
+def no_private_objects(image):
+    """Deterministic successful detector for queue/encoding unit tests."""
+    return image, 0
+
+
+prepare_sample = partial(_prepare_sample, privacy_blurrer=no_private_objects)
 
 
 def save_mpo(path, *, orientation=1):
@@ -68,10 +80,89 @@ class TrainingQueueTests(unittest.TestCase):
 
     def make_queue(self):
         return TrainingQueue(self.root / 'state', transport=self.cloud,
-                             clock=lambda: self.now, debounce_seconds=0)
+                             clock=lambda: self.now, debounce_seconds=0,
+                             privacy_blurrer=no_private_objects)
 
     def enable(self):
         self.queue.set_consent(AGREEMENT_VERSION, True)
+
+    def test_device_identity_survives_consent_clear_and_restart_without_hardware(self):
+        initial = self.queue.status()['device_id']
+        self.assertRegex(initial, r'^[a-f0-9]{32}$')
+        self.enable()
+        self.queue.clear_pending()
+        self.queue.set_consent(AGREEMENT_VERSION, False)
+        self.queue.stop()
+        self.queue = self.make_queue()
+        self.assertEqual(self.queue.status()['device_id'], initial)
+        with self.queue._connect() as db:
+            secret = db.execute("SELECT value FROM identity WHERE key='device_secret'").fetchone()[0]
+        self.assertEqual(initial, hashlib.sha256(secret.encode()).hexdigest()[:32])
+        self.assertNotIn(secret, json.dumps(self.queue.status()))
+        other = TrainingQueue(self.root / 'other', transport=self.cloud)
+        try:
+            self.assertNotEqual(other.status()['device_id'], initial)
+        finally:
+            other.stop()
+
+    def test_upload_receives_the_same_device_identity_as_privacy_status(self):
+        self.enable()
+        self.queue.enqueue(self.photo(), {'物种名称': '赤狐'})
+        with patch.object(self.cloud, 'upload', wraps=self.cloud.upload) as upload:
+            self.drain()
+        job = upload.call_args.args[0]
+        self.assertEqual(job['device_id'], self.queue.status()['device_id'])
+        self.assertNotEqual(job['secret'], job['device_secret'])
+
+    def test_privacy_failure_never_reaches_transport_and_retries(self):
+        self.enable()
+        for name, species in [('fox.jpg', '赤狐'), ('empty.jpg', '空')]:
+            self.queue.enqueue(self.photo(name), {'物种名称': species})
+        with patch.object(self.cloud, 'upload', wraps=self.cloud.upload) as upload:
+            self.queue.privacy_blurrer = lambda image: (_ for _ in ()).throw(
+                PrivacyProcessingError('privacy_processing_unavailable'))
+            self.drain()
+            upload.assert_not_called()
+            self.assertEqual(self.queue.status()['stats']['failed'], 2)
+            with self.queue._connect() as db:
+                self.assertEqual(db.execute('SELECT SUM(remote_possible) FROM jobs').fetchone()[0], 0)
+            self.queue.privacy_blurrer = no_private_objects
+            self.now += 31
+            self.drain()
+            self.assertEqual(upload.call_count, 2)
+        self.assertTrue(all(item['privacy_processing'] == PROCESSING_VERSION
+                            for item in self.cloud.files.values()))
+
+    def test_old_agreement_pauses_pending_jobs_until_new_explicit_choice(self):
+        self.enable()
+        self.queue.enqueue(self.photo(), {'物种名称': '赤狐'})
+        with self.queue._connect() as db:
+            db.execute("UPDATE consent SET value='2026-09-05' WHERE key='version'")
+        with patch('system.training.queue.prepare_sample', side_effect=AssertionError('decoded')):
+            self.assertFalse(self.queue.process_once())
+        self.assertFalse(self.queue.status()['training_enabled'])
+        self.assertFalse(self.queue.status()['agreement_accepted'])
+        self.assertFalse(self.cloud.files)
+        self.enable()
+        self.drain()
+        self.assertEqual(len(self.cloud.files), 1)
+
+    def test_upload_contains_processed_pixels_and_preserves_original(self):
+        self.enable()
+        path = self.photo()
+        original = path.read_bytes()
+        self.queue.enqueue(path, {'物种名称': '赤狐'})
+        self.queue.privacy_blurrer = lambda image: (Image.new('RGB', image.size, 'red'), 1)
+        with patch.object(self.cloud, 'upload', wraps=self.cloud.upload) as upload:
+            self.drain()
+        photo = upload.call_args.args[1]
+        with Image.open(io.BytesIO(photo)) as image:
+            self.assertGreater(image.getpixel((10, 10))[0], 240)
+            self.assertLess(image.getpixel((10, 10))[1], 15)
+        self.assertEqual(path.read_bytes(), original)
+        package = next(iter(self.cloud.files.values()))
+        self.assertEqual(package['privacy_blurred_regions'], 1)
+        self.assertFalse(package['visual_anonymity_guaranteed'])
 
     def photo(self, name='camera/a.jpg'):
         path = self.root / name
@@ -350,6 +441,21 @@ class TrainingQueueTests(unittest.TestCase):
 
 
 class TrainingMediaTests(unittest.TestCase):
+    def test_empty_and_boxless_labels_are_transferable_without_inventing_objects(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'synthetic.jpg'
+            Image.new('RGB', (40, 30), 'green').save(path)
+            for payload in ({'species': ['空照片'], 'empty': True}, {'species': ['赤狐']}):
+                with self.subTest(payload=payload):
+                    _, annotation = prepare_sample(path, {
+                        'sample_id': 'e' * 32, 'revision': 1, 'payload': payload,
+                    })
+                    data = json.loads(annotation)
+                    for label in data['yolo_labels'].values():
+                        self.assertGreater(len(label.encode('utf-8')), 0)
+                        self.assertFalse(label.strip())
+                    self.assertEqual(data['model_predictions'], [])
+
     def test_mpo_uses_only_primary_image_and_strips_metadata(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / 'camera.jpg'

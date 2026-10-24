@@ -9,14 +9,17 @@ import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/models/settings.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
+import 'package:neri_flutter/src/privacy/privacy_status.dart';
+import 'package:neri_flutter/src/privacy/training_upload_diagnostics.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 
 Map<String, dynamic> diagnostics({bool enabled = true, int uploaded = 4}) => {
   'status': {
-    'agreement_version': '2026-09-05',
+    'agreement_version': privacyAgreementVersion,
     'agreement_accepted': true,
     'participation_decided': true,
     'training_enabled': enabled,
+    'device_id': '0123456789abcdef0123456789abcdef',
     'stats': {
       'pending': 2,
       'uploading': 1,
@@ -42,6 +45,36 @@ Map<String, dynamic> diagnostics({bool enabled = true, int uploaded = 4}) => {
 };
 
 void main() {
+  test(
+    'upload privacy diagnostics report required processing and missing dependencies',
+    () {
+      final data = diagnostics();
+      data['privacy_blurring'] = {
+        'required': true,
+        'model': 'yolo11n.pt',
+        'dependencies_available': false,
+        'model_cached': false,
+      };
+      final missing = TrainingUploadDiagnostics.fromJson(data);
+      expect(
+        missing.copyText,
+        contains('设备匿名 ID：0123456789abcdef0123456789abcdef'),
+      );
+      expect(missing.copyText, contains('完成前不会上传照片'));
+      expect(missing.copyText, contains('首次处理时从 Ultralytics 官方 GitHub 下载'));
+      (data['privacy_blurring']
+              as Map<String, dynamic>)['dependencies_available'] =
+          true;
+      final ready = TrainingUploadDiagnostics.fromJson(data);
+      expect(ready.copyText, contains('打码失败不上传'));
+      expect(ready.copyText, contains('自动检测仍可能漏检'));
+      data.remove('privacy_blurring');
+      expect(
+        TrainingUploadDiagnostics.fromJson(data).copyText,
+        contains('服务未确认强制打码状态'),
+      );
+    },
+  );
   Future<void> openDebug(WidgetTester tester, NeriApiClient client) async {
     tester.view.physicalSize = const Size(1100, 850);
     tester.view.devicePixelRatio = 1;

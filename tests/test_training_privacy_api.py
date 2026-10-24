@@ -57,6 +57,17 @@ class PrivacyApiTests(unittest.TestCase):
         self.assertTrue(status['participation_decided'])
         self.assertFalse(status['training_enabled'])
 
+    def test_anonymous_id_is_public_stable_and_never_includes_upload_credentials(self):
+        code, first = self.request('GET')
+        self.assertEqual(code, 200)
+        self.assertRegex(first['device_id'], r'^[a-f0-9]{32}$')
+        _, declined = self.request('PUT', {'agreement_version': AGREEMENT_VERSION, 'training_enabled': False})
+        self.assertEqual(declined['device_id'], first['device_id'])
+        _, details = asyncio.run(asgi_request(self.app, 'GET', '/api/debug/training-upload'))
+        self.assertEqual(details['status']['device_id'], first['device_id'])
+        self.assertNotIn(self.queue._device_secret, json.dumps(details))
+        self.assertNotIn('device_secret', json.dumps(details))
+
     def test_upload_diagnostics_read_current_settings_without_exposing_addresses(self):
         self.queue.debounce_seconds = 17
         self.queue.transport.timeout = 91
@@ -75,6 +86,8 @@ class PrivacyApiTests(unittest.TestCase):
         self.assertEqual(details['request_timeout_seconds'], 91)
         self.assertEqual(details['max_image_edge'], 2048)
         self.assertEqual(details['jpeg_quality'], 82)
+        self.assertTrue(details['privacy_blurring']['required'])
+        self.assertEqual(details['privacy_blurring']['model'], 'yolo11n.pt')
         self.assertFalse(details['worker_running'])
         serialized = json.dumps(details)
         for private_value in ('private.example', 'secret-destination', str(photo), 'secret', 'url', 'source_path'):

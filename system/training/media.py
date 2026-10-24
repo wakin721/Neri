@@ -4,11 +4,13 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image, ImageOps
 
 from system.config import APP_VERSION
 from .policy import AGREEMENT_VERSION, JPEG_QUALITY, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE
+from .privacy import PROCESSING_VERSION
 
 
 def _yolo_line(box: dict, width: int, height: int) -> str | None:
@@ -25,7 +27,10 @@ def _yolo_line(box: dict, width: int, height: int) -> str | None:
     return f"0 {x_center:.6f} {y_center:.6f} {box_width:.6f} {box_height:.6f}\n"
 
 
-def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
+def prepare_sample(
+    path: Path, job: dict, *,
+    privacy_blurrer: Callable[[Image.Image], tuple[Image.Image, int]],
+) -> tuple[bytes, bytes]:
     with Image.open(path) as source:
         if source.format == "MPO":
             source.seek(0)
@@ -38,6 +43,9 @@ def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
         image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE), Image.Resampling.LANCZOS)
         clean = Image.frombytes("RGB", image.size, image.tobytes())
 
+    # This is mandatory for empty samples too. A detector/runtime error must
+    # propagate to the queue before the transport can create upload sessions.
+    clean, blurred_regions = privacy_blurrer(clean)
     output = io.BytesIO()
     clean.save(output, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     photo = output.getvalue()
@@ -53,7 +61,10 @@ def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
 
     for name in species:
         yolo_classes[name] = f"{training_names.get(name, name)}\n"
-        yolo_labels[name] = ""
+        # OneDrive resumable upload rejects a zero-byte PUT. A blank line is
+        # still an empty YOLO label (the loader strips whitespace) and can be
+        # transferred with the normal bounded byte-range path.
+        yolo_labels[name] = "\n"
 
     if orientation == 1 and not payload.get("empty", False):
         lines_by_species: dict[str, list[str]] = {name: [] for name in species}
@@ -73,7 +84,7 @@ def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
             if name in lines_by_species:
                 lines_by_species[name].append(line)
         for name, lines in lines_by_species.items():
-            yolo_labels[name] = "".join(lines)
+            yolo_labels[name] = "".join(lines) or "\n"
 
     package = {
         "schema_version": 2,
@@ -91,6 +102,8 @@ def prepare_sample(path: Path, job: dict) -> tuple[bytes, bytes]:
         "yolo_labels": yolo_labels,
         "yolo_classes": yolo_classes,
         "application_version": APP_VERSION,
-        "privacy_processing": "metadata_removed_visual_identity_not_guaranteed",
+        "privacy_processing": PROCESSING_VERSION,
+        "privacy_blurred_regions": blurred_regions,
+        "visual_anonymity_guaranteed": False,
     }
     return photo, json.dumps(package, ensure_ascii=False, allow_nan=False).encode("utf-8")

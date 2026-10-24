@@ -92,6 +92,8 @@ class HttpTransport:
             raise UploadError("invalid_yolo_package") from None
 
         response = self._broker("/v1/submissions", "POST", {
+            "device_id": job["device_id"],
+            "device_secret": job["device_secret"],
             "sample_id": job["sample_id"],
             "revision": job["revision"],
             "secret": job["secret"],
@@ -102,6 +104,7 @@ class HttpTransport:
         })
         if (
             not isinstance(response, dict)
+            or response.get('device_id') != job['device_id']
             or response.get('sample_id') != job['sample_id']
             or response.get('revision') != job['revision']
         ):

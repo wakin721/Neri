@@ -46,6 +46,7 @@ Copy-Item "system" $package -Recurse -Force
 Copy-Item "res" $package -Recurse -Force
 Copy-Item "requirements.txt" $package -Force
 Copy-Item "requirements-within-seq.txt" $package -Force
+Copy-Item "requirements-privacy.txt" $package -Force
 Copy-Item "res\demo\README_Update.md" (Join-Path $package "README_Update.md") -Force
 
 $requiredModelPaths = @(

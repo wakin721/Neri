@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -12,6 +13,99 @@ import 'package:neri_flutter/src/privacy/privacy_settings_card.dart';
 import 'package:neri_flutter/src/privacy/privacy_status.dart';
 
 void main() {
+  test(
+    'device IDs are parsed strictly and older services have no copyable ID',
+    () {
+      const deviceId = '0123456789abcdef0123456789abcdef';
+      expect(
+        PrivacyStatus.fromJson({'device_id': deviceId}).deviceId,
+        deviceId,
+      );
+      for (final invalid in [
+        null,
+        12,
+        '../private',
+        'private-device-credential',
+      ]) {
+        expect(
+          PrivacyStatus.fromJson({'device_id': invalid}).hasDeviceId,
+          isFalse,
+        );
+      }
+    },
+  );
+
+  testWidgets(
+    'privacy settings display and copy only the anonymous ID while participation is off',
+    (tester) async {
+      const deviceId = '0123456789abcdef0123456789abcdef';
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final client = NeriApiClient(
+        httpClient: MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'agreement_version': privacyAgreementVersion,
+              'agreement_accepted': true,
+              'participation_decided': true,
+              'training_enabled': false,
+              'device_id': deviceId,
+              'device_secret': 'must-never-appear',
+            }),
+            200,
+          ),
+        ),
+      );
+      addTearDown(client.close);
+      tester.view.physicalSize = const Size(360, 740);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: PrivacySettingsCard(apiClient: client),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final text = tester.widget<SelectableText>(find.byType(SelectableText));
+      expect(text.data, deviceId);
+      expect(find.textContaining('must-never-appear'), findsNothing);
+      await tester.ensureVisible(find.byKey(privacyCopyDeviceIdButtonKey));
+      await tester.tap(find.byKey(privacyCopyDeviceIdButtonKey));
+      await tester.pumpAndSettle();
+      expect(copied, deviceId);
+      expect(find.text('设备匿名 ID 已复制'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  test('an older agreement never satisfies the current consent gate', () {
+    final status = PrivacyStatus.fromJson({
+      'agreement_version': '2026-09-05',
+      'agreement_accepted': true,
+      'participation_decided': true,
+      'training_enabled': true,
+    });
+    expect(status.hasCurrentAgreement, isFalse);
+    expect(status.isConsentComplete, isFalse);
+  });
   const undecidedStatus = PrivacyStatus(
     agreementVersion: privacyAgreementVersion,
     agreementAccepted: false,
@@ -496,7 +590,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('协议版本 2026-09-05 · 已同意'), findsOneWidget);
+    expect(find.text('协议版本 $privacyAgreementVersion · 已同意'), findsOneWidget);
     await tester.tap(find.byKey(privacyDisableButtonKey));
     await tester.pumpAndSettle();
     expect(methods, ['GET', 'PUT']);

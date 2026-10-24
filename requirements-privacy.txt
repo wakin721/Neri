@@ -1,0 +1,3 @@
+# Optional upload privacy processing; also installed by Settings > YOLO dependencies.
+# PyTorch is installed separately by Neri's hardware-aware installer.
+ultralytics>=8.4.13

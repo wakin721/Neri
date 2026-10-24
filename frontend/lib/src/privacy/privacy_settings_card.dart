@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api_client.dart';
 import 'privacy_consent_dialog.dart';
@@ -8,6 +9,7 @@ import 'privacy_status.dart';
 
 const privacyEnableButtonKey = Key('privacy-enable-button');
 const privacyDisableButtonKey = Key('privacy-disable-button');
+const privacyCopyDeviceIdButtonKey = Key('privacy-copy-device-id-button');
 
 class PrivacySettingsCard extends StatefulWidget {
   const PrivacySettingsCard({
@@ -148,6 +150,21 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
 
   Future<void> _showAgreement() => showPrivacyAgreementDialog(context);
 
+  Future<void> _copyDeviceId() async {
+    final status = _status;
+    if (status == null || !status.hasDeviceId) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: status.deviceId));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('设备匿名 ID 已复制')));
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = '复制设备匿名 ID 失败：$error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -224,6 +241,38 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
                 ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
               const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '设备匿名 ID',
+                          style: Theme.of(context).textTheme.labelMedium,
+                        ),
+                        SelectableText(
+                          status.hasDeviceId
+                              ? status.deviceId
+                              : '当前后端未提供 ID，请更新后端',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    key: privacyCopyDeviceIdButtonKey,
+                    tooltip: '复制设备匿名 ID',
+                    onPressed: status.hasDeviceId ? _copyDeviceId : null,
+                    icon: const Icon(Icons.copy_rounded),
+                  ),
+                ],
+              ),
+              Text(
+                '申请删除上传照片时，请向 wakin721@outlook.com 提供此 ID。ID 随当前安装保存；清除应用数据或更换设备后可能改变，请提前留存。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
               Wrap(
                 spacing: 14,
                 runSpacing: 8,
@@ -280,7 +329,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
               ),
               const SizedBox(height: 10),
               Text(
-                '停止参加会在下一次传输前取消等待中或进行中的任务。远程未完成上传创建满 20 分钟后进入清理；已完成照片和 JSON 自修订创建起最长保存 365 天，故障导致的到期清理会在服务恢复后重试。也可联系 wakin721@outlook.com 申请提前删除。',
+                '停止参加会在下一次传输前取消等待中或进行中的任务。远程未完成上传创建满 20 分钟后进入清理；已完成照片、YOLO 标注和类别文件自修订创建起最长保存 365 天，故障导致的到期清理会在服务恢复后重试。也可联系 wakin721@outlook.com 申请提前删除。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),

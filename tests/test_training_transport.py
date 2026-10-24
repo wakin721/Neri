@@ -1,4 +1,5 @@
 import json
+import hashlib
 import unittest
 
 from system.training.transport import HttpTransport, UploadError, UploadCancelled
@@ -8,6 +9,8 @@ class TransportTests(unittest.TestCase):
     def setUp(self):
         self.transport = HttpTransport()
         self.job = {
+            'device_secret': 'd' * 43,
+            'device_id': hashlib.sha256(('d' * 43).encode()).hexdigest()[:32],
             'sample_id': 'a' * 32,
             'revision': 1,
             'secret': 's' * 43,
@@ -23,7 +26,8 @@ class TransportTests(unittest.TestCase):
             }
             for kind, token in [('image', 'i'), ('annotation', 'a'), ('classes', 'c')]
         ]
-        self.response = {'sample_id': self.job['sample_id'], 'revision': 1, 'targets': self.targets}
+        self.response = {'sample_id': self.job['sample_id'], 'revision': 1,
+                         'device_id': self.job['device_id'], 'targets': self.targets}
         self.calls = []
 
         def request(url, method, body=None, headers=None):
@@ -48,6 +52,19 @@ class TransportTests(unittest.TestCase):
         self.response.update(already_complete=True, targets=[], revision=2)
         with self.assertRaises(UploadError):
             self.transport.upload(self.job, b'photo', self.package(), lambda: True)
+
+    def test_receipt_must_confirm_device_folder_and_secret_only_goes_to_broker(self):
+        self.transport.upload(self.job, b'photo', self.package(), lambda: True)
+        authorization = json.loads(self.calls[0][2])
+        self.assertEqual(authorization['device_id'], self.job['device_id'])
+        self.assertEqual(authorization['device_secret'], self.job['device_secret'])
+        for url, method, body, headers in self.calls[1:]:
+            self.assertNotIn(self.job['device_secret'].encode(), body or b'')
+        self.calls.clear()
+        self.response.pop('device_id')
+        with self.assertRaisesRegex(UploadError, 'invalid_submission_receipt'):
+            self.transport.upload(self.job, b'photo', self.package(), lambda: True)
+        self.assertFalse(any(call[1] == 'PUT' for call in self.calls))
 
     def test_only_microsoft_receives_photo_and_yolo_bytes_in_bounded_chunks(self):
         photo = b'x' * (5242880 + 7)

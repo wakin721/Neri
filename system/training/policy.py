@@ -5,7 +5,7 @@ import math
 import re
 import unicodedata
 
-AGREEMENT_VERSION = "2026-09-05"
+AGREEMENT_VERSION = "2026-10-25"
 EMPTY_CATEGORY = "空照片"
 MAX_EMPTY_PER_FOLDER = 3
 MAX_IMAGE_EDGE = 2048
