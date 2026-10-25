@@ -22,6 +22,7 @@ ENV/
 /tests/*
 !/tests/__init__.py
 !/tests/test_training_upload.py
+!/tests/test_training_yolo_events.py
 !/tests/test_training_privacy_blurring.py
 !/tests/test_training_privacy_api.py
 !/tests/test_training_transport.py
