@@ -12,9 +12,15 @@ from PIL import Image
 
 from system.training.events import EVENT_GAP_SECONDS, TriggerEventResolver
 from system.training.media import prepare_sample
+from system.training.policy import AGREEMENT_VERSION
 from system.training.queue import TrainingQueue
 from system.training.species import SpeciesNameResolver
 from system.training.transport import UploadCancelled
+
+
+def no_private_objects(image: Image.Image) -> tuple[Image.Image, int]:
+    """Deterministic privacy processor for label/event unit tests."""
+    return image, 0
 
 
 def save_camera_photo(path: Path, taken: datetime) -> None:
@@ -115,6 +121,7 @@ class TrainingYoloMediaTests(unittest.TestCase):
                         ],
                     },
                 },
+                privacy_blurrer=no_private_objects,
             )
             self.assertTrue(photo.startswith(b'\xff\xd8'))
             data = json.loads(package)
@@ -144,10 +151,13 @@ class TrainingYoloMediaTests(unittest.TestCase):
                         'model_boxes': [],
                     },
                 },
+                privacy_blurrer=no_private_objects,
             )
             data = json.loads(package)
             self.assertEqual(data['upload_species'], ['空照片'])
-            self.assertEqual(data['yolo_labels']['空照片'], '')
+            label = data['yolo_labels']['空照片']
+            self.assertEqual(label.strip(), '')
+            self.assertGreater(len(label.encode('utf-8')), 0)
             self.assertEqual(data['yolo_classes']['空照片'], 'background\n')
 
 
@@ -164,9 +174,10 @@ class TrainingEventQueueTests(unittest.TestCase):
                 clock=lambda: 1000.0,
                 debounce_seconds=0,
                 species_db_path=db_path,
+                privacy_blurrer=no_private_objects,
             )
             try:
-                queue.set_consent('2026-09-05', True)
+                queue.set_consent(AGREEMENT_VERSION, True)
                 start = datetime(2026, 9, 7, 12, 0, 0)
                 photos = [root / 'camera' / f'{i}.jpg' for i in range(3)]
                 for path, seconds in zip(photos, (0, 4, 9)):
