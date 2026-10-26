@@ -292,6 +292,138 @@ void main() {
       tester.view.resetDevicePixelRatio();
     },
   );
+  testWidgets(
+    'ungrouped metadata does not retain a removed fallback species bucket',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => http.Response('{}', 200)),
+      );
+      addTearDown(api.close);
+      final items = [
+        for (var index = 0; index < 600; index++)
+          DetectionItem(
+            filename: '$index.jpg',
+            path:
+                '${Directory('ungrouped-metadata-input').absolute.path}/$index.jpg',
+            fileType: 'jpg',
+            dateTaken: '2026-10-10T12:00:00',
+            species: index == 0 ? const ['豹猫', '未检测'] : const ['豹猫'],
+          ),
+      ];
+      await tester.pumpWidget(
+        _GroupExpansionHarness(
+          apiClient: api,
+          initialItems: items,
+          autoGroup: false,
+        ),
+      );
+      await _waitForValidationPreparation(tester);
+      expect(find.text('未检测、豹猫'), findsWidgets);
+      final state = tester.state<_GroupExpansionHarnessState>(
+        find.byType(_GroupExpansionHarness),
+      );
+      state.switchItems(
+        List.of(items)
+          ..[0] = DetectionItem(
+            filename: items.first.filename,
+            path: items.first.path,
+            fileType: 'jpg',
+            dateTaken: items.first.dateTaken,
+            species: const ['豹猫'],
+          ),
+      );
+      await tester.pump();
+      await _waitForValidationPreparation(tester);
+      expect(find.text('未检测、豹猫'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  for (final change in [
+    'timestamp',
+    'gap-boundary',
+    'species',
+    'validated',
+    'order',
+  ]) {
+    testWidgets('real $change changes still rebuild large validation', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => http.Response('{}', 200)),
+      );
+      addTearDown(api.close);
+      final items = [
+        for (var index = 0; index < 600; index++)
+          DetectionItem(
+            filename: '$index.jpg',
+            path:
+                '${Directory('metadata-boundaries-input').absolute.path}/$index.jpg',
+            fileType: 'jpg',
+            dateTaken: '2026-10-10T12:00:00',
+            species: const ['豹猫'],
+          ),
+      ];
+      await tester.pumpWidget(
+        _GroupExpansionHarness(apiClient: api, initialItems: items),
+      );
+      await _waitForValidationPreparation(tester);
+      expect(find.textContaining('150 组'), findsWidgets);
+      final state = tester.state<_GroupExpansionHarnessState>(
+        find.byType(_GroupExpansionHarness),
+      );
+      final next = List<DetectionItem>.of(items);
+      final first = items.first;
+      next[0] = DetectionItem(
+        filename: first.filename,
+        path: first.path,
+        fileType: first.fileType,
+        dateTaken: change == 'timestamp'
+            ? '2026-10-11T12:00:00'
+            : change == 'gap-boundary'
+            ? '2026-10-10T11:30:00'
+            : first.dateTaken,
+        species: change == 'species' ? const ['岩羊'] : first.species,
+        validated: change == 'validated',
+      );
+      if (change == 'validated') {
+        for (var index = 1; index < 4; index++) {
+          final item = items[index];
+          next[index] = DetectionItem(
+            filename: item.filename,
+            path: item.path,
+            fileType: item.fileType,
+            dateTaken: item.dateTaken,
+            species: item.species,
+            validated: true,
+          );
+        }
+      }
+      state.switchItems(change == 'order' ? next.reversed.toList() : next);
+      await tester.pump();
+      expect(_preparingContent(), findsOneWidget);
+      await _waitForValidationPreparation(tester);
+      if (change == 'timestamp' || change == 'gap-boundary') {
+        expect(find.textContaining('151 组'), findsWidgets);
+      } else if (change == 'species') {
+        expect(find.textContaining('岩羊'), findsWidgets);
+      } else {
+        expect(find.textContaining('150 组'), findsWidgets);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   testWidgets('a failed large preparation recovers on a small directory', (
     tester,
   ) async {
@@ -346,10 +478,12 @@ class _GroupExpansionHarness extends StatefulWidget {
   const _GroupExpansionHarness({
     required this.apiClient,
     required this.initialItems,
+    this.autoGroup = true,
   });
 
   final NeriApiClient apiClient;
   final List<DetectionItem> initialItems;
+  final bool autoGroup;
 
   @override
   State<_GroupExpansionHarness> createState() => _GroupExpansionHarnessState();
@@ -396,7 +530,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,
           minFrameRatio: 0,
-          autoGroup: true,
+          autoGroup: widget.autoGroup,
           collapseGroups: true,
           autoGroupDetectBurst: false,
           autoGroupBurstSize: _burstSize,

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -455,6 +456,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       const <String, _ValidationMediaGroup>{};
   Map<String, int> _bucketCacheGroupIndexBySignature = const <String, int>{};
   int _bucketCacheGroupCount = 0;
+  List<_ValidationMediaGroup> _bucketCacheOrderedGroups = const [];
   final Map<String, _MediaTimestampCacheEntry> _mediaTimestampCache =
       <String, _MediaTimestampCacheEntry>{};
   final Map<String, String> _groupSpeciesLabelCache = <String, String>{};
@@ -754,6 +756,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _bucketCache = buckets;
       _bucketCacheHasRepeatedPaths = repeatedPaths;
       _bucketCacheGroupCount = groups.length;
+      _bucketCacheOrderedGroups = groups;
       _bucketCacheGroupIndexBySignature = groupIndices;
       _bucketCacheItemByPath = itemByPath;
       _bucketCacheItemIndexByPath = itemIndices;
@@ -860,8 +863,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   @override
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final preparationChanged =
-        !identical(oldWidget.items, widget.items) ||
+    final groupingSettingsChanged =
         oldWidget.inputPath != widget.inputPath ||
         oldWidget.classificationModelPath != widget.classificationModelPath ||
         oldWidget.refreshVersion != widget.refreshVersion ||
@@ -870,8 +872,21 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         oldWidget.autoGroupBurstSize != widget.autoGroupBurstSize ||
         oldWidget.autoGroupGapSeconds != widget.autoGroupGapSeconds ||
         oldWidget.minFrameRatio != widget.minFrameRatio;
+    final preparationChanged =
+        groupingSettingsChanged || !identical(oldWidget.items, widget.items);
+    // Loading one photo's metadata replaces the list, but usually does not
+    // change any groups. Adopt that delta before the large-list loading gate.
+    final adoptedItemUpdates =
+        preparationChanged &&
+        !groupingSettingsChanged &&
+        !_preparing &&
+        _bucketCacheConfidenceSignature == _confidenceSettingsSignature &&
+        _tryAdoptValidationEchoWithoutGlobalSignatures(
+          includeMetadataUpdates: true,
+        );
     if (preparationChanged) _preparationError = null;
     if (preparationChanged &&
+        !adoptedItemUpdates &&
         _requiresPreparation &&
         (_preparing || _pendingValidationEchoPaths.isEmpty)) {
       _startPreparation();
@@ -930,6 +945,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _bucketCacheGroupBySignature = const <String, _ValidationMediaGroup>{};
       _bucketCacheGroupIndexBySignature = const <String, int>{};
       _bucketCacheGroupCount = 0;
+      _bucketCacheOrderedGroups = const [];
       _mediaTimestampCache.clear();
       _groupSpeciesLabelCache.clear();
       _deferredRegroupGroupSignatures.clear();
@@ -2841,6 +2857,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _rebuildGlobalGroupIndexes(List<_ValidationMediaGroup> groups) {
     _bucketCacheGroupCount = groups.length;
+    _bucketCacheOrderedGroups = groups;
     _bucketCacheGroupIndexBySignature = <String, int>{
       for (var index = 0; index < groups.length; index++)
         _groupSignature(groups[index]): index,
@@ -2925,30 +2942,103 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem previous,
     DetectionItem next,
   ) {
-    return previous.path == next.path &&
-        previous.filename == next.filename &&
-        previous.fileType == next.fileType &&
-        previous.dateTaken == next.dateTaken &&
-        previous.modifiedAt == next.modifiedAt &&
-        previous.error == next.error &&
-        previous.detectionData['拍摄时间']?.toString() ==
-            next.detectionData['拍摄时间']?.toString();
+    if (previous.path != next.path ||
+        previous.filename != next.filename ||
+        previous.fileType != next.fileType ||
+        previous.error != next.error) {
+      return false;
+    }
+    if (_mediaSortTimestamp(previous) == _mediaSortTimestamp(next)) return true;
+
+    // EXIF often corrects the filesystem timestamp by a second. That only
+    // changes grouping if it changes chronological order or crosses a burst
+    // gap. Inspect the two neighboring edges, including edges across groups.
+    final entry = _bucketCacheGroupByPath[previous.path];
+    if (entry == null || entry.index >= _bucketCacheOrderedGroups.length) {
+      return false;
+    }
+    final members = entry.group.items;
+    final memberIndex = members.indexWhere(
+      (item) => item.path == previous.path,
+    );
+    if (memberIndex < 0) return false;
+    final before = memberIndex > 0
+        ? members[memberIndex - 1]
+        : entry.index > 0
+        ? _bucketCacheOrderedGroups[entry.index - 1].items.last
+        : null;
+    final after = memberIndex + 1 < members.length
+        ? members[memberIndex + 1]
+        : entry.index + 1 < _bucketCacheOrderedGroups.length
+        ? _bucketCacheOrderedGroups[entry.index + 1].items.first
+        : null;
+    final directory = File(previous.path).parent.path;
+    final gapThreshold = Duration(
+      seconds: widget.autoGroupGapSeconds.clamp(1, 3600),
+    );
+    bool preservesEdge(DetectionItem left, DetectionItem right) {
+      if (widget.autoGroup &&
+          (File(left.path).parent.path != directory ||
+              File(right.path).parent.path != directory)) {
+        return true;
+      }
+      final leftIndex = _bucketCacheItemIndexByPath[left.path];
+      final rightIndex = _bucketCacheItemIndexByPath[right.path];
+      if (leftIndex == null || rightIndex == null) return false;
+      final nextLeft = widget.items[leftIndex];
+      final nextRight = widget.items[rightIndex];
+      if (sortMediaItemsForDisplay([nextLeft, nextRight]).first.path !=
+          left.path) {
+        return false;
+      }
+      if (!widget.autoGroup) return true;
+      final wasBoundary =
+          (_mediaGap(left, right) ?? Duration.zero) >= gapThreshold;
+      final isBoundary =
+          (_mediaGap(nextLeft, nextRight) ?? Duration.zero) >= gapThreshold;
+      return wasBoundary == isBoundary;
+    }
+
+    return (before == null || preservesEdge(before, previous)) &&
+        (after == null || preservesEdge(previous, after));
   }
 
-  bool _tryAdoptValidationEchoWithoutGlobalSignatures() {
+  bool _tryAdoptValidationEchoWithoutGlobalSignatures({
+    bool includeMetadataUpdates = false,
+  }) {
     // A file can belong to multiple cluster buckets. Rebuild those memberships
     // together rather than updating only the last bucket indexed by its path.
     if (_bucketCacheHasRepeatedPaths) return false;
-    if (_pendingValidationEchoPaths.isEmpty) return false;
+    if (!includeMetadataUpdates && _pendingValidationEchoPaths.isEmpty) {
+      return false;
+    }
     final previousItems = _bucketCacheItemsIdentity;
     if (previousItems == null || previousItems.length != widget.items.length) {
       return false;
+    }
+    final changedPaths = Set<String>.of(_pendingValidationEchoPaths);
+    if (includeMetadataUpdates) {
+      for (var index = 0; index < widget.items.length; index++) {
+        final previous = previousItems[index];
+        final next = widget.items[index];
+        if (identical(previous, next)) continue;
+        // Reordering, replacement scans and bulk changes use cancellable
+        // preparation; only small metadata/mark deltas take this path.
+        if (previous.path != next.path || changedPaths.length >= 128) {
+          return false;
+        }
+        changedPaths.add(next.path);
+      }
+      if (changedPaths.isEmpty) {
+        _bucketCacheItemsIdentity = widget.items;
+        return true;
+      }
     }
     if (!ValidationCacheDelta.canAdoptPendingEcho<DetectionItem>(
       nextItems: widget.items,
       cachedLength: _bucketCacheItemIndexByPath.length,
       cachedIndexByPath: _bucketCacheItemIndexByPath,
-      pendingPaths: _pendingValidationEchoPaths,
+      pendingPaths: changedPaths,
       pathOf: (item) => item.path,
       groupingSettingsUnchanged: true,
       refreshVersionUnchanged: true,
@@ -2957,7 +3047,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     }
 
     final pendingIndexes = <int>{};
-    for (final path in _pendingValidationEchoPaths) {
+    for (final path in changedPaths) {
       final index = _bucketCacheItemIndexByPath[path];
       if (index == null) return false;
       pendingIndexes.add(index);
@@ -2971,7 +3061,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final groupItemIndexByPath = <String, int>{};
     final affectedGroups = <String, _ValidationMediaGroup>{};
 
-    for (final path in _pendingValidationEchoPaths) {
+    for (final path in changedPaths) {
       final globalIndex = _bucketCacheItemIndexByPath[path];
       final previous = _bucketCacheItemByPath[path];
       final groupEntry = _bucketCacheGroupByPath[path];
@@ -2990,6 +3080,15 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       }
 
       final next = widget.items[globalIndex];
+      if ((widget.classificationModelPath?.trim().isNotEmpty ?? false) &&
+          next.detectionBoxes.any(
+            (box) =>
+                _isRejectedSpeciesName(box.species) &&
+                box.observationId != null &&
+                !_rejectionClusters.containsKey(box.observationId),
+          )) {
+        return false;
+      }
       if (!_sameGroupingBoundaryMetadata(previous, next) ||
           bucket.items[bucketIndex].path != path) {
         return false;
@@ -3009,8 +3108,17 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       final nextGroup = _ValidationMediaGroup(<DetectionItem>[
         for (final item in group.items) replacements[item.path] ?? item,
       ]);
-      if (_primarySpeciesForGroup(group) !=
-          _primarySpeciesForGroup(nextGroup)) {
+      final previousSpecies = widget.autoGroup
+          ? _primarySpeciesForGroup(group)
+          : _primarySpeciesAfterConfidenceFilter(group.items.first);
+      final nextSpecies = widget.autoGroup
+          ? _primarySpeciesForGroup(nextGroup)
+          : _primarySpeciesAfterConfidenceFilter(nextGroup.items.first);
+      if (previousSpecies != nextSpecies ||
+          !listEquals(
+            _clusterBucketLabels(group, previousSpecies),
+            _clusterBucketLabels(nextGroup, nextSpecies),
+          )) {
         return false;
       }
       final wasComplete = _groupComplete(group);

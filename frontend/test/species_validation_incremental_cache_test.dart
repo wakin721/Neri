@@ -109,6 +109,149 @@ void main() {
     },
   );
 
+  for (final afterMark in [false, true]) {
+    testWidgets(
+      'metadata preserving group boundaries keeps large validation interactive (afterMark=$afterMark)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final key = GlobalKey<_IncrementalHarnessState>();
+        await tester.pumpWidget(
+          _IncrementalHarness(
+            key: key,
+            apiClient: apiClient,
+            tempDir: tempDir,
+            itemCount: 23310,
+          ),
+        );
+        for (var attempt = 0; attempt < 500; attempt++) {
+          if (_blockedValidation().evaluate().isEmpty) break;
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(_blockedValidation(), findsNothing);
+        key.currentState!.resetReadCount();
+        if (afterMark) {
+          key.currentState!.loadMetadataAfterMark = true;
+          await tester.tap(find.text('正确').first);
+        } else {
+          key.currentState!.applyMetadata(0, captureTimeOffsetSeconds: 1);
+        }
+        await tester.pump();
+        expect(
+          _blockedValidation(),
+          findsNothing,
+          reason:
+              'Loading metadata for one photo must not prepare all 23310 items again',
+        );
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(
+          key.currentState!.detectionDataReads,
+          lessThan(500),
+          reason:
+              'Unchanged photos must not have their grouping metadata read again',
+        );
+        expect(key.currentState!.metadataApplications, 1);
+        expect(find.text('正确'), findsWidgets);
+        await tester.tap(find.text('正确').first);
+        await tester.pump();
+        expect(
+          key.currentState!.lastMarkedItem?.width,
+          640,
+          reason:
+              'The next mark must receive the updated metadata from the bucket cache',
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
+  for (final unresolved in [false, true]) {
+    testWidgets(
+      'metadata refreshes changed rejection membership (unresolved=$unresolved)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        var requests = 0;
+        final api = NeriApiClient(
+          httpClient: MockClient((request) async {
+            expect(request.url.path, '/api/dinov2/feedback/rejection-clusters');
+            requests++;
+            final ids =
+                (jsonDecode(request.body) as Map)['observation_ids'] as List;
+            return http.Response(
+              jsonEncode({
+                for (final id in ids.where((id) => id != 'missing'))
+                  id: {
+                    'cluster_id': 'cluster-$id',
+                    'candidate_number': id == 'a' ? 1 : (id == 'b' ? 2 : 3),
+                    'model_fingerprint': 'fp',
+                    'event_count': 10,
+                    'min_cluster_events': 5,
+                    'is_noise': false,
+                    'density_verified': true,
+                  },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        );
+        addTearDown(api.close);
+        final key = GlobalKey<_IncrementalHarnessState>();
+        await tester.pumpWidget(
+          _IncrementalHarness(
+            key: key,
+            apiClient: api,
+            tempDir: tempDir,
+            rejected: true,
+            initialUnassigned: unresolved,
+          ),
+        );
+        Future<void> waitUntilReady() async {
+          for (var attempt = 0; attempt < 500; attempt++) {
+            if (_blockedValidation().evaluate().isEmpty) break;
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 10)),
+            );
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          expect(_blockedValidation(), findsNothing);
+        }
+
+        await waitUntilReady();
+        expect(requests, 1);
+        if (unresolved) {
+          expect(find.text('拒识（未分簇）'), findsWidgets);
+        }
+        key.currentState!.applyMetadata(
+          0,
+          observationId: unresolved ? 'c' : 'b',
+        );
+        await tester.pump();
+        await waitUntilReady();
+        final label = unresolved ? '拒识簇 #3' : '拒识簇 #2';
+        final tile = tester.widget<ListTile>(
+          find
+              .ancestor(of: find.text(label), matching: find.byType(ListTile))
+              .first,
+        );
+        expect((tile.subtitle! as Text).data, unresolved ? '1 个文件' : '301 个文件');
+        expect(requests, unresolved ? 2 : 1);
+        expect(find.text('拒识（未分簇）'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
   testWidgets('marking work stays bounded with 600 validation items', (
     tester,
   ) async {
@@ -212,11 +355,17 @@ class _IncrementalHarness extends StatefulWidget {
   const _IncrementalHarness({
     required this.apiClient,
     required this.tempDir,
+    this.itemCount = _widgetItemCount,
+    this.rejected = false,
+    this.initialUnassigned = false,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final Directory tempDir;
+  final int itemCount;
+  final bool rejected;
+  final bool initialUnassigned;
 
   @override
   State<_IncrementalHarness> createState() => _IncrementalHarnessState();
@@ -226,21 +375,88 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
   late List<DetectionItem> _items;
   int detectionDataReads = 0;
   int readsBeforeParentEcho = 0;
+  bool loadMetadataAfterMark = false;
+  int metadataApplications = 0;
+  DetectionItem? lastMarkedItem;
+
+  void applyMetadata(
+    int index, {
+    String? observationId,
+    int captureTimeOffsetSeconds = 0,
+  }) {
+    final item = _items[index];
+    final updated = DetectionItem(
+      filename: item.filename,
+      path: item.path,
+      fileType: item.fileType,
+      dateTaken: DateTime.parse(
+        item.dateTaken ?? item.modifiedAt!,
+      ).add(Duration(seconds: captureTimeOffsetSeconds)).toIso8601String(),
+      modifiedAt: item.modifiedAt,
+      width: 640,
+      height: 480,
+      species: item.species,
+      confidence: item.confidence,
+      detectionBoxes: observationId == null
+          ? item.detectionBoxes
+          : [
+              DetectionBox(
+                species: '拒识/Unknown',
+                confidence: 0.95,
+                bbox: const [0.1, 0.1, 0.9, 0.9],
+                observationId: observationId,
+              ),
+            ],
+      detectionData: item.detectionData,
+      error: item.error,
+      validated: item.validated,
+    );
+    setState(() {
+      _items = List.of(_items)..[index] = updated;
+      metadataApplications++;
+    });
+  }
+
+  Future<void> _loadMetadata(DetectionItem item) async {
+    if (!loadMetadataAfterMark || metadataApplications != 0) return;
+    applyMetadata(
+      _items.indexWhere((entry) => entry.path == item.path),
+      captureTimeOffsetSeconds: 1,
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     _items = <DetectionItem>[
-      for (var index = 0; index < _widgetItemCount; index++)
+      for (var index = 0; index < widget.itemCount; index++)
         DetectionItem(
           filename: 'image-$index.jpg',
-          path: '${widget.tempDir.path}/image-$index.jpg',
+          path: widget.rejected
+              ? '${widget.tempDir.path}/rejected/image-$index.jpg'
+              : '${widget.tempDir.path}/image-$index.jpg',
           fileType: 'jpg',
-          modifiedAt: '2026-09-14T00:00:00Z',
-          species: const <String>['豹猫'],
+          modifiedAt: DateTime.utc(
+            2026,
+            9,
+            14,
+          ).add(Duration(seconds: index * 2)).toIso8601String(),
+          species: widget.rejected ? const ['拒识/Unknown'] : const ['豹猫'],
           confidence: 0.95,
-          detectionData: _CountingMap(const <String, dynamic>{
-            '物种名称': '豹猫',
+          detectionBoxes: widget.rejected
+              ? [
+                  DetectionBox(
+                    species: '拒识/Unknown',
+                    confidence: 0.95,
+                    bbox: const [0.1, 0.1, 0.9, 0.9],
+                    observationId: widget.initialUnassigned && index == 0
+                        ? 'missing'
+                        : (index.isEven ? 'a' : 'b'),
+                  ),
+                ]
+              : const [],
+          detectionData: _CountingMap(<String, dynamic>{
+            '物种名称': widget.rejected ? '拒识/Unknown' : '豹猫',
             '物种数量': '1',
           }, () => detectionDataReads += 1),
         ),
@@ -291,6 +507,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     String? speciesType,
     String? remark,
   }) async {
+    lastMarkedItem = item;
     final updated = _markedCopy(item, action);
     _beginParentEchoMeasurement();
     setState(() {
@@ -338,12 +555,13 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           rootItems: _items,
           exportFormatMode: 'ask',
           items: _items,
+          classificationModelPath: widget.rejected ? 'model.neri.json' : null,
           loading: false,
           refreshVersion: 0,
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,
           minFrameRatio: 0,
-          autoGroup: true,
+          autoGroup: !widget.rejected,
           collapseGroups: false,
           autoGroupDetectBurst: false,
           autoGroupBurstSize: 20,
@@ -359,7 +577,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           favoritePhotoExportMode: favoritePhotoExportNever,
           emptyPhotoDeleteMode: emptyPhotoDeleteNever,
           onRefresh: () async {},
-          onLoadMetadata: (_) async {},
+          onLoadMetadata: _loadMetadata,
           onOpenExternal: (_) {},
           onMarkItem: _markItem,
           onMarkItems: _markItems,
@@ -376,3 +594,10 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
     );
   }
 }
+
+Finder _blockedValidation() => find.byWidgetPredicate(
+  (widget) =>
+      widget is AbsorbPointer &&
+      widget.key == const ValueKey('validation-directory-content') &&
+      widget.absorbing,
+);
