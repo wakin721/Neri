@@ -45,3 +45,16 @@
 - `dart analyze` on all three changed Dart files: no issues. `dart format --output=none --set-exit-if-changed` and `git diff --check`: pass. Earlier full `flutter analyze --no-pub`: no issues.
 - Independent code review: single-item species comparison finding fixed with a failing then passing regression. Narrow review of the subsequently added field-evidence adjacency logic found no actionable issues.
 - Both requested feature tips are ancestors of the integration merge. Preserve the new local branch/worktree for review; no push, deployment, or modification of the running installation is part of this request.
+
+## Follow-up: marking remains slow with real rejection data
+User clarified the delay occurs after Correct/Change Species, not just entering the page. Real snapshot: 23,310 items, 11,429 rejected items, 4,798 mixed-species items, 31,837 rejected observations. Existing adopter rejects the entire snapshot whenever any path belongs to multiple cluster buckets; completed groups and label changes also fall through to synchronous full-cache reconstruction.
+- [x] Reproduce ordinary marking with an unrelated multi-cluster file, both partial and completed groups, at 23,310 items.
+- [x] Replace single-bucket update assumptions with affected-group membership updates across every bucket; preserve partial-group deferral while moving complete groups and real species/cluster changes immediately.
+- [x] Preserve structural/timestamp-boundary preparation, rejection lookup, selection and undo. Re-run suites, review, build and update the installed version under the user's ongoing deployment authorization.
+
+### Follow-up verification
+- RED: 23,310-item marking read 186,547 metadata fields for a partial group and 396,330 for a completed singleton when an unrelated multi-cluster file existed. GREEN: both tests now stay below 500 fields and retain both cluster buckets.
+- Real cached metadata benchmark: installed HEAD 41b78b = 995ms / 409,643 metadata reads; updated code = 182ms / 53 reads. Both use the same 23,310 cached detection items and 31,606 resolved links, nonexistent media paths, and in-memory marking callbacks. These measurements isolate frontend processing and exclude real backend feedback/network latency. Local fixture and logs are ignored under temp/real-validation-benchmark.
+- Independent review found an unrelated metadata update could overwrite cache-only per-box feedback. Preserving authoritative item lookups fixes it; a widget regression failed before this correction and passed afterward. No other actionable review findings.
+- Added asynchronous local validation_timing.log phases for preparation, backend marking, and incremental updates. Logs contain counts/durations only, no media or model paths.
+- Full Flutter suite: 237 passed. Full Python suite: 511 passed, 1 skipped, 57 subtests passed, existing Starlette/httpx deprecation warning. Analyzer: no errors/warnings; 8 style infos on existing getter/setter and brace patterns under generated Flutter lint options. Formatting and diff checks pass.

@@ -4,11 +4,14 @@ import '../crash_reporter.dart';
 
 /// Local timings contain stage names and durations, never media or user paths.
 class StartupTiming {
-  StartupTiming() : _startedAt = DateTime.now().toIso8601String() {
+  StartupTiming({String logFileName = 'startup_timing.log'})
+    : _logFileName = logFileName,
+      _startedAt = DateTime.now().toIso8601String() {
     _clock.start();
   }
 
   final String _startedAt;
+  final String _logFileName;
   final _clock = Stopwatch();
   int _lastElapsed = 0;
   Future<void> _pending = Future<void>.value();
@@ -24,7 +27,7 @@ class StartupTiming {
       try {
         final file = File(
           '${CrashReporter.logsDirectory.path}'
-          '${Platform.pathSeparator}startup_timing.log',
+          '${Platform.pathSeparator}$_logFileName',
         );
         if (await file.exists() && await file.length() > 128 * 1024) {
           await file.writeAsString('');

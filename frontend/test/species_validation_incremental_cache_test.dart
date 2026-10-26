@@ -252,6 +252,78 @@ void main() {
     );
   }
 
+  for (final burstSize in [20, 1]) {
+    testWidgets(
+      'multi-cluster data keeps marking work local (burst=$burstSize)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final api = NeriApiClient(
+          httpClient: MockClient((request) async {
+            final ids =
+                (jsonDecode(request.body) as Map)['observation_ids'] as List;
+            return http.Response(
+              jsonEncode({
+                for (final id in ids)
+                  id: {
+                    'cluster_id': 'cluster-$id',
+                    'candidate_number': id == 'a' ? 1 : 2,
+                    'model_fingerprint': 'fp',
+                    'event_count': 10,
+                    'min_cluster_events': 5,
+                    'is_noise': false,
+                    'density_verified': true,
+                  },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        );
+        addTearDown(api.close);
+        final key = GlobalKey<_IncrementalHarnessState>();
+        await tester.pumpWidget(
+          _IncrementalHarness(
+            key: key,
+            apiClient: api,
+            tempDir: tempDir,
+            itemCount: 23310,
+            multiClusterFile: true,
+            burstSize: burstSize,
+          ),
+        );
+        for (var attempt = 0; attempt < 500; attempt++) {
+          if (_blockedValidation().evaluate().isEmpty) break;
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(_blockedValidation(), findsNothing);
+        expect(find.textContaining('拒识簇 #1'), findsWidgets);
+        expect(find.textContaining('拒识簇 #2'), findsWidgets);
+        key.currentState!.resetReadCount();
+        await tester.tap(find.text('正确').first);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(_blockedValidation(), findsNothing);
+        expect(key.currentState!.lastMarkedItem, isNotNull);
+        expect(
+          key.currentState!.detectionDataReads,
+          lessThan(500),
+          reason:
+              'An unrelated multi-cluster file or a completed group must not rescan 23310 photos',
+        );
+        expect(find.textContaining('拒识簇 #1'), findsWidgets);
+        expect(find.textContaining('拒识簇 #2'), findsWidgets);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
   testWidgets('marking work stays bounded with 600 validation items', (
     tester,
   ) async {
@@ -358,6 +430,8 @@ class _IncrementalHarness extends StatefulWidget {
     this.itemCount = _widgetItemCount,
     this.rejected = false,
     this.initialUnassigned = false,
+    this.multiClusterFile = false,
+    this.burstSize = 20,
     super.key,
   });
 
@@ -366,6 +440,8 @@ class _IncrementalHarness extends StatefulWidget {
   final int itemCount;
   final bool rejected;
   final bool initialUnassigned;
+  final bool multiClusterFile;
+  final int burstSize;
 
   @override
   State<_IncrementalHarness> createState() => _IncrementalHarnessState();
@@ -443,7 +519,18 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           ).add(Duration(seconds: index * 2)).toIso8601String(),
           species: widget.rejected ? const ['拒识/Unknown'] : const ['豹猫'],
           confidence: 0.95,
-          detectionBoxes: widget.rejected
+          detectionBoxes:
+              widget.multiClusterFile && index == widget.itemCount - 1
+              ? [
+                  for (final id in ['a', 'b'])
+                    DetectionBox(
+                      species: '拒识/Unknown',
+                      confidence: 0.95,
+                      bbox: const [0.1, 0.1, 0.9, 0.9],
+                      observationId: id,
+                    ),
+                ]
+              : widget.rejected
               ? [
                   DetectionBox(
                     species: '拒识/Unknown',
@@ -555,7 +642,9 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           rootItems: _items,
           exportFormatMode: 'ask',
           items: _items,
-          classificationModelPath: widget.rejected ? 'model.neri.json' : null,
+          classificationModelPath: widget.rejected || widget.multiClusterFile
+              ? 'model.neri.json'
+              : null,
           loading: false,
           refreshVersion: 0,
           speciesTypes: const <String, String>{'豹猫': '兽类'},
@@ -564,7 +653,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           autoGroup: !widget.rejected,
           collapseGroups: false,
           autoGroupDetectBurst: false,
-          autoGroupBurstSize: 20,
+          autoGroupBurstSize: widget.burstSize,
           autoGroupGapSeconds: 1800,
           autoSortQuickMarks: false,
           undoSteps: 20,

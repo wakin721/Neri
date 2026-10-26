@@ -12,3 +12,6 @@ Preserve manual mark/undo deferral, rejection density checks, privacy processing
 
 ## Field validation
 The running installation returns date_taken=2025-09-17T11:24:49 and modified_at=2025-09-17T11:24:48 for IMAG0001.JPG. Therefore timestamp equality alone is insufficient: the one-second correction must reuse grouping when it changes neither order nor burst boundaries. A 23,310-item regression reproduces this case before the adjacency check and passes afterward.
+
+## Follow-up scope from real marking failures
+Incremental adoption must handle repeated bucket membership, completed groups, and changed species labels without recomputing unaffected groups. Mutate each affected group's shared item references once, replace its memberships across all affected buckets, retain unfinished manual-review group deferral, remove empty buckets, and retain global chronological group indexes. Preserve authoritative cache-only per-box feedback when an unrelated parent metadata update is adopted. Real structure and burst-boundary changes still use cancellable preparation.

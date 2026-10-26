@@ -410,7 +410,12 @@ void main() {
       }
       state.switchItems(change == 'order' ? next.reversed.toList() : next);
       await tester.pump();
-      expect(_preparingContent(), findsOneWidget);
+      expect(
+        _preparingContent(),
+        change == 'species' || change == 'validated'
+            ? findsNothing
+            : findsOneWidget,
+      );
       await _waitForValidationPreparation(tester);
       if (change == 'timestamp' || change == 'gap-boundary') {
         expect(find.textContaining('151 组'), findsWidgets);

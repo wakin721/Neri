@@ -286,6 +286,99 @@ void main() {
     });
   }
 
+  testWidgets(
+    'unrelated metadata preserves confirmed box feedback before parent refresh',
+    (tester) async {
+      _setSize(tester, 1280);
+      final original = item();
+      final other = DetectionItem(
+        filename: 'other.png',
+        path: '${directory.path}/missing.png',
+        fileType: 'png',
+        species: const ['中亚兔'],
+      );
+      final api = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.method == 'POST') {
+            final body = jsonDecode(request.body) as Map;
+            return _jsonResponse({
+              'operation_id': body['feedback_operation_id'],
+              'item': {
+                'path': imagePath,
+                'species': ['已确认物种'],
+                'detection_boxes': [
+                  {
+                    'species': '已确认物种',
+                    'bbox': [0.2, 0.2, 0.8, 0.8],
+                    'confidence': 0.752,
+                    'observation_id': 'bird-1',
+                  },
+                ],
+              },
+            });
+          }
+          return _jsonResponse({'species': '中亚兔', 'nearest_species': []});
+        }),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(
+        _screen(
+          api,
+          directory.path,
+          original,
+          itemsOverride: [original, other],
+        ),
+      );
+      await _waitForImage(tester);
+      await tester.tapAt(tester.getCenter(find.byType(Image)));
+      await tester.pumpAndSettle();
+      final dialog = find.byKey(const ValueKey('dinov2-detection-box-dialog'));
+      await tester.tap(
+        find.descendant(
+          of: dialog,
+          matching: find.widgetWithText(OutlinedButton, '正确'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('物种：已确认物种'), findsOneWidget);
+      await tester.tap(
+        find.descendant(
+          of: dialog,
+          matching: find.widgetWithText(TextButton, '关闭'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _screen(
+          api,
+          directory.path,
+          original,
+          itemsOverride: [
+            original,
+            DetectionItem(
+              filename: other.filename,
+              path: other.path,
+              fileType: other.fileType,
+              species: other.species,
+              width: 20,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tapAt(tester.getCenter(find.byType(Image)));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('物种：已确认物种'),
+        findsOneWidget,
+        reason:
+            'An unrelated metadata echo must not overwrite newer cache-only feedback',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   for (final width in [1280.0, 600.0]) {
     testWidgets(
       'box click opens details and feature explanation at width $width',
@@ -494,6 +587,7 @@ Widget _screen(
   String exportMode = 'ask',
   Future<void> Function(String)? onFormatModeChanged,
   ThemeData? theme,
+  List<DetectionItem>? itemsOverride,
 }) => MaterialApp(
   theme: theme,
   home: Scaffold(
@@ -501,10 +595,10 @@ Widget _screen(
       apiClient: api,
       inputPath: path,
       rootInputPath: rootPath ?? path,
-      rootItems: [item],
+      rootItems: itemsOverride ?? [item],
       exportFormatMode: exportMode,
       classificationModelPath: 'model.dinov2',
-      items: [item],
+      items: itemsOverride ?? [item],
       loading: false,
       refreshVersion: 0,
       speciesTypes: const {},
