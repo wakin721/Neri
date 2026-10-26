@@ -40,6 +40,8 @@ class Completion(OwnedRequest):
 
 
 class Submission(Completion):
+    device_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    device_secret: str = Field(min_length=32, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
     sample_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     species: list[str] = Field(min_length=1, max_length=8)
     image_bytes: int = Field(ge=1, le=16 * 1024 * 1024)
@@ -169,6 +171,10 @@ class Broker:
                     created REAL NOT NULL,PRIMARY KEY(id,rev));
                 CREATE TABLE IF NOT EXISTS budgets(key TEXT PRIMARY KEY,amount INTEGER NOT NULL);
             ''')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(samples)')}
+            if 'device_id' not in columns:
+                db.execute("ALTER TABLE samples ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+            db.execute('CREATE INDEX IF NOT EXISTS samples_device ON samples(device_id)')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('ip_salt', secrets.token_hex(32)))
             self.salt = db.execute('SELECT value FROM settings WHERE key=?', ('ip_salt',)).fetchone()[0]
         if os.name != 'nt':
@@ -267,6 +273,9 @@ class Broker:
         return annotation, classes
 
     def create(self, data, ip):
+        expected_device = hashlib.sha256(data.device_secret.encode()).hexdigest()[:32]
+        if not hmac.compare_digest(data.device_id, expected_device):
+            raise BrokerError(403, 'device_access_denied')
         annotation_sizes, classes_sizes = self._validated_sizes(data)
         total = data.image_bytes * len(data.species) + sum(annotation_sizes.values()) + sum(classes_sizes.values())
         self.budget(ip, total)
@@ -278,13 +287,19 @@ class Broker:
             sample = db.execute('SELECT * FROM samples WHERE id=?', (data.sample_id,)).fetchone()
             if sample:
                 self.authorize(db, data.sample_id, data.secret)
+                if sample['device_id'] and sample['device_id'] != data.device_id:
+                    raise BrokerError(403, 'device_access_denied')
                 if data.revision < sample['latest'] or (sample['deleted'] and data.revision <= sample['latest']):
                     raise BrokerError(409, 'stale_revision')
             else:
                 db.execute('INSERT INTO samples(id,owner,latest,created,updated) VALUES (?,?,?,?,?)',
                            (data.sample_id, self.owner(data.secret), data.revision, self.clock(), self.clock()))
+            # A legacy sample can be associated only after its private sample
+            # secret was verified. Existing target paths remain usable.
+            db.execute('UPDATE samples SET device_id=? WHERE id=?', (data.device_id, data.sample_id))
             old = db.execute('SELECT * FROM revisions WHERE id=? AND rev=?', (data.sample_id, data.revision)).fetchone()
-            response = {'sample_id': data.sample_id, 'revision': data.revision, 'targets': []}
+            response = {'sample_id': data.sample_id, 'revision': data.revision,
+                        'device_id': data.device_id, 'targets': []}
             if old and old['signature'] != signature:
                 raise BrokerError(409, 'revision_payload_changed')
             if old and old['complete']:
@@ -294,8 +309,9 @@ class Broker:
             db.execute('DELETE FROM revisions WHERE id=? AND complete=0', (data.sample_id,))
             targets = []
             attempt = secrets.token_hex(8)
+            device_folder = self.config.root_path.rstrip('/') + '/' + data.device_id
             for species in data.species:
-                folder = self.config.root_path.rstrip('/') + '/' + species
+                folder = device_folder + '/' + species
                 files = [
                     ('image', '.jpg', data.image_bytes),
                     ('annotation', '.txt', annotation_sizes[species]),
@@ -309,6 +325,7 @@ class Broker:
                        (data.sample_id, data.revision, signature, json.dumps(targets), self.clock()))
             db.execute('UPDATE samples SET latest=?,updated=?,deleted=0 WHERE id=?', (data.revision, self.clock(), data.sample_id))
             db.commit()
+            self.drive.mkdir(device_folder)
             for target in targets:
                 self.drive.mkdir(posixpath.dirname(target['path']))
                 capability = self.drive.create_session(target['path'], target['size'])
@@ -418,7 +435,7 @@ def create_app(config=None, drive=None):
 
     @app.get('/health')
     def health():
-        return {'status': 'ok', 'schema_version': 2}
+        return {'status': 'ok', 'schema_version': 3}
 
     @app.post('/v1/submissions')
     def create(data: Submission, request: Request):

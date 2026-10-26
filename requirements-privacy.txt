@@ -1,0 +1,2 @@
+# Local upload privacy inference; no torch, ultralytics or TensorFlow dependency.
+ai-edge-litert==2.3.0

@@ -1,4 +1,4 @@
 const frontendVersion = String.fromEnvironment(
   'NERI_FRONTEND_VERSION',
-  defaultValue: '3.1.0-alpha1(e2971f)',
+  defaultValue: '3.1.1_alpha1(8a79c9)',
 );

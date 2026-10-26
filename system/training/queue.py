@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .events import TriggerEventResolver
 from .media import prepare_sample
+from .privacy import PrivacyBlurrer
 from .policy import (
     AGREEMENT_VERSION,
     IMAGE_SUFFIXES,
@@ -41,6 +42,7 @@ class TrainingQueue:
         debounce_seconds=10,
         species_db_path: Path | None = None,
         event_resolver: TriggerEventResolver | None = None,
+        privacy_blurrer=None,
     ):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +54,7 @@ class TrainingQueue:
         self.debounce_seconds = debounce_seconds
         self.species_resolver = SpeciesNameResolver(species_db_path)
         self.event_resolver = event_resolver or TriggerEventResolver()
+        self.privacy_blurrer = privacy_blurrer if privacy_blurrer is not None else PrivacyBlurrer(self.state_dir / "privacy-models")
         self._lock = threading.RLock()
         self._processing_lock = threading.Lock()
         self._wake = threading.Event()
@@ -60,6 +63,7 @@ class TrainingQueue:
         with self._connect() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS consent (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS identity (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (
                     source_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, folder_key TEXT NOT NULL,
                     event_key TEXT NOT NULL DEFAULT '',
@@ -73,6 +77,13 @@ class TrainingQueue:
                 CREATE INDEX IF NOT EXISTS jobs_folder ON jobs(folder_key);
                 CREATE INDEX IF NOT EXISTS jobs_waiting ON jobs(state,next_attempt);
             ''')
+            # A random installation secret, independent of consent and hardware.
+            # A transaction also makes concurrent first launches choose one ID.
+            db.execute('INSERT OR IGNORE INTO identity(key,value) VALUES (?,?)',
+                       ('device_secret', secrets.token_urlsafe(32)))
+            self._device_secret = db.execute(
+                "SELECT value FROM identity WHERE key='device_secret'").fetchone()[0]
+            self.device_id = hashlib.sha256(self._device_secret.encode()).hexdigest()[:32]
         with self._connect() as db:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
             if 'remote_possible' not in columns:
@@ -117,6 +128,7 @@ class TrainingQueue:
             counts = dict(db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state"))
         return {
             "agreement_version": AGREEMENT_VERSION,
+            "device_id": self.device_id,
             "agreement_accepted": values.get("version") == AGREEMENT_VERSION,
             "participation_decided": values.get("version") == AGREEMENT_VERSION and "enabled" in values,
             "training_enabled": values.get("version") == AGREEMENT_VERSION and values.get("enabled") == "true",
@@ -152,6 +164,7 @@ class TrainingQueue:
             "jpeg_quality": JPEG_QUALITY,
             "max_image_bytes": MAX_IMAGE_BYTES,
             "image_suffixes": sorted(IMAGE_SUFFIXES),
+            "privacy_blurring": self.privacy_blurrer.status(),
         }
 
     def clear_pending(self):
@@ -301,6 +314,8 @@ class TrainingQueue:
                 return False
             job = dict(row)
             job["payload"] = json.loads(job["payload"])
+            job["device_id"] = self.device_id
+            job["device_secret"] = self._device_secret
             db.execute("UPDATE jobs SET state='uploading' WHERE source_key=?", (job["source_key"],))
         try:
             if job["operation"] == "delete":
@@ -309,7 +324,7 @@ class TrainingQueue:
                 path = Path(job["source_path"])
                 if self._stamp(path) != job["stamp"]:
                     raise ValueError("source_changed")
-                photo, annotation = prepare_sample(path, job)
+                photo, annotation = prepare_sample(path, job, privacy_blurrer=self.privacy_blurrer)
                 if self._stamp(path) != job["stamp"]:
                     raise ValueError("source_changed")
                 if not self._current(job):

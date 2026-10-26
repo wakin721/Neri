@@ -3,9 +3,9 @@ import re
 import subprocess
 from pathlib import Path
 
-BASE_VERSION = "3.1.0-alpha1"
-DEFAULT_BUILD_CODE = "e2971f"
-DEFAULT_BUILD_NUMBER = 645
+BASE_VERSION = "3.1.1-alpha1"
+DEFAULT_BUILD_CODE = "8a79c9"
+DEFAULT_BUILD_NUMBER = 1453
 
 _BUILD_CODE_PATTERN = re.compile(r"^[0-9a-fA-F]{6}$")
 _BUILD_NUMBER_PATTERN = re.compile(r"^\d{1,5}$")
@@ -89,7 +89,8 @@ def get_build_number() -> int:
 
 
 def format_app_version(build_code: str | None = None) -> str:
-    return f"{BASE_VERSION}({build_code or get_build_code()})"
+    display_version = BASE_VERSION.replace("-", "_", 1)
+    return f"{display_version}({build_code or get_build_code()})"
 
 
 def format_pubspec_version(build_number: str | int | None = None) -> str:
