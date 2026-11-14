@@ -992,7 +992,11 @@ try {
 function Expand-UpdateArchive([string]$Source, [string]$Destination) {
     $Extension = [System.IO.Path]::GetExtension($Source).ToLowerInvariant()
     if ($Extension -eq '.zip') {
-        Expand-Archive -LiteralPath $Source -DestinationPath $Destination -Force
+        # The destination is freshly created. Use the .NET Framework overload
+        # directly: a PowerShell 7 Archive module inherited through PSModulePath
+        # can call the unsupported three-argument overload under Windows PS 5.1.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($Source, $Destination)
         return
     }
     if ($Extension -ne '.7z') {

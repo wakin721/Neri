@@ -6,10 +6,11 @@
 
 [dev 构建 43598449206](https://github.com/wakin721/Neri/actions/runs/43598449206) 的后端测试通过，286 项普通 Flutter 测试通过。单独的 Windows 更新器集成测试在等待更新器进程退出时触发 `TimeoutException after 0:01:00.000000`，后续编译、打包及上传都未执行。此次失败已不是先前缺失 requirements 文件、默认 30 秒测试时限或普通 Flutter 测试阶段的问题。
 
-旧日志没有更新器自己的 update.log，因此不能仅凭超时断言卡在具体哪条 PowerShell 指令。代码中存在两个需要处理的交互点：测试指定了不存在的重启程序；安装失败时 PowerShell 会调用模态 MessageBox。无人值守 runner 无法关闭此类窗口。
+旧日志没有更新器自己的 update.log，因此最初只能定位到等待进程退出。加入非交互模式和日志后，[nightly 构建 43606204068](https://github.com/wakin721/Neri/actions/runs/43606204068) 确认实际错误发生在 ZIP 解压：`Cannot find an overload for "ExtractToDirectory" and the argument count: "3".`。`Expand-Archive` 选择的模块调用了当前 Windows PowerShell/.NET Framework 运行时不兼容的三参数重载。失败后旧脚本的模态 MessageBox 阻止退出，最终表现为 60 秒超时。
 
 ## 修复
 
+- ZIP 目标目录由更新器预先清空并创建，直接调用 .NET Framework 兼容的两参数 `ZipFile.ExtractToDirectory(source, destination)`，消除解压时对 Archive 模块版本及三参数覆盖接口的依赖。
 - 重启前检查可执行文件是否存在；缺失时只记录日志，避免触发系统 ShellExecute 对话框。
 - 更新器支持调用方关闭失败对话框；正常软件使用维持默认提示，集成测试明确关闭对话框。
 - 安装失败返回退出码 1，防止错误被当作成功退出。
