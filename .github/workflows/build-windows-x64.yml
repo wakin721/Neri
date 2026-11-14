@@ -95,5 +95,7 @@ jobs:
         run: |
           $python = Join-Path $env:GITHUB_WORKSPACE "downloaded-package\Neri\toolkit\python.exe"
           # Isolated mode prevents the build environment from masking missing files.
-          & $python -I -c "import importlib.util; assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN"
+          & $python -I -c "import importlib.util, sys; from pathlib import Path; sys.path.insert(0, str(Path('downloaded-package/Neri').resolve())); assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; import system.model_sync.catalog, system.backend.dinov3_environment"
           if ($LASTEXITCODE -ne 0) { throw "Downloaded application dependency check failed." }
+          & $python "scripts/package_litert_resources.py" --verify "downloaded-package/Neri/res"
+          if ($LASTEXITCODE -ne 0) { throw "Downloaded artifact contains non-LiteRT models or corrupt model assets." }

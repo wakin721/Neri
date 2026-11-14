@@ -43,7 +43,10 @@ $engineDll = Join-Path $package "flutter_windows.dll"
 & python "scripts\flutter_accessibility_hotfix.py" $engineDll $engineDll
 if ($LASTEXITCODE -ne 0) { throw "Flutter accessibility hotfix failed; review the engine version/hash." }
 Copy-Item "system" $package -Recurse -Force
-Copy-Item "res" $package -Recurse -Force
+# Build a clean resource tree; local optional classifiers/encoders never enter
+# the portable lite artifact, even when packaging from a developer checkout.
+& python "scripts\package_litert_resources.py" --source "res" --destination (Join-Path $package "res")
+if ($LASTEXITCODE -ne 0) { throw "LiteRT-only resource packaging failed." }
 Copy-Item "requirements.txt" $package -Force
 Copy-Item "requirements-privacy.txt" $package -Force
 Copy-Item "res\demo\README_Update.md" (Join-Path $package "README_Update.md") -Force
@@ -96,5 +99,7 @@ if (Test-Path $generatedExe) {
   throw "The legacy neri_flutter.exe name is still present in the package."
 }
 
-& "$toolkit\python.exe" -c "import importlib.util; assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager"
+& "$toolkit\python.exe" -I -c "import importlib.util, sys; sys.path.insert(0, r'$package'); assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager, system.model_sync.catalog, system.backend.dinov3_environment"
 if ($LASTEXITCODE -ne 0) { throw "Packaged Python import check failed." }
+& "$toolkit\python.exe" "scripts\package_litert_resources.py" --verify (Join-Path $package "res")
+if ($LASTEXITCODE -ne 0) { throw "Packaged model policy verification failed." }

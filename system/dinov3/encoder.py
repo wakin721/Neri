@@ -9,9 +9,6 @@ import sys
 import threading
 
 import numpy as np
-import torch
-
-from system.dino.preprocess import preprocess_image
 
 FEATURE_DIM = 768
 PREPROCESSING = "letterbox224_imagenet"
@@ -55,6 +52,9 @@ class DinoV3Encoder:
             raise ValueError("DINOv3 encoder weight SHA-256 does not match the model")
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError("DINOv3 batch_size must be a positive integer")
+        # LiteRT-only installations must be able to inspect manifests and
+        # install optional components before PyTorch has been installed.
+        import torch
         self.device = str(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.batch_size = batch_size
         with _INFERENCE_LOCK:
@@ -72,6 +72,7 @@ class DinoV3Encoder:
         pass
 
     def encode(self, crops, *, array_color="rgb"):
+        from system.dino.preprocess import preprocess_image
         if not len(crops):
             raise ValueError("At least one crop is required")
         tensors = (preprocess_image(crop, array_color=array_color) for crop in crops)
@@ -84,6 +85,7 @@ class DinoV3Encoder:
         return self._encode_tensors(iter(tensors), len(tensors))
 
     def _encode_tensors(self, tensors, count):
+        import torch
         output = []
         # Restore process-wide precision flags after every call, including OOM.
         with _INFERENCE_LOCK, torch.inference_mode():

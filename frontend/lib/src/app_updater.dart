@@ -336,7 +336,7 @@ class AppUpdater {
     }
   }
 
-  Future<void> launchInstaller({
+  Future<Process> launchInstaller({
     required DownloadedAppUpdate update,
     required Directory installDirectory,
     required File restartExecutable,
@@ -434,6 +434,9 @@ class AppUpdater {
           '${output.isEmpty ? '' : '：${_shorten(output, 800)}'}',
         );
       }
+      // Launch readiness is distinct from completion. Callers normally exit
+      // now; integration tests can await the child before deleting its cwd.
+      return process;
     } catch (_) {
       if (await script.exists()) await script.delete();
       if (await readyFile.exists()) await readyFile.delete();

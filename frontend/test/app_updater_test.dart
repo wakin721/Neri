@@ -252,6 +252,8 @@ void main() {
       final archive = File('${updateDirectory.path}\\Neri-test.zip');
       final updater = AppUpdater();
       Process? blocker;
+      Process? installer;
+      var installerExited = false;
 
       try {
         await payloadDirectory.create(recursive: true);
@@ -290,7 +292,7 @@ void main() {
           asset: asset,
         );
 
-        await updater.launchInstaller(
+        installer = await updater.launchInstaller(
           update: DownloadedAppUpdate(
             release: release,
             archive: archive,
@@ -301,6 +303,12 @@ void main() {
           parentProcessId: blocker.pid,
         );
         blocker.kill();
+        await blocker.exitCode.timeout(const Duration(seconds: 10));
+        expect(
+          await installer.exitCode.timeout(const Duration(seconds: 30)),
+          0,
+        );
+        installerExited = true;
 
         final installedMarker = File('${installDirectory.path}\\updated.txt');
         final deadline = DateTime.now().add(const Duration(seconds: 10));
@@ -320,6 +328,11 @@ void main() {
         expect(installedContents, 'updated');
       } finally {
         blocker?.kill();
+        if (blocker != null) await blocker.exitCode;
+        if (installer != null && !installerExited) {
+          installer.kill();
+          await installer.exitCode;
+        }
         updater.close();
         await _deleteDirectoryWhenReleased(root);
       }
