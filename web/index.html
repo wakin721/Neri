@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Neri Web · 红外相机影像智能处理与人工标记系统</title>
+  <link rel="icon" href="assets/logo.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Hidden File Inputs for Folder Selection, Single/Multi Files, LiteRT Model, and Backup JSON -->
+  <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+  <input type="file" id="filesInput" accept="image/*,video/*" multiple hidden />
+  <input type="file" id="tfliteModelInput" accept=".tflite,.litert,.bin" hidden />
+  <input type="file" id="backupJsonInput" accept=".json" hidden />
+
+  <div class="app-shell">
+    <!-- ====================================================================
+         MD3 Expressive Navigation Rail
+         ==================================================================== -->
+    <aside class="nav-rail" aria-label="主导航">
+      <div class="nav-rail-brand" id="brandHomeBtn" title="Neri Web 工作台">
+        <div class="nav-rail-logo">
+          <img src="assets/logo.png" alt="Neri" onerror="this.style.display='none'" />
+        </div>
+        <span class="nav-rail-title">Neri</span>
+      </div>
+
+      <nav class="nav-rail-items">
+        <button type="button" class="nav-rail-item active" data-view="start" id="navBtnStart">
+          <div class="nav-rail-pill">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          </div>
+          <span class="nav-rail-label">开始</span>
+        </button>
+
+        <button type="button" class="nav-rail-item" data-view="validate" id="navBtnValidate">
+          <div class="nav-rail-pill">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          </div>
+          <span class="nav-rail-label">校验标记</span>
+          <span class="nav-rail-badge" id="navPendingBadge" style="display:none">0</span>
+        </button>
+
+        <button type="button" class="nav-rail-item" data-view="export" id="navBtnExport">
+          <div class="nav-rail-pill">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+          </div>
+          <span class="nav-rail-label">数据导出</span>
+        </button>
+
+        <button type="button" class="nav-rail-item" data-view="settings" id="navBtnSettings">
+          <div class="nav-rail-pill">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <span class="nav-rail-label">设置</span>
+        </button>
+      </nav>
+
+      <div class="nav-rail-footer">
+        <button type="button" class="md3-icon-btn" id="quickShortcutsBtn" title="键盘快捷键说明 (?)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></svg>
+        </button>
+        <button type="button" class="md3-icon-btn" id="quickThemeToggleBtn" title="切换深浅色模式">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="themeToggleIcon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ====================================================================
+         Main Stage (Top Context Bar + Views)
+         ==================================================================== -->
+    <div class="main-stage">
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <div class="folder-scope-bar" title="当前工作文件夹与子目录范围">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--md-primary);flex-shrink:0"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span class="folder-scope-title" id="topRootFolderLabel">未选择文件夹</span>
+            <select id="globalSubfolderSelect" class="scope-select" aria-label="选择目录范围">
+              <option value="__ALL__">全部目录 (0)</option>
+            </select>
+          </div>
+
+          <button type="button" class="md3-btn md3-btn-tonal" id="topPickFolderBtn">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+            选择文件夹
+          </button>
+
+          <div class="status-chip ready" id="persistenceStatusChip" title="所有识别与人工标记结果实时保存在浏览器本地 IndexedDB 中，意外关闭网页不会丢失">
+            <span class="dot"></span>
+            <span id="persistenceStatusText">自动保存已就绪</span>
+          </div>
+        </div>
+
+        <div class="top-bar-right">
+          <div class="status-chip" id="modelStatusChip" style="cursor:pointer" title="点击加载或切换本地 MegaDetectorV6 LiteRT (.tflite) 模型">
+            <span class="dot"></span>
+            <span id="modelStatusText">md_v1000.0.0-sorrel (YOLO11s LiteRT)</span>
+          </div>
+
+          <button type="button" class="md3-btn md3-btn-filled" id="topExportCsvBtn">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            批量导出 CSV
+          </button>
+        </div>
+      </header>
+
+      <!-- ==================================================================
+           VIEW 1: START & MEGADETECTOR V6 LITERT DETECTION
+           ================================================================== -->
+      <main class="view-panel active" id="view-start">
+        <!-- Expressive Hero Banner -->
+        <section class="md3-hero-card">
+          <div class="md3-hero-left">
+            <div class="md3-hero-badge">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+            </div>
+            <div>
+              <h1 class="md3-hero-title">红外相机影像智能处理 · Web</h1>
+              <p class="md3-hero-subtitle">使用 MegaDetector (YOLO11s / MDV6 LiteRT) 模型在浏览器本地完成目标探测、连拍事件分组、人工物种标记与批量 CSV 导出</p>
+            </div>
+          </div>
+          <div class="md3-hero-stats">
+            <div class="hero-stat-pill">
+              <div class="num" id="heroStatTotal">0</div>
+              <div class="lbl">总媒体文件</div>
+            </div>
+            <div class="hero-stat-pill">
+              <div class="num" id="heroStatDetected">0</div>
+              <div class="lbl">检出目标</div>
+            </div>
+            <div class="hero-stat-pill">
+              <div class="num" id="heroStatEmpty">0</div>
+              <div class="lbl">空拍文件</div>
+            </div>
+            <div class="hero-stat-pill">
+              <div class="num" id="heroStatValidated">0</div>
+              <div class="lbl">已人工标记</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Session Recovery Banner (Displayed when cached items are restored after page reload/close) -->
+        <section class="section-card" id="sessionRestoreBanner" style="display:none; background-color:var(--md-secondary-container); border-color:var(--md-primary)">
+          <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+            <div style="display:flex; align-items:center; gap:12px;">
+              <div class="section-card-icon" style="background-color:var(--md-primary); color:var(--md-on-primary)">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+              </div>
+              <div>
+                <div style="font-size:16px; font-weight:800; color:var(--md-on-secondary-container)" id="restoreBannerTitle">已从本地缓存恢复上次未关闭/已处理的任务结果</div>
+                <div style="font-size:13px; color:var(--md-on-secondary-container); opacity:0.88" id="restoreBannerDesc">所有探测边界框、EXIF 时间与人工标记均已完整保留。可继续人工标记、导出 CSV，或重新选择原文件夹关联高清原图。</div>
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" class="md3-btn md3-btn-outlined" id="restoreRelinkFolderBtn">重新关联原文件夹</button>
+              <button type="button" class="md3-btn md3-btn-filled" id="restoreGoValidateBtn">继续人工标记</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="start-grid">
+          <!-- Left: Create Local Detection Job Card -->
+          <section class="section-card">
+            <div class="section-card-header">
+              <div class="section-card-title-group">
+                <div class="section-card-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                </div>
+                <div>
+                  <div class="section-card-title">新建本地探测任务</div>
+                  <div class="section-card-subtitle">选择包含红外相机照片或视频的根文件夹（自动递归识别所有子文件夹），全程在浏览器本地处理</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Folder Picker & Drag-and-Drop Zone -->
+            <div class="folder-dropzone" id="folderDropzone">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--md-primary); margin-bottom:8px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <div style="font-size:15px; font-weight:700; margin-bottom:4px;" id="dropzoneMainText">点击选择本地文件夹，或将文件夹拖拽到此处</div>
+              <div style="font-size:12.5px; color:var(--md-on-surface-variant); margin-bottom:14px;" id="dropzoneSubText">支持 JPG / PNG / WEBP / BMP / TIFF 图像与 MP4 / MOV / WEBM / AVI 视频，自动提取 EXIF 拍摄时间</div>
+              <div style="display:flex; justify-content:center; gap:10px; flex-wrap:wrap;">
+                <button type="button" class="md3-btn md3-btn-filled" id="btnSelectFolderMain">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  选择文件夹
+                </button>
+                <button type="button" class="md3-btn md3-btn-tonal" id="btnSelectFilesMain">选择多张图片/视频</button>
+                <button type="button" class="md3-btn md3-btn-outlined" id="btnLoadDemoDataset" title="生成包含多相机位点子目录、连拍序列和 EXIF 时间的演示红外相机数据集">加载演示相机文件夹</button>
+              </div>
+            </div>
+
+            <!-- MegaDetectorV6 LiteRT Options Grid -->
+            <div class="option-grid-2">
+              <div class="md3-field">
+                <label for="selectLiteRtModel">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>
+                  探测模型 (MegaDetector LiteRT)
+                </label>
+                <select id="selectLiteRtModel">
+                  <option value="md_v1000.0.0-sorrel-litert" selected>md_v1000.0.0-sorrel (agentmorris/MegaDetector YOLO11s LiteRT · 推荐)</option>
+                  <option value="mdv6-yolov10-c-litert">MDV6-yolov10-c (MegaDetectorV6 YOLOv10c LiteRT · 极速)</option>
+                  <option value="custom-litert">自定义本地 .tflite / .litert 模型</option>
+                </select>
+                <div class="helper" id="modelHelperText">已内置转换好的 md_v1000.0.0-sorrel.tflite (YOLO11s) 与 MDV6-yolov10-c.tflite</div>
+              </div>
+
+              <div class="md3-field">
+                <label for="selectInputSize">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                  LiteRT 推理输入尺寸
+                </label>
+                <select id="selectInputSize">
+                  <option value="640">640 × 640 (标准高速推理)</option>
+                  <option value="960">960 × 960 (均衡精度)</option>
+                  <option value="1280">1280 × 1280 (远距小目标增强)</option>
+                </select>
+                <div class="helper">若 .tflite 模型固定输入维度则自动适配模型尺寸</div>
+              </div>
+
+              <div class="md3-field">
+                <label for="selectVideoMode">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                  视频处理模式
+                </label>
+                <select id="selectVideoMode">
+                  <option value="fast">快速识别 (均匀抽帧检测)</option>
+                  <option value="all">全部识别 (按帧间隔采样)</option>
+                  <option value="skip">跳过视频 (仅处理图像)</option>
+                </select>
+                <div class="helper" id="videoModeHelperText">使用浏览器本地硬件解码抽帧</div>
+              </div>
+
+              <div class="md3-field">
+                <label for="selectVidStride">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+                  视频抽帧数 / 帧间隔
+                </label>
+                <select id="selectVidStride">
+                  <option value="3">3 帧</option>
+                  <option value="5" selected>5 帧</option>
+                  <option value="8">8 帧</option>
+                  <option value="10">10 帧</option>
+                  <option value="15">15 帧</option>
+                  <option value="20">20 帧</option>
+                </select>
+                <div class="helper">快速识别为总抽帧数，全部识别为采样间隔</div>
+              </div>
+            </div>
+
+            <!-- Load Local .tflite Button Row -->
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; background-color:var(--md-surface-container); border-radius:var(--radius-md); margin-bottom:12px; flex-wrap:wrap;">
+              <div style="font-size:12.5px;">
+                <strong>本地 LiteRT 模型文件：</strong>
+                <span id="loadedTfliteName" style="color:var(--md-on-surface-variant)">已就绪：md_v1000.0.0-sorrel.tflite (agentmorris/MegaDetector YOLO11s LiteRT)</span>
+              </div>
+              <button type="button" class="md3-btn md3-btn-tonal" id="btnUploadTflite" style="min-height:34px; padding:4px 14px; font-size:12.5px;">
+                加载本地 .tflite 模型
+              </button>
+            </div>
+
+            <!-- Sliders: Confidence & IoU -->
+            <div class="slider-row">
+              <span class="slider-label">置信度阈值</span>
+              <input type="range" class="md3-slider" id="startConfSlider" min="0.05" max="0.95" step="0.01" value="0.25" />
+              <span class="slider-val" id="startConfVal">0.25</span>
+            </div>
+
+            <div class="slider-row">
+              <span class="slider-label">IOU 阈值</span>
+              <input type="range" class="md3-slider" id="startIouSlider" min="0.10" max="0.90" step="0.01" value="0.45" />
+              <span class="slider-val" id="startIouVal">0.45</span>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; gap:12px; flex-wrap:wrap;">
+              <div style="display:flex; gap:14px; align-items:center; font-size:13px; color:var(--md-on-surface-variant);">
+                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+                  <input type="checkbox" id="chkDetectAnimal" checked /> 动物 (animal)
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+                  <input type="checkbox" id="chkDetectPerson" checked /> 人 (person)
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+                  <input type="checkbox" id="chkDetectVehicle" checked /> 车辆 (vehicle)
+                </label>
+              </div>
+
+              <button type="button" class="md3-btn md3-btn-filled md3-btn-expressive-lg" id="btnStartDetectionJob">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span id="btnStartDetectionLabel">开始本地处理</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- Right Column: Job Progress Queue & Subfolder Breakdown -->
+          <div>
+            <section class="section-card">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">任务进度</div>
+                    <div class="section-card-subtitle" id="jobsCardSubtitle">实时保存进度，关闭网页后重新打开可继续</div>
+                  </div>
+                </div>
+                <button type="button" class="md3-btn md3-btn-text" id="btnClearJobs" style="display:none">清除任务记录</button>
+              </div>
+              <div id="jobsListContainer">
+                <div style="color:var(--md-on-surface-variant); font-size:13.5px; padding:8px 0;">
+                  选择文件夹并点击“开始本地处理”后，实时推理进度、速度与识别结果会显示在这里。
+                </div>
+              </div>
+            </section>
+
+            <section class="section-card">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">目录结构与快捷入口</div>
+                    <div class="section-card-subtitle">按相机位点子文件夹查看统计、进入人工标记或单独导出 CSV</div>
+                  </div>
+                </div>
+              </div>
+              <div id="subfolderOverviewContainer">
+                <div style="color:var(--md-on-surface-variant); font-size:13.5px; padding:8px 0;">
+                  尚未加载文件夹。
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+
+      <!-- ==================================================================
+           VIEW 2: UNIFIED PREVIEW & MANUAL SPECIES VALIDATION STUDIO
+           ================================================================== -->
+      <main class="view-panel studio-mode" id="view-validate">
+        <!-- Top Studio Bar -->
+        <div class="studio-toolbar">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div class="stage-pill-bar" style="background:var(--md-surface-container-low)">
+              <button type="button" class="md3-btn md3-btn-tonal" id="btnViewSplitMode" style="min-height:32px; padding:4px 12px; font-size:12px;">分栏校验视图</button>
+              <button type="button" class="md3-btn md3-btn-text" id="btnViewGridMode" style="min-height:32px; padding:4px 12px; font-size:12px;">网格速览视图</button>
+            </div>
+
+            <select id="studioStatusFilter" class="scope-select" style="background-color:var(--md-surface-container-high); color:var(--md-on-surface);">
+              <option value="all">全部状态</option>
+              <option value="unvalidated">仅待人工校验</option>
+              <option value="validated">仅已人工标记</option>
+              <option value="favorite">仅收藏媒体 (★)</option>
+            </select>
+
+            <input type="text" id="studioSearchInput" placeholder="搜索文件名 / 物种 / 备注..." style="background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); border-radius:var(--radius-pill); padding:6px 14px; font-size:12.5px; color:var(--md-on-surface); outline:none; width:200px;" />
+          </div>
+
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span class="status-chip" id="studioSelectionChip">已选 1 项</span>
+            <button type="button" class="md3-btn md3-btn-outlined" id="btnSelectAllInBucket" style="min-height:34px; padding:4px 12px; font-size:12px;">全选当前分组</button>
+            <button type="button" class="md3-btn md3-btn-outlined" id="btnToggleExpandGroups" style="min-height:34px; padding:4px 12px; font-size:12px;">展开/折叠连拍组</button>
+            <button type="button" class="md3-btn md3-btn-tonal" id="btnRedetectSelected" style="min-height:34px; padding:4px 12px; font-size:12px;">重新探测所选</button>
+          </div>
+        </div>
+
+        <!-- 3-Column Studio Workspace -->
+        <div class="studio-workspace">
+          <!-- Left Column: Species Buckets + Grouped File List -->
+          <div class="studio-left-col">
+            <div class="list-card" id="speciesBucketCard" style="flex: 0.45;">
+              <div class="list-card-header">
+                <span>物种分组 (按置信度实时归类)</span>
+                <span id="bucketCountBadge">0 类</span>
+              </div>
+              <div class="list-scroll" id="speciesBucketList"></div>
+            </div>
+
+            <div class="list-card" id="fileListCard" style="flex: 0.55;">
+              <div class="list-card-header">
+                <span id="fileListHeaderTitle">事件与文件列表</span>
+                <span id="fileCountBadge">0 项</span>
+              </div>
+              <div class="list-scroll" id="validationFileList"></div>
+            </div>
+          </div>
+
+          <!-- Center Column: Media Viewer Stage (or Grid View) + Summary + Confidence Filter -->
+          <div class="studio-center-col">
+            <!-- Split Mode Canvas Stage -->
+            <div class="media-stage-card" id="mediaStageCard">
+              <div class="stage-floating-top">
+                <div class="stage-pill-bar">
+                  <span id="stageFilenameBadge" style="font-size:12.5px; font-weight:700; padding:0 8px;">未选择文件</span>
+                  <span id="stageValidationBadge" class="status-chip" style="padding:2px 8px; font-size:11px;">未校验</span>
+                </div>
+
+                <div class="stage-pill-bar">
+                  <button type="button" class="md3-icon-btn" id="btnDrawBoxMode" title="手绘新增检测框 (在画面上拖拽绘制新目标框)" style="width:32px; height:32px;">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+                  </button>
+                  <button type="button" class="md3-icon-btn" id="btnDeleteSelectedBox" title="删除选中的检测框 (Delete)" style="width:32px; height:32px; display:none;">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  </button>
+                  <button type="button" class="md3-icon-btn" id="btnZoomOut" title="缩小" style="width:32px; height:32px;">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                  </button>
+                  <button type="button" class="md3-icon-btn" id="btnZoomReset" title="适应窗口 (100%)" style="width:32px; height:32px; font-size:11px; font-weight:800;">1:1</button>
+                  <button type="button" class="md3-icon-btn" id="btnZoomIn" title="放大" style="width:32px; height:32px;">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                  </button>
+                  <button type="button" class="md3-icon-btn" id="btnToggleFavorite" title="收藏/取消收藏该媒体 (F)" style="width:32px; height:32px;">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" id="favStarSvg"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                  </button>
+                </div>
+              </div>
+
+              <button type="button" class="stage-nav-btn prev" id="btnPrevMedia" title="上一张 (↑ / ←)">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+
+              <div class="canvas-viewport" id="canvasViewport">
+                <canvas id="mediaCanvas"></canvas>
+                <video id="mediaVideo" controls style="display:none"></video>
+                <div id="emptyStagePrompt" style="text-align:center; color:var(--md-on-surface-variant); padding:24px;">
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" style="opacity:0.6; margin-bottom:10px;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  <div style="font-size:15px; font-weight:700;">请先在“开始”页面导入文件夹或加载演示数据集</div>
+                  <div style="font-size:12.5px; margin-top:4px;">支持按物种自动分桶、连拍事件折叠标记与检测框可视化</div>
+                </div>
+              </div>
+
+              <button type="button" class="stage-nav-btn next" id="btnNextMedia" title="下一张 (↓ / →)">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+
+            <!-- Grid Overview Mode Container (Hidden by default) -->
+            <div class="studio-grid-view" id="studioGridView" style="display:none;"></div>
+
+            <!-- Summary Info Panel (Matches Flutter _buildSummaryPanel) -->
+            <div class="studio-bar-card" id="studioSummaryBar">
+              <div style="display:flex; align-items:center; gap:10px; min-width:0; flex:1;">
+                <div style="width:32px; height:32px; border-radius:50%; background:var(--md-primary-container); color:var(--md-on-primary-container); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                </div>
+                <div id="summaryTextLine" style="font-size:13.5px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                  物种: -  |  数量: -  |  类型: -  |  置信度: -  |  拍摄时间: -
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <input type="text" id="quickRemarkInput" placeholder="添加备注 (按回车保存)..." style="background:var(--md-surface-container-highest); border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); padding:5px 10px; font-size:12px; color:var(--md-on-surface); width:170px; outline:none;" />
+              </div>
+            </div>
+
+            <!-- Filter & Confidence Panel (Matches Flutter _buildFilterPanel) -->
+            <div class="studio-bar-card">
+              <label style="display:inline-flex; align-items:center; gap:8px; font-weight:600; font-size:13px; cursor:pointer;">
+                <span>显示结果框</span>
+                <span class="md3-switch">
+                  <input type="checkbox" id="chkShowDetections" checked />
+                  <span class="md3-switch-track"></span>
+                </span>
+              </label>
+
+              <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:240px;">
+                <span style="font-weight:600; font-size:13px; white-space:nowrap;">置信度过滤</span>
+                <select id="filterSpeciesSelect" class="scope-select" style="max-width:140px;">
+                  <option value="global">全局设置</option>
+                </select>
+                <input type="range" class="md3-slider" id="validationConfSlider" min="0.05" max="0.95" step="0.01" value="0.25" style="flex:1" />
+                <span id="validationConfVal" style="font-weight:700; font-size:13px; width:36px; text-align:right; color:var(--md-primary)">0.25</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column: Quick Marking Dock (Matches Flutter _buildRightActions) -->
+          <div class="studio-right-col">
+            <div class="mark-dock-columns">
+              <!-- Species Mark Column -->
+              <div class="mark-panel">
+                <button type="button" class="mark-btn correct-btn" id="btnMarkCorrect" title="确认当前检测结果为人工校验正确 (快捷键 C)">
+                  ✓ 正确
+                </button>
+                <button type="button" class="mark-btn empty-btn" id="btnMarkEmpty" title="标记为空拍 (快捷键 E)">
+                  ∅ 空
+                </button>
+                <hr style="border:none; border-top:1px solid var(--md-outline-variant); margin:2px 0;" />
+                <div class="mark-scroll-list" id="quickSpeciesListContainer"></div>
+                <hr style="border:none; border-top:1px solid var(--md-outline-variant); margin:2px 0;" />
+                <button type="button" class="mark-btn" id="btnMarkOther" title="从 2026《中国生物物种名录》检索或输入其他物种 (快捷键 O)">
+                  + 其他物种
+                </button>
+              </div>
+
+              <!-- Quantity & Undo Column -->
+              <div class="mark-panel" style="align-items:stretch;">
+                <div class="mark-scroll-list" id="quantityButtonsContainer"></div>
+                <hr style="border:none; border-top:1px solid var(--md-outline-variant); margin:2px 0;" />
+                <button type="button" class="md3-icon-btn tonal" id="btnUndoMark" title="撤回上一步标记 (Ctrl+Z)" style="width:100%; height:40px; border-radius:var(--radius-md);" disabled>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <button type="button" class="md3-btn md3-btn-filled export-dock-btn" id="btnStudioExportCsv">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              导出为 CSV
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <!-- ==================================================================
+           VIEW 3: DATA OVERVIEW & BATCH CSV EXPORT
+           ================================================================== -->
+      <main class="view-panel" id="view-export">
+        <section class="section-card">
+          <div class="section-card-header">
+            <div class="section-card-title-group">
+              <div class="section-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <div>
+                <div class="section-card-title">批量导出 CSV 与物种名录数据总览</div>
+                <div class="section-card-subtitle">自动匹配 2026《中国生物物种名录》学名、目、科、属分类信息，计算工作天数与 30 分钟独立探测首只标记</div>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <button type="button" class="md3-btn md3-btn-outlined" id="btnExportBackupJson">备份项目 (.json)</button>
+              <button type="button" class="md3-btn md3-btn-outlined" id="btnImportBackupJson">恢复项目 (.json)</button>
+              <button type="button" class="md3-btn md3-btn-tonal" id="btnExportPerFolderCsv">按子文件夹分别导出 CSV</button>
+              <button type="button" class="md3-btn md3-btn-filled" id="btnExportMergedCsv">合并导出当前范围 CSV</button>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;" id="exportStatsRow"></div>
+
+          <div class="data-table-wrap" style="max-height: calc(100vh - 300px); overflow-y: auto;">
+            <table class="md3-table" id="exportPreviewTable">
+              <thead id="exportTableHead"></thead>
+              <tbody id="exportTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <!-- ==================================================================
+           VIEW 4: SETTINGS & CACHE MANAGEMENT
+           ================================================================== -->
+      <main class="view-panel" id="view-settings">
+        <div class="settings-layout">
+          <aside class="settings-drawer">
+            <div style="font-size:17px; font-weight:800; padding:8px 14px 12px;">设置</div>
+            <button type="button" class="settings-nav-item active" data-sec="cache">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+              缓存与离线持久化
+            </button>
+            <button type="button" class="settings-nav-item" data-sec="validation">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              基础与人工标记设置
+            </button>
+            <button type="button" class="settings-nav-item" data-sec="detection">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>
+              探测与视频设置
+            </button>
+            <button type="button" class="settings-nav-item" data-sec="export">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              CSV 导出设置
+            </button>
+            <button type="button" class="settings-nav-item" data-sec="theme">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+              外观与 MD3E 主题
+            </button>
+            <button type="button" class="settings-nav-item" data-sec="about">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              关于
+            </button>
+          </aside>
+
+          <div id="settingsPanelsContainer">
+            <!-- Section: Cache & Persistence -->
+            <section class="section-card settings-sec" id="sec-cache">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">清理缓存与断点持久化</div>
+                    <div class="section-card-subtitle">自动在浏览器本地 IndexedDB 保存处理进度、检测框与人工标记结果，意外关闭网页后重新打开自动恢复</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700; font-size:14.5px;">意外关闭网页保留识别与人工标记结果</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">开启后，每次探测完成或点击人工标记按钮都会实时写入本地 IndexedDB 数据库</div>
+                </div>
+                <label class="md3-switch">
+                  <input type="checkbox" id="setKeepResultsOnClose" checked />
+                  <span class="md3-switch-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700; font-size:14.5px;">预览缩略图缓存上限</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">保存压缩预览图以便在重新打开网页但未重新选择本地文件夹时仍可预览画面与标记</div>
+                </div>
+                <select id="setPreviewCacheLimitMb" class="scope-select" style="font-size:13px; padding:7px 28px 7px 12px;">
+                  <option value="0">不保留缩略图</option>
+                  <option value="64">64 MB</option>
+                  <option value="128">128 MB</option>
+                  <option value="256" selected>256 MB</option>
+                  <option value="512">512 MB</option>
+                  <option value="1024">1024 MB</option>
+                </select>
+              </div>
+
+              <div style="background:var(--md-surface-container); border-radius:var(--radius-xl); padding:16px; margin:16px 0;" id="cacheUsageBreakdownBox">
+                <div style="font-weight:700; margin-bottom:10px; display:flex; justify-content:space-between;">
+                  <span>当前浏览器本地缓存占用详情</span>
+                  <span id="cacheTotalSizeText" style="color:var(--md-primary)">计算中...</span>
+                </div>
+                <div id="cacheBreakdownLines" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; font-size:12.5px; color:var(--md-on-surface-variant);"></div>
+              </div>
+
+              <div style="display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                <button type="button" class="md3-btn md3-btn-tonal" id="btnOpenClearCacheModal">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
+                  选择清理缓存...
+                </button>
+                <button type="button" class="md3-btn md3-btn-danger" id="btnClearAllCacheQuick">一键清空所有缓存与结果</button>
+              </div>
+            </section>
+
+            <!-- Section: Basic & Validation Settings -->
+            <section class="section-card settings-sec" id="sec-validation" style="display:none;">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">基础与人工标记设置</div>
+                    <div class="section-card-subtitle">配置物种校验自动分组、折叠规则、可撤回步数、快捷物种按钮与数量按钮</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">物种校验界面自动分组</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">开启后，根据拍摄时间间隔与连拍张数自动对连续拍摄的照片和视频分组归类</div>
+                </div>
+                <label class="md3-switch">
+                  <input type="checkbox" id="setAutoGroup" checked />
+                  <span class="md3-switch-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">默认折叠连拍分组</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">开启后，点击分组行并点击物种标记按钮会直接批量标记该连拍组内的全部照片和视频</div>
+                </div>
+                <label class="md3-switch">
+                  <input type="checkbox" id="setCollapseGroups" checked />
+                  <span class="md3-switch-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">自动分组连拍张数与时间间隔</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">事件内最大时间间隔（秒）与连拍张数上限</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="font-size:12.5px;">连拍上限:</span>
+                  <input type="number" id="setBurstSize" min="1" max="20" value="3" style="width:60px; padding:6px 8px; border-radius:var(--radius-sm); border:1px solid var(--md-outline-variant); background:var(--md-surface-container-highest); color:var(--md-on-surface);" />
+                  <span style="font-size:12.5px;">间隔(秒):</span>
+                  <input type="number" id="setGapSeconds" min="5" max="300" value="30" style="width:70px; padding:6px 8px; border-radius:var(--radius-sm); border:1px solid var(--md-outline-variant); background:var(--md-surface-container-highest); color:var(--md-on-surface);" />
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">可撤回记录步数</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">最多保留多少次校验标记操作可供逐步撤回 (Ctrl+Z)</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:10px; min-width:220px;">
+                  <input type="range" class="md3-slider" id="setUndoSteps" min="10" max="200" step="10" value="50" />
+                  <span id="setUndoStepsVal" style="font-weight:700; width:48px; text-align:right;">50 步</span>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">快捷物种按钮按使用频率自动排序</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">开启后，常用标记物种自动排在校验面板顶部</div>
+                </div>
+                <label class="md3-switch">
+                  <input type="checkbox" id="setAutoSortQuickMarks" />
+                  <span class="md3-switch-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-row" style="align-items:flex-start; flex-direction:column;">
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+                  <div>
+                    <div style="font-weight:700;">自定义快捷物种按钮</div>
+                    <div style="font-size:12.5px; color:var(--md-on-surface-variant);">配置校验界面右侧快速标记列显示的物种按钮（点击标签可删除，或新增自定义物种）</div>
+                  </div>
+                  <button type="button" class="md3-btn md3-btn-text" id="btnResetQuickSpecies">恢复默认物种</button>
+                </div>
+                <div id="settingsQuickSpeciesChips" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;"></div>
+                <div style="display:flex; gap:8px; width:100%; max-width:420px; margin-top:8px;">
+                  <input type="text" id="inputNewQuickSpecies" placeholder="输入新增快捷物种名称，如 岩羊、赤狐..." style="flex:1; padding:8px 12px; border-radius:var(--radius-md); border:1px solid var(--md-outline-variant); background:var(--md-surface-container-highest); color:var(--md-on-surface); outline:none;" />
+                  <button type="button" class="md3-btn md3-btn-tonal" id="btnAddQuickSpecies">新增</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- Section: Detection & Video Settings -->
+            <section class="section-card settings-sec" id="sec-detection" style="display:none;">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">MegaDetectorV6 LiteRT 探测与视频参数</div>
+                    <div class="section-card-subtitle">管理浏览器端 LiteRT 模型推理参数与视频过滤阈值（网页端仅包含探测模型，不含分类模型）</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">跨类别 NMS (Agnostic NMS)</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">合并不同类别之间重叠度较高的边界框，减少同一目标重复框</div>
+                </div>
+                <label class="md3-switch">
+                  <input type="checkbox" id="setAgnosticNms" checked />
+                  <span class="md3-switch-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">视频最低帧数比例过滤</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">目标在视频抽帧中出现的比例低于此值时视为偶发误检并过滤</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:10px; min-width:220px;">
+                  <input type="range" class="md3-slider" id="setMinFrameRatio" min="0" max="0.5" step="0.05" value="0.1" />
+                  <span id="setMinFrameRatioVal" style="font-weight:700; width:48px; text-align:right;">10%</span>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">独立探测首只时间阈值 (分钟)</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">同一物种两次拍摄间隔超过此时间记为一次新的独立有效探测 (默认 30 分钟)</div>
+                </div>
+                <input type="number" id="setIndependentMinutes" min="1" max="1440" value="30" style="width:80px; padding:6px 10px; border-radius:var(--radius-sm); border:1px solid var(--md-outline-variant); background:var(--md-surface-container-highest); color:var(--md-on-surface);" />
+              </div>
+            </section>
+
+            <!-- Section: CSV Export Settings -->
+            <section class="section-card settings-sec" id="sec-export" style="display:none;">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">CSV 批量导出设置</div>
+                    <div class="section-card-subtitle">设置子目录导出方式、空拍记录过滤及导出表格列</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">默认 CSV 导出范围模式</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">当文件夹包含多个相机位点子目录时的默认导出方式</div>
+                </div>
+                <select id="setExportScopeMode" class="scope-select" style="font-size:13px; padding:7px 28px 7px 12px;">
+                  <option value="ask">每次询问 (合并单文件 或 按子目录批量生成)</option>
+                  <option value="per_folder">按子文件夹批量导出多个 CSV</option>
+                  <option value="single">合并导出为单份 CSV</option>
+                </select>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">空拍记录导出策略</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">导出 CSV 时是否包含物种为“空”的照片/视频记录</div>
+                </div>
+                <select id="setEmptyExportPolicy" class="scope-select" style="font-size:13px; padding:7px 28px 7px 12px;">
+                  <option value="keep">保留全部记录 (含空拍)</option>
+                  <option value="exclude_empty">仅导出非空有效记录</option>
+                </select>
+              </div>
+
+              <div class="settings-row" style="flex-direction:column; align-items:flex-start;">
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom:8px;">
+                  <div>
+                    <div style="font-weight:700;">导出 CSV 列字段选择</div>
+                    <div style="font-size:12.5px; color:var(--md-on-surface-variant);">勾选需要包含在导出 CSV 文件中的字段列（UTF-8 BOM 编码，Excel 直接打开不乱码）</div>
+                  </div>
+                  <div style="display:flex; gap:6px;">
+                    <button type="button" class="md3-btn md3-btn-text" id="btnSelectAllExportCols">全选</button>
+                    <button type="button" class="md3-btn md3-btn-text" id="btnResetExportCols">恢复默认</button>
+                  </div>
+                </div>
+                <div id="exportColumnsCheckboxes" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; width:100%;"></div>
+              </div>
+            </section>
+
+            <!-- Section: Appearance & MD3E Theme -->
+            <section class="section-card settings-sec" id="sec-theme" style="display:none;">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 1 0 10 10"/></svg>
+                  </div>
+                  <div>
+                    <div class="section-card-title">外观与 Material 3 Expressive 主题</div>
+                    <div class="section-card-subtitle">自定义深浅色外观与 11 款 Neri 主题种子色板</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <div style="font-weight:700;">主题模式</div>
+                  <div style="font-size:12.5px; color:var(--md-on-surface-variant);">选择浅色、深色或跟随系统外观</div>
+                </div>
+                <select id="setThemeMode" class="scope-select" style="font-size:13px; padding:7px 28px 7px 12px;">
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色模式 (Light)</option>
+                  <option value="dark">深色模式 (Dark)</option>
+                </select>
+              </div>
+
+              <div class="settings-row" style="flex-direction:column; align-items:flex-start;">
+                <div style="font-weight:700;">MD3E 主题调色板 (Seed Color)</div>
+                <div style="font-size:12.5px; color:var(--md-on-surface-variant);">点击切换全站 Material 3 Expressive 动态配色方案</div>
+                <div class="seed-palette-grid" id="seedPaletteContainer"></div>
+              </div>
+            </section>
+
+            <!-- Section: About -->
+            <section class="section-card settings-sec" id="sec-about" style="display:none;">
+              <div class="section-card-header">
+                <div class="section-card-title-group">
+                  <div class="section-card-icon">
+                    <img src="assets/logo.png" alt="Neri" style="width:28px; height:28px; object-fit:contain;" />
+                  </div>
+                  <div>
+                    <div class="section-card-title">关于 Neri Web</div>
+                    <div class="section-card-subtitle">NERI Enables Rapid Identification · 红外相机图像智能处理工具网页版</div>
+                  </div>
+                </div>
+              </div>
+              <div style="font-size:13.5px; line-height:1.75; color:var(--md-on-surface-variant);">
+                <p><strong>版本：</strong>Neri Web Edition (MD3 Expressive · MegaDetectorV6 LiteRT 本地推理版)</p>
+                <p><strong>核心特性：</strong></p>
+                <ul style="padding-left:20px; margin-top:6px;">
+                  <li><strong>浏览器本地推理：</strong>基于 MegaDetectorV6 LiteRT (<code>.tflite</code>) 在浏览器端直接检测野生动物、人员与车辆，无需上传任何照片至云端服务器，保护监测数据隐私。</li>
+                  <li><strong>断点自动恢复：</strong>利用 IndexedDB 本地持久化存储处理进度、目标边界框、预览缩略图与人工标记结果，意外关闭标签页或浏览器后重新打开即可无缝继续。</li>
+                  <li><strong>物种名录联动：</strong>内置 2026 版《中国生物物种名录》（鸟纲/哺乳纲共 2,252 种），人工标记后一键批量导出包含学名、目、科、属及独立探测首只的 CSV 表格。</li>
+                </ul>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       MODAL 1: OTHER SPECIES SEARCH &TAXONOMY AUTOCOMPLETE DIALOG
+       ==================================================================== -->
+  <div class="modal-backdrop" id="otherSpeciesModal">
+    <div class="md3-dialog">
+      <div class="md3-dialog-header">
+        <span>标记其他物种 (2026《中国生物物种名录》)</span>
+        <button type="button" class="md3-icon-btn" data-close-modal="otherSpeciesModal">✕</button>
+      </div>
+      <div class="md3-dialog-body">
+        <div class="md3-field" style="margin-bottom:10px;">
+          <label for="otherSpeciesInput">物种中文名 / 学名搜索</label>
+          <input type="text" id="otherSpeciesInput" placeholder="输入物种名称（如：雪豹、白鹇、Panthera...）" autocomplete="off" />
+        </div>
+        <div id="speciesAutocompleteList" style="max-height:180px; overflow-y:auto; border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); margin-bottom:12px; background:var(--md-surface-container);"></div>
+
+        <div class="option-grid-2">
+          <div class="md3-field">
+            <label for="otherSpeciesCount">物种数量</label>
+            <input type="number" id="otherSpeciesCount" min="1" max="999" value="1" />
+          </div>
+          <div class="md3-field">
+            <label for="otherSpeciesType">物种类型 (自动匹配或手选)</label>
+            <select id="otherSpeciesType">
+              <option value="">自动匹配名录</option>
+              <option value="兽">兽 (哺乳纲)</option>
+              <option value="鸟">鸟 (鸟纲)</option>
+              <option value="家畜">家畜</option>
+              <option value="人员">人员</option>
+              <option value="其他">其他</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="md3-field">
+          <label for="otherSpeciesRemark">备注 (可选)</label>
+          <input type="text" id="otherSpeciesRemark" placeholder="输入个体特征、行为或生境备注..." />
+        </div>
+
+        <div style="margin-top:10px;">
+          <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; cursor:pointer;">
+            <input type="checkbox" id="chkAddOtherToQuick" checked />
+            将该物种同时加入右侧“快捷物种按钮”列表
+          </label>
+        </div>
+      </div>
+      <div class="md3-dialog-actions">
+        <button type="button" class="md3-btn md3-btn-text" data-close-modal="otherSpeciesModal">取消</button>
+        <button type="button" class="md3-btn md3-btn-filled" id="btnConfirmOtherSpecies">确认标记</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       MODAL 2: SELECTIVE CLEAR CACHE DIALOG
+       ==================================================================== -->
+  <div class="modal-backdrop" id="clearCacheModal">
+    <div class="md3-dialog">
+      <div class="md3-dialog-header">
+        <span>选择清理缓存</span>
+        <button type="button" class="md3-icon-btn" data-close-modal="clearCacheModal">✕</button>
+      </div>
+      <div class="md3-dialog-body">
+        <p style="font-size:13px; color:var(--md-on-surface-variant); margin-bottom:14px;">
+          请选择需要清理的浏览器本地缓存项（不会删除您的主题、快捷按钮与导出列偏好设置）：
+        </p>
+        <div style="display:flex; flex-direction:column; gap:12px;">
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:10px; border-radius:var(--radius-md); background:var(--md-surface-container);">
+            <input type="checkbox" id="chkClearThumbnails" checked style="margin-top:4px;" />
+            <div>
+              <div style="font-weight:700;">清除预览缩略图缓存</div>
+              <div style="font-size:12px; color:var(--md-on-surface-variant);">释放离线缩略图占用的存储空间，保留所有识别框和人工标记数据</div>
+            </div>
+          </label>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:10px; border-radius:var(--radius-md); background:var(--md-surface-container);">
+            <input type="checkbox" id="chkClearJobsLogs" checked style="margin-top:4px;" />
+            <div>
+              <div style="font-weight:700;">清除历史任务队列与运行日志</div>
+              <div style="font-size:12px; color:var(--md-on-surface-variant);">清理已完成或已取消的任务进度条记录</div>
+            </div>
+          </label>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:10px; border-radius:var(--radius-md); background:var(--md-surface-container);">
+            <input type="checkbox" id="chkClearModels" style="margin-top:4px;" />
+            <div>
+              <div style="font-weight:700;">清除已缓存的本地 LiteRT (.tflite) 模型文件</div>
+              <div style="font-size:12px; color:var(--md-on-surface-variant);">移除保存在 IndexedDB 中的自定义 .tflite 模型权重文件</div>
+            </div>
+          </label>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:10px; border-radius:var(--radius-md); background:var(--md-error-container); color:var(--md-on-error-container);">
+            <input type="checkbox" id="chkClearRecognitionResults" style="margin-top:4px;" />
+            <div>
+              <div style="font-weight:700;">清除所有识别结果与人工标记记录</div>
+              <div style="font-size:12px; opacity:0.9;">警告：将清空当前保存在浏览器中的文件夹媒体列表、检测边界框及人工校验结果</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="md3-dialog-actions">
+        <button type="button" class="md3-btn md3-btn-text" data-close-modal="clearCacheModal">取消</button>
+        <button type="button" class="md3-btn md3-btn-filled" id="btnConfirmClearCache">立即清理所选项</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       MODAL 3: BATCH CSV EXPORT SCOPE DIALOG
+       ==================================================================== -->
+  <div class="modal-backdrop" id="exportCsvModal">
+    <div class="md3-dialog">
+      <div class="md3-dialog-header">
+        <span>批量导出为 CSV</span>
+        <button type="button" class="md3-icon-btn" data-close-modal="exportCsvModal">✕</button>
+      </div>
+      <div class="md3-dialog-body">
+        <p style="font-size:13.5px; color:var(--md-on-surface-variant); margin-bottom:14px;" id="exportModalSummaryText">
+          请选择导出范围与分表方式：
+        </p>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <button type="button" class="md3-btn md3-btn-filled" id="btnModalExportCurrentScope" style="justify-content:flex-start; padding:14px 18px; height:auto; text-align:left;">
+            <div>
+              <div style="font-size:14.5px; font-weight:800;">合并导出当前目录范围为单份 CSV</div>
+              <div style="font-size:12px; opacity:0.88; font-weight:500;" id="modalCurrentScopeDesc">将当前所选目录范围内的全部媒体记录合并导出为 1 个 .csv 文件</div>
+            </div>
+          </button>
+
+          <button type="button" class="md3-btn md3-btn-tonal" id="btnModalExportPerSubfolder" style="justify-content:flex-start; padding:14px 18px; height:auto; text-align:left;">
+            <div>
+              <div style="font-size:14.5px; font-weight:800;">按子文件夹分别导出 CSV (逐目录批量导出)</div>
+              <div style="font-size:12px; opacity:0.88; font-weight:500;" id="modalPerSubfolderDesc">每个含媒体的相机位点子目录分别计算工作天数与独立首只，并各自生成独立的 .csv 表格</div>
+            </div>
+          </button>
+        </div>
+
+        <div style="margin-top:14px;">
+          <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; cursor:pointer;">
+            <input type="checkbox" id="chkRememberExportChoice" />
+            记住我的选择，下次直接导出（可在“设置 → CSV 导出设置”中修改）
+          </label>
+        </div>
+      </div>
+      <div class="md3-dialog-actions">
+        <button type="button" class="md3-btn md3-btn-text" data-close-modal="exportCsvModal">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       MODAL 4: KEYBOARD SHORTCUTS DIALOG
+       ==================================================================== -->
+  <div class="modal-backdrop" id="shortcutsModal">
+    <div class="md3-dialog">
+      <div class="md3-dialog-header">
+        <span>键盘快捷键说明</span>
+        <button type="button" class="md3-icon-btn" data-close-modal="shortcutsModal">✕</button>
+      </div>
+      <div class="md3-dialog-body" style="font-size:13px; display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>↑ / ←</strong>：上一张媒体 / 事件</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>↓ / →</strong>：下一张媒体 / 事件</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>C / Enter</strong>：标记为“正确”</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>E / Space</strong>：标记为“空拍”</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>1 ~ 9</strong>：触发对应序号的快捷物种</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>O</strong>：打开“其他物种”名录搜索</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>Ctrl + Z</strong>：撤回上一步人工标记</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>F</strong>：收藏 / 取消收藏当前媒体</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>Ctrl + 点击</strong>：多选/反选文件</div>
+        <div style="padding:8px 12px; background:var(--md-surface-container); border-radius:var(--radius-md);"><strong>Shift + 点击</strong>：连续范围多选文件</div>
+      </div>
+      <div class="md3-dialog-actions">
+        <button type="button" class="md3-btn md3-btn-filled" data-close-modal="shortcutsModal">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Snackbar Container -->
+  <div id="snackbarContainer"></div>
+
+  <!-- Taxonomy Database (2,252 Chinese Bird & Mammal Species) + Main App Logic -->
+  <script src="species_taxonomy.js"></script>
+  <script src="models/bundled_models.js"></script>
+  <script src="litert_runtime.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

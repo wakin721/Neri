@@ -177,7 +177,7 @@ void main() {
         apiClient = NeriApiClient(
           httpClient: MockClient((request) async {
             final body = jsonDecode(request.body) as Map;
-            if (request.url.path == '/api/dinov2/feedback/cluster') {
+            if (request.url.path == '/api/dino/feedback/cluster') {
               learningRequests++;
               operationId = body['feedback_operation_id'] as String;
               final selected = (body['observation_ids'] as List)
@@ -245,7 +245,7 @@ void main() {
                 headers: {'content-type': 'application/json; charset=utf-8'},
               );
             }
-            if (request.url.path == '/api/dinov2/feedback/revert') {
+            if (request.url.path == '/api/dino/feedback/revert') {
               undoRequests++;
               expect(body['feedback_operation_id'], operationId);
               return http.Response(
@@ -257,7 +257,7 @@ void main() {
                 headers: {'content-type': 'application/json; charset=utf-8'},
               );
             }
-            expect(request.url.path, '/api/dinov2/feedback/rejection-clusters');
+          expect(request.url.path, '/api/dino/feedback/rejection-clusters');
             requests++;
             final ids =
                 (jsonDecode(request.body) as Map)['observation_ids'] as List;

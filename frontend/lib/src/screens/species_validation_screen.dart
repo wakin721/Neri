@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import '../models/export_result.dart';
 import '../models/job.dart';
 import '../models/rejection_cluster.dart';
 import '../utils/detection_species.dart';
+import '../utils/dino_rejection.dart';
 import '../utils/quick_mark_sort.dart';
 import '../utils/media_display_order.dart';
 import '../utils/validation_cache_delta.dart';
@@ -16,8 +18,10 @@ import '../utils/startup_timing.dart';
 import '../utils/validation_selection_modifiers.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
-import '../widgets/dinov2_feature_scatter.dart';
+import '../widgets/dino_feature_scatter.dart';
+import '../widgets/dino_rejection_scores.dart';
 import '../widgets/selectable_list_card.dart';
+import '../widgets/sequence_pending_notice.dart';
 
 import 'package:lpinyin/lpinyin.dart';
 
@@ -69,6 +73,32 @@ typedef RedetectValidationItems =
       required double confidence,
     });
 
+typedef MarkValidationItemWithFilters =
+    Future<DetectionItem> Function(
+      DetectionItem item,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+      Map<String, double>? confidenceSettings,
+      double? minFrameRatio,
+    });
+
+typedef MarkValidationItemsWithFilters =
+    Future<List<DetectionItem>> Function(
+      List<DetectionItem> items,
+      String action, {
+      String? speciesName,
+      String? speciesCount,
+      String? speciesType,
+      String? remark,
+      String? feedbackOperationId,
+      Map<String, double>? confidenceSettings,
+      double? minFrameRatio,
+    });
+
 const favoritePhotoExportAsk = 'ask';
 const favoritePhotoExportAlways = 'export';
 const favoritePhotoExportNever = 'skip';
@@ -78,7 +108,9 @@ const emptyPhotoDeleteNever = 'keep';
 
 const validationExportColumns = <String>[
   '文件名',
+  '相对路径',
   '格式',
+  '检测状态',
   '拍摄日期',
   '拍摄时间',
   '工作天数',
@@ -124,30 +156,36 @@ List<DetectionItem> dinoValidationEffectiveItems(
   ];
 }
 
-String dinoValidationLearningSkipSummary(
+String dinoValidationLearningFeedbackSummary(
   Iterable<DetectionItem> items, {
-  required bool learningRequested,
+  bool learningRequested = true,
 }) {
-  if (!learningRequested) return '';
   final targets = items.toList(growable: false);
   if (targets.isEmpty) return '';
 
-  var skipped = 0;
+  final counts = <String, int>{};
+  var totalWithMessage = 0;
   for (final item in targets) {
-    final observationIds = item.detectionBoxes
-        .map((box) => box.observationId?.trim() ?? '')
-        .where((id) => id.isNotEmpty)
-        .toSet();
-    if (observationIds.length != 1) skipped += 1;
+    final feedback = item.detectionData['learning_feedback'];
+    if (feedback is! Map) continue;
+    final status = feedback['status']?.toString().trim() ?? '';
+    if (!learningRequested && status != 'unverified') continue;
+    final message = feedback['message']?.toString().trim() ?? '';
+    if (message.isEmpty) continue;
+    totalWithMessage += 1;
+    counts[message] = (counts[message] ?? 0) + 1;
   }
-  if (skipped == 0) return '';
-  if (targets.length == 1) {
-    return 'DINOv2 学习已跳过：该文件需恰好 1 个可学习检测框';
+  if (counts.isEmpty) return '';
+  if (targets.length == 1 ||
+      (counts.length == 1 && totalWithMessage == targets.length)) {
+    return counts.keys.first;
   }
-  return 'DINOv2 学习已跳过 $skipped/${targets.length} 个文件：每个文件需恰好 1 个可学习检测框';
+  return [
+    for (final entry in counts.entries) '${entry.value} 个文件：${entry.key}',
+  ].join('；');
 }
 
-String dinoV2FeedbackPanelTitle(
+String dinoFeedbackPanelTitle(
   DetectionBox box,
   List<DetectionBox> visibleBoxes,
 ) {
@@ -179,7 +217,13 @@ String dinoV2FeedbackPanelTitle(
   final boxNumber = boxIndex >= 0 ? boxIndex + 1 : 1;
   final predictedSpecies = box.predictedSpecies?.trim() ?? '';
   final detectedSpecies = box.species.trim();
-  final species = predictedSpecies.isNotEmpty
+  final preferHumanSpecies =
+      (box.feedbackStatus == 'confirmed' ||
+          box.feedbackStatus == 'image_label') &&
+      detectedSpecies.isNotEmpty;
+  final species = preferHumanSpecies
+      ? detectedSpecies
+      : predictedSpecies.isNotEmpty
       ? predictedSpecies
       : detectedSpecies.isNotEmpty
       ? detectedSpecies
@@ -215,6 +259,69 @@ bool _sameDetectionBoxSelection(DetectionBox left, DetectionBox right) {
   return true;
 }
 
+const _dinoV3ScoreKeys = <String>[
+  'ridge_score',
+  'raw_ridge_score',
+  'within_score',
+  'box_known_score',
+  'sequence_known_score',
+];
+
+String synthesizeDinoV3ObservationId(
+  String filePath,
+  int boxIndex,
+  List<double> bbox,
+) {
+  final payload = jsonEncode({
+    'p': filePath,
+    'i': boxIndex,
+    'b': bbox.take(4).map((v) => double.parse(v.toStringAsFixed(2))).toList(),
+  });
+  final encoded = base64Url.encode(utf8.encode(payload)).replaceAll('=', '');
+  return 'dinov3:$encoded';
+}
+
+bool _isDinoV3Candidate(Map<String, dynamic> candidate) {
+  return _dinoV3ScoreKeys.any((key) => candidate[key] != null);
+}
+
+DetectionBox _withSynthesizedDinoV3ObservationId(
+  DetectionItem item,
+  DetectionBox box,
+  int boxIndex,
+) {
+  if ((box.observationId?.trim() ?? '').isNotEmpty) return box;
+  if (box.candidates.isEmpty) return box;
+  final primaryCandidate = box.candidates.first;
+  if (!_isDinoV3Candidate(primaryCandidate)) return box;
+  final filePath = item.path.trim();
+  if (filePath.isEmpty) return box;
+  final predictedSpecies =
+      (primaryCandidate['best_known_species'] ??
+              primaryCandidate['predicted_species'])
+          ?.toString()
+          .trim() ??
+      '';
+  final existingPredictedSpecies = box.predictedSpecies?.trim() ?? '';
+  return DetectionBox(
+    species: box.species,
+    confidence: box.confidence,
+    bbox: box.bbox,
+    frameIndex: box.frameIndex,
+    timestamp: box.timestamp,
+    trackId: box.trackId,
+    candidates: box.candidates,
+    observationId: synthesizeDinoV3ObservationId(filePath, boxIndex, box.bbox),
+    registryId: box.registryId,
+    predictedSpecies: existingPredictedSpecies.isNotEmpty
+        ? box.predictedSpecies
+        : predictedSpecies.isEmpty
+        ? box.predictedSpecies
+        : predictedSpecies,
+    feedbackStatus: box.feedbackStatus,
+  );
+}
+
 const double _validationButtonHeight = 40;
 const _validationImageTypes = {
   'png',
@@ -242,6 +349,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.apiClient,
     required this.inputPath,
     this.classificationModelPath,
+    this.detectionConfidence = 0.25,
     required this.items,
     required this.rootInputPath,
     required this.rootItems,
@@ -272,6 +380,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.onOpenExternal,
     required this.onMarkItem,
     required this.onMarkItems,
+    this.onItemUpdated,
     required this.onQuickMarkUsed,
     required this.onQuickMarkReverted,
     required this.onRedetectItems,
@@ -286,6 +395,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final NeriApiClient apiClient;
   final String inputPath;
   final String? classificationModelPath;
+  final double detectionConfidence;
   final List<DetectionItem> items;
   final String rootInputPath;
   final List<DetectionItem> rootItems;
@@ -316,6 +426,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final void Function(String path) onOpenExternal;
   final MarkValidationItem onMarkItem;
   final MarkValidationItems onMarkItems;
+  final ValueChanged<DetectionItem>? onItemUpdated;
   final Future<void> Function(String speciesName) onQuickMarkUsed;
   final Future<void> Function(String speciesName) onQuickMarkReverted;
   final RedetectValidationItems onRedetectItems;
@@ -411,6 +522,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   // 临时状态（标记中、导出中不需要跨界面保存）
   bool _marking = false;
+  Map<String, String> get _availableSpeciesTypes => widget.speciesTypes;
   Timer? _snackBarCloseTimer;
   ScaffoldFeatureController<SnackBar, SnackBarClosedReason>?
   _snackBarController;
@@ -499,6 +611,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         (box) =>
             _isRejectedSpeciesName(box.species) &&
             box.observationId != null &&
+            !box.observationId!.startsWith('dinov3:') &&
             (changed || !_rejectionClusters.containsKey(box.observationId)),
       ),
     );
@@ -523,6 +636,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       for (final box in items[index].detectionBoxes) {
         if (_isRejectedSpeciesName(box.species) &&
             box.observationId != null &&
+            !box.observationId!.startsWith('dinov3:') &&
             !_rejectionClusters.containsKey(box.observationId)) {
           pendingIds.add(box.observationId!);
         }
@@ -536,7 +650,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           offset,
           (offset + 10000).clamp(0, ids.length),
         );
-        final resolved = await widget.apiClient.fetchDinoV2RejectionClusters(
+        final resolved = await widget.apiClient.fetchDinoRejectionClusters(
           model,
           batch,
         );
@@ -1531,7 +1645,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           }
 
           return AlertDialog(
-            key: const ValueKey('dinov2-detection-box-dialog'),
+            key: const ValueKey('dino-detection-box-dialog'),
             title: const Text('特征空间位置与最近类别'),
             content: SizedBox(
               width: 680,
@@ -1553,7 +1667,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     const SizedBox(height: 16),
                     if (classificationModelPath.isNotEmpty &&
                         observationId.isNotEmpty)
-                      DinoV2FeatureExplanationPanel(
+                      DinoFeatureExplanationPanel(
                         apiClient: widget.apiClient,
                         classificationModelPath: classificationModelPath,
                         observationId: observationId,
@@ -1561,7 +1675,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     else
                       Text(
                         classificationModelPath.isEmpty
-                            ? '请先选择 DINOv2 分类模型'
+                            ? '请先选择 Neri1.1 或 Neri1.1 分类模型'
                             : '该检测框没有可用的特征空间数据',
                       ),
                   ],
@@ -1648,7 +1762,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final operationId = _newFeedbackOperationId();
     _setMarking(true);
     try {
-      final result = await widget.apiClient.confirmDinoV2Cluster(
+      final result = await widget.apiClient.confirmDinoCluster(
         inputPath: widget.inputPath,
         classificationModelPath: model,
         clusterId: clusterId,
@@ -1720,7 +1834,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (selected.isNotEmpty) _selectedBucketKey = selected.first.key;
   }
 
-  void _mergeDinoFeedbackItem(DetectionItem authoritative) {
+  DetectionItem _mergeDinoFeedbackItem(DetectionItem authoritative) {
     _currentBuckets();
     final current =
         _bucketCacheItemByPath[authoritative.path] ??
@@ -1752,6 +1866,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       }
     }
     _groupSpeciesLabelCache.clear();
+    return merged;
   }
 
   Future<void> _submitDinoBoxFeedback(
@@ -1759,7 +1874,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String action, {
     String? speciesName,
   }) async {
-    if (_marking || widget.items.isEmpty) return;
+    if (_marking || _interactionBlocked || widget.items.isEmpty) return;
     final observationId = box.observationId?.trim() ?? '';
     final classificationModelPath =
         widget.classificationModelPath?.trim() ?? '';
@@ -1772,7 +1887,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
     _setMarking(true);
     try {
-      final result = await widget.apiClient.markDinoV2BoxFeedback(
+      final result = await widget.apiClient.markDinoBoxFeedback(
         inputPath: widget.inputPath,
         filePath: item.path,
         classificationModelPath: classificationModelPath,
@@ -1782,14 +1897,20 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         feedbackOperationId: operationId,
       );
       if (!mounted) return;
-      setState(() => _mergeDinoFeedbackItem(result.item));
+      late DetectionItem merged;
+      setState(() => merged = _mergeDinoFeedbackItem(result.item));
       final recordedOperationId = result.operationId.trim().isEmpty
           ? operationId
           : result.operationId.trim();
       _recordMarkHistory(<DetectionItem>[
-        result.item,
+        merged,
       ], feedbackOperationId: recordedOperationId);
-      unawaited(widget.onRefresh().catchError((_) {}));
+      if (widget.onItemUpdated != null) {
+        _pendingValidationEchoPaths.add(merged.path);
+        widget.onItemUpdated!(merged);
+      } else {
+        unawaited(widget.onRefresh().catchError((_) {}));
+      }
       _showSnackBar('已记录检测框反馈');
     } catch (error) {
       if (!mounted) return;
@@ -1813,7 +1934,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           initialCount: '1',
           initialType: widget.speciesTypes[initialSpecies] ?? '',
           initialRemark: '',
-          speciesTypes: widget.speciesTypes,
+          speciesTypes: _availableSpeciesTypes,
           speciesUsageCounts: _speciesUsageCounts(),
         );
       },
@@ -1831,7 +1952,20 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     required ValueChanged<String> onFeedback,
     required VoidCallback onEditSpecies,
   }) {
-    final title = dinoV2FeedbackPanelTitle(box, visibleBoxes);
+    double? candidateMetric(Map<String, dynamic> map, String key) {
+      final raw = map[key];
+      if (raw is num) {
+        final val = raw.toDouble();
+        return val.isFinite ? val : null;
+      }
+      if (raw != null) {
+        final parsed = double.tryParse(raw.toString());
+        if (parsed != null && parsed.isFinite) return parsed;
+      }
+      return null;
+    }
+
+    final title = dinoFeedbackPanelTitle(box, visibleBoxes);
     final classificationModelPath =
         widget.classificationModelPath?.trim() ?? '';
     final observationId = box.observationId?.trim() ?? '';
@@ -1844,11 +1978,32 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         .take(4)
         .map((value) => value.toStringAsFixed(1))
         .join(', ');
+    final primaryCandidate = box.candidates.isNotEmpty
+        ? box.candidates.first
+        : const <String, dynamic>{};
+    final isNeri1Box =
+        box.candidates.isNotEmpty && _isDinoV3Candidate(primaryCandidate);
+    final rejectionInfo = dinoRejectionInfo(box);
+    final rawDetConf = rejectionInfo.rawDetConf;
+    final boxKnownScore = rejectionInfo.boxScore;
+    final boxThreshold = rejectionInfo.boxThreshold;
+    final seqKnownScore = rejectionInfo.sequenceScore;
+    final seqThreshold = rejectionInfo.sequenceThreshold;
+    final withinScore = rejectionInfo.withinScore;
+    final ridgeScore = rejectionInfo.ridgeScore;
+    final rawRidgeScore = rejectionInfo.rawRidgeScore;
     final candidateSummary = box.candidates
         .take(3)
         .map((candidate) {
           final name = candidate['name']?.toString().trim() ?? '';
           if (name.isEmpty) return '';
+          final ridge = candidateMetric(candidate, 'ridge_score');
+          if (ridge != null &&
+              candidate['conf'] == null &&
+              candidate['confidence'] == null &&
+              candidate['score'] == null) {
+            return '$name Ridge ${ridge.toStringAsFixed(3)}';
+          }
           final confidence = candidateConfidence(candidate);
           return '$name ${(confidence * 100).toStringAsFixed(1)}%';
         })
@@ -1903,6 +2058,43 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   ),
                   if (box.confidence != null)
                     Text('置信度：${box.confidence!.toStringAsFixed(3)}'),
+                  if (rawDetConf != null)
+                    Text('检测置信度：${rawDetConf.toStringAsFixed(3)}'),
+                  if (boxKnownScore != null)
+                    Text(
+                      boxThreshold != null
+                          ? '单框门控：${boxKnownScore.toStringAsFixed(3)} (阈值 ${boxThreshold.toStringAsFixed(3)})'
+                          : '单框门控：${boxKnownScore.toStringAsFixed(3)}',
+                    ),
+                  if (seqKnownScore != null)
+                    Text(
+                      seqThreshold != null
+                          ? '序列门控：${seqKnownScore.toStringAsFixed(3)} (阈值 ${seqThreshold.toStringAsFixed(3)})'
+                          : '序列门控：${seqKnownScore.toStringAsFixed(3)}',
+                    ),
+                  if (rejectionInfo.isLegacySingleGate &&
+                      rejectionInfo.legacyScore != null)
+                    Text(
+                      rejectionInfo.legacyThreshold != null
+                          ? '旧版门控：${rejectionInfo.legacyScore!.toStringAsFixed(3)} (阈值 ${rejectionInfo.legacyThreshold!.toStringAsFixed(3)})'
+                          : '旧版门控：${rejectionInfo.legacyScore!.toStringAsFixed(3)}',
+                    ),
+                  if (rejectionInfo.hasInconsistentRecord)
+                    Text(
+                      '拒识记录不一致，建议重新识别',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  if (withinScore != null)
+                    Text('Within分数：${withinScore.toStringAsFixed(3)}'),
+                  if (ridgeScore != null)
+                    Text(
+                      rawRidgeScore != null &&
+                              (rawRidgeScore - ridgeScore).abs() > 1e-4
+                          ? 'Ridge分数：${ridgeScore.toStringAsFixed(3)} (单框 ${rawRidgeScore.toStringAsFixed(3)})'
+                          : 'Ridge分数：${ridgeScore.toStringAsFixed(3)}',
+                    ),
                   if (bboxSummary.isNotEmpty) Text('边界框：$bboxSummary'),
                   if (box.frameIndex != null) Text('帧：${box.frameIndex}'),
                   if (box.timestamp != null)
@@ -1910,7 +2102,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   if ((box.trackId?.trim() ?? '').isNotEmpty)
                     Text('Track：${box.trackId!.trim()}'),
                   if ((box.predictedSpecies?.trim() ?? '').isNotEmpty)
-                    Text('DINOv2：${box.predictedSpecies!.trim()}'),
+                    Text(
+                      '${isNeri1Box ? 'Neri1.1' : 'Neri1.1'}：${box.predictedSpecies!.trim()}',
+                    ),
                 ],
               ),
             ),
@@ -1921,7 +2115,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             if (observationId.isEmpty) ...[
               const SizedBox(height: 6),
               Text(
-                '该检测框没有 DINOv2 observation ID：可查看检测详情，但不能提交学习反馈。',
+                '该检测框没有 Neri1.1 observation ID：可查看检测详情，但不能提交学习反馈。',
                 style: TextStyle(
                   fontSize: 12,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -2081,14 +2275,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
+                      textWidthBasis: TextWidthBasis.longestLine,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  SequencePendingNotice(item: item),
+                ],
               ),
             ),
           ],
@@ -2102,6 +2304,30 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
+    if (isDinoItem(item) ||
+        widget.classificationModelPath?.endsWith('.neri.json') == true) {
+      return _ValidationPanel(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              const Text('显示结果', style: TextStyle(fontWeight: FontWeight.w500)),
+              Switch(
+                value: _showDetections,
+                onChanged: (value) => setState(() => _showDetections = value),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: DinoRejectionScores(
+                  boxes: item.detectionBoxes,
+                  detectionData: item.detectionData,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     final speciesOptions = detectionSpeciesOptions(
       item,
       globalOption: _globalSpecies,
@@ -3064,6 +3290,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             (box) =>
                 _isRejectedSpeciesName(box.species) &&
                 box.observationId != null &&
+                !box.observationId!.startsWith('dinov3:') &&
                 !_rejectionClusters.containsKey(box.observationId),
           )) {
         return false;
@@ -3555,6 +3782,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   String _speciesFilterFor(DetectionItem item) {
+    if (isDinoItem(item) ||
+        widget.classificationModelPath?.endsWith('.neri.json') == true) {
+      return _globalSpecies;
+    }
     return detectionSpeciesOptions(
           item,
           globalOption: _globalSpecies,
@@ -3563,7 +3794,14 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         : _globalSpecies;
   }
 
-  DetectionBox? _boxAfterConfidenceFilter(DetectionBox box) {
+  DetectionBox? _boxAfterConfidenceFilter(
+    DetectionBox box, {
+    bool dino = false,
+  }) {
+    if (dino || isDinoDecision(box)) {
+      final finalBox = dinoFinalBox(box);
+      return finalBox.species == '空' ? null : finalBox;
+    }
     if (box.feedbackStatus == 'confirmed') return box;
     if (box.candidates.isNotEmpty) {
       for (final candidate in box.candidates) {
@@ -3628,8 +3866,17 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final trackFrameCounts = _trackFrameCountsForFilter(item);
     final selectedSpeciesFilter = _speciesFilterFor(item);
     final filtered = <DetectionBox>[];
-    for (final originalBox in item.detectionBoxes) {
-      final box = _boxAfterConfidenceFilter(originalBox);
+    final boxes = item.detectionBoxes;
+    for (var index = 0; index < boxes.length; index++) {
+      final originalBox = _withSynthesizedDinoV3ObservationId(
+        item,
+        boxes[index],
+        index,
+      );
+      final box = _boxAfterConfidenceFilter(
+        originalBox,
+        dino: isDinoItem(item),
+      );
       if (box == null) continue;
       final matchesSpecies =
           selectedSpeciesFilter == _globalSpecies ||
@@ -3649,8 +3896,17 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
     final trackFrameCounts = _trackFrameCountsForFilter(item);
     final filtered = <DetectionBox>[];
-    for (final originalBox in item.detectionBoxes) {
-      final box = _boxAfterConfidenceFilter(originalBox);
+    final boxes = item.detectionBoxes;
+    for (var index = 0; index < boxes.length; index++) {
+      final originalBox = _withSynthesizedDinoV3ObservationId(
+        item,
+        boxes[index],
+        index,
+      );
+      final box = _boxAfterConfidenceFilter(
+        originalBox,
+        dino: isDinoItem(item),
+      );
       if (box != null &&
           _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
           box.bbox.length >= 4) {
@@ -3679,6 +3935,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     Map<String, int>? trackFrameCounts,
   ) {
     if (box.feedbackStatus == 'confirmed' ||
+        box.feedbackStatus == 'image_label' ||
         !_isVideo(item) ||
         _isManualDetection(item) ||
         _minFrameRatio <= 0) {
@@ -3702,7 +3959,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   bool _isManualDetection(DetectionItem item) {
-    return item.detectionData['最低置信度'] == '人工校验';
+    return item.detectionData['最低置信度'] == '人工校验' ||
+        item.detectionData['image_annotation'] is Map;
   }
 
   double? _itemConfidence(DetectionItem item) {
@@ -3908,7 +4166,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       count = '1';
     }
 
-    if (visibleBoxes.isNotEmpty && item.detectionData['最低置信度'] != '人工校验') {
+    final imageAnnotation = item.detectionData['image_annotation'];
+    final hasManualAnnotation = _isManualDetection(item);
+
+    if (visibleBoxes.isNotEmpty && !hasManualAnnotation) {
       final counts = _isVideo(item)
           ? _trackCountsBySpecies(visibleBoxes)
           : _boxCountsBySpecies(visibleBoxes);
@@ -3928,6 +4189,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       count = '空';
     }
 
+    if (count.trim().isEmpty && imageAnnotation is Map) {
+      count = imageAnnotation['count']?.toString().trim() ?? '';
+    }
     if (count.trim().isEmpty) {
       count = species == '空'
           ? '空'
@@ -4105,12 +4369,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if ((batchItems == null || batchItems.isEmpty) && widget.items.isEmpty) {
       return;
     }
-    final item = batchItems?.isNotEmpty == true
+    final originalItem = batchItems?.isNotEmpty == true
         ? batchItems!.first
         : widget.items.firstWhere(
             (candidate) => candidate.path == _selectedPath,
             orElse: () => widget.items.first,
           );
+    final item = _bucketCacheItemByPath[originalItem.path] ?? originalItem;
 
     final visibleBoxes = _filteredBoxes(item);
     final summary = _summaryFor(item, visibleBoxes);
@@ -4134,7 +4399,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           initialCount: initialCount,
           initialType: initialType,
           initialRemark: initialRemark,
-          speciesTypes: widget.speciesTypes,
+          speciesTypes: _availableSpeciesTypes,
           speciesUsageCounts: _speciesUsageCounts(),
         );
       },
@@ -4181,6 +4446,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String? feedbackOperationId,
   }) {
     final callback = widget.onMarkItem;
+    if (callback is MarkValidationItemWithFilters) {
+      return callback(
+        item,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+        confidenceSettings: action == 'correct'
+            ? (Map<String, double>.from(_savedConfidenceSettings)
+                ..putIfAbsent(_globalSpecies, () => 0.25))
+            : null,
+        minFrameRatio: _minFrameRatio,
+      );
+    }
     if (feedbackOperationId != null &&
         callback is MarkValidationItemWithFeedback) {
       return callback(
@@ -4213,6 +4494,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String? feedbackOperationId,
   }) {
     final callback = widget.onMarkItems;
+    if (callback is MarkValidationItemsWithFilters) {
+      return callback(
+        items,
+        action,
+        speciesName: speciesName,
+        speciesCount: speciesCount,
+        speciesType: speciesType,
+        remark: remark,
+        feedbackOperationId: feedbackOperationId,
+        confidenceSettings: action == 'correct'
+            ? (Map<String, double>.from(_savedConfidenceSettings)
+                ..putIfAbsent(_globalSpecies, () => 0.25))
+            : null,
+        minFrameRatio: _minFrameRatio,
+      );
+    }
     if (feedbackOperationId != null &&
         callback is MarkValidationItemsWithFeedback) {
       return callback(
@@ -4250,10 +4547,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final nextPath = _nextPathAfterBatch(visibleBefore, items);
     _deferRegroupForItems(items);
     final feedbackOperationId = _newValidationFeedbackOperationId(action);
-    final learningSkipSummary = dinoValidationLearningSkipSummary(
-      items,
-      learningRequested: feedbackOperationId != null,
-    );
 
     _setMarking(true);
     try {
@@ -4311,9 +4604,17 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       if (usedQuickSpecies != null) {
         _notifyQuickMarkUsed(usedQuickSpecies);
       }
+      final learningFeedbackSummary = dinoValidationLearningFeedbackSummary(
+        updatedItems,
+        learningRequested:
+            feedbackOperationId != null ||
+            (widget.classificationModelPath?.trim().isNotEmpty ?? false),
+      );
       final message = '已批量处理 ${items.length} 个文件';
       _showSnackBar(
-        learningSkipSummary.isEmpty ? message : '$message；$learningSkipSummary',
+        learningFeedbackSummary.isEmpty
+            ? message
+            : '$message；$learningFeedbackSummary',
       );
     } catch (error) {
       if (!mounted) return;
@@ -4411,7 +4712,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (_markHistory.last.clusterFeedback && feedbackOperationId != null) {
       _setMarking(true);
       try {
-        await widget.apiClient.revertDinoV2Feedback(
+        await widget.apiClient.revertDinoFeedback(
           classificationModelPath: widget.classificationModelPath!,
           feedbackOperationId: feedbackOperationId,
         );
@@ -4441,9 +4742,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         final classificationModelPath =
             widget.classificationModelPath?.trim() ?? '';
         if (classificationModelPath.isEmpty) {
-          throw StateError('缺少 DINOv2 分类模型路径，无法撤回学习反馈。');
+          throw StateError('缺少 Neri1.1 分类模型路径，无法撤回学习反馈。');
         }
-        await widget.apiClient.revertDinoV2Feedback(
+        await widget.apiClient.revertDinoFeedback(
           classificationModelPath: classificationModelPath,
           feedbackOperationId: feedbackOperationId,
         );
@@ -4486,7 +4787,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (items.isEmpty || _marking) return;
     _setMarking(true);
     try {
-      await widget.onRedetectItems(items, confidence: _confidence);
+      final dino =
+          widget.classificationModelPath?.endsWith('.neri.json') == true ||
+          items.any(isDinoItem);
+      await widget.onRedetectItems(
+        items,
+        confidence: dino ? widget.detectionConfidence : _confidence,
+      );
       if (!mounted) return;
       _showSnackBar('已提交 ${items.length} 个文件重新检测');
     } catch (error) {
@@ -4542,10 +4849,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _deferRegroupForItems(<DetectionItem>[item]);
 
     final feedbackOperationId = _newValidationFeedbackOperationId(action);
-    final learningSkipSummary = dinoValidationLearningSkipSummary(
-      <DetectionItem>[item],
-      learningRequested: feedbackOperationId != null,
-    );
     _setMarking(true);
     try {
       timing.mark('backend_start');
@@ -4605,11 +4908,19 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _notifyQuickMarkUsed(usedQuickSpecies);
       }
       unawaited(widget.onLoadMetadata(targetItem));
+      final learningFeedbackSummary = dinoValidationLearningFeedbackSummary(
+        <DetectionItem>[updated],
+        learningRequested:
+            feedbackOperationId != null ||
+            (widget.classificationModelPath?.trim().isNotEmpty ?? false),
+      );
       final message = action == 'unverified'
           ? '已撤回校验标记'
           : '已标记 ${updated.filename}';
       _showSnackBar(
-        learningSkipSummary.isEmpty ? message : '$message；$learningSkipSummary',
+        learningFeedbackSummary.isEmpty
+            ? message
+            : '$message；$learningFeedbackSummary',
       );
     } catch (error) {
       if (!mounted) return;
@@ -4622,7 +4933,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _setMarking(bool value) {
     if (!mounted || _marking == value) return;
-    setState(() => _marking = value);
+    setState(() {
+      _marking = value;
+    });
   }
 
   String? _nextPathAfterItem(

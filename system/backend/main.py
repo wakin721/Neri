@@ -17,10 +17,10 @@ install_runtime_patches(_services)
 
 from .main_core import *  # noqa: F401,F403
 from .main_core import app
-from .dinov2_environment import dinov2_environment_router
-from .dinov2_feedback_api import dinov2_feedback_router
+from .dinov3_environment import dinov3_environment_router
+from .dino_feedback_api import dino_feedback_router
 from system.model_sync.integration import wire_model_sync
 
-app.include_router(dinov2_environment_router())
-app.include_router(dinov2_feedback_router())
+app.include_router(dinov3_environment_router())
+app.include_router(dino_feedback_router())
 wire_model_sync(app)

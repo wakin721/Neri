@@ -19,16 +19,25 @@ ModelInfo? _classificationModelForPath(NeriSettings? settings, String? path) {
   return null;
 }
 
+ModelInfo? _detectionModelForPath(NeriSettings? settings, String? path) {
+  final target = path?.trim() ?? '';
+  if (target.isEmpty) return null;
+  for (final model in settings?.availableModels ?? const <ModelInfo>[]) {
+    if (model.path == target || model.checkpointPath == target) return model;
+  }
+  return null;
+}
+
 String _modelSelectorHelperText({
   required bool enabled,
   required List<ModelInfo> models,
   required String directory,
 }) {
   if (!enabled) {
-    return '检测依赖未安装，安装完成后可选择模型';
+    return '检测依赖未安装，请安装 PyTorch 或放入 LiteRT .tflite 模型';
   }
   if (models.isEmpty) {
-    return '未在 $directory 中找到 .pt 模型';
+    return '未在 $directory 中找到 .pt / .tflite 模型';
   }
   return '扫描 $directory';
 }
@@ -45,7 +54,10 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in userModels)
-        DropdownMenuEntry<String>(value: model.path, label: model.rawName),
+        DropdownMenuEntry<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
     ],
     if (cloudModels.isNotEmpty) ...[
       const DropdownMenuEntry<String>(
@@ -54,7 +66,10 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in cloudModels)
-        DropdownMenuEntry<String>(value: model.path, label: model.rawName),
+        DropdownMenuEntry<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
     ],
   ];
 }
@@ -126,7 +141,7 @@ class StartScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final detectionSettingsEnabled =
-        settings == null || settings!.missingYoloDependencies.isEmpty;
+        settings == null || settings!.detectionReady;
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
@@ -276,7 +291,6 @@ class _CreateJobCard extends StatelessWidget {
       selectedClassificationModelPath,
     );
     final dinoNeedsDetector =
-        classificationInfo?.isDinoV2 == true &&
         classificationInfo?.requiresDetector == true &&
         (selectedModelPath == null || selectedModelPath!.isEmpty);
     return SectionCard(
@@ -299,10 +313,22 @@ class _CreateJobCard extends StatelessWidget {
             vidStride: vidStride,
             onVidStrideChanged: onVidStrideChanged,
           ),
+          if (settings?.litertAvailable == true &&
+              settings?.detectionReady == true &&
+              (settings?.pytorchAvailable == false ||
+                  (settings?.missingYoloDependencies.isNotEmpty ?? false))) ...[
+            const SizedBox(height: 8),
+            Text(
+              '检测依赖不完整，当前使用 LiteRT 本地探测（动物 / 人 / 车辆，无物种分类）。',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
           if (dinoNeedsDetector) ...[
             const SizedBox(height: 8),
             Text(
-              'DINOv2 必须同时选择探测模型后才能开始处理。',
+              'Neri1.1 必须同时选择探测模型后才能开始处理。',
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
@@ -329,7 +355,10 @@ class _CreateJobCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           ExpressiveActionButton(
-            onPressed: submitting || dinoNeedsDetector ? null : onCreateJob,
+            onPressed:
+                submitting || dinoNeedsDetector || !detectionSettingsEnabled
+                ? null
+                : onCreateJob,
             icon: submitting
                 ? const SizedBox(
                     width: 18,
@@ -376,6 +405,8 @@ class _StartOptionGrid extends StatelessWidget {
       settings,
       selectedClassificationModelPath,
     );
+    final detectionInfo = _detectionModelForPath(settings, selectedModelPath);
+    final videoInfo = classificationInfo ?? detectionInfo;
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = constraints.maxWidth >= 1040
@@ -414,8 +445,9 @@ class _StartOptionGrid extends StatelessWidget {
               child: _VideoModeSelector(
                 enabled: enabled,
                 videoMode: videoMode,
-                supportsVideoAll: classificationInfo?.supportsVideoAll ?? true,
-                isDinoV2: classificationInfo?.isDinoV2 == true,
+                supportsVideoAll: videoInfo?.supportsVideoAll ?? true,
+                supportsVideoFast: videoInfo?.supportsVideoFast ?? true,
+                isDino: classificationInfo?.isDino == true,
                 onChanged: onVideoModeChanged,
               ),
             ),
@@ -524,25 +556,32 @@ class _VideoModeSelector extends StatelessWidget {
     required this.enabled,
     required this.videoMode,
     required this.supportsVideoAll,
-    required this.isDinoV2,
+    required this.supportsVideoFast,
+    required this.isDino,
     required this.onChanged,
   });
 
   final bool enabled;
   final String videoMode;
   final bool supportsVideoAll;
-  final bool isDinoV2;
+  final bool supportsVideoFast;
+  final bool isDino;
   final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
     final normalized = normalizeVideoProcessingMode(videoMode);
     final selectedValue =
-        !supportsVideoAll && normalized == videoProcessingModeAll
-        ? videoProcessingModeFast
+        !supportsVideoFast && normalized == videoProcessingModeFast ||
+            !supportsVideoAll && normalized == videoProcessingModeAll
+        ? (supportsVideoFast
+              ? videoProcessingModeFast
+              : videoProcessingModeSkip)
         : normalized;
-    final helperText = isDinoV2
-        ? 'DINOv2 当前仅支持抽帧快速识别或跳过视频'
+    final helperText = !supportsVideoFast && !supportsVideoAll
+        ? '所选分类模型处理完整照片序列，任务中跳过视频'
+        : isDino
+        ? 'Neri1.1 当前仅支持抽帧快速识别或跳过视频'
         : switch (selectedValue) {
             videoProcessingModeFast => '抽帧批量识别',
             videoProcessingModeSkip => '任务中忽略视频文件',
@@ -560,9 +599,10 @@ class _VideoModeSelector extends StatelessWidget {
           label: '全部识别',
           enabled: supportsVideoAll,
         ),
-        const DropdownMenuEntry<String>(
+        DropdownMenuEntry<String>(
           value: videoProcessingModeFast,
           label: '快速识别',
+          enabled: supportsVideoFast,
         ),
         const DropdownMenuEntry<String>(
           value: videoProcessingModeSkip,
@@ -693,6 +733,20 @@ class _JobsCard extends StatelessWidget {
 
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
     final runtimeText = _jobRuntimeText(job);
+    bool hasError(DetectionItem item) {
+      final error = item.error?.trim();
+      return error != null && error.isNotEmpty;
+    }
+
+    final failedResults = job.results.where(hasError).toList();
+    final successfulResults = job.results.where((item) => !hasError(item));
+    final visibleResults = [
+      ...failedResults,
+      ...successfulResults,
+    ].take(12).toList();
+    final visibleFailureCount = visibleResults.where(hasError).length;
+    final hiddenResultCount = job.results.length - visibleResults.length;
+    final hiddenFailureCount = failedResults.length - visibleFailureCount;
     return ExpansionTile(
       key: ValueKey(job.id),
       onExpansionChanged: (expanded) =>
@@ -729,10 +783,10 @@ class _JobsCard extends StatelessWidget {
               onPressed: () => onCancelJob(job),
               icon: const Icon(Icons.stop_circle_outlined),
             ),
-          ] else if (job.canResume) ...[
+          ] else if (job.canResume || job.canRetryFailed) ...[
             const SizedBox(width: 8),
             IconButton(
-              tooltip: '继续任务',
+              tooltip: job.canRetryFailed ? '重试失败文件' : '继续任务',
               onPressed: () => onResumeJob(job),
               icon: const Icon(Icons.play_circle_outline_rounded),
             ),
@@ -767,25 +821,42 @@ class _JobsCard extends StatelessWidget {
             leading: const Icon(Icons.error_outline_rounded),
             title: Text(job.error!),
           ),
-        ...job.results
-            .take(12)
-            .map(
-              (item) => ListTile(
-                title: Text(item.filename),
-                subtitle: Text(
-                  item.species.isEmpty
-                      ? (item.dateTaken ?? item.path)
-                      : item.species.join('、'),
-                ),
-                trailing: item.confidence == null
-                    ? null
-                    : Text(item.confidence!.toStringAsFixed(2)),
-              ),
-            ),
-        if (job.results.length > 12)
+        if (job.state == 'completed' && job.hasFailedItems)
           ListTile(
-            title: Text('还有 ${job.results.length - 12} 条结果，可在导出的 CSV 中查看。'),
+            leading: const Icon(Icons.warning_amber_rounded),
+            title: Text('${job.failedCount} 个文件处理失败'),
+            subtitle: const Text('可仅重新处理这些失败文件'),
+            trailing: TextButton(
+              onPressed: () => onResumeJob(job),
+              child: const Text('重试失败文件'),
+            ),
           ),
+        ...visibleResults.map((item) {
+          final error = item.error?.trim();
+          final hasError = error != null && error.isNotEmpty;
+          return ListTile(
+            leading: hasError ? const Icon(Icons.error_outline_rounded) : null,
+            title: Text(item.filename),
+            subtitle: Text(
+              hasError
+                  ? error
+                  : item.species.isEmpty
+                  ? (item.dateTaken ?? item.path)
+                  : item.species.join('、'),
+            ),
+            trailing: hasError || item.confidence == null
+                ? null
+                : Text(item.confidence!.toStringAsFixed(2)),
+          );
+        }),
+        if (hiddenFailureCount > 0)
+          ListTile(
+            leading: const Icon(Icons.error_outline_rounded),
+            title: Text('还有 $hiddenFailureCount 个失败文件未展开显示'),
+            subtitle: Text('“重试失败文件”会一次处理全部 ${failedResults.length} 个失败项。'),
+          )
+        else if (hiddenResultCount > 0)
+          ListTile(title: Text('还有 $hiddenResultCount 条结果未在此处展开显示。')),
       ],
     );
   }

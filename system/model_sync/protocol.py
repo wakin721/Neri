@@ -52,7 +52,9 @@ def valid_logical_path(path: str) -> bool:
         return False
     lower = name.lower()
     if folder == 'detect':
-        return lower.endswith('.pt')
+        return lower.endswith(
+            ('.pt', '.tflite', '.litert', '.labels.txt', '.labels.json')
+        )
     if folder == 'cls':
         return lower.endswith(('.pt', '.onnx', '.engine'))
     return False

@@ -91,8 +91,6 @@ def test_validation_saves_and_unmarks_only_the_selected_camera(cameras, monkeypa
     # Disable optional upload enqueue; this test only exercises local storage.
     import system.training
     monkeypatch.setattr(system.training, "get_queue", lambda: SimpleNamespace(enqueue=lambda *a, **kw: None))
-    from system.backend import validation_fast
-    monkeypatch.setattr(validation_fast, "schedule_validation_feedback_batch", lambda *a, **kw: None)
 
     marked = services.mark_validation_items(ValidationBatchMarkRequest(
         input_path=str(root), file_paths=[str(first), str(missing)], action="correct",
@@ -306,3 +304,26 @@ def test_export_per_directory_favorite_failure_lists_written_tables(tmp_path, mo
             export_favorite_photos=True, favorite_photo_paths=[str(media)],
         ))
     assert written[0] in str(error.value)
+
+
+def test_export_per_directory_sorts_each_directory_by_natural_filename(tmp_path, monkeypatch):
+    camera = tmp_path / "cam"
+    camera.mkdir()
+    for name in ("IMG_10.JPG", "IMG_2.JPG", "IMG_1.MP4"):
+        (camera / name).write_bytes(b"fixture")
+    monkeypatch.setattr(legacy, "_build_export_metadata", lambda path: {
+        "文件名": path.name, "拍摄日期对象": datetime(2024, 7, 20, 12, 0),
+    })
+    from system.data_processor import DataProcessor
+    exported_names = []
+
+    def capture(rows, output_path, *args, **kwargs):
+        exported_names[:] = [row["文件名"] for row in rows]
+        Path(output_path).write_text("table", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(DataProcessor, "export_to_excel", capture)
+    legacy.export_validation_data(ValidationExportRequest(
+        input_path=str(tmp_path), file_format="csv", per_directory=True,
+    ))
+    assert exported_names == ["IMG_1.MP4", "IMG_2.JPG", "IMG_10.JPG"]

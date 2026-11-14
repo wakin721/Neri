@@ -198,7 +198,7 @@ def test_completed_image_batch_is_checkpointed_while_job_is_running(
         pass
 
     legacy = services._legacy
-    monkeypatch.setattr(legacy, "_validate_dinov2_job_options", lambda *args: None)
+    monkeypatch.setattr(legacy, "_validate_dino_job_options", lambda *args: None)
     monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         legacy,
@@ -346,7 +346,7 @@ def test_checkpoint_rebuilds_after_software_cache_is_removed(monkeypatch, tmp_pa
         manager._executor.shutdown()
 
 
-@pytest.mark.parametrize("stage", ["_validate_dinov2_job_options", "_start_batch_log_session"])
+@pytest.mark.parametrize("stage", ["_validate_dino_job_options", "_start_batch_log_session"])
 def test_startup_failure_releases_job_and_checkpoints_error(monkeypatch, tmp_path, stage):
     _patch_state_path(monkeypatch, tmp_path / "job_state.json")
     manager = services.ProcessingJobManager()

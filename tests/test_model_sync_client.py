@@ -13,12 +13,14 @@ class ProtocolTests(unittest.TestCase):
             'manifest_id': 'a' * 64,
             'files': [
                 {'path': 'detect/a.pt', 'size': 3, 'sha256': 'b' * 64},
+                {'path': 'detect/a.tflite', 'size': 6, 'sha256': 'e' * 64},
+                {'path': 'detect/a.labels.txt', 'size': 8, 'sha256': 'f' * 64},
                 {'path': 'cls/c.onnx', 'size': 4, 'sha256': 'c' * 64},
                 {'path': 'tracker.yaml', 'size': 5, 'sha256': 'd' * 64},
             ],
         })
         self.assertEqual(manifest.files[0].path, 'detect/a.pt')
-        self.assertEqual(len(manifest.files), 3)
+        self.assertEqual(len(manifest.files), 5)
 
     def test_rejects_invalid_or_duplicate_paths(self):
         base = {'schema_version': 1, 'manifest_id': 'a' * 64}

@@ -1,14 +1,12 @@
 from contextlib import closing
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
 from system.adaptive_batch import AcceleratorMemory, AdaptiveBatchSize
 from system.backend import inference_batching
 from system.backend.models import ProcessingOptions
-from system.dinov2.encoder import DinoV2Encoder
 
 
 GIB = 1024**3
@@ -85,40 +83,6 @@ def test_photo_prefetch_adopts_new_size_with_bounded_lookahead():
     assert [item for batch in batches for item in batch] == paths
     assert any(len(batch) == 4 for batch in batches)
     assert sum(len(batch) == 1 for batch in batches) <= 4
-
-
-def test_inner_encoder_retries_crops_within_one_frame_and_preserves_features(monkeypatch):
-    from system.dinov2 import encoder as encoder_module
-
-    calls, cleanups = [], []
-    monkeypatch.setattr(encoder_module, "accelerator_memory", lambda _: None)
-    monkeypatch.setattr(encoder_module.gc, "collect", lambda: cleanups.append(True))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-
-    class Model:
-        def __call__(self, *, pixel_values):
-            count = len(pixel_values)
-            calls.append(count)
-            if count > 2:
-                raise RuntimeError("CUDA out of memory")
-            features = torch.zeros((count, 1, 768))
-            features[:, 0, 0] = pixel_values.mean(dim=(1, 2, 3))
-            features[:, 0, 1] = 1
-            return SimpleNamespace(last_hidden_state=features)
-
-    encoder = DinoV2Encoder.__new__(DinoV2Encoder)
-    encoder.device = "cpu"  # Exercise GPU-OOM control with CPU-backed fake tensors.
-    encoder.use_fp16 = False
-    encoder.model = Model()
-    encoder._batch_tuner = AdaptiveBatchSize(8, maximum=64, enabled=True, label="crops")
-    crops = [np.full((8, 8, 3), index * 20, np.uint8) for index in range(8)]
-    actual = encoder.encode(crops)
-    assert calls == [8, 4, 2, 2, 2, 2]
-    assert len(cleanups) == 2 and encoder.batch_size == 2
-    encoder._batch_tuner = AdaptiveBatchSize(1, maximum=1, enabled=False, label="CPU")
-    expected = encoder.encode(crops)
-    np.testing.assert_allclose(actual, expected, atol=1e-6)
-    assert not np.array_equal(actual[0], actual[-1])
 
 
 def test_runtime_gc_is_periodic_and_oom_or_final_cleanup_is_immediate(monkeypatch):

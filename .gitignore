@@ -37,7 +37,16 @@ ENV/
 !/tests/test_model_sync_api.py
 !/tests/test_model_resource_paths.py
 !/tests/test_dinov3_*.py
-!/tests/test_dinov2_memory.py
+!/tests/test_litert_detection.py
+!/tests/test_classification_export_results.py
+!/tests/test_csv_export_integration.py
+!/tests/test_job_failed_retry_api.py
+!/tests/test_model_ssh.py
+
+# Reproducible local DINOv3 deployment artifacts (export from the verified cache).
+/res/model/cls/user/dinov3-ridge-within.neri.json
+/res/model/cls/user/dinov3-ridge-within.neri.export-report.json
+/res/model/cls/user/dinov3-ridge-within-assets-*/
 
 # Build outputs
 build/
@@ -74,6 +83,9 @@ logs/
 # Local experiments, downloaded dependencies, test scratch data and rollback copies.
 # Reusable tools live in scripts/; curated experiment records live in docs/experiments/.
 /runs/
+/backup-*.bundle
+/detections.db
+/detections.db-*
 
 # 忽略 frontend 文件夹下的所有内容，但保留 lib 文件夹
 frontend/*
@@ -99,6 +111,9 @@ frontend/test/*
 !frontend/test/expressive_start_screen_test.dart
 !frontend/test/dinov3_registry_test.dart
 !frontend/test/dinov3_video_mode_test.dart
+!frontend/test/dino_learning_status_test.dart
+!frontend/test/dino_rejection_test.dart
+!frontend/test/sequence_pending_notice_test.dart
 !frontend/pubspec.yaml
 !frontend/README.md
 !frontend/assets/
@@ -113,12 +128,7 @@ frontend/windows/runner/*
 !frontend/windows/runner/main.cpp
 !frontend/windows/runner/win32_window.cpp
 !frontend/windows/runner/win32_window.h
-!/tests/test_dinov2_custom_discovery.py
-!/tests/test_dinov2_clustering.py
-!/tests/test_dinov2_within_seq.py
-!/tests/test_dinov2_within_seq_runtime.py
 !/tests/test_processing_performance.py
-!/tests/test_rejection_clusters.py
 
 !frontend/test/startup_loading_test.dart
 !frontend/test/widget_test.dart
@@ -128,7 +138,9 @@ frontend/windows/runner/*
 !frontend/test/directory_browsing_scope_test.dart
 !frontend/test/preview_snapshot_cache_test.dart
 !frontend/test/export_settings_test.dart
-!frontend/test/dinov2_status_loading_test.dart
+!frontend/test/dino_status_loading_test.dart
+!frontend/test/dino_environment_api_test.dart
+!frontend/test/job_failed_retry_test.dart
 !/tests/test_video_pipeline.py
 !/tests/test_inference_batching.py
 !/tests/test_adaptive_processing.py

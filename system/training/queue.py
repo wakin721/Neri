@@ -1,6 +1,7 @@
 """Durable opt-in upload journal, with one background compressor/uploader."""
 from __future__ import annotations
 
+from collections import deque
 import hashlib
 import json
 import os
@@ -57,6 +58,8 @@ class TrainingQueue:
         self.privacy_blurrer = privacy_blurrer if privacy_blurrer is not None else PrivacyBlurrer(self.state_dir / "privacy-models")
         self._lock = threading.RLock()
         self._processing_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_enqueues: deque[tuple[Path, dict, bool]] = deque()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
@@ -145,6 +148,8 @@ class TrainingQueue:
                 ("decided_at", str(self.clock())),
             ])
             if not enabled:
+                with self._pending_lock:
+                    self._pending_enqueues.clear()
                 db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE state IN ('pending','failed','uploading')")
         self._wake.set()
         return self.status()
@@ -169,14 +174,61 @@ class TrainingQueue:
 
     def clear_pending(self):
         with self._lock, self._connect() as db:
+            with self._pending_lock:
+                self._pending_enqueues.clear()
             db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE state IN ('pending','failed','uploading')")
         return self.status()
+
+    def enqueue_async(self, path, data: dict, validated=True) -> bool:
+        return self.enqueue_many_async([(path, data, validated)])
+
+    def enqueue_many_async(self, items) -> bool:
+        entries = [(Path(path), dict(data), bool(validated)) for path, data, validated in items]
+        if not entries:
+            return False
+        worker_alive = self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+        if not worker_alive:
+            accepted = False
+            for path, data, validated in entries:
+                accepted = self.enqueue(path, data, validated=validated) or accepted
+            return accepted
+        with self._pending_lock:
+            self._pending_enqueues.extend(entries)
+        self._wake.set()
+        return True
+
+    def _drain_pending_enqueues(self) -> None:
+        while not self._stop.is_set():
+            with self._pending_lock:
+                if not self._pending_enqueues:
+                    return
+                path, data, validated = self._pending_enqueues.popleft()
+            try:
+                self.enqueue(path, data, validated=validated)
+            except Exception:
+                continue
 
     def enqueue(self, path, data: dict, validated=True):
         with self._lock, self._connect() as db:
             if not self._enabled(db):
                 return False
-            path = Path(path).expanduser().resolve()
+        resolved_path = Path(path).expanduser().resolve()
+        payload = contribution_payload(data) if validated and resolved_path.suffix.lower() in IMAGE_SUFFIXES else None
+        event_key = ""
+        stamp = ""
+        if payload is not None:
+            try:
+                folder_hint = self._key(resolved_path.parent)
+                stamp = self._stamp(resolved_path)
+                event_key = self.event_resolver.event_key(resolved_path, folder_key=folder_hint)
+            except OSError:
+                return False
+            payload["training_names"] = self.species_resolver.resolve_many(payload["species"])
+
+        with self._lock, self._connect() as db:
+            if not self._enabled(db):
+                return False
+            path = resolved_path
             try:
                 key, folder = self._key(path), self._key(path.parent)
                 old = db.execute("SELECT * FROM jobs WHERE source_key=?", (key,)).fetchone()
@@ -188,7 +240,6 @@ class TrainingQueue:
             if old:
                 db.execute('UPDATE jobs SET source_path=? WHERE source_key=?', (str(path), key))
 
-            payload = contribution_payload(data) if validated and path.suffix.lower() in IMAGE_SUFFIXES else None
             if payload is None:
                 if old:
                     if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading":
@@ -203,7 +254,8 @@ class TrainingQueue:
 
             try:
                 stamp = self._stamp(path)
-                event_key = self.event_resolver.event_key(path, folder_key=folder)
+                if folder != folder_hint or not event_key:
+                    event_key = self.event_resolver.event_key(path, folder_key=folder)
             except OSError:
                 return False
 
@@ -215,7 +267,6 @@ class TrainingQueue:
                 if representative is not None:
                     return False
 
-            payload["training_names"] = self.species_resolver.resolve_many(payload["species"])
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             if (
                 old
@@ -391,6 +442,7 @@ class TrainingQueue:
     def _run(self):
         while not self._stop.is_set():
             try:
+                self._drain_pending_enqueues()
                 if self.process_once():
                     continue
             except Exception:

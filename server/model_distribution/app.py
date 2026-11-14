@@ -76,10 +76,10 @@ class DirectRequest(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class DinoV2DirectRequest(BaseModel):
+class DinoV3DirectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     manifest_id: str = Field(pattern=r"^[a-f0-9]{64}$")
-    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv2/.+")
+    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv3/.+")
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -148,15 +148,15 @@ def create_app(
         consume_request_budget(request)
         return service.direct(payload.manifest_id, payload.path, payload.sha256)
 
-    @app.get("/v1/dinov2/manifest")
-    def dinov2_manifest(request: Request):
+    @app.get("/v1/dinov3/manifest")
+    def dinov3_manifest(request: Request):
         consume_request_budget(request)
-        return snapshot_payload(service.dinov2_manifest())
+        return snapshot_payload(service.dinov3_manifest())
 
-    @app.post("/v1/dinov2/direct")
-    def dinov2_direct(payload: DinoV2DirectRequest, request: Request):
+    @app.post("/v1/dinov3/direct")
+    def dinov3_direct(payload: DinoV3DirectRequest, request: Request):
         consume_request_budget(request)
-        return service.dinov2_direct(
+        return service.dinov3_direct(
             payload.manifest_id,
             payload.path,
             payload.sha256,

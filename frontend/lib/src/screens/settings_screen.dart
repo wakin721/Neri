@@ -21,14 +21,16 @@ import '../privacy/training_upload_debug_dialog.dart';
 import '../utils/quick_mark_sort.dart';
 import '../utils/preview_snapshot_cache.dart';
 import '../widgets/app_menu_style.dart';
-import '../widgets/dinov2_registry_dialog.dart';
 import '../widgets/section_card.dart';
+import '../widgets/dino_learning_status.dart';
 import '../widgets/workspace_split_metrics.dart';
 import 'model_sync_settings_host.dart';
 
 const _defaultExportColumns = <String>[
   '文件名',
+  '相对路径',
   '格式',
+  '检测状态',
   '拍摄日期',
   '拍摄时间',
   '工作天数',
@@ -157,7 +159,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _maintenancePreparationOperation;
   bool _installingPytorch = false;
   bool _reinstallingPackage = false;
-  bool _maintainingDinoV2 = false;
+  bool _maintainingDino = false;
   bool _debugModeSaving = false;
   bool _clearingCache = false;
   bool _checkingForUpdates = false;
@@ -168,9 +170,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _maintenanceMessage;
   double? _maintenanceProgress;
   String? _maintenanceStatusPath;
-  DinoV2ComponentStatus? _dinoV2Status;
-  bool _loadingDinoV2Status = true;
-  int _dinoV2StatusRequestId = 0;
+  DinoComponentStatus? _dinoStatus;
+  bool _loadingDinoStatus = true;
+  int _dinoStatusRequestId = 0;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -182,7 +184,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _loadModelClassesForSelection();
-      if (widget.backendReady) unawaited(_loadDinoV2Status());
+      if (widget.backendReady) unawaited(_loadDinoStatus());
       unawaited(_resumeMaintenanceWatchIfActive());
     });
   }
@@ -191,18 +193,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!widget.backendReady && oldWidget.backendReady) {
-      _dinoV2StatusRequestId++;
-      _dinoV2Status = null;
-      _loadingDinoV2Status = true;
+      _dinoStatusRequestId++;
+      _dinoStatus = null;
+      _loadingDinoStatus = true;
     } else if (widget.backendReady &&
         (!oldWidget.backendReady ||
             oldWidget.backendGeneration != widget.backendGeneration ||
             oldWidget.apiClient != widget.apiClient ||
             (!oldWidget.isActive &&
                 widget.isActive &&
-                !_loadingDinoV2Status &&
-                _dinoV2Status == null))) {
-      unawaited(_loadDinoV2Status());
+                !_loadingDinoStatus &&
+                _dinoStatus == null))) {
+      unawaited(_loadDinoStatus());
     }
     if (oldWidget.settings != widget.settings) {
       if (!_dirty && !_saving) {
@@ -234,8 +236,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'quick_mark_list',
       _defaultQuickMarks,
     );
-    final dependenciesReady =
-        settings == null || settings.missingYoloDependencies.isEmpty;
+    final dependenciesReady = settings == null || settings.detectionReady;
     final gpuAvailable = settings?.gpuAvailable == true;
     _draft = <String, dynamic>{
       ...saved,
@@ -333,7 +334,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (selectedClassificationInfo?.supportsVideoAll == false &&
         _draft['video_mode'] == videoProcessingModeAll) {
-      _draft['video_mode'] = videoProcessingModeFast;
+      _draft['video_mode'] =
+          selectedClassificationInfo?.supportsVideoFast == false
+          ? videoProcessingModeSkip
+          : videoProcessingModeFast;
+    }
+    if (selectedClassificationInfo?.supportsVideoFast == false &&
+        _draft['video_mode'] == videoProcessingModeFast) {
+      _draft['video_mode'] = videoProcessingModeSkip;
     }
     _resettingDraft = true;
     _packageController.text = _stringSetting(saved, 'package', '');
@@ -373,7 +381,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (selectedClassificationInfo?.supportsVideoAll == false &&
         _draft['video_mode'] == videoProcessingModeAll) {
-      _draft['video_mode'] = videoProcessingModeFast;
+      _draft['video_mode'] =
+          selectedClassificationInfo?.supportsVideoFast == false
+          ? videoProcessingModeSkip
+          : videoProcessingModeFast;
+    }
+    if (selectedClassificationInfo?.supportsVideoFast == false &&
+        _draft['video_mode'] == videoProcessingModeFast) {
+      _draft['video_mode'] = videoProcessingModeSkip;
     }
     _markDraftChanged();
     _scheduleAutoSave();
@@ -415,7 +430,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<String> get _missingYoloDependencies =>
       widget.settings?.missingYoloDependencies ?? const <String>[];
 
-  bool get _detectionDependenciesReady => _missingYoloDependencies.isEmpty;
+  bool get _detectionDependenciesReady =>
+      widget.settings?.detectionReady ?? _missingYoloDependencies.isEmpty;
 
   String get _missingYoloDependenciesLabel {
     final missing = _missingYoloDependencies;
@@ -485,33 +501,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _loadDinoV2Status() async {
+  Future<void> _loadDinoStatus() async {
     if (!mounted || !widget.backendReady) return;
-    final requestId = ++_dinoV2StatusRequestId;
-    setState(() => _loadingDinoV2Status = true);
+    final requestId = ++_dinoStatusRequestId;
+    setState(() => _loadingDinoStatus = true);
     try {
-      final status = await widget.apiClient
-          .fetchDinoV2ComponentStatus()
-          .timeout(const Duration(seconds: 10));
-      if (!mounted || requestId != _dinoV2StatusRequestId) return;
+      final status = await widget.apiClient.fetchDinoComponentStatus().timeout(
+        const Duration(seconds: 10),
+      );
+      if (!mounted || requestId != _dinoStatusRequestId) return;
       setState(() {
-        _dinoV2Status = status;
-        _loadingDinoV2Status = false;
+        _dinoStatus = status;
+        _loadingDinoStatus = false;
       });
     } catch (_) {
-      if (!mounted || requestId != _dinoV2StatusRequestId) return;
+      if (!mounted || requestId != _dinoStatusRequestId) return;
       setState(() {
-        _dinoV2Status = null;
-        _loadingDinoV2Status = false;
+        _dinoStatus = null;
+        _loadingDinoStatus = false;
       });
     }
   }
 
-  Future<void> _installDinoV2() async {
+  Future<void> _installDinoV3() async {
     if (_maintenanceBusy) return;
     _startMaintenancePreparation(
-      operation: 'install_dinov2',
-      message: '正在检查 DINOv2 安装环境...',
+      operation: 'install_dinov3',
+      message: '正在检查 Neri1.1 安装环境...',
     );
 
     final envChoice = _normalizedPytorchVersion(
@@ -527,32 +543,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     if (packageSource == null || !mounted) return;
-    final repairing = _dinoV2Status?.installed == true;
+    final repairing = _dinoStatus?.installed == true;
     final confirmed = await _confirmPythonInstallation(
-      title: repairing ? '修复 DINOv2' : '安装 DINOv2',
+      title: repairing ? '修复 Neri1.1' : '安装 Neri1.1',
       message:
-          '将从 NeriCloud 严格同步 DINOv2 ViT-B/16 组件到 res/model/DINOv2，'
-          '并校验 Multi-prototype 模型、官方 source 与 SHA-256。'
+          '将从 NeriCloud 严格同步 Neri1.1 ViT-B/16 组件到 res/model/DINOv3，'
+          '并校验 Ridge + Within 模型、官方 source 与 SHA-256。'
           '如果共享 PyTorch 环境缺失，会按当前运行环境自动补齐。',
     );
     if (confirmed != true || !mounted) return;
 
     setState(() {
-      _maintainingDinoV2 = true;
-      _maintenanceOperation = 'install_dinov2';
+      _maintainingDino = true;
+      _maintenanceOperation = 'install_dinov3';
       _maintenanceMessage = repairing
-          ? '正在启动 DINOv2 修复...'
-          : '正在启动 DINOv2 安装...';
+          ? '正在启动 Neri1.1 修复...'
+          : '正在启动 Neri1.1 安装...';
     });
     try {
-      final response = await widget.apiClient.installDinoV2(
+      final response = await widget.apiClient.installDinoV3(
         envChoice: envChoice,
         packageSource: packageSource.source,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
         operation: response.operation.isEmpty
-            ? 'install_dinov2'
+            ? 'install_dinov3'
             : response.operation,
         message: response.message,
         progress: response.progress,
@@ -560,32 +576,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 DINOv2 安装失败');
+      await _handleMaintenanceStartFailure(error, '启动 Neri1.1 安装失败');
     }
   }
 
-  Future<void> _removeDinoV2() async {
+  Future<void> _removeDinoV3() async {
     if (_maintenanceBusy) return;
     final confirmed = await _confirmMaintenance(
-      title: '删除 DINOv2',
+      title: '删除 Neri1.1',
       message:
-          '将删除 res/model/DINOv2 中的 DINOv2 组件文件。\n\n'
-          '共享 PyTorch 环境不会删除；本地已学习物种、人工校验事件和增量 prototype 数据也会保留。',
+          '将删除 res/model/DINOv3 中的 Neri1.1 组件文件。\n\n'
+          '共享 PyTorch 环境不会删除；人工校验记录与补图数据会保留。',
       confirmLabel: '删除',
     );
     if (confirmed != true || !mounted) return;
 
     setState(() {
-      _maintainingDinoV2 = true;
-      _maintenanceOperation = 'remove_dinov2';
-      _maintenanceMessage = '正在启动 DINOv2 删除...';
+      _maintainingDino = true;
+      _maintenanceOperation = 'remove_dinov3';
+      _maintenanceMessage = '正在启动 Neri1.1 删除...';
     });
     try {
-      final response = await widget.apiClient.removeDinoV2();
+      final response = await widget.apiClient.removeDinoV3();
       if (!mounted) return;
       _startMaintenanceWatch(
         operation: response.operation.isEmpty
-            ? 'remove_dinov2'
+            ? 'remove_dinov3'
             : response.operation,
         message: response.message,
         progress: response.progress,
@@ -593,7 +609,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 DINOv2 删除失败');
+      await _handleMaintenanceStartFailure(error, '启动 Neri1.1 删除失败');
     }
   }
 
@@ -905,7 +921,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _installingPytorch = false;
       _reinstallingPackage = false;
-      _maintainingDinoV2 = false;
+      _maintainingDino = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
       _maintenanceProgress = null;
@@ -936,8 +952,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'install_pytorch',
       'install_yolo_dependencies',
       'reinstall_package',
-      'install_dinov2',
-      'remove_dinov2',
+      'install_dinov3',
+      'remove_dinov3',
     }.contains(operation)) {
       return false;
     }
@@ -967,8 +983,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           operation == 'install_pytorch' ||
           operation == 'install_yolo_dependencies';
       _reinstallingPackage = operation == 'reinstall_package';
-      _maintainingDinoV2 =
-          operation == 'install_dinov2' || operation == 'remove_dinov2';
+      _maintainingDino =
+          operation == 'install_dinov3' || operation == 'remove_dinov3';
     });
     _maintenanceTimer = Timer.periodic(
       const Duration(seconds: 2),
@@ -1001,8 +1017,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               operation == 'install_pytorch' ||
               operation == 'install_yolo_dependencies';
           _reinstallingPackage = operation == 'reinstall_package';
-          _maintainingDinoV2 =
-              operation == 'install_dinov2' || operation == 'remove_dinov2';
+          _maintainingDino =
+              operation == 'install_dinov3' || operation == 'remove_dinov3';
         });
         return;
       }
@@ -1021,7 +1037,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   bool get _maintenanceInProgress =>
-      _installingPytorch || _reinstallingPackage || _maintainingDinoV2;
+      _installingPytorch || _reinstallingPackage || _maintainingDino;
   bool get _maintenanceBusy =>
       _maintenancePreparationOperation != null || _maintenanceInProgress;
 
@@ -1032,17 +1048,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _installingPytorch = false;
       _reinstallingPackage = false;
-      _maintainingDinoV2 = false;
+      _maintainingDino = false;
       _maintenanceOperation = null;
       _maintenanceMessage = null;
       _maintenanceProgress = null;
       _maintenanceStatusPath = null;
     });
     if (message.isNotEmpty) widget.onShowMessage(message);
-    if (finishedOperation == 'install_dinov2' ||
-        finishedOperation == 'remove_dinov2') {
+    if (finishedOperation == 'install_dinov3' ||
+        finishedOperation == 'remove_dinov3') {
       unawaited(
-        Future<void>.delayed(const Duration(seconds: 1), _loadDinoV2Status),
+        Future<void>.delayed(const Duration(seconds: 1), _loadDinoStatus),
       );
     }
   }
@@ -1256,13 +1272,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
       settings?.availableClassificationModels ?? const <ModelInfo>[],
       selectedClassificationModel,
     );
+    final selectedDetectionInfo = _modelInfoForPath(
+      settings?.availableModels ?? const <ModelInfo>[],
+      selectedModel,
+    );
+    final videoInfo = selectedClassificationInfo ?? selectedDetectionInfo;
     final requestedVideoMode = normalizeVideoProcessingMode(
       _string('video_mode', defaultVideoProcessingMode),
     );
+    final fallbackVideoMode = videoInfo?.supportsVideoFast == false
+        ? videoProcessingModeSkip
+        : videoProcessingModeFast;
     final videoMode =
-        selectedClassificationInfo?.supportsVideoAll == false &&
-            requestedVideoMode == videoProcessingModeAll
-        ? videoProcessingModeFast
+        (videoInfo?.supportsVideoAll == false &&
+                requestedVideoMode == videoProcessingModeAll) ||
+            (videoInfo?.supportsVideoFast == false &&
+                requestedVideoMode == videoProcessingModeFast)
+        ? fallbackVideoMode
         : requestedVideoMode;
     final strideLabel = videoMode == videoProcessingModeAll ? '帧间隔' : '快速识别帧数';
     final detectionEnabled = _detectionDependenciesReady;
@@ -1271,7 +1297,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final combinedModelsEnabled =
         selectedModel?.isNotEmpty == true &&
         selectedClassificationModel?.isNotEmpty == true &&
-        selectedClassificationInfo?.isDinoV2 != true;
+        selectedClassificationInfo?.isDino != true;
     final confidencePriority =
         _string('confidence_priority', _classificationConfidencePriority) ==
             _detectionConfidencePriority
@@ -1309,6 +1335,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               onChanged: (value) {
                 _set('selected_model', value);
+                final info = _modelInfoForPath(
+                  settings?.availableModels ?? const <ModelInfo>[],
+                  value,
+                );
+                if (info?.supportsVideoAll == false &&
+                    _string('video_mode') == videoProcessingModeAll) {
+                  _set(
+                    'video_mode',
+                    info?.supportsVideoFast == false
+                        ? videoProcessingModeSkip
+                        : videoProcessingModeFast,
+                  );
+                }
+                if (info?.supportsVideoFast == false &&
+                    _string('video_mode') == videoProcessingModeFast) {
+                  _set('video_mode', videoProcessingModeSkip);
+                }
                 if (selectedClassificationModel?.isEmpty ?? true) {
                   _set('selected_species_names', <String>[]);
                   _loadModelClassesForSelection();
@@ -1339,31 +1382,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     );
                     if (modelInfo?.supportsVideoAll == false &&
                         _string('video_mode') == videoProcessingModeAll) {
-                      _set('video_mode', videoProcessingModeFast);
+                      _set(
+                        'video_mode',
+                        modelInfo?.supportsVideoFast == false
+                            ? videoProcessingModeSkip
+                            : videoProcessingModeFast,
+                      );
+                    }
+                    if (modelInfo?.supportsVideoFast == false &&
+                        _string('video_mode') == videoProcessingModeFast) {
+                      _set('video_mode', videoProcessingModeSkip);
                     }
                     _set('selected_species_names', <String>[]);
                     _loadModelClassesForSelection();
                   },
                 ),
-                if (selectedClassificationInfo?.isDinoV2 == true) ...[
-                  const Divider(height: 20),
-                  if (selectedModel?.isEmpty ?? true)
+                if (selectedClassificationInfo?.isDinoV3 == true) ...[
+                  if (selectedModel?.isEmpty ?? true) ...[
+                    const Divider(height: 20),
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
-                        'DINOv2 必须同时选择探测模型。',
+                        'Neri1.1必须同时选择探测模型。',
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.error,
                         ),
                       ),
                     ),
-                  DinoV2RegistryButton(
-                    apiClient: widget.apiClient,
-                    modelPath: selectedClassificationModel!,
-                    onContinueValidation:
-                        widget.onOpenDinoCandidateValidation ?? (_) {},
-                    onShowMessage: widget.onShowMessage,
-                  ),
+                  ],
                 ],
                 const SizedBox(height: 8),
               ],
@@ -1390,6 +1436,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onChanged: (value) => _set('confidence_priority', value),
               ),
             ),
+          if (selectedClassificationInfo?.isDinoV3 == true &&
+              selectedClassificationModel != null)
+            _SettingsPanel(
+              title: '当前模型学习状态',
+              subtitle: '人工校验后自动学习，查看进度、已学习物种和失败原因',
+              icon: Icons.psychology_rounded,
+              child: DinoLearningStatus(
+                key: ValueKey(selectedClassificationModel),
+                apiClient: widget.apiClient,
+                modelPath: selectedClassificationModel,
+                active: widget.isActive && widget.backendReady,
+                onLearned: () {
+                  _modelClassesPath = null;
+                  unawaited(_loadModelClassesForSelection());
+                },
+              ),
+            ),
           _SettingsPanel(
             title: '识别物种设置',
             subtitle: '不选择时默认识别全部物种',
@@ -1403,7 +1466,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Column(
               children: [
                 _LabeledSlider(
-                  label: '置信度',
+                  label: '探测置信度',
                   value: _double('confidence'),
                   min: 0.05,
                   max: 0.95,
@@ -1508,6 +1571,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             enabled: detectionEnabled,
             supportsVideoAll:
                 selectedClassificationInfo?.supportsVideoAll ?? true,
+            supportsVideoFast:
+                selectedClassificationInfo?.supportsVideoFast ?? true,
           ),
         ],
       ),
@@ -1688,13 +1753,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     String strideLabel, {
     bool enabled = true,
     bool supportsVideoAll = true,
+    bool supportsVideoFast = true,
   }) {
+    final videoSubtitle = supportsVideoAll
+        ? '选择完整识别、快速识别，或在任务中忽略视频'
+        : (supportsVideoFast ? 'Neri1.1 当前仅支持快速识别或跳过视频' : '当前模型暂不支持视频识别，请跳过视频');
     return [
       _SettingsPanel(
         title: '视频处理模式',
-        subtitle: supportsVideoAll
-            ? '选择完整识别、快速识别，或在任务中忽略视频'
-            : 'DINOv2 当前仅支持快速识别或跳过视频',
+        subtitle: videoSubtitle,
         icon: Icons.play_circle_outline_rounded,
         child: _SettingsMenuButton<String>(
           value: videoMode,
@@ -1705,9 +1772,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               label: '全部识别',
               enabled: supportsVideoAll,
             ),
-            const _SettingsOption<String>(
+            _SettingsOption<String>(
               value: videoProcessingModeFast,
               label: '快速识别',
+              enabled: supportsVideoFast,
             ),
             const _SettingsOption<String>(
               value: videoProcessingModeSkip,
@@ -1790,7 +1858,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildEnvironmentMaintenance() {
     return SectionCard(
       title: '环境维护',
-      subtitle: 'PyTorch、DINOv2 与单个 Python 包维护入口',
+      subtitle: 'PyTorch、Neri1.1 与单个 Python 包维护入口',
       icon: Icons.construction_rounded,
       child: Column(
         children: [
@@ -1882,45 +1950,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _SettingsPanel(
-            title: 'DINOv2 ViT-B/14',
-            subtitle: _loadingDinoV2Status
+            title: 'Neri1.1（DINOv3 ViT-B/16）',
+            subtitle: _loadingDinoStatus
                 ? widget.backendReady
-                      ? '正在读取 DINOv2 组件状态...'
+                      ? '正在读取 DINOv3 组件状态...'
                       : '等待后端就绪...'
-                : _dinoV2Status == null
-                ? '无法读取 DINOv2 组件状态。'
-                : _dinoV2Status!.healthy &&
-                      _dinoV2Status!.prototypeCount != null
-                ? '${_dinoV2Status!.message} · ${_dinoV2Status!.prototypeCount} ${const {'memory', 'memory_no_centroid'}.contains(_dinoV2Status!.classifierHeadType) ? 'Memory 样本' : 'prototypes'}'
-                : _dinoV2Status!.message,
+                : _dinoStatus == null
+                ? '无法读取 DINOv3 组件状态。'
+                : _dinoStatus!.healthy && _dinoStatus!.classCount != null
+                ? '${_dinoStatus!.message} · ${_dinoStatus!.classCount} 类 · ${_dinoStatus!.featureDim} 维'
+                : _dinoStatus!.message,
             icon: Icons.hub_rounded,
             child: Builder(
               builder: (context) {
-                if (_loadingDinoV2Status) {
+                if (_loadingDinoStatus) {
                   return const SizedBox.square(
                     dimension: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   );
                 }
-                final status = _dinoV2Status;
+                final status = _dinoStatus;
                 if (status == null) {
                   return OutlinedButton.icon(
-                    key: const Key('dinov2-status-retry'),
-                    onPressed: _maintenanceBusy ? null : _loadDinoV2Status,
+                    key: const Key('dino-status-retry'),
+                    onPressed: _maintenanceBusy ? null : _loadDinoStatus,
                     icon: const Icon(Icons.refresh_rounded),
                     label: const Text('重试'),
                   );
                 }
                 if (status.healthy) {
                   return OutlinedButton(
-                    key: const Key('dinov2-component-action'),
-                    onPressed: _maintenanceBusy ? null : _removeDinoV2,
+                    key: const Key('dino-component-action'),
+                    onPressed: _maintenanceBusy ? null : _removeDinoV3,
                     child: const Text('删除'),
                   );
                 }
                 return FilledButton(
-                  key: const Key('dinov2-component-action'),
-                  onPressed: _maintenanceBusy ? null : _installDinoV2,
+                  key: const Key('dino-component-action'),
+                  onPressed: _maintenanceBusy ? null : _installDinoV3,
                   child: Text(status.installed ? '安装/修复' : '安装'),
                 );
               },
@@ -2999,6 +3066,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _showExportColumnsDialog() async {
     final initialSelection = _stringList('export_columns').toSet();
+    if (initialSelection.isEmpty) {
+      initialSelection.addAll(_defaultExportColumns);
+    }
     final result = await showDialog<List<String>>(
       context: context,
       builder: (context) {
@@ -3036,6 +3106,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ],
                     ),
+                    if (selected.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text('请至少选择一列后再保存。'),
+                      ),
                     const Divider(height: 20),
                     Expanded(
                       child: ListView.builder(
@@ -3068,12 +3143,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: const Text('取消'),
                 ),
                 FilledButton(
-                  onPressed: () {
-                    final ordered = _defaultExportColumns
-                        .where(selected.contains)
-                        .toList();
-                    Navigator.of(context).pop(ordered);
-                  },
+                  onPressed: selected.isEmpty
+                      ? null
+                      : () {
+                          final ordered = _defaultExportColumns
+                              .where(selected.contains)
+                              .toList();
+                          Navigator.of(context).pop(ordered);
+                        },
                   child: const Text('确定'),
                 ),
               ],
@@ -3307,7 +3384,10 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in userModels)
-        _SettingsOption<String>(value: model.path, label: model.rawName),
+        _SettingsOption<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
     ],
     if (cloudModels.isNotEmpty) ...[
       const _SettingsOption<String>(
@@ -3316,7 +3396,10 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in cloudModels)
-        _SettingsOption<String>(value: model.path, label: model.rawName),
+        _SettingsOption<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
     ],
   ];
 }

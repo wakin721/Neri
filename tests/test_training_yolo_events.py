@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -97,6 +99,32 @@ class TriggerEventResolverTests(unittest.TestCase):
             self.assertEqual(keys[0], keys[1])
             self.assertEqual(keys[1], keys[2])
             self.assertNotEqual(keys[2], keys[3])
+
+    def test_event_key_caches_directory_scans_across_images(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / 'camera'
+            start = datetime(2026, 9, 7, 12, 0, 0)
+            photos = [folder / f'{i:03d}.jpg' for i in range(4)]
+            for idx, path in enumerate(photos):
+                save_camera_photo(path, start + timedelta(seconds=idx * 5))
+
+            resolver = TriggerEventResolver()
+            with patch.object(
+                TriggerEventResolver,
+                '_capture_time',
+                wraps=TriggerEventResolver._capture_time,
+            ) as capture_spy:
+                keys = [
+                    resolver.event_key(path, folder_key='physical-camera')
+                    for path in photos
+                ]
+                self.assertEqual(capture_spy.call_count, len(photos))
+                again = [
+                    resolver.event_key(path, folder_key='physical-camera')
+                    for path in photos
+                ]
+                self.assertEqual(capture_spy.call_count, len(photos))
+            self.assertEqual(keys, again)
 
 
 class TrainingYoloMediaTests(unittest.TestCase):
@@ -199,6 +227,45 @@ class TrainingEventQueueTests(unittest.TestCase):
                     uploaded['yolo_classes']['棕脸鹟莺'],
                     'Abroscopus_albogularis\n',
                 )
+            finally:
+                queue.stop()
+
+    def test_enqueue_many_async_offloads_to_running_worker_thread(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / 'species.db'
+            create_species_db(db_path)
+            cloud = MemoryCloud()
+            queue = TrainingQueue(
+                root / 'state',
+                transport=cloud,
+                clock=lambda: 1000.0,
+                debounce_seconds=0,
+                species_db_path=db_path,
+                privacy_blurrer=no_private_objects,
+            )
+            try:
+                queue.set_consent(AGREEMENT_VERSION, True)
+                start = datetime(2026, 9, 7, 12, 0, 0)
+                photos = [root / 'camera' / f'{i}.jpg' for i in range(3)]
+                for path, seconds in zip(photos, (0, 4, 9)):
+                    save_camera_photo(path, start + timedelta(seconds=seconds))
+                mark = {
+                    '物种名称': '棕脸鹟莺',
+                    '检测框': [
+                        {'物种': '棕脸鹟莺', '边界框': [10, 5, 60, 30], '置信度': 0.9}
+                    ],
+                }
+                queue.start()
+                accepted = queue.enqueue_many_async(
+                    [(path, mark, True) for path in photos]
+                )
+                self.assertTrue(accepted)
+                deadline = time.monotonic() + 5.0
+                while len(cloud.files) < 1 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                time.sleep(0.05)
+                self.assertEqual(len(cloud.files), 1)
             finally:
                 queue.stop()
 

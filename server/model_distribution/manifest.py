@@ -11,7 +11,7 @@ from pathlib import Path
 from .storage import RemoteEntry
 
 ROOT = "/Neri_Data/Model"
-DINO_ROOT = ROOT + "/DINOv2"
+DINO_ROOT = ROOT + "/DINOv3"
 
 
 class ManifestError(RuntimeError):
@@ -34,7 +34,10 @@ class ManifestSnapshot:
 def _allowed(folder: str, name: str) -> bool:
     suffix = Path(name).suffix.lower()
     if folder == "detect":
-        return suffix == ".pt"
+        lowered = name.lower()
+        return suffix in {".pt", ".tflite", ".litert"} or lowered.endswith(
+            (".labels.txt", ".labels.json")
+        )
     if folder == "cls":
         return suffix in {".pt", ".onnx", ".engine"}
     return False
@@ -131,8 +134,8 @@ class ManifestBuilder:
         return _snapshot(files)
 
 
-class DinoV2ManifestBuilder(ManifestBuilder):
-    """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv2."""
+class DinoV3ManifestBuilder(ManifestBuilder):
+    """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv3."""
 
     @staticmethod
     def _safe_name(name: str) -> bool:
@@ -148,7 +151,7 @@ class DinoV2ManifestBuilder(ManifestBuilder):
     def _walk(self, remote_dir: str, logical_dir: str, candidates) -> None:
         for entry in self.store.list_dir(remote_dir):
             if not self._safe_name(entry.name):
-                raise ManifestError("invalid_dinov2_path")
+                raise ManifestError("invalid_dinov3_path")
             remote = f"{remote_dir}/{entry.name}"
             logical = f"{logical_dir}/{entry.name}"
             if entry.is_dir:
@@ -158,7 +161,7 @@ class DinoV2ManifestBuilder(ManifestBuilder):
 
     def build(self) -> ManifestSnapshot:
         candidates = []
-        self._walk(DINO_ROOT, "DINOv2", candidates)
+        self._walk(DINO_ROOT, "DINOv3", candidates)
         normalized = self._deduplicate(candidates)
         files = tuple(
             ManifestEntry(

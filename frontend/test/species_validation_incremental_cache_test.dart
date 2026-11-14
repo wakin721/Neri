@@ -182,7 +182,7 @@ void main() {
         var requests = 0;
         final api = NeriApiClient(
           httpClient: MockClient((request) async {
-            expect(request.url.path, '/api/dinov2/feedback/rejection-clusters');
+            expect(request.url.path, '/api/dino/feedback/rejection-clusters');
             requests++;
             final ids =
                 (jsonDecode(request.body) as Map)['observation_ids'] as List;
@@ -387,6 +387,67 @@ void main() {
 
     await tester.pump(const Duration(seconds: 5));
   });
+
+  testWidgets(
+    'dinov3 rejected boxes adopt validation updates incrementally without preparation',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      var rejectionClusterCalls = 0;
+      final api = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.url.path == '/api/dino/feedback/rejection-clusters') {
+            rejectionClusterCalls += 1;
+          }
+          return http.Response(
+            '{}',
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }),
+      );
+      addTearDown(api.close);
+
+      final key = GlobalKey<_IncrementalHarnessState>();
+      await tester.pumpWidget(
+        _IncrementalHarness(
+          key: key,
+          apiClient: api,
+          tempDir: tempDir,
+          itemCount: 600,
+          rejected: true,
+          dinov3Rejected: true,
+        ),
+      );
+      for (var attempt = 0; attempt < 500; attempt++) {
+        if (_blockedValidation().evaluate().isEmpty) break;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(_blockedValidation(), findsNothing);
+      expect(rejectionClusterCalls, 0);
+
+      key.currentState!.resetReadCount();
+      await tester.tap(find.text('正确').first);
+      await tester.pump();
+      expect(_blockedValidation(), findsNothing);
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(_blockedValidation(), findsNothing);
+      expect(
+        key.currentState!.detectionDataReads,
+        lessThan(500),
+        reason:
+            'dinov3 rejected boxes should adopt validation updates incrementally',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }
 
 class _Item {
@@ -429,6 +490,7 @@ class _IncrementalHarness extends StatefulWidget {
     required this.tempDir,
     this.itemCount = _widgetItemCount,
     this.rejected = false,
+    this.dinov3Rejected = false,
     this.initialUnassigned = false,
     this.multiClusterFile = false,
     this.burstSize = 20,
@@ -439,6 +501,7 @@ class _IncrementalHarness extends StatefulWidget {
   final Directory tempDir;
   final int itemCount;
   final bool rejected;
+  final bool dinov3Rejected;
   final bool initialUnassigned;
   final bool multiClusterFile;
   final int burstSize;
@@ -536,7 +599,9 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
                     species: '拒识/Unknown',
                     confidence: 0.95,
                     bbox: const [0.1, 0.1, 0.9, 0.9],
-                    observationId: widget.initialUnassigned && index == 0
+                    observationId: widget.dinov3Rejected
+                        ? 'dinov3:obs-$index'
+                        : widget.initialUnassigned && index == 0
                         ? 'missing'
                         : (index.isEven ? 'a' : 'b'),
                   ),
@@ -642,7 +707,8 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
           rootItems: _items,
           exportFormatMode: 'ask',
           items: _items,
-          classificationModelPath: widget.rejected || widget.multiClusterFile
+          classificationModelPath:
+              widget.rejected || widget.multiClusterFile || widget.dinov3Rejected
               ? 'model.neri.json'
               : null,
           loading: false,

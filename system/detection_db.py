@@ -7,21 +7,48 @@ import sqlite3
 import json
 import os
 import logging
+import threading
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "detections.db"
+_WAL_LOCK = threading.Lock()
+_WAL_INITIALIZED_DBS: set[tuple[str, int, int]] = set()
 
 
 def get_db_path(temp_photo_dir: str) -> str:
     return os.path.join(temp_photo_dir, DB_FILENAME)
 
 
+def _db_identity(db_path: str) -> tuple[str, int, int] | None:
+    if db_path == ":memory:":
+        return None
+    try:
+        stat = os.stat(db_path)
+    except OSError:
+        return None
+    if stat.st_size <= 0 or not stat.st_ino:
+        return None
+    return (os.path.abspath(db_path), stat.st_dev, stat.st_ino)
+
+
 @contextmanager
 def _get_conn(db_path: str):
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")   # 允许并发读写
+    db_id = _db_identity(db_path)
+    need_wal = True
+    if db_id is not None:
+        with _WAL_LOCK:
+            need_wal = db_id not in _WAL_INITIALIZED_DBS
+    if need_wal:
+        conn.execute("PRAGMA journal_mode=WAL")   # 允许并发读写
+        db_id = db_id or _db_identity(db_path)
+        if db_id is not None:
+            with _WAL_LOCK:
+                if len(_WAL_INITIALIZED_DBS) > 2048:
+                    _WAL_INITIALIZED_DBS.clear()
+                _WAL_INITIALIZED_DBS.add(db_id)
     conn.execute("PRAGMA synchronous=NORMAL") # 平衡性能与安全
     conn.row_factory = sqlite3.Row
     try:
@@ -181,9 +208,12 @@ def delete_validation(db_path: str, image_filename: str):
 
 
 def delete_validation_bulk(db_path: str, image_filenames: list[str]):
+    rows = [(f,) for f in image_filenames if f]
+    if not rows:
+        return
     with _get_conn(db_path) as conn:
         conn.executemany("DELETE FROM validation WHERE image_filename=?",
-                         [(f,) for f in image_filenames])
+                         rows)
 
 
 def get_all_validation(db_path: str) -> dict:

@@ -8,9 +8,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/app_theme.dart';
+import 'package:neri_flutter/src/main_window.dart';
 import 'package:neri_flutter/src/models/job.dart';
+import 'package:neri_flutter/src/models/settings.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
-import 'package:neri_flutter/src/widgets/dinov2_feature_scatter.dart';
+import 'package:neri_flutter/src/screens/preview_screen.dart';
+import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
+import 'package:neri_flutter/src/widgets/dino_feature_scatter.dart';
+import 'package:neri_flutter/src/widgets/sequence_pending_notice.dart';
 
 void main() {
   late Directory directory;
@@ -27,6 +32,313 @@ void main() {
   });
 
   tearDown(() async => directory.delete(recursive: true));
+
+  DetectionItem rejectedDinoItem() => DetectionItem(
+    filename: 'bird.png',
+    path: imagePath,
+    fileType: 'png',
+    width: 10,
+    height: 10,
+    species: const ['Unknown'],
+    confidence: 0.086,
+    detectionData: const {
+      '物种名称': 'Unknown',
+      '物种数量': '3',
+      'sequence_completed': true,
+    },
+    detectionBoxes: [
+      for (final score in [0.171, 0.116, 0.086])
+        DetectionBox(
+          species: 'Unknown',
+          confidence: score,
+          bbox: const [0.1, 0.1, 0.7, 0.7],
+          candidates: [
+            {
+              'name': 'Unknown',
+              'conf': score,
+              'accepted': false,
+              'raw_det_conf': 0.94,
+              'box_known_score': -1.399,
+              'box_threshold': -0.993,
+              'sequence_known_score': -1.911,
+              'sequence_threshold': -0.332,
+              'source': 'dinov3_ridge_within',
+            },
+            {'name': '备选物种', 'conf': 0.999},
+          ],
+        ),
+    ],
+  );
+
+  testWidgets(
+    'DINO validation retains all rejected boxes and replaces the confidence slider with readonly scores',
+    (tester) async {
+      _setSize(tester, 1280);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(_screen(api, directory.path, rejectedDinoItem()));
+      await _waitForImage(tester);
+      final viewer = tester.widget<DetectionMediaViewer>(
+        find.byType(DetectionMediaViewer),
+      );
+      expect(viewer.visibleBoxes.length, 3);
+      expect(viewer.visibleBoxes.map((box) => box.species).toSet(), {
+        'Unknown',
+      });
+      expect(find.byType(Slider), findsNothing);
+      expect(find.text('显示物种'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('dino-rejection-single-line')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('单框 -1.399 < 门限 -0.993（未通过）'), findsNWidgets(3));
+      expect(find.byTooltip('序列 -1.911 < 门限 -0.332（未通过）'), findsNWidgets(3));
+      expect(find.textContaining('最终拒识 · Unknown'), findsNWidgets(3));
+      expect(find.textContaining('物种: Unknown  |  数量: 3'), findsOneWidget);
+      expect(
+        tester
+            .getCenter(find.byKey(const ValueKey('dino-rejection-single-line')))
+            .dy,
+        closeTo(tester.getCenter(find.byType(Switch)).dy, 1),
+      );
+      await tester.tap(find.text('其他'));
+      await tester.pumpAndSettle();
+      final text = tester
+          .widgetList<TextField>(find.byType(TextField))
+          .map((field) => field.controller?.text)
+          .toList();
+      expect(text, contains('Unknown'));
+      expect(text, contains('3'));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'DINO preview ignores a stale display confidence threshold and shows readonly gates',
+    (tester) async {
+      _setSize(tester, 1280);
+      final selected = rejectedDinoItem();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PreviewScreen(
+              inputPath: directory.path,
+              items: [selected],
+              selectedIndex: 0,
+              selectedItem: selected,
+              speciesTypes: const {},
+              useCombinedConfidence: true,
+              showDetections: true,
+              onShowDetectionsChanged: (_) {},
+              selectedSpeciesFilter: previewAllSpeciesLabel,
+              onSpeciesFilterChanged: (_) {},
+              confidenceThreshold: 0.95,
+              onConfidenceThresholdChanged: (_) =>
+                  fail('DINO confidence is readonly'),
+              detecting: false,
+              loading: false,
+              onDetectCurrentImage: (_) {},
+              onSelected: (_, _) {},
+              onLoadMetadata: (_) async {},
+              onRefresh: () async {},
+              onOpenExternal: (_) {},
+            ),
+          ),
+        ),
+      );
+      await _waitForImage(tester);
+      final viewer = tester.widget<DetectionMediaViewer>(
+        find.byType(DetectionMediaViewer),
+      );
+      expect(viewer.visibleBoxes.length, 3);
+      expect(
+        viewer.visibleBoxes.every((box) => box.species == 'Unknown'),
+        isTrue,
+      );
+      expect(find.byType(Slider), findsNothing);
+      expect(find.text('显示物种'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('dino-rejection-single-line')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('单框 -1.399 < 门限 -0.993（未通过）'), findsNWidgets(3));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'legacy YOLO validation keeps the confidence slider and filtering',
+    (tester) async {
+      _setSize(tester, 1280);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      final legacy = DetectionItem(
+        filename: 'bird.png',
+        path: imagePath,
+        fileType: 'png',
+        width: 10,
+        height: 10,
+        confidence: 0.1,
+        species: const ['bird'],
+        detectionBoxes: const [
+          DetectionBox(
+            species: 'bird',
+            confidence: 0.1,
+            bbox: [0.1, 0.1, 0.7, 0.7],
+            candidates: [
+              {'name': 'bird', 'conf': 0.1},
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(_screen(api, directory.path, legacy));
+      await _waitForImage(tester);
+      expect(
+        tester
+            .widget<DetectionMediaViewer>(find.byType(DetectionMediaViewer))
+            .visibleBoxes,
+        isEmpty,
+      );
+      expect(find.byType(Slider), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  for (final batch in [false, true]) {
+    testWidgets('correct passes active filters to callback batch=$batch', (
+      tester,
+    ) async {
+      _setSize(tester, 1280);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      Map<String, double>? captured;
+      double? frameRatio;
+      String? entrypoint;
+      Future<DetectionItem> markItem(
+        DetectionItem item,
+        String action, {
+        String? speciesName,
+        String? speciesCount,
+        String? speciesType,
+        String? remark,
+        String? feedbackOperationId,
+        Map<String, double>? confidenceSettings,
+        double? minFrameRatio,
+      }) async {
+        captured = confidenceSettings;
+        frameRatio = minFrameRatio;
+        entrypoint = 'single';
+        return item;
+      }
+
+      Future<List<DetectionItem>> markItems(
+        List<DetectionItem> items,
+        String action, {
+        String? speciesName,
+        String? speciesCount,
+        String? speciesType,
+        String? remark,
+        String? feedbackOperationId,
+        Map<String, double>? confidenceSettings,
+        double? minFrameRatio,
+      }) async {
+        captured = confidenceSettings;
+        frameRatio = minFrameRatio;
+        entrypoint = 'batch';
+        return items;
+      }
+
+      final items = <DetectionItem>[];
+      for (var index = 0; index < (batch ? 4 : 1); index++) {
+        // This test exercises annotation requests, independently of image decoding.
+        final path = '${directory.path}/missing-$index.jpg';
+        items.add(
+          DetectionItem(
+            filename: 'IMG_$index.png',
+            path: path,
+            fileType: 'png',
+            dateTaken: '2026-11-13T12:00:0$index',
+            width: 10,
+            height: 10,
+            species: const ['bird'],
+            detectionBoxes: const [
+              DetectionBox(
+                species: 'bird',
+                confidence: 0.95,
+                bbox: [0, 0, 8, 8],
+              ),
+            ],
+          ),
+        );
+      }
+      await tester.pumpWidget(
+        _screen(
+          api,
+          directory.path,
+          items.first,
+          itemsOverride: items,
+          autoGroup: batch,
+          minFrameRatio: 0.3,
+          onMarkItem: markItem,
+          onMarkItems: markItems,
+        ),
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+      final previousConfidence = tester
+          .widget<Slider>(find.byType(Slider))
+          .value;
+      tester.widget<Slider>(find.byType(Slider)).onChanged!(0.8);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('正确').first);
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      expect(entrypoint, batch ? 'batch' : 'single');
+      expect(captured?['global'], 0.8);
+      expect(frameRatio, 0.3);
+      tester.widget<Slider>(find.byType(Slider)).onChanged!(previousConfidence);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() async {
+        imageCache.clear();
+        imageCache.clearLiveImages();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+    });
+  }
+
+  test('resolveDinoValidationModelPath accepts dinov3 only', () {
+    ModelInfo model(String backend, String path) =>
+        ModelInfo(name: 'model', path: path, backend: backend);
+
+    expect(
+      resolveDinoValidationModelPath(
+        model('dinov3', 'model.dinov3'),
+        'model.dinov3',
+      ),
+      'model.dinov3',
+    );
+    expect(
+      resolveDinoValidationModelPath(model('yolo', 'model.pt'), 'model.pt'),
+      isNull,
+    );
+    expect(
+      resolveDinoValidationModelPath(model('dinov3', 'model.dinov3'), '   '),
+      isNull,
+    );
+    expect(resolveDinoValidationModelPath(null, 'model.dinov3'), isNull);
+  });
 
   DetectionItem item({String? observationId = 'bird-1'}) => DetectionItem(
     filename: 'bird.png',
@@ -56,6 +368,45 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(button);
     await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  for (final width in [900.0, 1280.0]) {
+    testWidgets('pending results remain visible at width $width', (
+      tester,
+    ) async {
+      _setSize(tester, width);
+      tester.view.physicalSize = Size(width, 790);
+      final api = NeriApiClient(
+        httpClient: MockClient((request) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      final pending = DetectionItem(
+        filename: 'bird.png',
+        path: imagePath,
+        fileType: 'png',
+        width: 10,
+        height: 10,
+        species: const ['拒识/Unknown'],
+        detectionBoxes: const [
+          DetectionBox(species: '拒识/Unknown', bbox: [0.2, 0.2, 0.8, 0.8]),
+        ],
+        detectionData: const {'sequence_pending': true},
+      );
+      await tester.pumpWidget(_screen(api, directory.path, pending));
+      await _waitForImage(tester);
+      if (width < 1000) {
+        final scroll = tester.state<ScrollableState>(
+          find.byType(Scrollable).first,
+        );
+        scroll.position.jumpTo(scroll.position.maxScrollExtent);
+        await tester.pumpAndSettle();
+      }
+      expect(find.byTooltip(SequencePendingNotice.message), findsOneWidget);
+      expect(find.textContaining('临时结果 · 序列待汇总'), findsNothing);
+      expect(find.textContaining('置信度: N/A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
   }
 
   testWidgets('selected child can export every media directory in root', (
@@ -332,7 +683,7 @@ void main() {
       await _waitForImage(tester);
       await tester.tapAt(tester.getCenter(find.byType(Image)));
       await tester.pumpAndSettle();
-      final dialog = find.byKey(const ValueKey('dinov2-detection-box-dialog'));
+      final dialog = find.byKey(const ValueKey('dino-detection-box-dialog'));
       await tester.tap(
         find.descendant(
           of: dialog,
@@ -403,7 +754,7 @@ void main() {
         await _waitForImage(tester);
 
         expect(
-          find.byKey(const ValueKey('dinov2-feature-explanation-button')),
+          find.byKey(const ValueKey('dino-feature-explanation-button')),
           findsNothing,
         );
         expect(
@@ -420,9 +771,7 @@ void main() {
 
         await tester.tapAt(center);
         await tester.pumpAndSettle();
-        final dialog = find.byKey(
-          const ValueKey('dinov2-detection-box-dialog'),
-        );
+        final dialog = find.byKey(const ValueKey('dino-detection-box-dialog'));
         expect(dialog, findsOneWidget);
         expect(
           find.descendant(of: dialog, matching: find.text('#1 中亚兔 · 检测框校验')),
@@ -439,7 +788,7 @@ void main() {
         expect(
           find.descendant(
             of: dialog,
-            matching: find.byType(DinoV2FeatureExplanationPanel),
+            matching: find.byType(DinoFeatureExplanationPanel),
           ),
           findsOneWidget,
         );
@@ -447,7 +796,7 @@ void main() {
         expect(requests.single.url.path, endsWith('/bird-1/explain'));
         expect(
           requests.single.url.queryParameters['classification_model_path'],
-          'model.dinov2',
+          'model.dino',
         );
 
         final correct = find.descendant(
@@ -528,7 +877,7 @@ void main() {
       await _waitForImage(tester);
       await tester.tapAt(tester.getCenter(find.byType(Image)));
       await tester.pumpAndSettle();
-      final dialog = find.byKey(const ValueKey('dinov2-detection-box-dialog'));
+      final dialog = find.byKey(const ValueKey('dino-detection-box-dialog'));
       expect(dialog, findsOneWidget);
       expect(find.text('该检测框没有可用的特征空间数据'), findsOneWidget);
       expect(
@@ -546,6 +895,237 @@ void main() {
         isTrue,
       );
       expect(requests, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'dinov3 box details separate per-box recognition evidence and sequence gate score',
+    (tester) async {
+      _setSize(tester, 1280);
+      final api = NeriApiClient(
+        httpClient: MockClient((_) async => _jsonResponse({})),
+      );
+      addTearDown(api.close);
+      final dinov3Item = DetectionItem(
+        filename: 'bird.png',
+        path: imagePath,
+        fileType: 'png',
+        width: 10,
+        height: 10,
+        species: const ['岩松鼠'],
+        confidence: 0.785,
+        detectionBoxes: const [
+          DetectionBox(
+            species: '岩松鼠',
+            predictedSpecies: '岩松鼠',
+            confidence: 0.785,
+            bbox: [0.2, 0.2, 0.8, 0.8],
+            trackId: 'event:cam1:2026-11-01T10:00:00:track_00',
+            candidates: [
+              {
+                'name': '岩松鼠',
+                'conf': 0.785,
+                'raw_det_conf': 0.722,
+                'box_known_score': 1.090,
+                'box_threshold': -0.993,
+                'sequence_known_score': 0.864,
+                'sequence_threshold': -0.332,
+                'within_score': 0.480,
+                'ridge_score': 0.256,
+                'raw_ridge_score': 0.241,
+              },
+              {'name': '猪獾', 'ridge_score': 0.142},
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(_screen(api, directory.path, dinov3Item));
+      await _waitForImage(tester);
+      await tester.tapAt(tester.getCenter(find.byType(Image)));
+      await tester.pumpAndSettle();
+
+      final details = find.byKey(const ValueKey('detection-box-details'));
+      expect(details, findsOneWidget);
+      expect(
+        find.descendant(of: details, matching: find.text('置信度：0.785')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: details, matching: find.text('检测置信度：0.722')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: details,
+          matching: find.text('单框门控：1.090 (阈值 -0.993)'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: details,
+          matching: find.text('序列门控：0.864 (阈值 -0.332)'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: details, matching: find.text('Within分数：0.480')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: details,
+          matching: find.text('Ridge分数：0.256 (单框 0.241)'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('候选：岩松鼠 78.5% / 猪獾 Ridge 0.142'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'dinov3 box without observation id synthesizes one and enables feedback',
+    (tester) async {
+      _setSize(tester, 1280);
+      final expectedObservationId = synthesizeDinoV3ObservationId(
+        imagePath,
+        0,
+        const [0.2, 0.2, 0.8, 0.8],
+      );
+      expect(expectedObservationId, startsWith('dinov3:'));
+      Map<String, dynamic>? feedbackBody;
+      final dinov3Item = DetectionItem(
+        filename: 'bird.png',
+        path: imagePath,
+        fileType: 'png',
+        width: 10,
+        height: 10,
+        species: const ['岩松鼠'],
+        confidence: 0.785,
+        detectionBoxes: const [
+          DetectionBox(
+            species: '岩松鼠',
+            confidence: 0.785,
+            bbox: [0.2, 0.2, 0.8, 0.8],
+            candidates: [
+              {
+                'name': '岩松鼠',
+                'conf': 0.785,
+                'best_known_species': '岩松鼠',
+                'ridge_score': 0.256,
+                'within_score': 0.480,
+                'box_known_score': 1.090,
+                'sequence_known_score': 0.864,
+              },
+            ],
+          ),
+        ],
+      );
+      final api = NeriApiClient(
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET' &&
+              request.url.path.endsWith('/explain')) {
+            return _jsonResponse({
+              'species': '岩松鼠',
+              'known_score': 0.864,
+              'threshold': -0.332,
+              'rejection': {'mode': 'ridge_within'},
+              'nearest_species': [
+                {
+                  'name': '岩松鼠',
+                  'squared_distance': 0.1,
+                  'cosine_score': 0.9,
+                  'source': 'memory',
+                },
+              ],
+              'projection': {
+                'method': 'pca',
+                'species': ['岩松鼠'],
+                'points': [
+                  {'kind': 'current', 'species': '岩松鼠', 'x': 0, 'y': 0},
+                ],
+              },
+              'current_example_available': false,
+            });
+          }
+          if (request.method == 'POST' &&
+              request.url.path.endsWith('/api/dino/feedback/box')) {
+            feedbackBody = jsonDecode(request.body) as Map<String, dynamic>;
+            return _jsonResponse({
+              'item': {
+                'filename': 'bird.png',
+                'path': imagePath,
+                'file_type': 'png',
+                'species': ['岩松鼠'],
+                'detection_boxes': [
+                  {
+                    'species': '岩松鼠',
+                    'bbox': [0.2, 0.2, 0.8, 0.8],
+                    'confidence': 0.785,
+                    'observation_id': expectedObservationId,
+                    'predicted_species': '岩松鼠',
+                  },
+                ],
+              },
+              'operation_id': feedbackBody?['feedback_operation_id'],
+            });
+          }
+          return _jsonResponse({});
+        }),
+      );
+      addTearDown(api.close);
+      await tester.pumpWidget(_screen(api, directory.path, dinov3Item));
+      await _waitForImage(tester);
+      await tester.tapAt(tester.getCenter(find.byType(Image)));
+      await tester.pumpAndSettle();
+
+      final dialog = find.byKey(const ValueKey('dino-detection-box-dialog'));
+      expect(dialog, findsOneWidget);
+      expect(
+        find.descendant(of: dialog, matching: find.text('#1 岩松鼠 · 检测框校验')),
+        findsOneWidget,
+      );
+      final panel = tester.widget<DinoFeatureExplanationPanel>(
+        find.byType(DinoFeatureExplanationPanel),
+      );
+      expect(panel.observationId, expectedObservationId);
+      expect(find.text('序列门控 0.8640'), findsOneWidget);
+      expect(
+        find.text('二维图用于展示白化特征空间近邻；实际判定结合因果历史适配、Within 近邻与 Ridge 序列门控。'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('该检测框没有 Neri1.1 observation ID'),
+        findsNothing,
+      );
+
+      for (final label in ['正确', '修改物种', '空 / 误检', '不参与学习']) {
+        final button = find.descendant(
+          of: dialog,
+          matching: find.widgetWithText(OutlinedButton, label),
+        );
+        expect(button, findsOneWidget);
+        expect(
+          tester.widget<OutlinedButton>(button).onPressed,
+          isNotNull,
+          reason:
+              '$label should be enabled for a synthesized dinov3 observation',
+        );
+      }
+
+      await tester.tap(
+        find.descendant(
+          of: dialog,
+          matching: find.widgetWithText(OutlinedButton, '正确'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(feedbackBody?['observation_id'], expectedObservationId);
+      expect(feedbackBody?['file_path'], imagePath);
+
+      await tester.pump(const Duration(seconds: 5));
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
@@ -588,6 +1168,10 @@ Widget _screen(
   Future<void> Function(String)? onFormatModeChanged,
   ThemeData? theme,
   List<DetectionItem>? itemsOverride,
+  bool autoGroup = false,
+  double minFrameRatio = 0,
+  MarkValidationItem? onMarkItem,
+  MarkValidationItems? onMarkItems,
 }) => MaterialApp(
   theme: theme,
   home: Scaffold(
@@ -597,15 +1181,15 @@ Widget _screen(
       rootInputPath: rootPath ?? path,
       rootItems: itemsOverride ?? [item],
       exportFormatMode: exportMode,
-      classificationModelPath: 'model.dinov2',
+      classificationModelPath: 'model.dino',
       items: itemsOverride ?? [item],
       loading: false,
       refreshVersion: 0,
       speciesTypes: const {},
       useCombinedConfidence: false,
-      minFrameRatio: 0,
-      autoGroup: false,
-      collapseGroups: false,
+      minFrameRatio: minFrameRatio,
+      autoGroup: autoGroup,
+      collapseGroups: autoGroup,
       autoGroupDetectBurst: false,
       autoGroupBurstSize: 4,
       autoGroupGapSeconds: 1800,
@@ -623,6 +1207,7 @@ Widget _screen(
       onLoadMetadata: (_) async {},
       onOpenExternal: (_) {},
       onMarkItem:
+          onMarkItem ??
           (
             candidate,
             action, {
@@ -632,6 +1217,7 @@ Widget _screen(
             remark,
           }) async => candidate,
       onMarkItems:
+          onMarkItems ??
           (
             candidates,
             action, {

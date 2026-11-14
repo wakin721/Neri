@@ -148,9 +148,6 @@ class InferenceBatcher:
 
             # Release the failed call's traceback before emptying the cache so
             # tensors referenced by that stack can actually be reclaimed.
-            drain = getattr(detector, "drain_dinov2_observations", None)
-            if callable(drain):
-                drain()
             cleanup = getattr(detector, "cleanup_runtime_cache", None)
             if callable(cleanup):
                 cleanup(clear_cuda_cache=True)

@@ -84,7 +84,10 @@
 **模型管理**
 
 - 模型目录位于 `res/model/detect` 与 `res/model/cls`；用户模型放入各自的 `user` 子目录，NeriCloud 同步模型位于 `sync` 子目录
-- 目前仅支持 `.pt` 结尾的模型文件，可自行更换
+- 探测模型支持 `.pt` 文件，可自行更换
+- 分类模型还可选择 **Neri1.1**（DINOv3＋Ridge＋Within），支持完整照片序列拒识与人工确认后的补图更新；部署与调用见 [联合模型说明](docs/dinov3-ridge-within.md)。
+- 未安装 PyTorch 时，可选择 `.tflite` / `.litert` 探测模型，由 LiteRT 完成照片和快速视频抽帧探测；详见 [无 PyTorch 的 LiteRT 探测](docs/litert-detection.md)。
+- **环境维护 → Neri1.1（DINOv3 ViT-B/16）** 可一键安装或修复组件：软件从 NeriCloud `/Neri_Data/Model/DINOv3` 递归同步模型清单、checkpoint、冻结编码器与官方源码到 `res/model/DINOv3`，逐文件校验 SHA-256 后原子启用。
 
 **检测阈值设置**
 

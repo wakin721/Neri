@@ -128,6 +128,44 @@ class DetectionItem {
   final String? error;
   final bool? validated;
 
+  /// Legacy interrupted DINOv3 jobs may keep the pending marker only on
+  /// accepted candidates; rejected boxes instead retain their backend source.
+  bool get isSequencePending {
+    if (error != null ||
+        detectionData['sequence_status'] == 'failed' ||
+        validated == true ||
+        detectionData['最低置信度'] == '人工校验' ||
+        detectionData['sequence_completed'] == true) {
+      return false;
+    }
+    if (detectionData['sequence_pending'] == true) return true;
+    bool pendingBox(Map<dynamic, dynamic> box) {
+      if (box['sequence_pending'] == true ||
+          box['source'] == 'dinov3_ridge_within') {
+        return true;
+      }
+      final candidates = box['候选项'] ?? box['candidates'];
+      return candidates is List &&
+          candidates.whereType<Map>().any(
+            (candidate) =>
+                candidate['sequence_pending'] == true ||
+                candidate['source'] == 'dinov3_ridge_within',
+          );
+    }
+
+    final rawBoxes = detectionData['检测框'];
+    if (rawBoxes is List && rawBoxes.whereType<Map>().any(pendingBox)) {
+      return true;
+    }
+    return detectionBoxes.any(
+      (box) => box.candidates.any(
+        (candidate) =>
+            candidate['sequence_pending'] == true ||
+            candidate['source'] == 'dinov3_ridge_within',
+      ),
+    );
+  }
+
   DetectionItem mergeValidationUpdate(DetectionItem update) {
     return DetectionItem(
       filename: update.filename.isNotEmpty ? update.filename : filename,
@@ -158,6 +196,7 @@ class ProcessingJob {
     this.outputDir,
     this.total = 0,
     this.processed = 0,
+    this.failedCount = 0,
     this.elapsedSeconds = 0,
     this.speed = 0,
     this.remainingSeconds,
@@ -175,6 +214,7 @@ class ProcessingJob {
       outputDir: json['output_dir'] as String?,
       total: json['total'] as int? ?? 0,
       processed: json['processed'] as int? ?? 0,
+      failedCount: (json['failed_count'] as num?)?.toInt() ?? 0,
       elapsedSeconds: _doubleFromJobJson(json['elapsed_seconds']) ?? 0,
       speed: _doubleFromJobJson(json['speed']) ?? 0,
       remainingSeconds: _doubleFromJobJson(json['remaining_seconds']),
@@ -196,6 +236,7 @@ class ProcessingJob {
   final String? outputDir;
   final int total;
   final int processed;
+  final int failedCount;
   final double elapsedSeconds;
   final double speed;
   final double? remainingSeconds;
@@ -209,7 +250,9 @@ class ProcessingJob {
   double get progress => total == 0 ? 0 : processed / total;
   bool get isActive => state == 'queued' || state == 'running';
   bool get isWorkerActive => isActive || active;
+  bool get hasFailedItems => failedCount > 0;
   bool get canResume => !active && (state == 'cancelled' || state == 'failed');
+  bool get canRetryFailed => !active && state == 'completed' && hasFailedItems;
 }
 
 double? _doubleFromJobJson(Object? value) {

@@ -8,18 +8,22 @@ on:
       - "frontend/lib/src/**"
       - "frontend/test/**"
       - "tests/test_validation_cache_wiring.py"
-      - "system/dinov2/**"
-      - "tests/test_dinov2_within_seq.py"
-      - "requirements-within-seq.txt"
+      - "system/dino/**"
+      - "system/dinov3/**"
+      - "tests/test_dinov3_processing.py"
+      - "requirements.txt"
+      - "requirements-privacy.txt"
   pull_request:
     paths:
       - ".github/workflows/validation-performance.yml"
       - "frontend/lib/src/**"
       - "frontend/test/**"
       - "tests/test_validation_cache_wiring.py"
-      - "system/dinov2/**"
-      - "tests/test_dinov2_within_seq.py"
-      - "requirements-within-seq.txt"
+      - "system/dino/**"
+      - "system/dinov3/**"
+      - "tests/test_dinov3_processing.py"
+      - "requirements.txt"
+      - "requirements-privacy.txt"
 
 permissions:
   contents: read
@@ -29,7 +33,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  within-seq:
+  dinov3-processing:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,12 +41,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install batch algorithm test dependencies
-        run: python -m pip install -r requirements-within-seq.txt httpx pytest
-      - name: Verify classification, calibration, clustering and API
+      - name: Install test dependencies
+        run: python -m pip install numpy pillow opencv-python httpx pytest
+      - name: Verify DINOv3 context and sequence processing
         env:
           OPENBLAS_NUM_THREADS: "1"
-        run: python -m pytest -q tests/test_dinov2_within_seq.py
+        run: python -m pytest -q tests/test_dinov3_processing.py
 
   flutter-validation:
     runs-on: ubuntu-latest

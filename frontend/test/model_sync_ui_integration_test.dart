@@ -99,8 +99,11 @@ void main() {
       await tester.pumpWidget(_startScreen());
       await tester.pump();
 
-      expect(find.text('未在 res/model/detect 中找到 .pt 模型'), findsOneWidget);
-      expect(find.text('未在 res/model/cls 中找到 .pt 模型'), findsOneWidget);
+      expect(
+        find.text('未在 res/model/detect 中找到 .pt / .tflite 模型'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('未在 res/model/cls 中找到'), findsOneWidget);
     },
   );
 
@@ -239,6 +242,8 @@ void main() {
                     missingYoloDependencies: missingDependencies
                         ? const ['torch', 'torchvision', 'ultralytics']
                         : const [],
+                    pytorchAvailable: !missingDependencies,
+                    detectionReady: !missingDependencies,
                   ),
                   autoGroupInferredBurstSize: null,
                   apiClient: client,

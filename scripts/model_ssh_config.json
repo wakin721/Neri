@@ -1,0 +1,74 @@
+{
+    "default_profile":  "neri-cloud",
+    "profiles":  {
+                     "neri-cloud":  {
+                                        "name":  "neri-cloud",
+                                        "description":  "Neri 云端模型分发服务器 (Model Distribution \u0026 DINOv3)",
+                                        "host":  "47.108.14.199",
+                                        "port":  22,
+                                        "user":  "codex",
+                                        "key_path":  "C:\\Users\\wakin\\.ssh\\id_ed25519_agent",
+                                        "remote_model_dir":  "/opt/neri-models/server/model_distribution",
+                                        "remote_weights_dir":  "/Neri_Data/Model",
+                                        "local_weights_dir":  "runs",
+                                        "forward_ports":  [
+                                                              8002
+                                                          ],
+                                        "tmux_session":  "neri-model",
+                                        "service_name":  "neri-models"
+                                    },
+                     "gpu-training":  {
+                                          "name":  "gpu-training",
+                                          "description":  "远程GPU模型训练/微调节点 (AutoDL/云GPU/本地工作站)",
+                                          "host":  "127.0.0.1",
+                                          "port":  22,
+                                          "user":  "root",
+                                          "key_path":  "",
+                                          "remote_model_dir":  "/root/models",
+                                          "remote_weights_dir":  "/root/autodl-tmp",
+                                          "local_weights_dir":  "runs",
+                                          "forward_ports":  [
+                                                                6006,
+                                                                7860,
+                                                                8888,
+                                                                8000
+                                                            ],
+                                          "tmux_session":  "model-train",
+                                          "service_name":  ""
+                                      }
+                 },
+    "port_presets":  {
+                         "tensorboard":  {
+                                             "port":  6006,
+                                             "desc":  "TensorBoard 训练可视化"
+                                         },
+                         "webui_gradio":  {
+                                              "port":  7860,
+                                              "desc":  "Gradio / WebUI 界面"
+                                          },
+                         "streamlit":  {
+                                           "port":  8501,
+                                           "desc":  "Streamlit 仪表盘"
+                                       },
+                         "jupyter":  {
+                                         "port":  8888,
+                                         "desc":  "Jupyter Notebook / Lab"
+                                     },
+                         "fastapi_vllm":  {
+                                              "port":  8000,
+                                              "desc":  "FastAPI / vLLM 模型推理服务"
+                                          },
+                         "neri_model_service":  {
+                                                    "port":  8002,
+                                                    "desc":  "Neri 云端模型分发服务"
+                                                },
+                         "ollama":  {
+                                        "port":  11434,
+                                        "desc":  "Ollama 本地大模型服务"
+                                    },
+                         "mlflow":  {
+                                        "port":  5000,
+                                        "desc":  "MLflow 实验追踪"
+                                    }
+                     }
+}

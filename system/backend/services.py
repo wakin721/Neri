@@ -1,8 +1,8 @@
-"""Active backend service facade with DINOv2-only DINO routing.
+"""Active backend facade for the versioned DINOv3 joint model.
 
 The large legacy service module remains a temporary implementation detail for
-non-DINO media/job behavior. Its DINO hook globals are replaced here so no old
-DINOv3 model is loaded or executed.
+non-DINO media/job behavior. Its DINO hooks select the validated Neri1.1
+runtime; legacy classification checkpoint formats are not supported.
 """
 from __future__ import annotations
 
@@ -136,7 +136,7 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
         return root, files
 
 
-def _dinov2_manifest_payload(model_path: str | Path | None):
+def _dino_manifest_payload(model_path: str | Path | None):
     if not model_path:
         return None
     path = Path(model_path).expanduser()
@@ -148,33 +148,48 @@ def _dinov2_manifest_payload(model_path: str | Path | None):
         return None
     if not isinstance(payload, dict):
         return None
-    backend = payload.get("backend")
-    if backend == "dinov3":
-        raise ValueError("DINOv3 模型已不再支持；请安装或选择 DINOv2 模型。")
-    return payload if backend == "dinov2" else None
+    if payload.get("backend") != "dinov3":
+        return None
+    try:
+        from system.dinov3.runtime import read_manifest
+
+        return read_manifest(path)
+    except ValueError as exc:
+        raise ValueError(f"DINOv3联合模型无效: {exc}") from exc
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"DINOv3联合模型无效: {exc}") from exc
 
 
-def _validate_dinov2_job_options(
+def _validate_dino_job_options(
     model_path: str | None,
     classification_model_path: str | None,
     video_mode: str,
 ) -> None:
-    payload = _dinov2_manifest_payload(classification_model_path)
+    if (
+        model_path
+        and Path(model_path).suffix.lower() in {".tflite", ".litert"}
+        and video_mode == "all"
+    ):
+        raise ValueError(
+            "LiteRT 探测暂不支持完整视频追踪，请使用快速识别或跳过视频。"
+        )
+    payload = _dino_manifest_payload(classification_model_path)
     if payload is None:
         return
     if not model_path:
-        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
+        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError("DINOv2 暂不支持视频完整识别，请使用快速识别或跳过视频。")
+        raise ValueError("Neri1.1 暂不支持视频识别，请选择跳过视频。")
 
 
-def _persist_dinov2_observations(*args, **kwargs):
-    from .dinov2_feedback_service import persist_runtime_observations
-    return persist_runtime_observations(*args, **kwargs)
+def _persist_dino_observations(*args, **kwargs):
+    return None
 
 
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
-    from system.dinov2.image_processor import ImageProcessor
+    import importlib.util
+
+    from system.dino.image_processor import ImageProcessor
 
     resolved_model_path = _resolve_model_path(model_path) if model_path else None
     resolved_classification_path = _resolve_classification_model_path(
@@ -185,28 +200,60 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
     if resolved_model_path is None and resolved_classification_path is None:
         raise ValueError("探测模型和分类模型至少需要选择一个。")
 
-    payload = _dinov2_manifest_payload(resolved_classification_path)
+    suffix = resolved_model_path.suffix.lower() if resolved_model_path is not None else ""
+    if suffix in {".tflite", ".litert"}:
+        if resolved_classification_path is not None:
+            raise ValueError(
+                "LiteRT 探测暂不支持搭配分类模型；请取消分类模型或安装 PyTorch。"
+            )
+        from system.dino.litert_image_processor import LiteRtImageProcessor
+
+        try:
+            return LiteRtImageProcessor(str(resolved_model_path))
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "LiteRT 运行库未安装；请安装 requirements-privacy.txt 中的 "
+                "ai-edge-litert，或安装 PyTorch 后使用 .pt 模型。"
+            ) from exc
+    if (
+        resolved_model_path is not None
+        and importlib.util.find_spec("torch") is None
+        and resolved_classification_path is None
+    ):
+        raise RuntimeError(
+            "当前环境未安装 PyTorch。请选择 .tflite LiteRT 探测模型，"
+            "或在环境维护中安装 PyTorch。"
+        )
+    if (
+        resolved_classification_path is not None
+        and importlib.util.find_spec("torch") is None
+    ):
+        raise RuntimeError("分类模型需要 PyTorch；请安装 PyTorch 或取消分类模型。")
+
+    payload = _dino_manifest_payload(resolved_classification_path)
     if payload is not None and resolved_model_path is None:
-        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
+        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+    if payload is not None and importlib.util.find_spec("torch") is None:
+        raise RuntimeError("Neri1.1 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
 
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None
     )
     if resolved_classification_path is not None:
         if payload is not None:
-            from system.dinov2.runtime import load_dinov2_model
+            from system.dinov3.runtime import load_dinov3_model
 
-            runtime = load_dinov2_model(resolved_classification_path)
-            detector.load_dinov2_classifier(runtime.classifier)
-            detector.dinov2_registry = runtime.registry
-            detector.dinov2_feedback = runtime.feedback
-            detector.dinov2_runtime = runtime
+            runtime = load_dinov3_model(resolved_classification_path)
+            detector.load_dino_classifier(runtime.classifier)
+            detector.dino_registry = None
+            detector.dino_feedback = None
+            detector.dino_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
     if (
         detector.model is None
         and getattr(detector, "cls_model", None) is None
-        and getattr(detector, "dinov2_classifier", None) is None
+        and getattr(detector, "dino_classifier", None) is None
     ):
         raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
@@ -216,38 +263,11 @@ def _learnable_observations_for_file(
     classification_model_path: str,
     file_path: Path,
 ):
-    from .dinov2_feedback_service import _open_feedback_state, _path_identity
-
-    feedback, _center = _open_feedback_state(classification_model_path)
-    try:
-        target = _path_identity(file_path)
-        rows = feedback._conn.execute(
-            "SELECT id,payload FROM observations ORDER BY id"
-        ).fetchall()
-        result = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if _path_identity(payload.get("source_path", "")) != target:
-                continue
-            observation_id = str(row["id"] or "")
-            if observation_id:
-                result.append(feedback.get_observation(observation_id))
-        return result
-    finally:
-        feedback.close()
+    return []
 
 
 def _checkpoint_species_for_model(classification_model_path: str):
-    from .dinov2_registry_service import load_checkpoint_for_model
-    from system.dinov2.runtime import DinoV2ManifestError
-
-    try:
-        return set(load_checkpoint_for_model(classification_model_path).classes)
-    except (DinoV2ManifestError, FileNotFoundError):
-        return None
+    return None
 
 
 def _record_validation_registry_feedback(
@@ -256,14 +276,7 @@ def _record_validation_registry_feedback(
     operation_id: str,
     confirmed_species: str,
 ):
-    from .dinov2_feedback_service import record_registry_species_feedback
-
-    return record_registry_species_feedback(
-        classification_model_path,
-        observation,
-        operation_id,
-        confirmed_species,
-    )
+    return None
 
 
 def _record_validation_feedback(
@@ -273,30 +286,13 @@ def _record_validation_feedback(
     action: str,
     confirmed_species: str | None,
 ):
-    from .dinov2_feedback_service import (
-        _affected_learning_species,
-        _open_feedback_state,
-    )
-
-    feedback, feature_center = _open_feedback_state(classification_model_path)
-    try:
-        record = feedback.record_feedback(
-            observation.id,
-            operation_id=operation_id,
-            action=action,
-            confirmed_species=confirmed_species,
-        )
-        for species in sorted(_affected_learning_species(record)):
-            feedback.recompute_species(species, feature_center)
-        return record
-    finally:
-        feedback.close()
+    return None
 
 
 # These assignments redirect DINO hooks inside the generic service implementation.
-_legacy._validate_dinov2_job_options = _validate_dinov2_job_options
-_legacy._dinov2_manifest_payload = _dinov2_manifest_payload
-_legacy._persist_dinov2_observations = _persist_dinov2_observations
+_legacy._validate_dino_job_options = _validate_dino_job_options
+_legacy._dino_manifest_payload = _dino_manifest_payload
+_legacy._persist_dino_observations = _persist_dino_observations
 _legacy._load_detector = _load_detector
 _legacy._learnable_observations_for_file = _learnable_observations_for_file
 _legacy._checkpoint_species_for_model = _checkpoint_species_for_model
@@ -305,8 +301,23 @@ _legacy._record_validation_feedback = _record_validation_feedback
 
 
 # Make the active facade self-contained: callers that import services directly
-# must receive the same indexed/batched DINOv2 behavior as the FastAPI app.
+# must receive the same indexed/batched validation behavior as the FastAPI app.
 # The installer is idempotent via marker attributes on each patched function.
+def mark_validation_item(request):
+    """Keep single-file marks on the same staged-learning path as batch marks."""
+    items = mark_validation_items(ValidationBatchMarkRequest(
+        input_path=request.input_path, file_paths=[request.file_path], action=request.action,
+        species_name=request.species_name, species_count=request.species_count,
+        species_type=request.species_type, remark=request.remark,
+        classification_model_path=request.classification_model_path,
+        feedback_operation_id=request.feedback_operation_id,
+        confidence_settings=getattr(request, "confidence_settings", None),
+        min_frame_ratio=getattr(request, "min_frame_ratio", 0.0)))
+    if not items:
+        raise ValueError("没有可标记的文件")
+    return items[0]
+
+
 import sys as _sys
 from .runtime_patches import install_runtime_patches as _install_runtime_patches
 

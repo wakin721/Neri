@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/job.dart';
+import '../utils/detection_box_label.dart';
 import '../utils/preview_decode_size.dart';
 import '../utils/video_detection_index.dart';
 
@@ -1077,7 +1078,11 @@ class _DetectionOverlayPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.5;
 
-    final textPainter = TextPainter(textDirection: TextDirection.ltr);
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    );
 
     for (var index = 0; index < boxes.length; index++) {
       final box = boxes[index];
@@ -1091,9 +1096,7 @@ class _DetectionOverlayPainter extends CustomPainter {
 
       canvas.drawRect(rect, paint);
 
-      final confidenceStr = (box.confidence ?? 0).toStringAsFixed(2);
-      final objectId = _objectIdForBox(box, index);
-      final label = '#$objectId ${box.species} $confidenceStr';
+      final label = detectionBoxLabel(box, index);
 
       textPainter.text = TextSpan(
         text: ' $label ',
@@ -1104,12 +1107,15 @@ class _DetectionOverlayPainter extends CustomPainter {
           height: 1.2,
         ),
       );
-      textPainter.layout();
+      textPainter.layout(maxWidth: fitted.width);
 
       final textY = math.max(fitted.top, rect.top - textPainter.height - 2);
+      final textX = rect.left
+          .clamp(fitted.left, fitted.right - textPainter.width)
+          .toDouble();
 
       final bgRect = Rect.fromLTWH(
-        rect.left,
+        textX,
         textY,
         textPainter.width,
         textPainter.height,
@@ -1120,18 +1126,12 @@ class _DetectionOverlayPainter extends CustomPainter {
         ..color = color.withValues(alpha: 0.85);
 
       canvas.drawRect(bgRect, bgPaint);
-      textPainter.paint(canvas, Offset(rect.left, textY));
+      textPainter.paint(canvas, Offset(textX, textY));
     }
   }
 
   @override
   bool shouldRepaint(covariant _DetectionOverlayPainter oldDelegate) {
     return oldDelegate.boxes != boxes || oldDelegate.mediaSize != mediaSize;
-  }
-
-  String _objectIdForBox(DetectionBox box, int index) {
-    final trackId = box.trackId?.trim();
-    if (trackId != null && trackId.isNotEmpty) return trackId;
-    return '${index + 1}';
   }
 }

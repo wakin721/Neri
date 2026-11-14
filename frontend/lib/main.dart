@@ -11,7 +11,7 @@ import 'src/api_client.dart';
 import 'src/app_theme.dart';
 import 'src/crash_reporter.dart';
 import 'src/crash_watchdog.dart';
-import 'src/dinov2_startup_check.dart';
+import 'src/dino_startup_check.dart';
 import 'src/models/theme_settings.dart';
 import 'src/main_window.dart';
 
@@ -257,7 +257,7 @@ class NeriApp extends StatefulWidget {
 class _NeriAppState extends State<NeriApp> {
   // MainWindow closes this client after shutting down the backend.
   final _apiClient = NeriApiClient();
-  final _dinoV2StartupCheck = DinoV2StartupCheck();
+  final _dinoStartupCheck = DinoStartupCheck();
 
   @override
   Widget build(BuildContext context) {
@@ -294,7 +294,7 @@ class _NeriAppState extends State<NeriApp> {
               home: MainWindow(
                 apiClient: _apiClient,
                 themeNotifier: widget.themeNotifier,
-                dinoV2StartupCheck: _dinoV2StartupCheck,
+                dinoStartupCheck: _dinoStartupCheck,
               ),
             );
           },

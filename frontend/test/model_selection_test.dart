@@ -44,6 +44,30 @@ void main() {
     expect(settings.seedColor, coralOption.color);
   });
 
+  test('LiteRT only detection settings remain runnable without PyTorch', () {
+    final settings = NeriSettings.fromJson({
+      'available_models': [
+        {
+          'name': 'camera.tflite',
+          'path': 'res/model/detect/sync/camera.tflite',
+          'backend': 'litert',
+          'supports_video_fast': true,
+          'supports_video_all': false,
+        },
+      ],
+      'missing_yolo_dependencies': ['torch', 'torchvision', 'ultralytics'],
+      'pytorch_available': false,
+      'litert_available': true,
+      'detection_ready': true,
+    });
+
+    expect(settings.pytorchAvailable, isFalse);
+    expect(settings.litertAvailable, isTrue);
+    expect(settings.detectionReady, isTrue);
+    expect(settings.availableModels.single.isLiteRt, isTrue);
+    expect(settings.availableModels.single.supportsVideoAll, isFalse);
+  });
+
   testWidgets('探测模型可以选择不使用', (tester) async {
     final inputController = TextEditingController();
     addTearDown(inputController.dispose);
