@@ -34,6 +34,7 @@ from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 from .preview_fast import load_media_indexes
 from .inference_batching import InferenceBatcher, prefetched_path_batches
+from system.host_memory import HostMemoryPressure, is_host_memory_error
 
 from .models import (
     CreateJobRequest,
@@ -840,8 +841,8 @@ class ProcessingJobManager:
                     or detector is None
                     or not current_results
                     or all(
-                        not item.error
-                        and (item.detection_data or {}).get("sequence_completed") is True
+                        item.error
+                        or (item.detection_data or {}).get("sequence_completed") is True
                         for item in current_results
                     )
                 ):
@@ -1027,9 +1028,13 @@ class ProcessingJobManager:
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
                 ]
                 inference_batcher = InferenceBatcher(request.options)
+                if image_files and hasattr(detector, "_photo_memory_guard"):
+                    detector._photo_memory_guard = inference_batcher.host_guard
                 image_batches = prefetched_path_batches(
                     image_files, lambda: inference_batcher.batch_size,
                     getattr(detector, "preload_batch_data", None),
+                    memory_guard=inference_batcher.host_guard,
+                    check_cancelled=lambda: _raise_if_cancelled(lambda: self._is_cancelled(job_id)),
                 )
 
                 def take_preloaded(future):
@@ -1079,17 +1084,21 @@ class ProcessingJobManager:
                                 if path in surviving_items
                             ]
                         if not batch:
+                            preloaded_data = None
+                            preload_future = None
                             continue
                         detect_started = time.perf_counter()
-                        detected_items = _detect_image_batch(
-                            detector,
-                            batch,
-                            batch_items,
-                            request,
-                            input_path,
-                            preloaded_data=preloaded_data,
-                            inference_batcher=inference_batcher,
-                        )
+                        try:
+                            detected_items = _detect_image_batch(
+                                detector, batch, batch_items, request, input_path,
+                                preloaded_data=preloaded_data, inference_batcher=inference_batcher,
+                            )
+                        finally:
+                            preloaded_data = None
+                            preload_future = None
+                            release = getattr(detector, "release_batch_images", None)
+                            if callable(release):
+                                release()
                         detect_elapsed = time.perf_counter() - detect_started
                         logger.info(
                             (
@@ -1127,7 +1136,7 @@ class ProcessingJobManager:
                         self._mark_cancelled(job_id, results)
                         return
                     from system.dinov3.processor import finalize_photo_job
-                    self._mutate_job(job_id, persist=False, message="正在汇总 Neri1.1完整照片序列")
+                    self._mutate_job(job_id, persist=False, message="正在汇总 Neri1.1完整照片序列并聚类拒识目标")
                     results = finalize_photo_job(
                         detector, results, input_path,
                         is_cancelled=lambda: self._is_cancelled(job_id),
@@ -1135,6 +1144,7 @@ class ProcessingJobManager:
                         apply_data_fn=_apply_detection_data,
                         complete_sequence=True,
                         total_photos=total_files,
+                        job_id=job_id,
                     )
                     if self._is_cancelled(job_id):
                         results = checkpoint_dinov3_cancellation(results)
@@ -1396,6 +1406,8 @@ class ProcessingJobManager:
                     "存储访问失败，恢复访问后可继续任务"
                     if isinstance(exc, MediaStorageError) else "处理失败"
                 )
+                if isinstance(exc, HostMemoryPressure):
+                    message = "内存不足，释放内存后可继续任务"
                 # UI updates are throttled; completed local results may be newer
                 # than the last published snapshot when a later file fails.
                 self._mutate_job(
@@ -2228,6 +2240,9 @@ def _normalize_detection_boxes(
         sequence_status = raw_box.get("sequence_status")
         if sequence_status is not None:
             box_data["sequence_status"] = str(sequence_status)
+        rejection_cluster = raw_box.get("rejection_cluster")
+        if isinstance(rejection_cluster, dict):
+            box_data["rejection_cluster"] = dict(rejection_cluster)
         boxes.append(box_data)
     return boxes
 
@@ -2539,6 +2554,8 @@ def _detect_image_batch(
     except MediaStorageError:
         raise
     except Exception as exc:  # noqa: BLE001 - preserve per-file metadata on batch failure
+        if is_host_memory_error(exc):
+            raise HostMemoryPressure("批量处理的主内存不足，已停止任务；释放内存后可继续。") from exc
         return [item.model_copy(update={"error": f"批量检测失败: {exc}"}) for item in items]
 
 

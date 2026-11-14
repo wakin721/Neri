@@ -27,6 +27,8 @@ class DinoBoxRejectionInfo {
     required this.isImageLabeled,
     required this.isLegacySingleGate,
     required this.hasInconsistentRecord,
+    this.isExperimentSingleGate = false,
+    this.classificationConfidence,
     this.boxScore,
     this.boxThreshold,
     this.boxPassed,
@@ -49,6 +51,8 @@ class DinoBoxRejectionInfo {
   final bool isHumanConfirmed;
   final bool isImageLabeled;
   final bool isLegacySingleGate;
+  final bool isExperimentSingleGate;
+  final double? classificationConfidence;
   final bool hasInconsistentRecord;
   final double? boxScore;
   final double? boxThreshold;
@@ -84,6 +88,18 @@ Map<String, dynamic>? primaryDinoCandidate(DetectionBox box) {
     }
   }
   return box.candidates.first;
+}
+
+String dinoConfidenceLabel(DetectionBox box) {
+  final candidate = primaryDinoCandidate(box);
+  if (candidate?['confidence_kind'] == 'sigmoid_frame_class_margin') {
+    return '分类证据';
+  }
+  if (candidate?['gate_mode'] == 'sequence' ||
+      candidate?['inference_recipe'] == 'experiment_full') {
+    return '事件接纳';
+  }
+  return '置信度';
 }
 
 Map<dynamic, dynamic>? findRawDinoBox(
@@ -208,6 +224,7 @@ DetectionBox dinoFinalBox(DetectionBox box) {
     registryId: box.registryId,
     predictedSpecies: box.predictedSpecies,
     feedbackStatus: box.feedbackStatus,
+    rejectionCluster: box.rejectionCluster,
     candidates: box.candidates,
   );
 }
@@ -219,6 +236,11 @@ DinoBoxRejectionInfo dinoRejectionInfo(
 }) {
   final primary = primaryDinoCandidate(box);
   final sources = <Map<dynamic, dynamic>?>[primary, rawBox];
+  final isExperimentSingleGate = sources.any(
+    (source) =>
+        source?['gate_mode'] == 'sequence' ||
+        source?['inference_recipe'] == 'experiment_full',
+  );
 
   final boxScore = _firstFiniteMetric(sources, const ['box_known_score']);
   final sequenceScore = _firstFiniteMetric(sources, const [
@@ -341,6 +363,10 @@ DinoBoxRejectionInfo dinoRejectionInfo(
     isHumanConfirmed: isHumanConfirmed,
     isImageLabeled: isImageLabeled,
     isLegacySingleGate: isLegacySingleGate,
+    isExperimentSingleGate: isExperimentSingleGate,
+    classificationConfidence: _firstFiniteMetric(sources, const [
+      'frame_classification_confidence',
+    ]),
     hasInconsistentRecord: hasInconsistentRecord,
     boxScore: boxScore,
     boxThreshold: boxThreshold,

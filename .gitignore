@@ -47,6 +47,8 @@ ENV/
 /res/model/cls/user/dinov3-ridge-within.neri.json
 /res/model/cls/user/dinov3-ridge-within.neri.export-report.json
 /res/model/cls/user/dinov3-ridge-within-assets-*/
+/res/model/cls/user/dinov3-experiment-local.neri.json
+/res/model/cls/user/dinov3-experiment-local-assets-*/
 
 # Build outputs
 build/
@@ -113,6 +115,7 @@ frontend/test/*
 !frontend/test/dinov3_video_mode_test.dart
 !frontend/test/dino_learning_status_test.dart
 !frontend/test/dino_rejection_test.dart
+!frontend/test/rejection_clustering_test.dart
 !frontend/test/sequence_pending_notice_test.dart
 !frontend/pubspec.yaml
 !frontend/README.md
@@ -143,6 +146,7 @@ frontend/windows/runner/*
 !frontend/test/job_failed_retry_test.dart
 !/tests/test_video_pipeline.py
 !/tests/test_inference_batching.py
+!/tests/test_host_memory_batching.py
 !/tests/test_adaptive_processing.py
 !/tests/test_adaptive_video.py
 !/tests/test_example_writer.py

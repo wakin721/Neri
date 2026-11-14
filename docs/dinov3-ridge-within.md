@@ -1,5 +1,7 @@
 # Neri1.1（DINOv3＋Ridge＋Within）
 
+2026-11-14：软件另支持可选的 **Neri 实验模型 B/16（本地数据）**，采用 Within＋Ridge 融合分类和整事件单门控。接入、复现与安装说明见 [实验模型接入](dinov3-experiment-integration-20261114.md)。原有模型继续使用双门控。
+
 本实现将 2026-11-07 的联合实验迁入 `system/dinov3`，软件模型选择器通过版本化 `.neri.json` 加载。冻结 DINOv3 ViT-B/16 的 CLS 特征；Ridge 做分类，Within 提供拒识证据，两者支持旧物种补图和新增物种。
 
 ## 在软件中使用

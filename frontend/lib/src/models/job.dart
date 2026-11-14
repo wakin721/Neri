@@ -10,6 +10,7 @@ class DetectionBox {
     this.registryId,
     this.predictedSpecies,
     this.feedbackStatus,
+    this.rejectionCluster = const <String, dynamic>{},
     this.candidates = const <Map<String, dynamic>>[],
   });
 
@@ -25,6 +26,9 @@ class DetectionBox {
       registryId: _intFromJson(json['registry_id']),
       predictedSpecies: _stringFromJson(json['predicted_species']),
       feedbackStatus: _stringFromJson(json['feedback_status']),
+      rejectionCluster: json['rejection_cluster'] is Map
+          ? Map<String, dynamic>.from(json['rejection_cluster'] as Map)
+          : const <String, dynamic>{},
       bbox: rawBbox
           .map(
             (item) => item is num
@@ -48,6 +52,23 @@ class DetectionBox {
   final int? registryId;
   final String? predictedSpecies;
   final String? feedbackStatus;
+  final Map<String, dynamic> rejectionCluster;
+
+  DetectionBox withRejectionCluster(Map<String, dynamic> metadata) =>
+      DetectionBox(
+        species: species,
+        bbox: bbox,
+        confidence: confidence,
+        frameIndex: frameIndex,
+        timestamp: timestamp,
+        trackId: trackId,
+        observationId: observationId,
+        registryId: registryId,
+        predictedSpecies: predictedSpecies,
+        feedbackStatus: feedbackStatus,
+        candidates: candidates,
+        rejectionCluster: metadata,
+      );
   final List<double> bbox;
   final List<Map<String, dynamic>> candidates;
 

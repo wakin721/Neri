@@ -10,10 +10,93 @@ import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/preview_screen.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 import 'package:neri_flutter/src/utils/dino_rejection.dart';
+import 'package:neri_flutter/src/utils/detection_box_label.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 import 'package:neri_flutter/src/widgets/dino_rejection_scores.dart';
 
 void main() {
+  testWidgets('frame evidence and shared experiment gate stay distinct', (
+    tester,
+  ) async {
+    const box = DetectionBox(
+      species: '岩羊',
+      confidence: 0.426,
+      bbox: [0, 0, 1, 1],
+      candidates: [
+        {
+          'source': 'dinov3_ridge_within',
+          'gate_mode': 'sequence',
+          'inference_recipe': 'experiment_full',
+          'confidence_kind': 'sigmoid_frame_class_margin',
+          'frame_classification_confidence': 0.426,
+          'accepted': true,
+          'sequence_known_score': 3.0,
+          'sequence_threshold': 1.0,
+          'sequence_accepted': true,
+        },
+      ],
+    );
+    expect(dinoConfidenceLabel(box), '分类证据');
+    expect(detectionBoxLabel(box, 0), '#1 岩羊 分类0.43');
+    expect(dinoFinalBox(box).species, '岩羊');
+    expect(dinoRejectionInfo(box).finalRejected, isFalse);
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: DinoRejectionScores(boxes: [box])),
+      ),
+    );
+    expect(find.text('分类证据 0.426'), findsOneWidget);
+    expect(find.text('实验事件 3.000 ≥ 1.000'), findsOneWidget);
+  });
+
+  test(
+    'old experiment event confidences are not labelled as class evidence',
+    () {
+      const box = DetectionBox(
+        species: '岩羊',
+        confidence: 0.88,
+        bbox: [0, 0, 1, 1],
+        candidates: [
+          {
+            'source': 'dinov3_ridge_within',
+            'gate_mode': 'sequence',
+            'confidence_kind': 'sigmoid_gate_margin',
+          },
+        ],
+      );
+      expect(dinoConfidenceLabel(box), '事件接纳');
+      expect(detectionBoxLabel(box, 1), '#2 岩羊 事件0.88');
+      expect(dinoRejectionInfo(box).classificationConfidence, isNull);
+    },
+  );
+  testWidgets('experiment shows its event gate without a synthetic box gate', (
+    tester,
+  ) async {
+    const box = DetectionBox(
+      species: '岩羊',
+      bbox: [0, 0, 1, 1],
+      candidates: [
+        {
+          'source': 'dinov3_ridge_within',
+          'gate_mode': 'sequence',
+          'inference_recipe': 'experiment_full',
+          'accepted': true,
+          'sequence_known_score': 0.8,
+          'sequence_threshold': 0.2,
+          'sequence_accepted': true,
+        },
+      ],
+    );
+    expect(dinoRejectionInfo(box).isExperimentSingleGate, isTrue);
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: DinoRejectionScores(boxes: [box])),
+      ),
+    );
+    expect(find.text('实验事件 0.800 ≥ 0.200'), findsOneWidget);
+    expect(find.textContaining('单框 —'), findsNothing);
+    expect(find.textContaining('旧版门控'), findsNothing);
+  });
   late Directory directory;
   late String imagePath;
 
@@ -642,9 +725,9 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       // Switch to DINO item.
-      // It belongs to the mixed known/rejected species bucket, so it is not
-      // visible in the current YOLO-only file list yet.
-      await tester.tap(find.textContaining('拒识（未分簇）'));
+      // Rejected targets without a saved clustering snapshot have their own
+      // unclustered bucket alongside the shared known-species bucket.
+      await tester.tap(find.textContaining('拒识（未聚类）'));
       for (
         var i = 0;
         i < 60 &&

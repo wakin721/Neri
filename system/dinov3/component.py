@@ -12,6 +12,7 @@ from system.model_sync.layout import get_model_layout
 
 from .encoder import sha256
 from .runtime import read_manifest, resolve_manifest_asset
+from .experiment import PRODUCTION_RECIPE, head_type
 
 COMPONENT_VERSION = 1
 DINO_COMPONENT_ARCHITECTURE = "DINOv3 ViT-B/16"
@@ -71,7 +72,7 @@ def _model_manifest_summary(checkpoint: Path) -> tuple[int, int]:
         raise ValueError("模型 manifest 不是 JSON 对象。")
     if (
         payload.get("backend") != "dinov3"
-        or payload.get("head_type") != "ridge_within"
+        or payload.get("head_type") != head_type(payload.get("inference_recipe", PRODUCTION_RECIPE))
         or payload.get("schema_version") != 1
         or payload.get("is_calibrated") is not True
         or payload.get("dimension") != 768

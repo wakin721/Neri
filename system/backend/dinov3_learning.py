@@ -28,7 +28,7 @@ _CALIBRATION_CHECKS = set()
 _UNKNOWN = {"", "空", "Unknown", "unknown", "拒识/Unknown", "无"}
 _UNKNOWN_FOLDED = {name.casefold() for name in _UNKNOWN} | {"unknow", "empty", "未知", "未知物种", "待确认", "待核实"}
 _REQUIRED = {"features", "labels", "cameras", "sequences"}
-_OPTIONAL = {"sites", "contents", "adapted_features", "datetimes"}
+_OPTIONAL = {"sites", "contents", "source_contents", "adapted_features", "datetimes"}
 
 
 class _Superseded(RuntimeError):
@@ -194,6 +194,8 @@ def _load_model(path):
     if sha256(checkpoint) != payload["checkpoint_sha256"]:
         raise ValueError("模型校验失败，未更新。")
     model = DinoV3RidgeWithinModel.load(checkpoint)
+    if model.inference_recipe != payload.get("inference_recipe", "production_dual"):
+        raise ValueError("模型推理配方与清单不一致，未更新。")
     if model.dimension != 768 or model.provenance.get("encoder_sha256") != payload["encoder_sha256"]:
         raise ValueError("模型与编码器来源不一致，未更新。")
     return manifest, payload, model
@@ -264,8 +266,11 @@ def learning_status(model_path):
         classes = info.get("classes", [])
         if 'calibration.json' in archive.namelist():
             calibration_info = json.loads(archive.read('calibration.json'))
-            rejection = dict(box_threshold=calibration_info.get('box_threshold', calibration_info.get('threshold')),
+            experiment = info.get('inference_recipe') == 'experiment_full'
+            rejection = dict(box_threshold=None if experiment else calibration_info.get('box_threshold', calibration_info.get('threshold')),
                              sequence_threshold=calibration_info.get('threshold'),
+                             gate_mode='sequence' if experiment else 'box_and_sequence',
+                             inference_recipe=info.get('inference_recipe', 'production_dual'),
                              target_unknown_recall=calibration_info.get('target'), direction='higher_is_known')
     try:
         if not payload.get("calibration"):
@@ -382,7 +387,7 @@ def update_model(model_path):
         legacy_applied = dict(model.metadata.get("human_learning_samples", {}))
         unique = {}
         vectors = {}
-        calibration_contents = {str(c).split(":")[0] for c in cal.get("contents", [])}
+        calibration_contents = {str(c).split(":")[0] for key in ("contents", "source_contents") for c in cal.get(key, [])}
         prepared = {}
         for row in rows:
             data = json.loads(row["data"])

@@ -29,7 +29,9 @@ def test_active_python_and_flutter_sources_do_not_reference_dinov2():
 def test_environment_api_only_exposes_dinov3_component():
     from system.backend.main import app
 
-    paths = {getattr(route, "path", "") for route in app.routes}
+    # Included routers may be lazy; inspect the public API contract rather
+    # than assuming app.routes contains a flat list of APIRoute instances.
+    paths = set(app.openapi()["paths"])
     assert "/api/environment/dinov3-status" in paths
     assert "/api/environment/install-dinov3" in paths
     assert "/api/environment/remove-dinov3" in paths

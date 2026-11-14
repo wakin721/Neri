@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../dino_validation_selection.dart';
 import '../models/job.dart';
+import '../utils/detection_box_label.dart';
 import 'detection_media_viewer_impl.dart' as impl;
 
 export 'detection_media_viewer_impl.dart' hide DetectionMediaViewer;
@@ -33,7 +34,7 @@ class DetectionMediaViewer extends StatelessWidget {
     final selectionCallback = onDetectionBoxSelected;
     return impl.DetectionMediaViewer(
       item: item,
-      visibleBoxes: visibleBoxes,
+      visibleBoxes: detectionBoxesWithDisplayMetadata(item, visibleBoxes),
       showDetections: showDetections,
       onOpenExternal: onOpenExternal,
       isFavorite: isFavorite,

@@ -140,6 +140,8 @@ def _annotate_sequence_state(
         if not isinstance(raw_box, dict):
             continue
         box = dict(raw_box)
+        if not complete:
+            box.pop("rejection_cluster", None)
         box["sequence_pending"] = pending
         box["sequence_status"] = status
         raw_candidates = box.get("候选项")
@@ -391,6 +393,9 @@ def finalize_photo_job(
                 )
                 if valid_items else []
             )
+            if complete_sequence and is_cancelled is not None and is_cancelled():
+                completed_by_path = {str(item.path): item for item in completed_valid}
+                return [completed_by_path.get(str(item.path), item) for item in results]
             failed_results = []
             failed_payloads = []
             for item in failed_items:
@@ -400,6 +405,9 @@ def finalize_photo_job(
                 )
                 failed_results.append(updated)
                 failed_payloads.append((Path(item.path), data))
+            if complete_sequence and is_cancelled is not None and is_cancelled():
+                by_path = {str(item.path): item for item in [*completed_valid, *failed_results]}
+                return [by_path[str(item.path)] for item in results]
             if save_batch_fn is not None:
                 _save_in_chunks(failed_payloads, input_path, save_batch_fn)
             by_path = {str(item.path): item for item in [*completed_valid, *failed_results]}
@@ -528,6 +536,8 @@ def finalize_photo_job(
 
         camera_ids = [r["camera_id"] for r in history_records]
         sequence_ids = track_sequence_ids
+        if getattr(getattr(classifier, "model", None), "inference_recipe", None) == "experiment_full":
+            sequence_ids = [r["seq_id"] for r in history_records]
         content_ids = [r["content_hash"] for r in history_records]
 
         if complete_sequence and is_cancelled is not None and is_cancelled():
@@ -558,6 +568,47 @@ def finalize_photo_job(
             raise RuntimeError(
                 f"DINOv3 classifier returned {len(predictions)} predictions for {len(crop_items)} crops"
             )
+
+        # One fit across the entire task, after final sequence decisions. Use
+        # raw crop features and individual tracks even for experiment_full.
+        rejection_clusters = {}
+        if complete_sequence:
+            from .rejection_clustering import (
+                ClusteringCancelled, cluster_rejections, failed_rejections,
+            )
+            rejected = [i for i, pred in enumerate(predictions) if not bool(pred.accepted)]
+            rejected_ids = [make_dinov3_observation_id(crop_items[i][0].path,
+                            crop_items[i][1].box_index, crop_items[i][1].bbox) for i in rejected]
+            fingerprint = getattr(classifier, "model_fingerprint", None)
+            if not isinstance(fingerprint, str):
+                fingerprint = "unversioned"
+            try:
+                # Directory proxies for clustering must not depend on which
+                # selected input root happened to be listed first. Keep the
+                # original classifier context/gates unchanged; regroup target
+                # tracks using full source directories for this browsing step.
+                cluster_groups = group_job_events([
+                    {**record, "camera_id": camera_id_for_path(record["path"])}
+                    for record in event_input_records
+                ]) if rejected else []
+                cluster_by_crop = {g["crop_idx"]: g for g in cluster_groups}
+                rejection_clusters = cluster_rejections(
+                    raw_features[rejected], rejected_ids,
+                    [cluster_by_crop[i]["camera_id"] for i in rejected],
+                    [cluster_by_crop[i]["track_id"] for i in rejected],
+                    [f"{image_digests[str(crop_items[i][0].path)]}:"
+                     f"{tuple(float(v) for v in crop_items[i][1].bbox)}" for i in rejected],
+                    model_fingerprint=fingerprint, scope_id=job_id or "",
+                    is_cancelled=is_cancelled,
+                )
+            except ClusteringCancelled:
+                return results
+            except Exception:
+                logger.exception("HDBSCAN rejection clustering failed; preserving sequence decisions")
+                rejection_clusters = failed_rejections(
+                    rejected_ids, model_fingerprint=fingerprint, scope_id=job_id or "")
+            if is_cancelled is not None and is_cancelled():
+                return results
 
         # Map predictions back by (path_key, box_index)
         final_preds_by_path: dict[str, dict[int, tuple[DinoV3CropRecord, Any, dict[str, Any]]]] = {}
@@ -623,6 +674,10 @@ def finalize_photo_job(
                     if getattr(pred, "box_confidence", None) is not None
                     else box_conf
                 )
+                gate_mode = getattr(pred, "gate_mode", "box_and_sequence")
+                inference_recipe = getattr(pred, "inference_recipe", "production_dual")
+                if gate_mode == "sequence":
+                    box_known_score = box_threshold = box_accepted = box_confidence = None
                 sequence_known_score = float(
                     pred.sequence_known_score
                     if getattr(pred, "sequence_known_score", None) is not None
@@ -682,6 +737,8 @@ def finalize_photo_job(
                 candidate["best_known_species"] = best_known
                 candidate["predicted_species"] = best_known
                 candidate["accepted"] = accepted
+                candidate["gate_mode"] = gate_mode
+                candidate["inference_recipe"] = inference_recipe
                 candidate["known_score"] = float(pred.known_score)
                 candidate["threshold"] = float(pred.threshold)
                 candidate["score_threshold"] = float(pred.threshold)
@@ -719,6 +776,14 @@ def finalize_photo_job(
                     "候选项": cand_list,
                     "observation_id": obs_id,
                     "accepted": accepted,
+                    "gate_mode": gate_mode,
+                    "inference_recipe": inference_recipe,
+                    "confidence_kind": getattr(pred, "confidence_kind", "sigmoid_gate_margin"),
+                    "frame_classification_score": getattr(pred, "frame_classification_score", None),
+                    "frame_classification_margin": getattr(pred, "frame_classification_margin", None),
+                    "frame_classification_confidence": (
+                        box_conf if getattr(pred, "confidence_kind", "") == "sigmoid_frame_class_margin" else None
+                    ),
                     "known_score": float(pred.known_score),
                     "threshold": float(pred.threshold),
                     "box_known_score": box_known_score,
@@ -747,6 +812,8 @@ def finalize_photo_job(
                     box_dict["track_id"] = track_id
                 if event_id:
                     box_dict["event_id"] = event_id
+                if not accepted and obs_id in rejection_clusters:
+                    box_dict["rejection_cluster"] = rejection_clusters[obs_id]
                 new_boxes.append(box_dict)
                 species_counts[box_name] = species_counts.get(box_name, 0) + 1
                 confidences.append(box_conf)

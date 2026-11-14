@@ -58,7 +58,7 @@ class DinoRejectionScores extends StatelessWidget {
             children: [
               const Tooltip(
                 message:
-                    'DINO 拒识判定分数（只读）\n以下为该图本次识别时记录的原始分数与当时门限，自动学习后不会覆盖历史判定。\n分数越低越易拒识；单框和序列均达到各自门限才接纳。\n数字右侧为门限，悬停可查看完整比较；内容较多时可横向拖动。',
+                    'DINO 拒识判定分数（只读）\n以下为该图本次识别时记录的原始分数与当时门限，自动学习后不会覆盖历史判定。\n分数越低越易拒识；双门控模型要求单框和序列均通过，实验模型按事件门控接纳。\n数字右侧为门限，悬停可查看完整比较；内容较多时可横向拖动。',
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -140,7 +140,25 @@ class DinoRejectionScores extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          if (info.isLegacySingleGate && info.legacyScore != null)
+          if (info.classificationConfidence != null) ...[
+            Tooltip(
+              message: '当前框对最终候选物种的分类证据，仅用于比较，不是分类正确率。事件分数单独用于接纳或拒识。',
+              child: Text(
+                '分类证据 ${info.classificationConfidence!.toStringAsFixed(3)}',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
+          if (info.isExperimentSingleGate)
+            _gate(
+              context,
+              '实验事件',
+              info.sequenceScore,
+              info.sequenceThreshold,
+              info.sequencePassed,
+            )
+          else if (info.isLegacySingleGate && info.legacyScore != null)
             _gate(
               context,
               '旧版门控',

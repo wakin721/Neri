@@ -18,6 +18,7 @@ from system.confidence import (
     combined_confidence_weights,
 )
 from system.utils import resource_path
+from system.host_memory import is_host_memory_error
 import cv2
 
 if TYPE_CHECKING:
@@ -116,6 +117,15 @@ class ImageProcessor:
                 xpu.empty_cache()
         except Exception as e:
             logger.warning(f"Runtime cache cleanup failed: {e}")
+
+    def release_batch_images(self) -> None:
+        """Drop predictor-owned full images after their metadata is persisted."""
+        for model in (self.model, self.cls_model):
+            predictor = getattr(model, "predictor", None)
+            if predictor is not None:
+                predictor.results = []
+                predictor.batch = None
+                predictor.dataset = None
 
     @staticmethod
     def _cuda_cache_pressure_high(min_free_ratio: float = 0.15) -> bool:
@@ -274,6 +284,8 @@ class ImageProcessor:
             orig_rgb = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
             return (idx, proc_img, orig_rgb)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             logger.warning(f"处理图片 {path} 失败: {e}")
             return None
 
@@ -286,12 +298,20 @@ class ImageProcessor:
             valid_indices = []
             original_imgs_rgb = []
 
-            max_workers = min(len(img_paths), 8)
+            guard = getattr(self, '_photo_memory_guard', None)
+            if guard is not None:
+                guard.ensure_decode(img_paths)
+            max_workers = guard.decode_workers(img_paths) if guard is not None else min(len(img_paths), 8)
+
+            def decode(task):
+                if guard is not None:
+                    guard.ensure_decode([task[1]])
+                return self._process_single_image_task(task)
 
             # 使用线程池并行读取和预处理
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
-                    executor.submit(self._process_single_image_task, (idx, path))
+                    executor.submit(decode, (idx, path))
                     for idx, path in enumerate(img_paths)
                 ]
 
@@ -308,6 +328,8 @@ class ImageProcessor:
 
             return (valid_indices, processed_imgs, original_imgs_rgb)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             logger.error(f"预加载数据失败: {e}")
             return None
 
@@ -355,6 +377,8 @@ class ImageProcessor:
                     )
                 return (r_idx, b_idx, crop)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             pass
         return None
 

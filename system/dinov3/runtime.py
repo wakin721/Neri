@@ -6,6 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 
 from .encoder import FEATURE_DIM, PREPROCESSING, DinoV3Encoder, sha256
+from .experiment import PRODUCTION_RECIPE, head_type
 
 ARCHITECTURE = "dinov3_vitb16"
 HEAD_TYPE = "ridge_within"
@@ -29,11 +30,13 @@ def read_manifest(path):
     path = Path(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     expected = dict(schema_version=1, backend="dinov3", architecture=ARCHITECTURE,
-                    head_type=HEAD_TYPE, feature_dim=FEATURE_DIM, preprocessing=PREPROCESSING,
+                    feature_dim=FEATURE_DIM, preprocessing=PREPROCESSING,
                     event_aggregation="complete_sequence", requires_detector=True,
                     supports_video_fast=False, supports_video_all=False)
     if not isinstance(payload, dict) or any(payload.get(k) != v for k, v in expected.items()):
         raise ValueError("Unsupported DINOv3 Ridge/Within manifest contract")
+    if payload.get("head_type") != head_type(payload.get("inference_recipe", PRODUCTION_RECIPE)):
+        raise ValueError("DINOv3 head type and inference recipe differ")
     for field in ("encoder_sha256", "checkpoint_sha256"):
         value = payload.get(field)
         if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
@@ -78,6 +81,8 @@ def load_dinov3_model(model_path, *, device=None, encoder_factory=None, **_kwarg
     if sha256(checkpoint) != payload["checkpoint_sha256"]:
         raise ValueError("DINOv3 classifier SHA-256 mismatch")
     model = DinoV3RidgeWithinModel.load(checkpoint)
+    if model.inference_recipe != payload.get("inference_recipe", PRODUCTION_RECIPE):
+        raise ValueError("DINOv3 checkpoint and manifest inference recipes differ")
     if model.dimension != FEATURE_DIM:
         raise ValueError("DINOv3 model must use 768-dimensional CLS features")
     if model.provenance.get("encoder_sha256") != payload["encoder_sha256"]:
@@ -92,4 +97,6 @@ def load_dinov3_model(model_path, *, device=None, encoder_factory=None, **_kwarg
     encoder = (encoder_factory or DinoV3Encoder)(
         weights,
         resolve_manifest_asset(path, payload["encoder_code"]), payload["encoder_sha256"], device=device)
-    return DinoV3Runtime(path, model, DinoV3Classifier(model, encoder=encoder))
+    classifier = DinoV3Classifier(model, encoder=encoder)
+    classifier.model_fingerprint = f"{payload['encoder_sha256']}:{payload['checkpoint_sha256']}"
+    return DinoV3Runtime(path, model, classifier)
