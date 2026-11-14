@@ -3,10 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
+import subprocess
+import tempfile
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -18,6 +23,9 @@ DINO_DISTRIBUTION_URL_ENV = "NERI_DINOV3_DISTRIBUTION_URL"
 DINO_DEFAULT_DISTRIBUTION_URL = "https://myneri.top/api/models/v1"
 _HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
+PROXY_SEGMENT_BYTES = 1024 * 1024
+PROXY_SEGMENT_THRESHOLD = 8 * 1024 * 1024
+PROXY_SEGMENT_ATTEMPTS = 5
 
 
 class DinoV3DistributionError(RuntimeError):
@@ -83,6 +91,7 @@ class DinoV3DistributionClient:
             (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
         )
         self.opener = opener or urllib.request.urlopen
+        self._native_fallback = opener is None and os.name == "nt"
 
     def _json_request(
         self,
@@ -239,6 +248,104 @@ class DinoV3DistributionClient:
             temp.unlink(missing_ok=True)
             raise
 
+    def _native_proxy_segment(self, url, start, end, size, directory):
+        """Use Windows' TLS transport after Python's TLS stream fails."""
+        executable = shutil.which("curl.exe")
+        if executable is None:
+            raise OSError("Windows curl is unavailable")
+        with tempfile.TemporaryDirectory(prefix=".neri-range-", dir=directory) as scratch:
+            body, headers = Path(scratch) / "body", Path(scratch) / "headers"
+            try:
+                result = subprocess.run([
+                    executable, "--disable", "--fail", "--silent", "--show-error",
+                    "--connect-timeout", "30", "--max-time", "90",
+                    "--max-filesize", str(end - start + 1),
+                    "--range", f"{start}-{end}", "--dump-header", str(headers),
+                    "--output", str(body), "--write-out", "%{http_code}", url,
+                ], stdin=subprocess.DEVNULL, capture_output=True, timeout=100,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except subprocess.TimeoutExpired as exc:
+                raise OSError("Windows range download timed out") from exc
+            if result.returncode:
+                detail = result.stderr.decode("utf-8", errors="replace").replace(url, "[download URL]").strip()
+                raise OSError(f"Windows range download failed ({result.returncode}): {detail[:200]}")
+            ranges = [line.split(":", 1)[1].strip() for line in
+                      headers.read_text("iso-8859-1").splitlines()
+                      if line.lower().startswith("content-range:")]
+            if result.stdout.strip() != b"206" or ranges != [f"bytes {start}-{end}/{size}"]:
+                raise DinoV3DistributionError("dinov3_download_range_mismatch")
+            data = body.read_bytes()
+            if len(data) != end - start + 1:
+                raise DinoV3DistributionError("dinov3_download_size_mismatch")
+            return data
+
+    def _stream_proxy_segments(
+        self,
+        manifest: DinoV3DistributionManifest,
+        entry: DinoV3DistributionEntry,
+        target: Path,
+        capability: DinoV3DownloadCapability,
+        on_progress=None,
+    ) -> None:
+        """Bound each TLS stream and retry a segment before committing its bytes."""
+        temp = target.with_name(target.name + ".download")
+        temp.unlink(missing_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        capability_uses = 0
+        use_native = False
+        try:
+            with temp.open("wb") as output:
+                for start in range(0, entry.size, PROXY_SEGMENT_BYTES):
+                    end = min(start + PROXY_SEGMENT_BYTES, entry.size) - 1
+                    length = end - start + 1
+                    for attempt in range(PROXY_SEGMENT_ATTEMPTS):
+                        # Capabilities have a small, bounded use count and TTL.
+                        # Renew within the use count, and on every retry.
+                        if capability_uses >= 3 or attempt:
+                            capability = self._capability(manifest, entry)
+                            capability_uses = 0
+                        capability_uses += 1
+                        request = urllib.request.Request(
+                            self.origin + "/proxy/" + capability.proxy_token,
+                            headers={"User-Agent": "Neri DINOv3 installer",
+                                     "Range": f"bytes={start}-{end}"}, method="GET",
+                        )
+                        try:
+                            if use_native:
+                                data = self._native_proxy_segment(
+                                    request.full_url, start, end, entry.size, target.parent)
+                            else:
+                                with self.opener(request, timeout=90) as response:
+                                    if (response.status != 206 or response.headers.get("Content-Range")
+                                            != f"bytes {start}-{end}/{entry.size}"):
+                                        raise DinoV3DistributionError("dinov3_download_range_mismatch")
+                                    data = response.read(length + 1)
+                                    if len(data) != length:
+                                        raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                            break
+                        except (OSError, http.client.HTTPException):
+                            if self._native_fallback and shutil.which("curl.exe"):
+                                use_native = True
+                            if attempt + 1 == PROXY_SEGMENT_ATTEMPTS:
+                                raise
+                            time.sleep(min(8, 2 ** attempt))
+                        except DinoV3DistributionError:
+                            if attempt + 1 == PROXY_SEGMENT_ATTEMPTS:
+                                raise
+                    output.write(data)
+                    digest.update(data)
+                    if on_progress is not None:
+                        on_progress(end + 1, entry.size)
+            if temp.stat().st_size != entry.size:
+                raise DinoV3DistributionError("dinov3_download_size_mismatch")
+            if digest.hexdigest() != entry.sha256:
+                raise DinoV3DistributionError("dinov3_download_sha256_mismatch")
+            temp.replace(target)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
+
     def _download_entry(
         self,
         manifest: DinoV3DistributionManifest,
@@ -260,6 +367,9 @@ class DinoV3DistributionClient:
                 return
             except Exception:
                 target.unlink(missing_ok=True)
+        if entry.size >= PROXY_SEGMENT_THRESHOLD:
+            self._stream_proxy_segments(manifest, entry, target, capability, on_progress)
+            return
         self._stream_to_file(
             self.origin + "/proxy/" + capability.proxy_token,
             target,
@@ -316,7 +426,7 @@ class DinoV3DistributionClient:
                     reported_percent = max(reported_percent, percent)
                     on_progress(
                         reported_percent,
-                        f"正在下载 Neri1.1: {entry.relative_path}",
+                        f"正在下载 Neri1.2preview: {entry.relative_path}",
                     )
 
                 self._download_entry(
@@ -327,4 +437,4 @@ class DinoV3DistributionClient:
                 )
                 completed_bytes += entry.size
         if on_progress is not None:
-            on_progress(100, "Neri1.1 下载完成，正在校验组件。")
+            on_progress(100, "Neri1.2preview 下载完成，正在校验组件。")

@@ -31,7 +31,7 @@ python scripts/package_dinov3_preview.py --manifest res/model/cls/user/dinov3-ex
 
 上传先采用 `.uploading` 临时名，远端核对完整 ZIP 和 203 个资产条目的大小、哈希后再改正式名称。相同目录保存 `.sha256`、包报告和远端校验结果。
 
-当前服务器分发服务的活动代码仍提供旧 `/v1/dinov2/*` 接口，SSH 账号不能免密执行管理员命令。上传完成不代表已经替换线上默认组件或接入 `/v1/dinov3/*` 下载协议；后续服务迁移需要管理员部署配套的新协议与模型目录。
+最初上传时，服务器仍只提供旧 `/v1/dinov2/*` 接口，SSH 账号不能免密执行管理员命令。后续管理员已执行升级，正式服务现同时提供新旧组件协议，Neri1.2preview 已接入 `/v1/dinov3/*` 下载；公网整包验证的网络限制与已完成检查见 [云端发布记录](neri12preview-cloud-download-20261114.md)。
 
 ## 构建与验证
 

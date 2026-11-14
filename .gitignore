@@ -32,6 +32,7 @@ ENV/
 !/tests/test_model_catalog.py
 !/tests/test_model_services_bridge.py
 !/tests/test_model_distribution.py
+!/tests/test_local_component_distribution.py
 !/tests/test_model_sync_client.py
 !/tests/test_model_sync_manager.py
 !/tests/test_model_sync_api.py

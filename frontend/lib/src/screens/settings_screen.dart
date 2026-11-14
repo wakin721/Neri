@@ -527,7 +527,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_maintenanceBusy) return;
     _startMaintenancePreparation(
       operation: 'install_dinov3',
-      message: '正在检查 Neri1.1 安装环境...',
+      message: '正在检查 Neri1.2preview 安装环境...',
     );
 
     final envChoice = _normalizedPytorchVersion(
@@ -545,9 +545,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (packageSource == null || !mounted) return;
     final repairing = _dinoStatus?.installed == true;
     final confirmed = await _confirmPythonInstallation(
-      title: repairing ? '修复 Neri1.1' : '安装 Neri1.1',
+      title: repairing ? '修复 Neri1.2preview' : '安装 Neri1.2preview',
       message:
-          '将从 NeriCloud 严格同步 Neri1.1 ViT-B/16 组件到 res/model/DINOv3，'
+          '将从 NeriCloud 严格同步 Neri1.2preview ViT-B/16 组件到 res/model/DINOv3，'
           '并校验 Ridge + Within 模型、官方 source 与 SHA-256。'
           '如果共享 PyTorch 环境缺失，会按当前运行环境自动补齐。',
     );
@@ -557,8 +557,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _maintainingDino = true;
       _maintenanceOperation = 'install_dinov3';
       _maintenanceMessage = repairing
-          ? '正在启动 Neri1.1 修复...'
-          : '正在启动 Neri1.1 安装...';
+          ? '正在启动 Neri1.2preview 修复...'
+          : '正在启动 Neri1.2preview 安装...';
     });
     try {
       final response = await widget.apiClient.installDinoV3(
@@ -576,16 +576,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 Neri1.1 安装失败');
+      await _handleMaintenanceStartFailure(error, '启动 Neri1.2preview 安装失败');
     }
   }
 
   Future<void> _removeDinoV3() async {
     if (_maintenanceBusy) return;
     final confirmed = await _confirmMaintenance(
-      title: '删除 Neri1.1',
+      title: '删除 Neri1.2preview',
       message:
-          '将删除 res/model/DINOv3 中的 Neri1.1 组件文件。\n\n'
+          '将删除 res/model/DINOv3 中的 Neri1.2preview 组件文件。\n\n'
           '共享 PyTorch 环境不会删除；人工校验记录与补图数据会保留。',
       confirmLabel: '删除',
     );
@@ -594,7 +594,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _maintainingDino = true;
       _maintenanceOperation = 'remove_dinov3';
-      _maintenanceMessage = '正在启动 Neri1.1 删除...';
+      _maintenanceMessage = '正在启动 Neri1.2preview 删除...';
     });
     try {
       final response = await widget.apiClient.removeDinoV3();
@@ -609,7 +609,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       widget.onShowMessage(response.message);
     } catch (error) {
-      await _handleMaintenanceStartFailure(error, '启动 Neri1.1 删除失败');
+      await _handleMaintenanceStartFailure(error, '启动 Neri1.2preview 删除失败');
     }
   }
 
@@ -1858,7 +1858,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildEnvironmentMaintenance() {
     return SectionCard(
       title: '环境维护',
-      subtitle: 'PyTorch、Neri1.1 与单个 Python 包维护入口',
+      subtitle: 'PyTorch、Neri1.2preview 与单个 Python 包维护入口',
       icon: Icons.construction_rounded,
       child: Column(
         children: [
@@ -1950,7 +1950,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           _SettingsPanel(
-            title: 'Neri1.1（DINOv3 ViT-B/16）',
+            title: 'Neri1.2preview（DINOv3 ViT-B/16）',
             subtitle: _loadingDinoStatus
                 ? widget.backendReady
                       ? '正在读取 DINOv3 组件状态...'

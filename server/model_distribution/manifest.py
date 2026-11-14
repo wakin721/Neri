@@ -137,6 +137,8 @@ class ManifestBuilder:
 class DinoV3ManifestBuilder(ManifestBuilder):
     """Build a byte-exact recursive manifest for /Neri_Data/Model/DINOv3."""
 
+    component = "DINOv3"
+
     @staticmethod
     def _safe_name(name: str) -> bool:
         return (
@@ -151,7 +153,7 @@ class DinoV3ManifestBuilder(ManifestBuilder):
     def _walk(self, remote_dir: str, logical_dir: str, candidates) -> None:
         for entry in self.store.list_dir(remote_dir):
             if not self._safe_name(entry.name):
-                raise ManifestError("invalid_dinov3_path")
+                raise ManifestError(f"invalid_{self.component.lower()}_path")
             remote = f"{remote_dir}/{entry.name}"
             logical = f"{logical_dir}/{entry.name}"
             if entry.is_dir:
@@ -161,7 +163,7 @@ class DinoV3ManifestBuilder(ManifestBuilder):
 
     def build(self) -> ManifestSnapshot:
         candidates = []
-        self._walk(DINO_ROOT, "DINOv3", candidates)
+        self._walk(f"{ROOT}/{self.component}", self.component, candidates)
         normalized = self._deduplicate(candidates)
         files = tuple(
             ManifestEntry(
@@ -172,3 +174,9 @@ class DinoV3ManifestBuilder(ManifestBuilder):
             for logical, remote, entry in sorted(normalized, key=lambda item: item[0])
         )
         return _snapshot(files)
+
+
+class DinoV2ManifestBuilder(DinoV3ManifestBuilder):
+    """The legacy component retains its separate directory and identity."""
+
+    component = "DINOv2"

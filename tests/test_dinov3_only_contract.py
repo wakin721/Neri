@@ -46,7 +46,7 @@ def test_component_installer_uses_dinov3_root_and_manifest():
     )
 
     assert DINO_COMPONENT_ARCHITECTURE == "DINOv3 ViT-B/16"
-    assert DINO_COMPONENT_DISPLAY_NAME == "Neri1.1"
+    assert DINO_COMPONENT_DISPLAY_NAME == "Neri1.2preview"
     backend = _source(Path("system/dinov3/component.py"))
     assert "read_manifest" in backend
     assert "checkpoint_sha256" in backend

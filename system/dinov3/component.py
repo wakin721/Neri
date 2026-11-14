@@ -1,4 +1,4 @@
-"""Lifecycle helpers for Neri's offline DINOv3 (Neri1.1) component."""
+"""Lifecycle helpers for Neri's offline DINOv3 (Neri1.2preview) component."""
 from __future__ import annotations
 
 import json
@@ -12,11 +12,11 @@ from system.model_sync.layout import get_model_layout
 
 from .encoder import sha256
 from .runtime import read_manifest, resolve_manifest_asset
-from .experiment import PRODUCTION_RECIPE, head_type
+from .experiment import PREVIEW_DISPLAY_NAME, PRODUCTION_RECIPE, head_type
 
 COMPONENT_VERSION = 1
 DINO_COMPONENT_ARCHITECTURE = "DINOv3 ViT-B/16"
-DINO_COMPONENT_DISPLAY_NAME = "Neri1.1"
+DINO_COMPONENT_DISPLAY_NAME = PREVIEW_DISPLAY_NAME
 _MANIFEST_SUFFIX = ".neri.json"
 
 
@@ -67,7 +67,7 @@ def _select_valid_manifest(root: Path) -> tuple[Path, dict]:
     if not valid:
         if legacy:
             raise ValueError("检测到旧版 DINOv3 多原型组件，需迁移为当前联合模型格式；独立安装的用户模型不受影响。")
-        raise ValueError("未找到有效的 Neri1.1 模型清单。")
+        raise ValueError("未找到有效的 Neri1.2preview 模型清单。")
     if len(valid) > 1:
         raise ValueError("DINOv3 组件中包含多个模型清单。")
     return valid[0]
@@ -99,7 +99,7 @@ def _component_health(
     root: Path,
 ) -> tuple[bool, str, dict | None, int | None, int | None]:
     if not root.is_dir() or not any(root.iterdir()):
-        return False, "Neri1.1 未安装。", None, None, None
+        return False, "Neri1.2preview 未安装。", None, None, None
     try:
         manifest_path, payload = _select_valid_manifest(root)
         checkpoint = resolve_manifest_asset(manifest_path, payload["checkpoint"])
@@ -109,6 +109,10 @@ def _component_health(
             raise ValueError("模型文件 SHA-256 不匹配。")
         if sha256(weights) != payload["encoder_sha256"]:
             raise ValueError("编码器权重 SHA-256 不匹配。")
+        if "calibration" in payload:
+            calibration = resolve_manifest_asset(manifest_path, payload["calibration"])
+            if sha256(calibration) != payload["calibration_sha256"]:
+                raise ValueError("校准集 SHA-256 不匹配。")
         if not code.is_dir():
             raise ValueError("编码器源码目录不存在。")
         if not (code / "LICENSE.md").is_file():
@@ -118,7 +122,7 @@ def _component_health(
         class_count, feature_dim = _model_manifest_summary(checkpoint)
     except Exception as exc:  # noqa: BLE001 - status boundary
         return False, str(exc), None, None, None
-    return True, "Neri1.1 已安装。", payload, class_count, feature_dim
+    return True, f"{payload.get('display_name') or DINO_COMPONENT_DISPLAY_NAME} 已安装。", payload, class_count, feature_dim
 
 
 def dinov3_component_status(*, root: Path | None = None) -> dict:
@@ -210,7 +214,12 @@ def install_dinov3_component(
             shutil.rmtree(backup)
         if component_root.exists():
             component_root.replace(backup)
-        staging.replace(component_root)
+        try:
+            staging.replace(component_root)
+        except Exception:
+            if backup.exists() and not component_root.exists():
+                backup.replace(component_root)
+            raise
         if backup.exists():
             shutil.rmtree(backup)
         return dinov3_component_status(root=component_root)

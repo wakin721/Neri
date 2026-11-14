@@ -12,8 +12,9 @@ String? dinoStartupStatusMessage(
   // user classifiers. Its legacy/corrupt installation must remain visible in
   // Environment Maintenance without warning users of an unrelated model.
   if (!usesManagedComponent) return null;
+  final name = status.displayName;
   if (!status.installed) {
-    return 'Neri1.1 尚未安装，可进入设置安装。';
+    return '$name 尚未安装，可进入设置安装。';
   }
   if (status.healthy) return null;
 
@@ -32,10 +33,10 @@ String? dinoStartupStatusMessage(
       lower.contains('missing') ||
       lower.contains('unavailable');
   if (mentionsRuntime && indicatesMissing) {
-    return 'Neri1.1 已安装，但推理依赖不完整，当前不可推理';
+    return '$name 已安装，但推理依赖不完整，当前不可推理';
   }
-  if (reason.isEmpty) return 'Neri1.1 安装异常';
-  return 'Neri1.1 安装异常：$reason';
+  if (reason.isEmpty) return '$name 安装异常';
+  return '$name 安装异常：$reason';
 }
 
 class DinoStartupCheck {
