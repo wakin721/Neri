@@ -37,11 +37,10 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-privacy.txt
-            requirements-within-seq.txt
 
       - name: Install Python backend and test dependencies
         run: |
-          python -m pip install -r requirements-within-seq.txt pytest httpx numpy
+          python -m pip install -r requirements.txt pytest httpx numpy
           if ($LASTEXITCODE -ne 0) { throw "Backend and test dependency installation failed." }
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           if ($LASTEXITCODE -ne 0) { throw "PyTorch installation failed." }
@@ -96,5 +95,5 @@ jobs:
         run: |
           $python = Join-Path $env:GITHUB_WORKSPACE "downloaded-package\Neri\toolkit\python.exe"
           # Isolated mode prevents the build environment from masking missing files.
-          & $python -I -c "import importlib.util; assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; from hdbscan import HDBSCAN as WithinSeqHDBSCAN"
+          & $python -I -c "import importlib.util; assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN"
           if ($LASTEXITCODE -ne 0) { throw "Downloaded application dependency check failed." }
