@@ -64,7 +64,13 @@ jobs:
 
       - name: Run Flutter tests
         working-directory: frontend
-        run: flutter test
+        run: |
+          flutter test --exclude-tags windows-integration
+          if ($LASTEXITCODE -ne 0) { throw "Flutter unit/widget tests failed." }
+          # Real updater processes have OS-level handles and cold PowerShell
+          # startup costs; run them separately from parallel widget workers.
+          flutter test --tags windows-integration --concurrency=1
+          if ($LASTEXITCODE -ne 0) { throw "Windows updater integration test failed." }
 
       - name: Build Flutter Windows release
         working-directory: frontend

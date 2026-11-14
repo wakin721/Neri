@@ -892,6 +892,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         generation: _backendStartupGeneration,
         apiClient: widget.apiClient,
         onMessage: _showSnackBar,
+        selectedModelPath: _selectedClassificationModelPath ?? '',
       ),
     );
     _scheduleStartupUpdateCheck();

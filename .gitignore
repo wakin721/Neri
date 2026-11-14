@@ -142,6 +142,7 @@ frontend/windows/runner/*
 !frontend/test/preview_snapshot_cache_test.dart
 !frontend/test/export_settings_test.dart
 !frontend/test/dino_status_loading_test.dart
+!frontend/test/dino_startup_check_test.dart
 !frontend/test/dino_environment_api_test.dart
 !frontend/test/job_failed_retry_test.dart
 !/tests/test_video_pipeline.py

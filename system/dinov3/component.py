@@ -50,12 +50,23 @@ def _select_valid_manifest(root: Path) -> tuple[Path, dict]:
         key=lambda path: path.name.casefold(),
     )
     valid: list[tuple[Path, dict]] = []
+    legacy = False
     for candidate in candidates:
         try:
             valid.append((candidate, read_manifest(candidate)))
         except (OSError, ValueError, json.JSONDecodeError):
+            try:
+                previous = json.loads(candidate.read_text(encoding="utf-8"))
+                legacy |= (isinstance(previous, dict) and previous.get("backend") == "dinov3"
+                           and previous.get("schema_version") == 1
+                           and previous.get("head_type") is None
+                           and previous.get("event_aggregation") == "mean_l2_normalized_crop_embeddings")
+            except (OSError, ValueError):
+                pass
             continue
     if not valid:
+        if legacy:
+            raise ValueError("检测到旧版 DINOv3 多原型组件，需迁移为当前联合模型格式；独立安装的用户模型不受影响。")
         raise ValueError("未找到有效的 Neri1.1 模型清单。")
     if len(valid) > 1:
         raise ValueError("DINOv3 组件中包含多个模型清单。")

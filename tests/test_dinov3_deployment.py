@@ -82,6 +82,21 @@ def test_old_dinov3_manifest_is_not_loaded_as_joint_model(tmp_path):
         read_manifest(path)
 
 
+def test_legacy_component_status_explains_migration_without_marking_it_healthy(tmp_path):
+    from system.dinov3.component import dinov3_component_status
+    root=tmp_path/'DINOv3'
+    root.mkdir()
+    (root/'multi_prototype.neri.json').write_text(json.dumps({
+        'schema_version':1,'backend':'dinov3','architecture':'dinov3_vitb16',
+        'event_aggregation':'mean_l2_normalized_crop_embeddings',
+        'checkpoint':'multi_prototype.pt',
+    }),encoding='utf-8')
+    status=dinov3_component_status(root=root)
+    assert status['installed'] and not status['healthy']
+    assert '旧版' in status['message'] and '迁移' in status['message']
+    assert (root/'multi_prototype.neri.json').is_file()
+
+
 def test_update_command_publishes_new_joint_generation_with_frozen_geometry(deployed, tmp_path):
     from scripts.train_dinov3_ridge_within import train
     from system.dinov3.model import DinoV3RidgeWithinModel

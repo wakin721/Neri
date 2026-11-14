@@ -268,7 +268,7 @@ void main() {
           r'''& { param([string]$Source, [string]$Destination) Compress-Archive -Path (Join-Path $Source '*') -DestinationPath $Destination -Force }''',
           payloadDirectory.path,
           archive.path,
-        ]);
+        ]).timeout(const Duration(seconds: 30));
         expect(zipResult.exitCode, 0, reason: zipResult.stderr.toString());
 
         blocker = await Process.start('powershell.exe', const <String>[
@@ -305,7 +305,7 @@ void main() {
         blocker.kill();
         await blocker.exitCode.timeout(const Duration(seconds: 10));
         expect(
-          await installer.exitCode.timeout(const Duration(seconds: 30)),
+          await installer.exitCode.timeout(const Duration(seconds: 60)),
           0,
         );
         installerExited = true;
@@ -337,5 +337,7 @@ void main() {
         await _deleteDirectoryWhenReleased(root);
       }
     },
+    tags: const ['windows-integration'],
+    timeout: const Timeout(Duration(minutes: 2)),
   );
 }
