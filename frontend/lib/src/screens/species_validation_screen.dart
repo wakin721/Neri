@@ -442,7 +442,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   List<_SpeciesBucket> _bucketCache = const <_SpeciesBucket>[];
   final Map<String, RejectionCluster?> _rejectionClusters = {};
   String? _clusterModelPath;
-  int? _clusterRefreshVersion;
+  int _clusterEpoch = 0;
+  int _clusterScanGeneration = 0;
+  int _clusterPresentationGeneration = 0;
+  bool _clusterBucketsDirty = false;
+  final Map<String, Future<void>> _clusterRequests = {};
+  final Map<String, String> _clusterEvidence = {};
   bool _clusterLookupFailed = false;
   Map<String, DetectionItem> _bucketCacheItemByPath =
       const <String, DetectionItem>{};
@@ -487,69 +492,128 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _preparationFuture = _prepareBuckets(generation);
   }
 
-  bool get _requiresPreparation {
-    if (widget.items.length >= 512) return true;
+  bool get _requiresPreparation => widget.items.length >= 512;
+
+  void _invalidateRejectionClusters() {
+    _clusterEpoch++;
+    _clusterPresentationGeneration++;
+    _rejectionClusters.clear();
+    _clusterRequests.clear();
+    _clusterEvidence.clear();
+    _clusterLookupFailed = false;
+    _clusterBucketsDirty = true;
+  }
+
+  void _scheduleRejectionClusterRefresh() {
     final model = widget.classificationModelPath?.trim() ?? '';
-    if (model.isEmpty) return false;
-    final changed =
-        _clusterModelPath != model ||
-        _clusterRefreshVersion != widget.refreshVersion;
-    return widget.items.any(
-      (item) => item.detectionBoxes.any(
-        (box) =>
-            _isRejectedSpeciesName(box.species) &&
-            box.observationId != null &&
-            (changed || !_rejectionClusters.containsKey(box.observationId)),
-      ),
-    );
+    if (_clusterModelPath != model) {
+      _invalidateRejectionClusters();
+      _clusterModelPath = model;
+    }
+    final generation = ++_clusterScanGeneration;
+    unawaited(_loadRejectionClusters(widget.items, model, generation));
   }
 
   Future<void> _loadRejectionClusters(
     List<DetectionItem> items,
+    String model,
     int generation,
-    _ValidationWorkBudget budget,
   ) async {
-    final model = widget.classificationModelPath?.trim() ?? '';
-    if (_clusterModelPath != model ||
-        _clusterRefreshVersion != widget.refreshVersion) {
-      _rejectionClusters.clear();
-      _clusterModelPath = model;
-      _clusterRefreshVersion = widget.refreshVersion;
-      _clusterLookupFailed = false;
-    }
-    if (model.isEmpty) return;
-    final pendingIds = <String>{};
-    for (var index = 0; index < items.length; index++) {
-      for (final box in items[index].detectionBoxes) {
-        if (_isRejectedSpeciesName(box.species) &&
-            box.observationId != null &&
-            !_rejectionClusters.containsKey(box.observationId)) {
-          pendingIds.add(box.observationId!);
-        }
-      }
-      if (index % 128 == 0) await budget.checkpoint();
-    }
-    final ids = pendingIds.toList();
+    final budget = _ValidationWorkBudget(
+      () => !mounted || generation != _clusterScanGeneration,
+    );
     try {
-      for (var offset = 0; offset < ids.length; offset += 10000) {
-        final batch = ids.sublist(
-          offset,
-          (offset + 10000).clamp(0, ids.length),
-        );
-        final resolved = await widget.apiClient.fetchDinoV2RejectionClusters(
-          model,
-          batch,
-        );
-        if (!mounted || generation != _preparationGeneration) return;
-        for (final id in batch) {
-          _rejectionClusters[id] = resolved[id];
+      if (model.isEmpty) return;
+      final evidence = <String, String>{};
+      for (var index = 0; index < items.length; index++) {
+        for (final box in items[index].detectionBoxes) {
+          final id = box.observationId;
+          if (id == null || !_isRejectedSpeciesName(box.species)) continue;
+          evidence[id] = '${box.species}|${box.bbox.join(',')}|'
+              '${box.frameIndex}|${box.timestamp}|${box.trackId}|'
+              '${box.confidence}|${box.predictedSpecies}|${box.feedbackStatus}';
         }
+        if (index % 128 == 0) await budget.checkpoint();
       }
-      _clusterLookupFailed = false;
+      // A preview version is not evidence. Reuse verified links until their
+      // model, observation evidence, or an explicit learning mutation changes.
+      if (evidence.entries.any((entry) =>
+          _clusterEvidence.containsKey(entry.key) &&
+          _clusterEvidence[entry.key] != entry.value)) {
+        _invalidateRejectionClusters();
+      }
+      _clusterEvidence.addAll(evidence);
+      final ids = evidence.keys.where((id) =>
+          !_rejectionClusters.containsKey(id) &&
+          !_clusterRequests.containsKey(id)).toList();
+      final epoch = _clusterEpoch;
+      for (var offset = 0; offset < ids.length; offset += 10000) {
+        final batch = ids.sublist(offset, (offset + 10000).clamp(0, ids.length));
+        late final Future<void> task;
+        task = Future<void>.sync(() async {
+          try {
+            final resolved = await widget.apiClient.fetchDinoV2RejectionClusters(model, batch);
+            if (!mounted || epoch != _clusterEpoch || model != _clusterModelPath) return;
+            for (final id in batch) {
+              _rejectionClusters[id] = resolved[id];
+            }
+            _clusterLookupFailed = false;
+            _clusterBucketsDirty = true;
+          } finally {
+            for (final id in batch) {
+              if (identical(_clusterRequests[id], task)) _clusterRequests.remove(id);
+            }
+          }
+        });
+        for (final id in batch) { _clusterRequests[id] = task; }
+      }
+      await Future.wait(evidence.keys.map((id) => _clusterRequests[id])
+          .whereType<Future<void>>().toSet());
+      if (!mounted || generation != _clusterScanGeneration) return;
+      await _refreshClusterBuckets();
+    } on _ValidationPreparationCancelled {
+      // A newer snapshot owns the scan; model-scoped requests remain shared.
     } catch (error) {
-      if (!mounted || generation != _preparationGeneration) return;
+      if (!mounted || generation != _clusterScanGeneration) return;
       _clusterLookupFailed = true;
+      _clusterBucketsDirty = true;
       debugPrint('Unable to load rejection clusters: $error');
+      await _refreshClusterBuckets();
+    }
+  }
+
+  Future<void> _refreshClusterBuckets() async {
+    if (!_clusterBucketsDirty || _preparing || _marking || !mounted) return;
+    final generation = ++_clusterPresentationGeneration;
+    final budget = _ValidationWorkBudget(() => !mounted || _preparing ||
+        _marking || generation != _clusterPresentationGeneration);
+    try {
+      final map = <String, _SpeciesBucket>{};
+      final groups = List<_ValidationMediaGroup>.of(_bucketCacheOrderedGroups);
+      for (var index = 0; index < groups.length; index++) {
+        final group = groups[index];
+        final species = _groupSpeciesLabelCache[group.signature] ??
+            (widget.autoGroup ? _primarySpeciesForGroup(group) :
+                _primarySpeciesAfterConfidenceFilter(group.items.first));
+        final validated = group.items.every(_isItemValidated);
+        for (final label in _clusterBucketLabels(group, species)) {
+          final key = '${validated ? 1 : 0}::${label.$1}';
+          final bucket = map.putIfAbsent(key, () => _SpeciesBucket(
+            key: key, isValidated: validated, species: label.$2,
+            clusterNumber: label.$3, items: [], groups: []));
+          bucket.items.addAll(group.items);
+          bucket.groups.add(group);
+        }
+        if (index % 128 == 0) await budget.checkpoint();
+      }
+      await budget.checkpoint();
+      final buckets = map.values.toList()..sort(_SpeciesBucket.compare);
+      setState(() {
+        _bucketCache = buckets;
+        _clusterBucketsDirty = false;
+      });
+    } on _ValidationPreparationCancelled {
+      // Marks/metadata/another directory retain authority over group objects.
     }
   }
 
@@ -563,9 +627,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     try {
       // Yield before any large traversal so the loading frame reaches paint.
       await Future<void>.delayed(Duration.zero);
-      await budget.checkpoint(force: true);
-      await _loadRejectionClusters(items, generation, budget);
-      timing.mark('prepare_clusters_ready');
       await budget.checkpoint(force: true);
       final indices = await mediaDisplayIndicesAsync(
         items,
@@ -778,6 +839,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _notifyAutoGroupInferredBurstSize(inferred);
       setState(() => _preparing = false);
       timing.mark('prepare_ready groups=${groups.length}');
+      unawaited(_refreshClusterBuckets());
     } on _ValidationPreparationCancelled {
       timing.mark('prepare_cancelled');
       // A newer directory, metadata snapshot or disposal owns the UI now.
@@ -796,12 +858,15 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     if (_requiresPreparation) _startPreparation();
+    _scheduleRejectionClusterRefresh();
   }
 
   @override
   void dispose() {
     _snackBarCloseTimer?.cancel();
     _preparationGeneration++;
+    _clusterScanGeneration++;
+    _clusterPresentationGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -851,10 +916,11 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   @override
   void didUpdateWidget(covariant SpeciesValidationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _clusterPresentationGeneration++;
+    _scheduleRejectionClusterRefresh();
     final groupingSettingsChanged =
         oldWidget.inputPath != widget.inputPath ||
         oldWidget.classificationModelPath != widget.classificationModelPath ||
-        oldWidget.refreshVersion != widget.refreshVersion ||
         oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
         oldWidget.autoGroupBurstSize != widget.autoGroupBurstSize ||
@@ -872,6 +938,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _tryAdoptValidationEchoWithoutGlobalSignatures(
           includeMetadataUpdates: true,
         );
+    if (!groupingSettingsChanged) _bucketCacheRefreshVersion = widget.refreshVersion;
     if (preparationChanged) _preparationError = null;
     if (preparationChanged &&
         !adoptedItemUpdates &&
@@ -1593,7 +1660,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       for (final box in _confidenceFilteredBoxes(item)) {
         if (box.observationId != null &&
             _isRejectedSpeciesName(box.species) &&
-            _rejectionClusters[box.observationId]?.id == clusterId) {
+            _rejectionClusters[box.observationId]?.id == clusterId &&
+            _rejectionClusters[box.observationId]?.isNoise == false) {
           ids.add(box.observationId!);
           targets[item.path] = item;
         }
@@ -1658,6 +1726,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       );
       if (!mounted) return;
       setState(() {
+        _invalidateRejectionClusters();
         _mergeClusterFeedbackItems(result.items);
         _recordMarkHistory(
           targets.values,
@@ -3059,15 +3128,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       }
 
       final next = widget.items[globalIndex];
-      if ((widget.classificationModelPath?.trim().isNotEmpty ?? false) &&
-          next.detectionBoxes.any(
-            (box) =>
-                _isRejectedSpeciesName(box.species) &&
-                box.observationId != null &&
-                !_rejectionClusters.containsKey(box.observationId),
-          )) {
-        return false;
-      }
       if (!_sameGroupingBoundaryMetadata(previous, next)) {
         return false;
       }
@@ -4417,6 +4477,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         );
         if (!mounted) return;
         setState(() {
+          _invalidateRejectionClusters();
           _mergeClusterFeedbackItems(targets);
           _markHistory.removeLast();
         });
@@ -4447,6 +4508,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           classificationModelPath: classificationModelPath,
           feedbackOperationId: feedbackOperationId,
         );
+        _invalidateRejectionClusters();
       }
       final lastUpdated = updatedItems.isEmpty ? null : updatedItems.last;
       if (!mounted) return;
@@ -4622,7 +4684,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _setMarking(bool value) {
     if (!mounted || _marking == value) return;
+    _clusterPresentationGeneration++;
     setState(() => _marking = value);
+    if (!value) {
+      _scheduleRejectionClusterRefresh();
+      unawaited(_refreshClusterBuckets());
+    }
   }
 
   String? _nextPathAfterItem(

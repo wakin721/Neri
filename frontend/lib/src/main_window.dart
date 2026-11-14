@@ -31,6 +31,7 @@ import 'screens/start_screen.dart';
 import 'utils/job_result_refresh.dart';
 import 'utils/startup_timing.dart';
 import 'utils/async_refresh_gate.dart';
+import 'utils/mutation_refresh_scheduler.dart';
 import 'utils/local_detection_items.dart';
 import 'utils/media_display_order.dart';
 import 'utils/directory_browsing_scope.dart';
@@ -146,7 +147,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   Timer? _timer;
   Timer? _snackBarCloseTimer;
   Timer? _previewRefreshTimer;
-  Timer? _inputDirectoryChangeTimer;
+  late final _inputDirectoryRefresh = MutationRefreshScheduler(() async {
+    if (!mounted || _inputController.text.trim() != _watchedInputDirectory) return;
+    await _refreshPreviewItems(force: true);
+  });
   Timer? _modelSelectionSaveTimer;
   StreamSubscription<FileSystemEvent>? _inputDirectoryWatcher;
   int _inputDirectoryWatcherGeneration = 0;
@@ -265,7 +269,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     _timer?.cancel();
     _snackBarCloseTimer?.cancel();
     _previewRefreshTimer?.cancel();
-    _inputDirectoryChangeTimer?.cancel();
+    _inputDirectoryRefresh.dispose();
     _modelSelectionSaveTimer?.cancel();
     _inputDirectoryWatcherGeneration++;
     final inputDirectoryWatcher = _inputDirectoryWatcher;
@@ -1626,6 +1630,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (_validationBusyRequests == nextCount && _validationBusy == nextBusy) {
       return;
     }
+    if (value) {
+      _inputDirectoryRefresh.beginMutation();
+    } else {
+      _inputDirectoryRefresh.endMutation();
+    }
     setState(() {
       _validationBusyRequests = nextCount;
       _validationBusy = nextBusy;
@@ -1782,8 +1791,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       return;
     }
 
-    _inputDirectoryChangeTimer?.cancel();
-    _inputDirectoryChangeTimer = null;
+    _inputDirectoryRefresh.cancel();
     final previousWatcher = _inputDirectoryWatcher;
     _inputDirectoryWatcher = null;
     _watchedInputDirectory = null;
@@ -1834,13 +1842,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         (destination != null && _isSupportedMediaPath(destination));
     if (!affectsMedia) return;
 
-    _inputDirectoryChangeTimer?.cancel();
-    _inputDirectoryChangeTimer = Timer(const Duration(milliseconds: 350), () {
-      if (!mounted || _inputController.text.trim() != _watchedInputDirectory) {
-        return;
-      }
-      unawaited(_refreshPreviewItems(force: true));
-    });
+    _inputDirectoryRefresh.request();
   }
 
   bool _isSupportedMediaPath(String path) {

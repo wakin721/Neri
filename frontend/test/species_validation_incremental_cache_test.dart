@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -44,6 +45,56 @@ void main() {
       await tempDir.delete(recursive: true);
     }
   });
+
+  for (final count in [8, 600]) {
+    testWidgets('pending cluster lookup leaves $count files markable and coalesces refreshes', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final response = Completer<http.Response>();
+      var requests = 0;
+      final api = NeriApiClient(httpClient: MockClient((request) {
+        requests++;
+        return response.future;
+      }));
+      addTearDown(api.close);
+      final key = GlobalKey<_IncrementalHarnessState>();
+      await tester.pumpWidget(_IncrementalHarness(key: key, apiClient: api,
+        tempDir: tempDir, itemCount: count, rejected: true));
+      for (var attempt = 0; attempt < 100; attempt++) {
+        if (_blockedValidation().evaluate().isEmpty && find.text('正确').evaluate().isNotEmpty) break;
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(_blockedValidation(), findsNothing,
+        reason: 'Remote density verification must not gate individual annotation writes');
+      expect(find.textContaining('拒识簇 #'), findsNothing);
+      await tester.tap(find.text('正确').first);
+      await tester.pump();
+      expect(key.currentState!.lastMarkedItem, isNotNull);
+      key.currentState!.refreshPreview();
+      await tester.pump();
+      key.currentState!.applyMetadata(1);
+      await tester.pump();
+      expect(_blockedValidation(), findsNothing);
+      expect(requests, 1, reason: 'Same model/observation lookups must share in-flight work');
+      response.complete(http.Response(jsonEncode({for (final id in ['a', 'b']) id: {
+        'cluster_id': 'cluster-$id', 'candidate_number': id == 'a' ? 1 : 2,
+        'model_fingerprint': 'fp', 'event_count': 10, 'min_cluster_events': 5,
+        'density_verified': true, 'is_noise': false,
+      }}), 200, headers: {'content-type': 'application/json; charset=utf-8'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.textContaining('拒识簇 #'), findsWidgets);
+      key.currentState!.refreshPreview();
+      await tester.pump();
+      expect(_blockedValidation(), findsNothing);
+      expect(requests, 1, reason: 'Benign preview refresh retains verified cluster links');
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(milliseconds: 20));
+    });
+  }
 
   test('pending echo checks only pending item paths', () {
     final items = <_Item>[
@@ -449,6 +500,8 @@ class _IncrementalHarness extends StatefulWidget {
 
 class _IncrementalHarnessState extends State<_IncrementalHarness> {
   late List<DetectionItem> _items;
+  int refreshVersion = 0;
+  void refreshPreview() => setState(() { refreshVersion++; _items = List.of(_items); });
   int detectionDataReads = 0;
   int readsBeforeParentEcho = 0;
   bool loadMetadataAfterMark = false;
@@ -646,7 +699,7 @@ class _IncrementalHarnessState extends State<_IncrementalHarness> {
               ? 'model.neri.json'
               : null,
           loading: false,
-          refreshVersion: 0,
+          refreshVersion: refreshVersion,
           speciesTypes: const <String, String>{'豹猫': '兽类'},
           useCombinedConfidence: false,
           minFrameRatio: 0,

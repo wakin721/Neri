@@ -3248,11 +3248,8 @@ def _persist_validation_updates(
     input_path: Path,
 ) -> None:
     from system.detection_db import (
-        delete_validation_bulk,
         get_db_path,
-        init_db,
-        upsert_detections_bulk,
-        upsert_validation_bulk,
+        persist_validation_batch,
     )
 
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
@@ -3285,10 +3282,12 @@ def _persist_validation_updates(
 
     for root, payloads in payloads_by_root.items():
         db_path = get_db_path(str(root))
-        init_db(db_path)
-        upsert_detections_bulk(db_path, payloads)
-        delete_validation_bulk(db_path, validation_deletes_by_root.get(root, []))
-        upsert_validation_bulk(db_path, validation_upserts_by_root.get(root, []))
+        persist_validation_batch(
+            db_path,
+            payloads,
+            validation_upserts_by_root.get(root, []),
+            validation_deletes_by_root.get(root, []),
+        )
 
 
 def _build_export_metadata(path: Path) -> dict[str, Any]:

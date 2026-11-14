@@ -94,6 +94,50 @@ def upsert_detections_bulk(db_path: str, payloads: list[tuple[str, str, dict]]):
         """, rows)
 
 
+def persist_validation_batch(
+    db_path: str,
+    payloads: list[tuple[str, str, dict]],
+    validations: list[tuple[str, bool]],
+    unverified_filenames: list[str],
+) -> None:
+    """Commit detection payloads and their validation states atomically.
+
+    Schema initialization is idempotent; all annotation changes share the
+    following transaction, and any write or commit failure propagates.
+    """
+    rows = [
+        (str(base_name), str(image_filename),
+         json.dumps(detection_data or {}, ensure_ascii=False))
+        for base_name, image_filename, detection_data in payloads
+        if base_name and image_filename
+    ]
+    validation_rows = [
+        (str(image_filename), 1 if is_validated else 0)
+        for image_filename, is_validated in validations
+        if image_filename
+    ]
+    unverified_rows = [(str(name),) for name in unverified_filenames if name]
+    if not rows and not validation_rows and not unverified_rows:
+        return
+
+    init_db(db_path)
+    with _get_conn(db_path) as conn:
+        conn.executemany("""
+            INSERT INTO detections (base_name, image_filename, detection_json, updated_at)
+            VALUES (?, ?, ?, strftime('%s','now'))
+            ON CONFLICT(base_name) DO UPDATE SET
+                image_filename = excluded.image_filename,
+                detection_json = excluded.detection_json,
+                updated_at     = excluded.updated_at
+        """, rows)
+        conn.executemany("DELETE FROM validation WHERE image_filename=?",
+                         unverified_rows)
+        conn.executemany("""
+            INSERT INTO validation (image_filename, is_validated) VALUES (?,?)
+            ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
+        """, validation_rows)
+
+
 def get_detection(db_path: str, base_name: str) -> dict | None:
     """读取单条检测记录"""
     with _get_conn(db_path) as conn:
