@@ -1064,12 +1064,6 @@ class _DetectionOverlayPainter extends CustomPainter {
   final List<DetectionBox> boxes;
   final Size mediaSize;
 
-  Color _getColorForSpecies(String species) {
-    final hash = species.hashCode;
-    final hue = (hash % 360).toDouble();
-    return HSVColor.fromAHSV(1.0, hue, 0.85, 0.95).toColor();
-  }
-
   @override
   void paint(Canvas canvas, Size size) {
     if (mediaSize.isEmpty || boxes.isEmpty) return;
@@ -1091,7 +1085,7 @@ class _DetectionOverlayPainter extends CustomPainter {
       final rect = _renderRectForBox(box, size, mediaSize);
       if (rect == null) continue;
       final fitted = _fittedMediaRect(size, mediaSize);
-      final color = _getColorForSpecies(box.species);
+      final color = detectionBoxColor(box);
       paint.color = color;
 
       canvas.drawRect(rect, paint);

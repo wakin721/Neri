@@ -23,6 +23,7 @@ class ImageProcessor:
         self.dinov3_classifier = None
         self._dinov3_collector = None
         self._dinov3_current_paths = ()
+        self._photo_memory_guard = None
 
         # Preserve eager model loading when the normal YOLO runtime is present,
         # but do not make importing/constructing the DINOv3 adapter depend on it.
@@ -65,6 +66,15 @@ class ImageProcessor:
         self.dino_classifier = classifier
         self.dinov3_classifier = classifier
         self._dinov3_collector = DinoV3CropCollector()
+
+    def preload_batch_data(self, img_paths):
+        legacy = self._ensure_legacy()
+        legacy._photo_memory_guard = self._photo_memory_guard
+        return legacy.preload_batch_data(img_paths)
+
+    def release_batch_images(self):
+        if self._legacy is not None:
+            self._legacy.release_batch_images()
 
     def _classify_dino_crops(
         self,

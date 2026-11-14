@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from system.dinov3.deployment import publish_model
 from system.dinov3.encoder import PREPROCESSING, sha256
 from system.dinov3.model import DinoV3RidgeWithinModel
+from system.dinov3.experiment import INFERENCE_RECIPES, PRODUCTION_RECIPE
 from system.dinov3.runtime import read_manifest, resolve_manifest_asset
 
 
@@ -55,14 +56,15 @@ def train(args):
         digest = sha256(args.encoder_weights)
         bank = read_features(args.bank, digest)
         cal = read_features(args.calibration, digest)
-        model = DinoV3RidgeWithinModel()
+        model = DinoV3RidgeWithinModel(inference_recipe=getattr(args, "inference_recipe", PRODUCTION_RECIPE))
         model.fit(bank["features"], bank["labels"], bank["cameras"], bank["sequences"],
                   origin=bank.get("origin"), transform=bank.get("transform"),
                   metadata=dict(encoder_sha256=digest, preprocessing=PREPROCESSING,
                                 source="DINOv3 + Ridge + Within; 2026-11-07", gradient_updates=0))
         recalibrate(model, cal)
         return publish_model(model, args.manifest, encoder_weights=args.encoder_weights,
-                             encoder_code=args.encoder_code, calibration_data=cal)
+                             encoder_code=args.encoder_code, calibration_data=cal,
+                             display_name=getattr(args, "display_name", "Neri1.1"))
     payload = read_manifest(args.manifest)
     model = DinoV3RidgeWithinModel.load(resolve_manifest_asset(args.manifest, payload["checkpoint"]))
     digest = payload["encoder_sha256"]
@@ -84,6 +86,8 @@ def main():
     fit.add_argument("--bank", type=Path, required=True)
     fit.add_argument("--encoder-weights", type=Path, required=True)
     fit.add_argument("--encoder-code", type=Path, required=True)
+    fit.add_argument("--inference-recipe", choices=INFERENCE_RECIPES, default=PRODUCTION_RECIPE)
+    fit.add_argument("--display-name", default="Neri1.1")
     update = commands.add_parser("update", help="Supplement old/new species, then recalibrate both paths")
     update.add_argument("--supports", type=Path, required=True)
     commands.add_parser("calibrate", help="Recalibrate C without changing the frozen geometry/supports")

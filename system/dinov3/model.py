@@ -29,6 +29,7 @@ import numpy as np
 from .balanced_unknown_calibration import fit_unknown_threshold
 from .hierarchical_ridge_head import _metadata_vector, _portable_classes, _sorted_classes, hierarchical_weights
 from .species_feature_cache_ridge_head import SpeciesFeatureCacheRidgeHead
+from .experiment import PRODUCTION_RECIPE, EXPERIMENT_RECIPE, INFERENCE_RECIPES, head_type
 
 
 def unit(x: np.ndarray) -> np.ndarray:
@@ -403,10 +404,11 @@ class DinoV3RidgeWithinModel:
         self,
         ridge: float = 0.01,
         weighting: str = "hierarchical",
-        tau: float = 1.0,
+        tau: Optional[float] = None,
         consensus_boost: bool = True,
         target_recall: float = 0.90,
         metadata: Optional[Dict[str, Any]] = None,
+        inference_recipe: str = PRODUCTION_RECIPE,
     ):
         if not math.isfinite(ridge) or ridge <= 0:
             raise ValueError("ridge penalty must be a positive finite float")
@@ -415,7 +417,12 @@ class DinoV3RidgeWithinModel:
 
         self.ridge = float(ridge)
         self.weighting = str(weighting)
-        self.tau = float(tau)
+        if inference_recipe not in INFERENCE_RECIPES:
+            raise ValueError(f"Unsupported DINOv3 inference recipe: {inference_recipe}")
+        self.inference_recipe = inference_recipe
+        self.tau = float(tau if tau is not None else .5 if inference_recipe == EXPERIMENT_RECIPE else 1.)
+        if inference_recipe == EXPERIMENT_RECIPE and (self.tau != .5 or not consensus_boost):
+            raise ValueError("The frozen experiment recipe requires tau=.5 and consensus boost")
         self.consensus_boost = bool(consensus_boost)
         self.target_recall = float(target_recall)
         if not math.isfinite(self.tau) or self.tau <= 0:
@@ -715,6 +722,15 @@ class DinoV3RidgeWithinModel:
         z = (np.asarray(query_feat, dtype=np.float64) - self.origin_) @ self.transform_
         norm = np.linalg.norm(z, axis=1)
 
+        if self.inference_recipe == EXPERIMENT_RECIPE:
+            from .experiment import fit_calibration
+            self._calibration = fit_calibration(within_mat, norm, labels_arr, cameras_arr,
+                                                sequences_arr, k_mask, target)
+            self._threshold = self._calibration["threshold"]
+            self._box_threshold = None
+            self.is_calibrated = True
+            return deepcopy(self._calibration)
+
         # Stage 1: Per-box independent gate standardization and calibration
         z_box_margin, box_m_meta = standardize(margin, k_mask)
         z_box_radial, box_r_meta = standardize(norm, k_mask)
@@ -846,6 +862,10 @@ class DinoV3RidgeWithinModel:
             else np.asarray([f"item_{i}" for i in range(length)], dtype=str)
         )
 
+        if self.inference_recipe == EXPERIMENT_RECIPE:
+            from .experiment import predict
+            return predict(self, raw, cameras_arr, sequences_arr, sites_arr, contents_arr, adapted_features)
+
         within_mat = self._compute_within_scores(raw, adapted_features=adapted_features)
         raw_top = np.sort(within_mat, axis=1)[:, -2:]
         margin = 2 * raw_top[:, 1] - raw_top[:, 0]
@@ -940,7 +960,8 @@ class DinoV3RidgeWithinModel:
         try:
             with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
                 manifest_data = {
-                    "head_type": "ridge_within",
+                    "head_type": head_type(self.inference_recipe),
+                    "inference_recipe": self.inference_recipe,
                     "schema_version": 1,
                     "backend": "dinov3",
                     "dimension": int(self.feature_dim_),
@@ -1064,7 +1085,7 @@ class DinoV3RidgeWithinModel:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             if not isinstance(manifest, dict):
                 raise ValueError("Model manifest must be an object")
-            if manifest.get("head_type") != "ridge_within":
+            if manifest.get("head_type") != head_type(manifest.get("inference_recipe", PRODUCTION_RECIPE)):
                 raise ValueError(f"Unsupported head_type: {manifest.get('head_type')}")
             if manifest.get("schema_version") != 1:
                 raise ValueError(f"Unsupported schema_version: {manifest.get('schema_version')}")
@@ -1087,6 +1108,7 @@ class DinoV3RidgeWithinModel:
                 consensus_boost=manifest.get("consensus_boost", True),
                 target_recall=manifest.get("target_recall", 0.90),
                 metadata=manifest.get("metadata", {}),
+                inference_recipe=manifest.get("inference_recipe", PRODUCTION_RECIPE),
             )
             model.feature_dim_ = int(manifest["dimension"])
 
@@ -1146,11 +1168,12 @@ class DinoV3RidgeWithinModel:
                 if not isinstance(cal_data, dict):
                     raise ValueError("Calibration must be an object")
                 model._threshold = float(cal_data["threshold"])
-                model._box_threshold = float(cal_data.get("box_threshold", model._threshold))
+                model._box_threshold = (None if model.inference_recipe == EXPERIMENT_RECIPE
+                                        else float(cal_data.get("box_threshold", model._threshold)))
                 model._calibration = cal_data
                 model.is_calibrated = True
                 if (not math.isfinite(model._threshold) or manifest.get("threshold") != model._threshold
-                        or not math.isfinite(model._box_threshold)
+                        or (model._box_threshold is not None and not math.isfinite(model._box_threshold))
                         or not math.isfinite(cal_data["target"]) or not 0 < cal_data["target"] <= 1):
                     raise ValueError("Invalid calibration threshold or target")
                 if "box_target" in cal_data and (

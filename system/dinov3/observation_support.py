@@ -556,7 +556,8 @@ def explain_dinov3_observation(
         "squared_distance": nearest_species[0]["squared_distance"],
         "class_margin": score1 - score2,
         "adjusted_distance_score": score1,
-        "rejection": {"mode": "ridge_within"},
+        "rejection": ({"mode": "ridge_within", "gate_mode": "sequence", "inference_recipe": "experiment_full"}
+                      if primary.get("inference_recipe") == "experiment_full" else {"mode": "ridge_within"}),
         "nearest_species": nearest_species,
         "projection": projection,
         "current_example_available": source_path.is_file(),

@@ -169,6 +169,7 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
     final learned = (_status?['learned_count'] as num?)?.toInt() ?? 0;
     final classes = (_status?['class_count'] as num?)?.toInt() ?? 0;
     final rejection = _status?['rejection'] as Map<String, dynamic>? ?? {};
+    final experiment = rejection['gate_mode'] == 'sequence';
     String threshold(String key) =>
         (rejection[key] as num?)?.toStringAsFixed(3) ?? '未记录';
     final species =
@@ -197,9 +198,15 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
             style: TextStyle(fontWeight: FontWeight.w600),
           ),
           Text(
-            '单框门限 ${threshold('box_threshold')}  ·  序列门限 ${threshold('sequence_threshold')}',
+            experiment
+                ? '实验事件门限 ${threshold('sequence_threshold')}'
+                : '单框门限 ${threshold('box_threshold')}  ·  序列门限 ${threshold('sequence_threshold')}',
           ),
-          const Text('分数越低越容易拒识；两级都通过才接纳。门限由模型自动校准，不能手动拖动。'),
+          Text(
+            experiment
+                ? '事件分数达到门限才接纳。门限由模型自动校准，不能手动拖动。'
+                : '分数越低越容易拒识；两级都通过才接纳。门限由模型自动校准，不能手动拖动。',
+          ),
         ],
         if (_error != null)
           Text(

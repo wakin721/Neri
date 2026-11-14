@@ -24,7 +24,7 @@ def _is_joint_model(classification_model_path) -> bool:
     return (
         isinstance(payload, dict)
         and payload.get("backend") == "dinov3"
-        and payload.get("head_type") == "ridge_within"
+        and payload.get("head_type") in {"ridge_within", "ridge_within_experiment"}
     )
 
 

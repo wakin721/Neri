@@ -319,6 +319,7 @@ DetectionBox _withSynthesizedDinoV3ObservationId(
         ? box.predictedSpecies
         : predictedSpecies,
     feedbackStatus: box.feedbackStatus,
+    rejectionCluster: box.rejectionCluster,
   );
 }
 
@@ -765,7 +766,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         final species = widget.autoGroup
             ? _primarySpeciesForGroup(group)
             : _primarySpeciesAfterConfidenceFilter(group.items.first);
-        labels[group.signature] = species;
+        labels[group.signature] =
+            widget.autoGroup && _usesDinoClusterGrouping(group)
+            ? _clusterBucketLabels(group, species).single.$2
+            : species;
         groupIndices[group.signature] = i;
         final validated = group.items.every(_isItemValidated);
         for (final label in _clusterBucketLabels(group, species)) {
@@ -803,6 +807,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             item.fileType,
             _primarySpeciesAfterConfidenceFilter(item),
             _isItemValidated(item),
+            _rejectionGroupingSignature(item),
             item.error ?? '',
           ].join('\u001d'),
         );
@@ -1401,7 +1406,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     // 取消物种栏后面的数字
                     trailingBuilder: (bucket) {
                       if (bucket.key != _selectedBucketKey) return null;
-                      if (bucket.clusterId != null) {
+                      if (bucket.clusterId != null &&
+                          !bucket.key.contains('hdbscan::')) {
                         return IconButton(
                           tooltip: '确认簇物种并学习',
                           icon: const Icon(Icons.school_outlined),
@@ -1420,6 +1426,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                       setState(() {
                         _activeList = _ValidationListFocus.species;
                         _selectedBucketKey = bucket.key;
+                        _selectedObservationId = null;
                         _selectedPath = bucket.items.first.path;
                         _selectedPaths
                           ..clear()
@@ -1590,7 +1597,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         visibleBoxes: visibleBoxes,
         showDetections: _showDetections,
         onOpenExternal: () => widget.onOpenExternal(item.path),
-        selectedObservationId: _selectedObservationId,
+        selectedObservationId: _clusterObservationForItem(item, visibleBoxes),
         onDetectionBoxSelected: (box) {
           setState(() {
             _selectedObservationId = box?.observationId;
@@ -1695,6 +1702,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   Future<void> _confirmClusterSpecies(_SpeciesBucket bucket) async {
+    if (bucket.key.contains('hdbscan::')) return;
     final model = widget.classificationModelPath?.trim() ?? '';
     final clusterId = bucket.clusterId;
     if (_marking || _interactionBlocked || model.isEmpty || clusterId == null) {
@@ -2057,10 +2065,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     '物种：${box.species.trim().isEmpty ? 'Unknown' : box.species.trim()}',
                   ),
                   if (box.confidence != null)
-                    Text('置信度：${box.confidence!.toStringAsFixed(3)}'),
+                    Text(
+                      '${dinoConfidenceLabel(box)}：${box.confidence!.toStringAsFixed(3)}',
+                    ),
                   if (rawDetConf != null)
                     Text('检测置信度：${rawDetConf.toStringAsFixed(3)}'),
-                  if (boxKnownScore != null)
+                  if (boxKnownScore != null &&
+                      !rejectionInfo.isExperimentSingleGate)
                     Text(
                       boxThreshold != null
                           ? '单框门控：${boxKnownScore.toStringAsFixed(3)} (阈值 ${boxThreshold.toStringAsFixed(3)})'
@@ -2069,8 +2080,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   if (seqKnownScore != null)
                     Text(
                       seqThreshold != null
-                          ? '序列门控：${seqKnownScore.toStringAsFixed(3)} (阈值 ${seqThreshold.toStringAsFixed(3)})'
-                          : '序列门控：${seqKnownScore.toStringAsFixed(3)}',
+                          ? '${rejectionInfo.isExperimentSingleGate ? '实验事件门控' : '序列门控'}：${seqKnownScore.toStringAsFixed(3)} (阈值 ${seqThreshold.toStringAsFixed(3)})'
+                          : '${rejectionInfo.isExperimentSingleGate ? '实验事件门控' : '序列门控'}：${seqKnownScore.toStringAsFixed(3)}',
                     ),
                   if (rejectionInfo.isLegacySingleGate &&
                       rejectionInfo.legacyScore != null)
@@ -2090,8 +2101,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     Text('Within分数：${withinScore.toStringAsFixed(3)}'),
                   if (ridgeScore != null)
                     Text(
-                      rawRidgeScore != null &&
-                              (rawRidgeScore - ridgeScore).abs() > 1e-4
+                      rejectionInfo.isExperimentSingleGate
+                          ? '融合分类分数：${ridgeScore.toStringAsFixed(3)}'
+                          : rawRidgeScore != null &&
+                                (rawRidgeScore - ridgeScore).abs() > 1e-4
                           ? 'Ridge分数：${ridgeScore.toStringAsFixed(3)} (单框 ${rawRidgeScore.toStringAsFixed(3)})'
                           : 'Ridge分数：${ridgeScore.toStringAsFixed(3)}',
                     ),
@@ -2875,6 +2888,96 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     }
   }
 
+  RejectionCluster? _persistedCluster(DetectionItem item, DetectionBox box) {
+    var data = box.rejectionCluster;
+    if (data.isEmpty) {
+      final raw = findRawDinoBox(box, -1, item.detectionData['检测框']);
+      final saved = raw?['rejection_cluster'];
+      if (saved is Map) data = Map<String, dynamic>.from(saved);
+    }
+    return data.isEmpty ? null : RejectionCluster.fromJson(data);
+  }
+
+  bool _usesDinoClusterGrouping(_ValidationMediaGroup group) => group.items.any(
+    (item) => _confidenceFilteredBoxes(
+      item,
+    ).any((box) => isDinoDecision(box) && _isRejectedSpeciesName(box.species)),
+  );
+
+  List<(String, String, int?)> _dinoItemBucketLabels(DetectionItem item) {
+    final labels = <String, (String, String, int?)>{};
+    final known = <String>{};
+    for (final box in _confidenceFilteredBoxes(item)) {
+      if (!_isRejectedSpeciesName(box.species)) {
+        if (!_isFallbackSpecies(box.species)) known.add(box.species);
+        continue;
+      }
+      final cluster = _persistedCluster(item, box);
+      final (String, String, int?) label;
+      if (item.isSequencePending) {
+        label = ('hdbscan::pending', '拒识（待聚类）', null);
+      } else if (cluster == null) {
+        label = ('hdbscan::unassigned', '拒识（未聚类）', null);
+      } else if (cluster.isFailed) {
+        label = ('hdbscan::failed', '拒识（聚类失败）', null);
+      } else if (cluster.isClustered) {
+        label = (
+          'hdbscan::${cluster.id}',
+          '拒识（簇${cluster.number}）',
+          cluster.number,
+        );
+      } else {
+        label = ('hdbscan::noise', '拒识（未成簇）', null);
+      }
+      labels[label.$1] = label;
+    }
+    if (known.isNotEmpty) {
+      final names = known.toList()..sort();
+      final name = names.join('、');
+      labels[name] = (name, name, null);
+    }
+    if (labels.isEmpty) {
+      final name = _primarySpeciesAfterConfidenceFilter(item);
+      labels[name] = (name, name, null);
+    }
+    return labels.values.toList();
+  }
+
+  String _rejectionGroupingSignature(
+    DetectionItem item,
+  ) => _confidenceFilteredBoxes(item)
+      .where(isDinoDecision)
+      .map((box) {
+        final cluster = _persistedCluster(item, box);
+        return '${box.observationId}:${box.species}:${cluster?.id}:${cluster?.status}:${item.isSequencePending}';
+      })
+      .join('|');
+
+  String? _clusterObservationForItem(
+    DetectionItem item,
+    List<DetectionBox> boxes,
+  ) {
+    final bucket = _bucketCache
+        .where((b) => b.key == _selectedBucketKey)
+        .firstOrNull;
+    if (bucket == null ||
+        !bucket.key.contains('hdbscan::') ||
+        bucket.clusterId == null) {
+      return _selectedObservationId;
+    }
+    final members = boxes
+        .where(
+          (box) =>
+              _isRejectedSpeciesName(box.species) &&
+              _persistedCluster(item, box)?.id == bucket.clusterId,
+        )
+        .toList();
+    if (members.any((box) => box.observationId == _selectedObservationId)) {
+      return _selectedObservationId;
+    }
+    return members.firstOrNull?.observationId;
+  }
+
   List<_ValidationMediaGroup> _buildValidationGroups(
     List<DetectionItem> items,
   ) {
@@ -2890,6 +2993,47 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _ValidationMediaGroup group,
     String rawSpecies,
   ) {
+    if (_usesDinoClusterGrouping(group)) {
+      final labels = <String, (String, String, int?)>{};
+      for (final item in group.items) {
+        for (final label in _dinoItemBucketLabels(item)) {
+          labels[label.$1] = label;
+        }
+      }
+      if (widget.autoGroup) {
+        if (labels.length > 1) {
+          labels.removeWhere(
+            (key, value) =>
+                value.$2 == '空' || value.$2.toLowerCase() == 'empty',
+          );
+        }
+        final ordered = labels.values.toList()
+          ..sort((a, b) {
+            final aKnown = !a.$1.startsWith('hdbscan::');
+            final bKnown = !b.$1.startsWith('hdbscan::');
+            if (aKnown != bKnown) return aKnown ? -1 : 1;
+            if (a.$3 != null && b.$3 != null) {
+              final number = a.$3!.compareTo(b.$3!);
+              return number != 0 ? number : a.$1.compareTo(b.$1);
+            }
+            if ((a.$3 != null) != (b.$3 != null)) return a.$3 != null ? -1 : 1;
+            return a.$2.compareTo(b.$2);
+          });
+        final ids = ordered.map((label) => label.$1).toList();
+        final names = ordered
+            .map((label) => label.$3 == null ? label.$2 : '簇${label.$3}')
+            .toSet();
+        final numbers = ordered.map((label) => label.$3).whereType<int>();
+        return [
+          (
+            'hdbscan::group::${jsonEncode(ids)}',
+            names.join('、'),
+            numbers.firstOrNull,
+          ),
+        ];
+      }
+      return labels.values.toList();
+    }
     final names = _splitGroupSpeciesNames(rawSpecies).toSet().toList()..sort();
     if (!names.any(_isRejectedSpeciesName)) {
       final label = names.join('、');
@@ -3140,6 +3284,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             item.fileType,
             _primarySpeciesAfterConfidenceFilter(item),
             _isItemValidated(item),
+            _rejectionGroupingSignature(item),
             item.error ?? '',
           ].join('\u001d'),
         )
@@ -3455,6 +3600,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _deferRegroupForItems(Iterable<DetectionItem> items) {
     if (!widget.autoGroup) return;
+    if (_bucketCache.any((bucket) => bucket.key.contains('hdbscan::'))) return;
     final targetPaths = items.map((item) => item.path).toSet();
     if (targetPaths.isEmpty) return;
     _currentBuckets();
@@ -3650,10 +3796,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   String _groupSpeciesLabel(_ValidationMediaGroup group) {
     final signature = _groupSignature(group);
-    return _groupSpeciesLabelCache.putIfAbsent(
-      signature,
-      () => _primarySpeciesForGroup(group),
-    );
+    return _groupSpeciesLabelCache.putIfAbsent(signature, () {
+      final raw = _primarySpeciesForGroup(group);
+      return widget.autoGroup && _usesDinoClusterGrouping(group)
+          ? _clusterBucketLabels(group, raw).single.$2
+          : raw;
+    });
   }
 
   String _topVotedSpecies(Map<String, _SpeciesVote> votes) {
@@ -3821,6 +3969,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           registryId: box.registryId,
           predictedSpecies: box.predictedSpecies,
           feedbackStatus: box.feedbackStatus,
+          rejectionCluster: box.rejectionCluster,
         );
       }
       return null;
@@ -5834,6 +5983,7 @@ class _EmptyValidationInputState extends StatelessWidget {
 bool _isRejectedSpeciesName(String species) {
   final name = species.trim();
   return name.toLowerCase() == 'unknown' ||
+      RegExp(r'^簇\d+$').hasMatch(name) ||
       name.contains('拒识') ||
       name.startsWith('未知物种 #') ||
       name.startsWith('新模式候选 #');
@@ -5865,11 +6015,15 @@ class _SpeciesBucket {
   final List<DetectionItem> items;
   final List<_ValidationMediaGroup> groups;
   final int? clusterNumber;
-  String? get clusterId => clusterNumber == null ? null : key.split('::').last;
+  String? get clusterId =>
+      clusterNumber == null || key.contains('hdbscan::group::')
+      ? null
+      : key.split('::').last;
 
   late final int _sortPriority = _priority();
 
   int _priority() {
+    if (isValidated) return 6;
     final names = species
         .split(RegExp('[,，、]'))
         .map((name) => name.trim())
@@ -5878,24 +6032,45 @@ class _SpeciesBucket {
               name.isNotEmpty && name != '空' && name.toLowerCase() != 'empty',
         )
         .toList();
-    if (names.isEmpty) return 4;
-    if (isValidated) return 0;
+    if (names.isEmpty) return 5;
     final rejected = names.any(_isRejectedSpeciesName);
     final known = names.any(
       (name) =>
           !_isRejectedSpeciesName(name) &&
           !const {'未检测', '错误', '需人工校验'}.contains(name),
     );
-    if (known) return rejected ? 2 : 1;
-    return 3;
+    if (known) return rejected ? 1 : 0;
+    if (clusterNumber != null) return 2;
+    if (species.contains('拒识（未成簇）') || species.contains('拒识（噪声/证据不足）')) {
+      return 3;
+    }
+    return 4;
   }
 
   static int compare(_SpeciesBucket a, _SpeciesBucket b) {
     final priority = a._sortPriority.compareTo(b._sortPriority);
     if (priority != 0) return priority;
+    final pattern = RegExp(r'簇(?:\s*#)?(\d+)');
+    final aNumbers = pattern
+        .allMatches(a.species)
+        .map((m) => int.parse(m[1]!))
+        .toList();
+    final bNumbers = pattern
+        .allMatches(b.species)
+        .map((m) => int.parse(m[1]!))
+        .toList();
+    if (aNumbers.isNotEmpty && bNumbers.isNotEmpty && a._sortPriority == 2) {
+      for (var i = 0; i < aNumbers.length && i < bNumbers.length; i++) {
+        final number = aNumbers[i].compareTo(bNumbers[i]);
+        if (number != 0) return number;
+      }
+      final length = aNumbers.length.compareTo(bNumbers.length);
+      if (length != 0) return length;
+    }
     if (a.clusterNumber != null &&
         b.clusterNumber != null &&
-        a.species.split('拒识簇 #').first == b.species.split('拒识簇 #').first) {
+        a.species.split(RegExp('拒识簇 #|拒识（簇')).first ==
+            b.species.split(RegExp('拒识簇 #|拒识（簇')).first) {
       final cluster = a.clusterNumber!.compareTo(b.clusterNumber!);
       if (cluster != 0) return cluster;
     }

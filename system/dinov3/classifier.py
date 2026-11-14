@@ -34,11 +34,23 @@ class DinoV3Prediction:
     within_margin: float | None = None
     whitened_norm: float | None = None
     track_id: str | None = None
+    gate_mode: str = "box_and_sequence"
+    inference_recipe: str = "production_dual"
+    frame_classification_score: float | None = None
+    frame_classification_margin: float | None = None
+
+    @property
+    def confidence_kind(self):
+        return ("sigmoid_frame_class_margin" if self.gate_mode == "sequence"
+                and self.frame_classification_margin is not None else "sigmoid_gate_margin")
 
     @property
     def confidence(self):
-        # Presentation only: a bounded score, never a calibrated probability.
-        delta = max(-700.0, min(700.0, self.known_score - self.threshold))
+        # The experimental gate is shared by an event. Display each frame's
+        # support for the final candidate instead; this is not a probability.
+        margin = (self.frame_classification_margin if self.confidence_kind == "sigmoid_frame_class_margin"
+                  else self.known_score - self.threshold)
+        delta = max(-700.0, min(700.0, margin))
         return 1.0 / (1.0 + math.exp(-delta))
 
     @property
@@ -63,12 +75,14 @@ class DinoV3Prediction:
         seq_thresh = self.sequence_threshold if self.sequence_threshold is not None else self.threshold
         seq_acc = self.sequence_accepted if self.sequence_accepted is not None else self.accepted
         raw_ridge = self.raw_ridge_score if self.raw_ridge_score is not None else self.ridge_score
+        if self.gate_mode == "sequence":
+            box_score = box_thresh = box_acc = None
         return dict(name=self.best_known_species, conf=self.confidence,
                     raw_cls_conf=self.confidence, raw_det_conf=detection_confidence,
                     accepted=self.accepted, known_score=self.known_score,
                     threshold=self.threshold, score_threshold=self.threshold,
                     box_known_score=box_score, box_threshold=box_thresh,
-                    box_accepted=box_acc, box_confidence=self.box_confidence,
+                    box_accepted=box_acc, box_confidence=None if self.gate_mode == "sequence" else self.box_confidence,
                     sequence_known_score=seq_score, sequence_threshold=seq_thresh,
                     sequence_accepted=seq_acc, sequence_confidence=self.sequence_confidence,
                     best_known_species=self.best_known_species,
@@ -77,7 +91,11 @@ class DinoV3Prediction:
                     ridge_margin=self.ridge_margin, fused_ridge_margin=self.fused_ridge_margin,
                     within_score=self.within_score, within_margin=self.within_margin,
                     whitened_norm=self.whitened_norm, track_id=self.track_id,
-                    source=self.source, confidence_kind="sigmoid_gate_margin",
+                    source=self.source, gate_mode=self.gate_mode, inference_recipe=self.inference_recipe,
+                    classification_score=self.ridge_score, confidence_kind=self.confidence_kind,
+                    frame_classification_score=self.frame_classification_score,
+                    frame_classification_margin=self.frame_classification_margin,
+                    frame_classification_confidence=self.confidence if self.confidence_kind == "sigmoid_frame_class_margin" else None,
                     registry_id=None, registration_status=None, assistive_match=False)
 
 
@@ -102,6 +120,8 @@ class DinoV3Classifier:
     @property
     def rejection_metadata(self):
         return dict(mode="dinov3_ridge_within", gate="top75_radial08",
+                    inference_recipe=getattr(self.model, "inference_recipe", "production_dual"),
+                    gate_mode="sequence" if getattr(self.model, "inference_recipe", None) == "experiment_full" else "box_and_sequence",
                     sequence_aggregation="complete_sequence", calibrated=self.model.calibration is not None)
 
     def classify_features(self, features, *, camera_ids=None, sequence_ids=None,
@@ -130,6 +150,7 @@ class DinoV3Classifier:
         within_margins = result.get("within_margins")
         whitened_norms = result.get("whitened_norms")
         resolved_tracks = result.get("resolved_tracks")
+        frame_scores = result.get("classification_scores")
         output = []
         for i, species in enumerate(result["predictions"]):
             ranking = np.argsort(result["fused_scores"][i])[::-1]
@@ -143,6 +164,12 @@ class DinoV3Classifier:
                 for j in ranking[:5]
             )
             winner = int(np.flatnonzero(classes == species)[0])
+            frame_score = frame_margin = None
+            if result.get("gate_mode") == "sequence" and frame_scores is not None:
+                frame_row = np.asarray(frame_scores[i], dtype=np.float64)
+                frame_score = float(frame_row[winner])
+                other = np.delete(frame_row, winner)
+                frame_margin = frame_score - float(other.max()) if len(other) else 0.0
             raw_row = result["ridge_scores"][i]
             fused_row = result["fused_scores"][i]
             if len(classes) >= 2:
@@ -161,9 +188,9 @@ class DinoV3Classifier:
                 threshold=float(result["threshold"]), embedding=embedding, candidates=candidates,
                 ridge_score=float(result["fused_scores"][i, winner]),
                 within_score=float(result["within_scores"][i, winner]),
-                box_known_score=float(box_scores[i]),
-                box_threshold=box_thresh,
-                box_accepted=bool(box_acc[i]),
+                box_known_score=None if result.get("gate_mode") == "sequence" else float(box_scores[i]),
+                box_threshold=None if result.get("gate_mode") == "sequence" else box_thresh,
+                box_accepted=None if result.get("gate_mode") == "sequence" else bool(box_acc[i]),
                 sequence_known_score=float(seq_scores[i]),
                 sequence_threshold=seq_thresh,
                 sequence_accepted=bool(seq_acc[i]),
@@ -172,7 +199,10 @@ class DinoV3Classifier:
                 fused_ridge_margin=fused_r_margin,
                 within_margin=float(within_margins[i]) if within_margins is not None else None,
                 whitened_norm=float(whitened_norms[i]) if whitened_norms is not None else None,
-                track_id=str(resolved_tracks[i]) if resolved_tracks is not None else str(sequences[i])))
+                track_id=str(resolved_tracks[i]) if resolved_tracks is not None else str(sequences[i]),
+                gate_mode=result.get("gate_mode", "box_and_sequence"),
+                inference_recipe=getattr(self.model, "inference_recipe", "production_dual"),
+                frame_classification_score=frame_score, frame_classification_margin=frame_margin))
         return output
 
     def classify_crops(self, crops, *, array_color="rgb", **kwargs):

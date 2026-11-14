@@ -11,7 +11,8 @@ from contextlib import nullcontext
 import numpy as np
 
 from .encoder import PREPROCESSING, sha256
-from .runtime import ARCHITECTURE, HEAD_TYPE
+from .runtime import ARCHITECTURE
+from .experiment import head_type
 
 
 def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=None,
@@ -59,7 +60,8 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
         # Verify the archive before making it discoverable by the software.
         type(model).load(checkpoint)
         payload = dict(schema_version=1, backend="dinov3", architecture=ARCHITECTURE,
-                       head_type=HEAD_TYPE, feature_dim=768, preprocessing=PREPROCESSING,
+                       head_type=head_type(model.inference_recipe), inference_recipe=model.inference_recipe,
+                       feature_dim=768, preprocessing=PREPROCESSING,
                        event_aggregation="complete_sequence", requires_detector=True,
                        supports_video_fast=False, supports_video_all=False,
                        display_name=display_name, checkpoint=f"{generation.name}/{checkpoint.name}",
@@ -67,7 +69,7 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
                        encoder_weights=weights_relative, encoder_code=code_relative)
         if calibration_data is not None:
             fields = {"features", "labels", "cameras", "sequences"}
-            optional = {"sites", "contents", "adapted_features", "datetimes"}
+            optional = {"sites", "contents", "source_contents", "adapted_features", "datetimes"}
             if not fields <= calibration_data.keys():
                 raise ValueError("Complete calibration inputs are required")
             data = {k: np.asarray(calibration_data[k]) for k in fields | optional if k in calibration_data}

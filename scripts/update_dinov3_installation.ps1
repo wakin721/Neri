@@ -470,6 +470,19 @@ if (-not (Test-Path -LiteralPath $encoderLicense -PathType Leaf) -or -not (Test-
 
 Write-Host "[VERIFY] Manifest assets and SHA-256 checksums verified successfully." -ForegroundColor Green
 
+# Full C is required for automatic feedback recalibration in both recipes.
+$calibrationSrc = $null
+if ($manifestObj.ContainsKey("calibration") -or $manifestObj.ContainsKey("calibration_sha256")) {
+    if (-not $manifestObj.ContainsKey("calibration") -or -not $manifestObj.ContainsKey("calibration_sha256")) {
+        throw "The calibration path and SHA-256 must both be present."
+    }
+    $calibrationSrc = Join-Path $manifestDir ($manifestObj["calibration"].Replace('/', '\'))
+    Assert-PathWithinRoots -Path $calibrationSrc -AllowedRoots $allowedSourceRoots -Label "Calibration Asset" | Out-Null
+    if ((Get-FileSha256 -Path $calibrationSrc) -ne $manifestObj["calibration_sha256"].ToLowerInvariant()) {
+        throw "Calibration SHA-256 mismatch."
+    }
+}
+
 # ==============================================================================
 # Compile Deployment Item Inventory
 # ==============================================================================
@@ -552,6 +565,10 @@ if (Test-Path -LiteralPath $exportReportFile -PathType Leaf) {
 # Checkpoint file
 $checkpointRel = "res\model\cls\user\" + $manifestObj["checkpoint"].Replace('/', '\')
 Register-DeploymentFile -SourceFile $checkpointSrc -RelativePath $checkpointRel
+if ($calibrationSrc) {
+    $calibrationRel = "res\model\cls\user\" + $manifestObj["calibration"].Replace('/', '\')
+    Register-DeploymentFile -SourceFile $calibrationSrc -RelativePath $calibrationRel
+}
 
 # Encoder weights file
 $encoderWeightsRel = "res\model\cls\user\" + $manifestObj["encoder_weights"].Replace('/', '\')
@@ -572,11 +589,14 @@ foreach ($file in $encoderFiles) {
 # 4. Training/Export Scripts & Documentation
 $scriptsToCopy = @(
     "scripts\export_dinov3_experiment.py",
+    "scripts\export_local_dinov3_experiment.py",
+    "scripts\verify_dinov3_experiment_installation.py",
     "scripts\train_dinov3_ridge_within.py",
     "scripts\train_reviewed_dinov3.py",
     "scripts\verify_dinov3_installation.py",
     "scripts\verify_litert_privacy.py",
     "docs\dinov3-ridge-within.md",
+    "docs\dinov3-experiment-integration-20261114.md",
     "docs\dinov3-reviewed-training-20261107.md",
     "docs\dinov3-known-rejection-controls-20261107.md",
     "docs\upload-privacy-blurring.md",
