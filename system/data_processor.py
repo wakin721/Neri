@@ -3,6 +3,8 @@
 import os
 import logging
 import json
+import math
+from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
 import pandas as pd
@@ -10,8 +12,27 @@ from collections import Counter
 
 from system.config import INDEPENDENT_DETECTION_THRESHOLD
 from system.utils import resource_path
+from system.confidence import is_dinov3_decision, dinov3_final_species
 
 logger = logging.getLogger(__name__)
+
+
+def _numeric_confidence(value: object) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _confidence_config_path() -> Path:
+    return Path(__file__).resolve().parents[1] / 'temp' / 'conf.json'
+
+
+def _human_box(box: Dict) -> bool:
+    return box.get('feedback_status') in {'confirmed', 'image_label'}
 
 
 def select_classification_candidate(
@@ -31,16 +52,69 @@ def select_classification_candidate(
         name = str(candidate.get("name") or "").strip()
         if not name:
             continue
-        try:
-            confidence = float(
-                candidate.get("conf", candidate.get("confidence", 0))
-            )
-        except (TypeError, ValueError):
+        confidence = _numeric_confidence(candidate.get("conf", candidate.get("confidence", 0)))
+        if confidence is None:
             continue
         threshold = float(confidence_settings.get(name, global_threshold))
         if confidence >= threshold:
             return name, confidence
     return None
+
+
+def _clean_db_text(value: object) -> str:
+    """Normalize SQL NULL / pandas NaN values into empty strings."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _split_species_names(names_str: object) -> list[str]:
+    """Split manual species strings supporting both English and Chinese commas."""
+    text = str(names_str or "").strip()
+    if not text or text == "空":
+        return []
+    return [
+        part.strip()
+        for part in text.replace("，", ",").split(",")
+        if part.strip() and part.strip() != "空"
+    ]
+
+
+def _resolve_confidence_settings(
+    confidence_settings: Optional[Dict[str, float]],
+) -> Dict[str, float]:
+    """Merge optional legacy temp/conf.json defaults underneath explicit thresholds."""
+    requested = dict(confidence_settings or {})
+    resolved: Dict[str, float] = {}
+    conf_path = _confidence_config_path()
+    if os.path.exists(conf_path):
+        try:
+            with open(conf_path, "r", encoding="utf-8") as f:
+                file_conf = json.load(f)
+                if isinstance(file_conf, dict):
+                    resolved.update(file_conf)
+                    logger.info(f"导出数据时已加载并应用阈值配置文件: {conf_path}")
+        except Exception as e:
+            logger.error(f"加载阈值配置文件失败: {e}，将继续使用默认设置", exc_info=True)
+    resolved.update(requested)
+    return resolved
+
+
+def _format_working_days_column(df: pd.DataFrame, *, blank_value: object) -> None:
+    """Keep integer working days as integers even when some rows lack dates."""
+    if "工作天数" not in df.columns:
+        return
+    formatted = []
+    for value in df["工作天数"].tolist():
+        if value is None or pd.isna(value) or (isinstance(value, str) and not value.strip()):
+            formatted.append(blank_value)
+            continue
+        try:
+            numeric = float(value)
+            formatted.append(int(numeric) if numeric.is_integer() else value)
+        except (TypeError, ValueError):
+            formatted.append(value)
+    df["工作天数"] = pd.Series(formatted, index=df.index, dtype=object)
 
 
 def select_image_detections(
@@ -49,31 +123,61 @@ def select_image_detections(
 ) -> tuple[Counter, list[float]]:
     """Use final boxes/candidates; only pre-box-format data may use detector arrays."""
     counts = Counter()
+    by_frame: dict[object, Counter] = {}
     confidences = []
     global_threshold = confidence_settings.get('global', 0.25)
     boxes = info.get('检测框') or []
+
+    def record_box_species(box: Dict, species_name: str, confidence_value: Optional[float]) -> None:
+        frame_index = box.get('frame_index')
+        if frame_index is not None:
+            by_frame.setdefault(frame_index, Counter())[species_name] += 1
+        else:
+            counts[species_name] += 1
+        if confidence_value is not None:
+            confidences.append(confidence_value)
+
     if boxes:
         for box in boxes:
-            species = box.get('物种')
+            if not isinstance(box, dict):
+                continue
+            species = box.get('物种') or box.get('species')
+            if _human_box(box):
+                species = str(species or box.get('species') or '').strip()
+                if species and species != '空':
+                    record_box_species(box, species, None)
+                continue
+            if is_dinov3_decision(box) or info.get('sequence_completed') is True:
+                species = dinov3_final_species(box)
+                if species and species != '空':
+                    # Rejected objects have no species-classification probability.
+                    confidence_value = None
+                    if species not in {'Unknown', '拒识/Unknown'}:
+                        confidence_value = _numeric_confidence(box.get('置信度', box.get('confidence')))
+                    record_box_species(box, species, confidence_value)
+                continue
             if species == '拒识/Unknown':
                 # Rejection is a final decision, with no numeric confidence.
-                counts[species] += 1
+                record_box_species(box, species, None)
                 continue
-            if box.get('候选项'):
-                chosen = select_classification_candidate(box['候选项'], confidence_settings)
+            candidates = box.get('候选项') or box.get('candidates')
+            if candidates:
+                chosen = select_classification_candidate(candidates, confidence_settings)
                 if chosen is None:
                     continue
                 species, confidence = chosen
             else:
                 if not species or species == '空':
                     continue
-                raw_confidence = box.get('置信度', 0)
-                confidence = float(raw_confidence) if raw_confidence is not None else None
+                raw_confidence = box.get('置信度', box.get('confidence', 0))
+                confidence = _numeric_confidence(raw_confidence)
                 if confidence is not None and confidence < confidence_settings.get(species, global_threshold):
                     continue
-            counts[species] += 1
-            if confidence is not None:
-                confidences.append(confidence)
+            record_box_species(box, species, confidence)
+
+        for frame_counts in by_frame.values():
+            for species_name, frame_count in frame_counts.items():
+                counts[species_name] = max(counts[species_name], frame_count)
     elif info.get('分类候选项'):
         # Classifier-only jobs have candidates but no detection boxes.
         chosen = select_classification_candidate(info['分类候选项'], confidence_settings)
@@ -90,6 +194,57 @@ def select_image_detections(
                 counts[species] += 1
                 confidences.append(confidence)
     return counts, confidences
+
+
+def select_track_detections(
+    info: Dict, confidence_settings: Dict[str, float], min_frame_ratio: float = 0.0,
+) -> tuple[Counter, list[float]]:
+    """Count winning tracks and only the confidences supporting each winner."""
+    counts = Counter()
+    confidences = []
+    tracks = info.get('tracks')
+    if not isinstance(tracks, dict):
+        return counts, confidences
+    total_frames = _numeric_confidence(info.get('total_frames_processed')) or 1
+    required_frames = max(1, total_frames) * min_frame_ratio
+    for points in tracks.values():
+        if not isinstance(points, list) or len(points) < required_frames:
+            continue
+        votes = []
+        for point in points:
+            if not isinstance(point, dict):
+                continue
+            species = str(point.get('species') or 'Unknown').strip()
+            confidence = _numeric_confidence(point.get('confidence'))
+            threshold = confidence_settings.get(species, confidence_settings.get('global', 0.25))
+            if species and species != '空' and confidence is not None and confidence >= threshold:
+                votes.append((species, confidence))
+        if votes:
+            winner = Counter(species for species, _ in votes).most_common(1)[0][0]
+            counts[winner] += 1
+            confidences.extend(confidence for species, confidence in votes if species == winner)
+    return Counter(dict(sorted(counts.items()))), confidences
+
+
+def _only_human_detections(info: Dict, confidence_settings: Dict[str, float]) -> bool:
+    selected = []
+    for box in info.get('检测框') or []:
+        if not isinstance(box, dict):
+            continue
+        counts, _ = select_image_detections(
+            {'检测框': [box], 'sequence_completed': info.get('sequence_completed')}, confidence_settings,
+        )
+        if counts:
+            selected.append(_human_box(box))
+    return bool(selected) and all(selected)
+
+
+def _has_detection_data(info: Dict) -> bool:
+    if info.get('检测状态') == '未检测':
+        return False
+    return info.get('检测状态') in {'已检测', '人工校验'} or any(
+        key in info for key in ('检测框', 'tracks', '分类候选项', 'all_classes', 'all_confidences')
+    ) or info.get('detect_results') is not None
 
 
 class DataProcessor:
@@ -122,6 +277,7 @@ class DataProcessor:
     def process_independent_detection(image_info_list: List[Dict], confidence_settings: Dict[str, float],
                                       min_frame_ratio: float = 0.0) -> List[Dict]:
         """处理独立探测首只标记 """
+        confidence_settings = _resolve_confidence_settings(confidence_settings)
         # 按拍摄日期排序
         sorted_images = sorted(
             [img for img in image_info_list if img.get('拍摄日期对象')],
@@ -132,51 +288,32 @@ class DataProcessor:
 
         for img_info in sorted_images:
             species_names = []
+            annotation = img_info.get('image_annotation')
+            has_human_annotation = isinstance(annotation, dict) and annotation.get('source') == 'human'
 
             # === 修改：增加视频tracks处理逻辑 ===
-            if img_info.get('最低置信度') == '人工校验':
+            if img_info.get('最低置信度') == '人工校验' or has_human_annotation:
                 # 对于人工校验过的数据，直接使用已有的物种名称
-                names_str = img_info.get('物种名称', '')
-                if names_str and names_str != '空':
-                    species_names = [s.strip() for s in names_str.split(',')]
+                names = annotation['species'] if has_human_annotation else img_info.get('物种名称', '')
+                species_names = _split_species_names(names)
 
             elif 'tracks' in img_info:
-                # 视频文件处理
-                total_frames = img_info.get('total_frames_processed', 1)
-                tracks = img_info.get('tracks', {})
-                threshold = total_frames * min_frame_ratio
-
-                track_species_list = []
-                for t_id, points in tracks.items():
-                    if len(points) < threshold: continue
-
-                    # 收集该轨迹的有效投票
-                    votes = []
-                    for p in points:
-                        sp = p.get('species', 'Unknown')
-                        conf = p.get('confidence', 0)
-                        thresh = confidence_settings.get(sp, confidence_settings.get("global", 0.25))
-                        if conf >= thresh:
-                            votes.append(sp)
-
-                    if votes:
-                        # 选出该轨迹的最终物种
-                        most_common = Counter(votes).most_common(1)[0][0]
-                        track_species_list.append(most_common)
-
-                species_names = list(set(track_species_list)) if track_species_list else ['空']
+                counts, _ = select_track_detections(img_info, confidence_settings, min_frame_ratio)
+                species_names = list(counts)
 
             else:
                 final_species_counts, _ = select_image_detections(img_info, confidence_settings)
-                species_names = [
-                    name for name in final_species_counts
-                    if name not in {'空', 'Unknown', '拒识/Unknown'}
-                ]
-            # --- 过滤逻辑结束 ---
+                species_names = list(final_species_counts)
+
+            # Apply the same event exclusions to manual, tracked and boxed results.
+            species_names = [
+                name for name in species_names
+                if name not in {'', '空', 'Unknown', '拒识/Unknown'}
+            ]
 
             current_time = img_info.get('拍摄日期对象')
 
-            if not current_time or not species_names or species_names == [''] or species_names == ['空']:
+            if not current_time or not species_names:
                 img_info['独立探测首只'] = ''
                 continue
 
@@ -208,21 +345,7 @@ class DataProcessor:
             logger.warning("没有数据可导出")
             return False
 
-        requested_confidence_settings = dict(confidence_settings or {})
-        confidence_settings = {}
-        conf_path = os.path.join("temp", "conf.json")
-        if os.path.exists(conf_path):
-            try:
-                with open(conf_path, 'r', encoding='utf-8') as f:
-                    file_conf = json.load(f)
-                    if isinstance(file_conf, dict):
-                        confidence_settings.update(file_conf)
-                        logger.info(f"导出数据时已加载并应用阈值配置文件: {conf_path}")
-            except Exception as e:
-                logger.error(f"加载阈值配置文件失败: {e}，将继续使用默认设置", exc_info=True)
-        # Values selected in the current UI are newer and must override the
-        # optional legacy conf.json defaults.
-        confidence_settings.update(requested_confidence_settings)
+        confidence_settings = _resolve_confidence_settings(confidence_settings)
 
         # --- 加载生物物种名录 ---
         species_info_map = {}
@@ -232,7 +355,6 @@ class DataProcessor:
             logger.info(f"正在从 {species_db_path} 加载物种名录...")
             try:
                 import sqlite3
-                import pandas as pd
                 conn = sqlite3.connect(species_db_path)
 
                 # 直接通过 SQL 查询所有需要的列
@@ -245,15 +367,15 @@ class DataProcessor:
                     if pd.notna(chinese_name) and str(chinese_name).strip():
                         cleaned_name = str(chinese_name).strip()
                         species_info_map[cleaned_name] = {
-                            '学名': str(row.get('学名', '')).strip(),
-                            '纲': str(row.get('纲', '')).strip(),
-                            '目名': str(row.get('目中文名', '')).strip(),
-                            '目拉丁名': str(row.get('目拉丁名', '')).strip(),
-                            '科名': str(row.get('科中文名', '')).strip(),
-                            '科拉丁名': str(row.get('科拉丁名', '')).strip(),
-                            '属名': str(row.get('属中文名', '')).strip(),
-                            '属拉丁名': str(row.get('属拉丁名', '')).strip(),
-                            '物种类型': str(row.get('物种类型', '')).strip()
+                            '学名': _clean_db_text(row.get('学名', '')),
+                            '纲': _clean_db_text(row.get('纲', '')),
+                            '目名': _clean_db_text(row.get('目中文名', '')),
+                            '目拉丁名': _clean_db_text(row.get('目拉丁名', '')),
+                            '科名': _clean_db_text(row.get('科中文名', '')),
+                            '科拉丁名': _clean_db_text(row.get('科拉丁名', '')),
+                            '属名': _clean_db_text(row.get('属中文名', '')),
+                            '属拉丁名': _clean_db_text(row.get('属拉丁名', '')),
+                            '物种类型': _clean_db_text(row.get('物种类型', ''))
                         }
 
                 if species_info_map:
@@ -281,55 +403,33 @@ class DataProcessor:
                     '属拉丁名'] = [''] * 7
 
                 species_names_str = info.get('物种名称', '')
+                annotation = info.get('image_annotation')
+                is_manual = info.get('最低置信度') == '人工校验' or (
+                    isinstance(annotation, dict) and annotation.get('source') == 'human'
+                )
+                detected = is_manual or _has_detection_data(info)
+                info['检测状态'] = '人工校验' if is_manual else '已检测' if detected else '未检测'
+                if '格式' in info:
+                    info['格式'] = str(info['格式'] or '').lstrip('.').upper()
 
-                if info.get('最低置信度') == '人工校验':
-                    if species_names_str and species_names_str != '空':
-                        species_list = [s.strip() for s in species_names_str.split(',')]
-                    else:
-                        species_list = []
-
-                elif 'tracks' in info:
-                    # === 视频文件处理：投票与过滤 ===
-                    total_frames = info.get('total_frames_processed', 1)
-                    tracks = info.get('tracks', {})
-                    threshold = total_frames * min_frame_ratio
-
-                    final_species_counts = Counter()
-                    valid_confidences = []
-
-                    for t_id, points in tracks.items():
-                        # 1. 帧数过滤
-                        if len(points) < threshold: continue
-
-                        # 2. 收集轨迹内的有效投票
-                        votes = []
-                        for p in points:
-                            sp = p.get('species', 'Unknown')
-                            conf = p.get('confidence', 0)
-                            thresh = confidence_settings.get(sp, confidence_settings.get("global", 0.25))
-
-                            if conf >= thresh:
-                                votes.append(sp)
-                                valid_confidences.append(conf)
-
-                        # 3. 轨迹投票
-                        if votes:
-                            most_common = Counter(votes).most_common(1)[0][0]
-                            final_species_counts[most_common] += 1
-
-                    species_list = sorted(list(final_species_counts.keys()))
-                    if not species_list:
-                        info['物种名称'], info['物种数量'], info['最低置信度'], info['物种类型'] = '空', '空', '', ''
-                    else:
-                        info['物种名称'] = ','.join(species_list)
-                        info['物种数量'] = ','.join([str(final_species_counts[s]) for s in species_list])
-                        info['最低置信度'] = f"{min(valid_confidences):.3f}" if valid_confidences else ''
-
-
+                if not detected:
+                    species_list = []
+                    info['物种名称'], info['物种数量'], info['最低置信度'] = '', '', ''
+                elif is_manual:
+                    if isinstance(annotation, dict) and annotation.get('source') == 'human':
+                        species_names_str = info['物种名称'] = annotation['species']
+                        info['物种数量'] = annotation['count']
+                    info['最低置信度'] = '人工校验'
+                    species_list = _split_species_names(species_names_str)
                 else:
-                    final_species_counts, valid_confidences = select_image_detections(
-                        info, confidence_settings,
-                    )
+                    if 'tracks' in info:
+                        final_species_counts, valid_confidences = select_track_detections(
+                            info, confidence_settings, min_frame_ratio,
+                        )
+                    else:
+                        final_species_counts, valid_confidences = select_image_detections(
+                            info, confidence_settings,
+                        )
 
                     # 更新 info 中的统计结果
                     species_list = list(final_species_counts.keys())
@@ -339,7 +439,12 @@ class DataProcessor:
                     else:
                         info['物种名称'] = ','.join(species_list)
                         info['物种数量'] = ','.join(map(str, final_species_counts.values()))
-                        info['最低置信度'] = f"{min(valid_confidences):.3f}" if valid_confidences else ''
+                        if valid_confidences:
+                            info['最低置信度'] = f"{min(valid_confidences):.3f}"
+                        elif _only_human_detections(info, confidence_settings):
+                            info['最低置信度'] = '人工校验'
+                        else:
+                            info['最低置信度'] = ''
 
                 # --- 开始填充分类信息 ---
                 if species_list:
@@ -350,6 +455,9 @@ class DataProcessor:
                     for species in species_list:
                         if species in personnel_names:
                             type_list.append("人员")
+                            for key in sci_info_lists.keys():
+                                if key != '纲':
+                                    sci_info_lists[key].append('')
                         elif species in species_info_map:  # 核心匹配逻辑
                             s_info = species_info_map[species]
                             p_type = s_info.get('物种类型', '')
@@ -368,12 +476,17 @@ class DataProcessor:
                                 if key != '纲': sci_info_lists[key].append(s_info.get(key, ''))
                         else:
                             # 如果物种不在名录中，记录警告并填充空值
-                            if species not in personnel_names:
+                            if species not in {'Unknown', '拒识/Unknown'}:
                                 logger.warning(f"物种名称 '{species}' 无法在名录中找到匹配项。")
                             for key in sci_info_lists.keys():
                                 if key != '纲': sci_info_lists[key].append('')
 
-                    info['物种类型'] = ','.join(sorted(list(set(type_list))))
+                    existing_type = str(info.get('物种类型') or '').strip()
+                    resolved_type = ','.join(sorted(list(set(type_list))))
+                    if is_manual and existing_type:
+                        info['物种类型'] = existing_type
+                    else:
+                        info['物种类型'] = resolved_type or existing_type
                     info['学名'] = ','.join(sci_info_lists['学名'])
                     info['目名'] = ','.join(sci_info_lists['目名'])
                     info['目拉丁名'] = ','.join(sci_info_lists['目拉丁名'])
@@ -388,7 +501,7 @@ class DataProcessor:
             df = pd.DataFrame(image_info_list)
 
             # 默认的完整列顺序
-            default_columns = ['文件名', '格式', '拍摄日期', '拍摄时间', '工作天数',
+            default_columns = ['文件名', '相对路径', '格式', '检测状态', '拍摄日期', '拍摄时间', '工作天数',
                                '物种名称', '学名',
                                '目名', '目拉丁名', '科名', '科拉丁名', '属名', '属拉丁名',
                                '物种类型', '物种数量', '最低置信度', '独立探测首只', '备注']
@@ -406,8 +519,10 @@ class DataProcessor:
             df = df[columns]
 
             if file_format.lower() == 'excel':
+                _format_working_days_column(df, blank_value=None)
                 df.to_excel(output_path, sheet_name="物种检测信息", index=False)
             elif file_format.lower() == 'csv':
+                _format_working_days_column(df, blank_value='')
                 df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
             logger.info(f"文件已成功导出到: {output_path}")

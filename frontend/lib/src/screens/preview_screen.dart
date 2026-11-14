@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/job.dart';
+import '../utils/dino_rejection.dart';
+import '../widgets/dino_rejection_scores.dart';
 import '../utils/detection_species.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/detection_media_viewer.dart';
 import '../widgets/selectable_list_card.dart';
+import '../widgets/sequence_pending_notice.dart';
 import '../widgets/workspace_split_metrics.dart';
 
 const previewAllSpeciesLabel = '全局设置';
@@ -176,11 +179,12 @@ class _PreviewScreenState extends State<PreviewScreen> {
   }
 
   Widget _buildPreviewDetail(BuildContext context, DetectionItem item) {
-    final speciesOptions = detectionSpeciesOptions(
-      item,
-      globalOption: previewAllSpeciesLabel,
-    );
-    final filterApplies = speciesOptions.contains(widget.selectedSpeciesFilter);
+    final dino = isDinoItem(item);
+    final speciesOptions = dino
+        ? const <String>[previewAllSpeciesLabel]
+        : detectionSpeciesOptions(item, globalOption: previewAllSpeciesLabel);
+    final filterApplies =
+        !dino && speciesOptions.contains(widget.selectedSpeciesFilter);
     final effectiveSpecies = filterApplies
         ? widget.selectedSpeciesFilter
         : previewAllSpeciesLabel;
@@ -234,6 +238,16 @@ class _PreviewScreenState extends State<PreviewScreen> {
       return _filteredBoxes;
     final boxes = <DetectionBox>[];
     for (final box in item.detectionBoxes) {
+      if (isDinoItem(item) || isDinoDecision(box)) {
+        final finalBox = dinoFinalBox(box);
+        if (finalBox.species != '空' &&
+            finalBox.bbox.length >= 4 &&
+            (selectedSpecies == previewAllSpeciesLabel ||
+                finalBox.species == selectedSpecies)) {
+          boxes.add(finalBox);
+        }
+        continue;
+      }
       var visibleBox = box;
       if (selectedSpecies != previewAllSpeciesLabel &&
           box.species != selectedSpecies) {
@@ -378,14 +392,22 @@ class _ImageInfoCard extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      '物种: ${summary.species}  |  数量: ${summary.count}  |  类型: ${summary.type}  |  $confidenceLabel: ${summary.confidence}',
+                      textWidthBasis: TextWidthBasis.longestLine,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  SequencePendingNotice(item: item),
+                ],
               ),
             ),
           ],
@@ -401,8 +423,11 @@ class _ImageInfoCard extends StatelessWidget {
     var species = _primarySpecies(item);
     var count = item.detectionData['物种数量']?.toString() ?? '';
     var confidence = item.detectionData['最低置信度']?.toString() ?? '';
+    final imageAnnotation = item.detectionData['image_annotation'];
+    final hasManualAnnotation =
+        item.detectionData['最低置信度'] == '人工校验' || imageAnnotation is Map;
 
-    if (visibleBoxes.isNotEmpty && item.detectionData['最低置信度'] != '人工校验') {
+    if (visibleBoxes.isNotEmpty && !hasManualAnnotation) {
       final counts = _isVideo(item)
           ? _trackCountsBySpecies(visibleBoxes)
           : _boxCountsBySpecies(visibleBoxes);
@@ -419,6 +444,9 @@ class _ImageInfoCard extends StatelessWidget {
       }
     }
 
+    if (count.trim().isEmpty && imageAnnotation is Map) {
+      count = imageAnnotation['count']?.toString().trim() ?? '';
+    }
     if (count.trim().isEmpty) {
       count = species == '空'
           ? '空'
@@ -545,6 +573,34 @@ class _PreviewDetectionControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (isDinoItem(item)) {
+      return Card.outlined(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              const Text('显示结果'),
+              Switch(value: showDetections, onChanged: onShowDetectionsChanged),
+              const SizedBox(width: 10),
+              Expanded(
+                child: DinoRejectionScores(
+                  boxes: item.detectionBoxes,
+                  detectionData: item.detectionData,
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton(
+                onPressed: detecting || !_isPreviewImage(item)
+                    ? null
+                    : () => onDetectCurrentImage(item),
+                child: Text(detecting ? '检测中...' : '检测当前图像'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Card.outlined(
       margin: EdgeInsets.zero,
       child: Padding(

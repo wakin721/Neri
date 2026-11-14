@@ -13,6 +13,7 @@ from .capabilities import BudgetError, BudgetStore
 from .config import DistributionConfig
 from .service import DistributionError, DistributionService
 from .storage import OpenListModelStore, StorageError
+from .local_component import LocalComponentOverlay
 
 _RANGE_RE = re.compile(r"^bytes=\d+-\d*$")
 
@@ -76,6 +77,13 @@ class DirectRequest(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class DinoV3DirectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    manifest_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    path: str = Field(min_length=8, max_length=2048, pattern=r"^DINOv3/.+")
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class DinoV2DirectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     manifest_id: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -97,7 +105,8 @@ def create_app(
     config = config or DistributionConfig.from_env()
     service = service or DistributionService(
         config.state_dir,
-        OpenListModelStore(config),
+        LocalComponentOverlay(OpenListModelStore(config), config.dinov3_root)
+        if config.dinov3_root else OpenListModelStore(config),
         ttl_seconds=config.capability_ttl_seconds,
     )
     budget = budget or BudgetStore(
@@ -148,6 +157,21 @@ def create_app(
         consume_request_budget(request)
         return service.direct(payload.manifest_id, payload.path, payload.sha256)
 
+    @app.get("/v1/dinov3/manifest")
+    def dinov3_manifest(request: Request):
+        consume_request_budget(request)
+        return snapshot_payload(service.dinov3_manifest())
+
+    @app.post("/v1/dinov3/direct")
+    def dinov3_direct(payload: DinoV3DirectRequest, request: Request):
+        consume_request_budget(request)
+        return service.dinov3_direct(
+            payload.manifest_id,
+            payload.path,
+            payload.sha256,
+        )
+
+    # Preserve the live service's old protocol for clients which still use it.
     @app.get("/v1/dinov2/manifest")
     def dinov2_manifest(request: Request):
         consume_request_budget(request)
@@ -156,11 +180,7 @@ def create_app(
     @app.post("/v1/dinov2/direct")
     def dinov2_direct(payload: DinoV2DirectRequest, request: Request):
         consume_request_budget(request)
-        return service.dinov2_direct(
-            payload.manifest_id,
-            payload.path,
-            payload.sha256,
-        )
+        return service.dinov2_direct(payload.manifest_id, payload.path, payload.sha256)
 
     @app.get("/v1/proxy/{token}")
     def proxy(token: str, request: Request):

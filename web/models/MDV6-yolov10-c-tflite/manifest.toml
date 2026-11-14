@@ -1,0 +1,63 @@
+# MDV6-yolov10-c.tflite — MegaDetector v6 (YOLOv10-compact), TFLite/LiteRT build.
+#
+# fp16 TensorFlow Lite build of `MDV6-yolov10-c` for the sparrow-engine mobile
+# flavor (spe-mobile / sparrow-engine-mobile, LiteRT backend) on ARM edge devices.
+# Same letterbox + yolo_e2e contract as the ONNX detector, but NHWC-input (the
+# TensorFlow channels-last convention onnx2tf emits). See `MDV6-yolov10-c` for the
+# reference ONNX + full provenance. Converted via
+# scripts/onboard-model/convert_onnx_to_tflite.py (RP-42).
+
+[model]
+id = "MDV6-yolov10-c-tflite"
+format = "tflite"
+file = "MDV6-yolov10-c.tflite"
+description = "MegaDetector v6 (YOLOv10-compact) fp16 TFLite/LiteRT build (mobile). Letterbox 640 -> yolo_e2e [N, 6] detections (animal / person / car)."
+tflite_sha256 = "d66f8fc9ca1f2c1b7c7ec322d4af67964e0ecf24d5a5e2f05ae6f8b76c7d23ef"
+tflite_size_bytes = 4717072
+derived_from = "MDV6-yolov10-c"
+domain = "camera_trap"
+task = "detector"
+family = ["MegaDetector"]
+version = "v6"
+flavor = "tflite-fp16"
+status = "active"
+license = "AGPL-3.0"
+commercial_use = true
+species_direct = false
+detector_gate_class = "animal"
+geo_scope = "global"
+geo_regions = []
+reference = "MegaDetector V6 yolov10-c TFLite conversion; inherits MDV6-yolov10-c; https://raw.githubusercontent.com/microsoft/MegaDetector/main/docs/model_zoo.md"
+hosting_status = "hosted"
+rights_status = "verified"
+commercial_use_status = "allowed"
+rights_record = "model-zoo-rights-adjudication-v1#3"
+rights_holder = "Microsoft AI for Good Lab (AI4G)"
+license_source_url = "https://raw.githubusercontent.com/microsoft/MegaDetector/main/README.md"
+original_source_url = "https://raw.githubusercontent.com/microsoft/MegaDetector/main/README.md"
+conversion_permission = "verified"
+restrictions = ["copyleft", "source_offer"]
+framework_licenses = []
+
+[preprocessing]
+method = "letterbox"
+input_size = [640, 640]
+layout = "nhwc"
+normalization = "unit"
+
+[inference]
+strategy = "single"
+precision = "fp16"
+runtime = "litert"
+
+[postprocessing]
+method = "yolo_e2e"
+confidence_threshold = 0.2
+
+[labels]
+file = "labels.txt"
+format = "name_index_csv"
+
+[provenance]
+developer = "Microsoft AI for Good Lab (AI4G)"
+ai4g_relationship = "first_party"

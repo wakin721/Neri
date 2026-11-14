@@ -1,4 +1,8 @@
 import io
+import hashlib
+import json
+import sqlite3
+from contextlib import closing
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +64,8 @@ class BrokerTests(unittest.TestCase):
 
     def submission(self, **kwargs):
         values = dict(
+            device_secret='d' * 43,
+            device_id=hashlib.sha256(('d' * 43).encode()).hexdigest()[:32],
             sample_id='a' * 32,
             revision=1,
             secret=self.secret,
@@ -77,7 +83,10 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(len(response['targets']), 6)
         self.drive.upload_all(response)
         paths = list(self.drive.files)
-        self.assertTrue(all(path.startswith('/Neri_Data/Training/') for path in paths))
+        device_id = self.submission().device_id
+        self.assertTrue(all(path.startswith(f'/Neri_Data/Training/{device_id}/') for path in paths))
+        self.assertIn(f'/Neri_Data/Training/{device_id}', self.drive.folders)
+        self.assertEqual(response['device_id'], device_id)
         self.assertTrue(any('/赤狐/' in path for path in paths))
         self.assertTrue(any('/狼/' in path for path in paths))
         self.assertTrue(any(path.endswith('.txt') for path in paths))
@@ -87,6 +96,94 @@ class BrokerTests(unittest.TestCase):
                 self.submission(species=[bad])
         with self.assertRaises(ValueError):
             self.submission(species=['Fox', 'fox'])
+
+    def test_different_installations_have_separate_folders(self):
+        first = self.submission()
+        other_secret = 'e' * 43
+        other_id = hashlib.sha256(other_secret.encode()).hexdigest()[:32]
+        second = self.submission(sample_id='b' * 32, device_secret=other_secret, device_id=other_id)
+        self.drive.upload_all(self.broker.create(first, 'client1'))
+        self.drive.upload_all(self.broker.create(second, 'client2'))
+        self.assertEqual({path.split('/')[3] for path in self.drive.files}, {first.device_id, other_id})
+        with self.broker.db() as db:
+            self.assertEqual({row['device_id'] for row in db.execute('SELECT device_id FROM samples')},
+                             {first.device_id, other_id})
+
+    def test_queue_status_id_matches_actual_transport_and_broker_destinations(self):
+        from system.training.policy import AGREEMENT_VERSION
+        from system.training.queue import TrainingQueue
+        from system.training.transport import HttpTransport
+
+        transport = HttpTransport()
+        def request(url, method, body=None, headers=None):
+            if method == 'POST' and url.endswith('/v1/submissions'):
+                return self.broker.create(Submission(**json.loads(body)), 'client1')
+            if method == 'POST' and url.endswith('/complete'):
+                data = json.loads(body)
+                return self.broker.complete(url.split('/')[-2], data['revision'], data['secret'], 'client1')
+            if method == 'PUT' and url in self.drive.sessions:
+                self.assertGreater(len(body), 0, 'OneDrive rejects zero-byte resumable uploads')
+                path, _ = self.drive.sessions[url]
+                self.drive.files[path] = self.drive.files.get(path, 0) + len(body)
+                return {}
+            raise AssertionError('unexpected transport call')
+        transport._request = request
+        root = Path(self.temp.name)
+        path = root / 'photo.jpg'
+        path.write_bytes(self.photo)
+        queue = TrainingQueue(root / 'client-state', transport=transport, debounce_seconds=0,
+                              privacy_blurrer=lambda image: (image, 0))
+        try:
+            device_id = queue.status()['device_id']
+            queue.set_consent(AGREEMENT_VERSION, True)
+            self.assertTrue(queue.enqueue(path, {'物种名称': '赤狐'}))
+            self.assertTrue(queue.process_once())
+            self.assertEqual(queue.status()['stats']['uploaded'], 1)
+            self.assertEqual(len(self.drive.files), 3)
+            self.assertTrue(all(path.startswith(f'/Neri_Data/Training/{device_id}/赤狐/')
+                                for path in self.drive.files))
+        finally:
+            queue.stop()
+
+    def test_public_device_id_cannot_be_spoofed_or_used_as_a_path(self):
+        with self.assertRaises(BrokerError) as error:
+            self.broker.create(self.submission(device_secret='e' * 43), 'client2')
+        self.assertEqual(error.exception.status, 403)
+        self.assertFalse(self.drive.sessions)
+        for invalid in ('../private', '/root', 'a' * 31, 'A' * 32, 'a' * 33):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.submission(device_id=invalid)
+
+    def test_owned_sample_cannot_be_reassigned_to_another_device(self):
+        self.broker.create(self.submission(), 'client1')
+        other_secret = 'e' * 43
+        other_id = hashlib.sha256(other_secret.encode()).hexdigest()[:32]
+        with self.assertRaises(BrokerError) as error:
+            self.broker.create(self.submission(revision=2, device_secret=other_secret, device_id=other_id), 'client1')
+        self.assertEqual(error.exception.status, 403)
+
+    def test_legacy_journal_migrates_and_old_remote_paths_remain_deletable(self):
+        with TemporaryDirectory() as directory:
+            config = BrokerConfig(state_dir=Path(directory))
+            # A journal created by the old release, with no device column.
+            old_path = '/Neri_Data/Training/赤狐/legacy.jpg'
+            with closing(sqlite3.connect(Path(directory) / 'broker.sqlite3')) as db, db:
+                db.executescript('''CREATE TABLE samples(id TEXT PRIMARY KEY,owner TEXT NOT NULL,
+                    latest INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,
+                    created REAL NOT NULL,updated REAL NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
+                    CREATE TABLE revisions(id TEXT NOT NULL,rev INTEGER NOT NULL,
+                    signature TEXT NOT NULL,targets TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,
+                    created REAL NOT NULL,PRIMARY KEY(id,rev));''')
+                db.execute('INSERT INTO samples VALUES (?,?,1,1,0,0,0)',
+                           ('a' * 32, Broker.owner(self.secret)))
+                db.execute('INSERT INTO revisions VALUES (?,1,?,?,1,0)',
+                           ('a' * 32, 'legacy', json.dumps([{'path': old_path, 'size': 3}])))
+            broker = Broker(config, self.drive, clock=lambda: self.now)
+            self.drive.files[old_path] = 3
+            with broker.db() as db:
+                self.assertEqual(db.execute('SELECT device_id FROM samples').fetchone()[0], '')
+            broker.delete('a' * 32, self.secret, 'client1')
+            self.assertNotIn(old_path, self.drive.files)
 
     def test_size_maps_must_match_species(self):
         with self.assertRaises(BrokerError) as error:

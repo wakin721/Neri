@@ -32,7 +32,7 @@ class ModelInfo(BaseModel):
     size_bytes: int | None = None
     source: Literal["user", "sync"] = "user"
     kind: Literal["detect", "cls"] = "detect"
-    backend: Literal["yolo", "dinov3"] = "yolo"
+    backend: Literal["yolo", "dinov3", "litert"] = "yolo"
     architecture: str | None = None
     feature_dim: int | None = None
     requires_detector: bool = False
@@ -151,6 +151,9 @@ class SettingsResponse(BaseModel):
     species_types: dict[str, str] = Field(default_factory=dict)
     gpu_available: bool = False
     missing_yolo_dependencies: list[str] = Field(default_factory=list)
+    pytorch_available: bool = True
+    litert_available: bool = False
+    detection_ready: bool = True
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -413,6 +416,8 @@ class ValidationMarkRequest(BaseModel):
     remark: str | None = None
     classification_model_path: str | None = None
     feedback_operation_id: str | None = None
+    confidence_settings: dict[str, float] | None = None
+    min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ValidationBatchMarkRequest(BaseModel):
@@ -427,6 +432,8 @@ class ValidationBatchMarkRequest(BaseModel):
     remark: str | None = None
     classification_model_path: str | None = None
     feedback_operation_id: str | None = None
+    confidence_settings: dict[str, float] | None = None
+    min_frame_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ValidationExportRequest(BaseModel):
@@ -467,6 +474,7 @@ class JobSummary(BaseModel):
     output_dir: str | None = None
     total: int = 0
     processed: int = 0
+    failed_count: int = Field(default=0, ge=0)
     elapsed_seconds: float = 0.0
     speed: float = 0.0
     remaining_seconds: float | None = None

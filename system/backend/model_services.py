@@ -1,10 +1,9 @@
-"""Backend-facing model helpers with DINOv2 manifest support."""
+"""Backend model discovery and class lists for YOLO and DINO manifests."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from system.dinov2.checkpoint import load_checkpoint
 from system.model_sync.layout import get_model_layout
 
 from .models import ModelClassInfo, ModelInfo
@@ -45,62 +44,71 @@ def list_available_classification_models() -> list[ModelInfo]:
     return [_to_model_info(item) for item in discover_models(get_model_layout(), "cls")]
 
 
-def _read_dinov2_manifest(path: Path) -> dict[str, object] | None:
+def _read_classification_manifest(path: Path) -> dict[str, object] | None:
     if not path.name.endswith(".neri.json"):
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"DINOv2 模型 manifest 无法读取: {exc}") from exc
+        raise ValueError(f"模型 manifest 无法读取: {exc}") from exc
     if not isinstance(payload, dict):
         return None
-    if payload.get("backend") == "dinov3":
-        raise ValueError("DINOv3 模型已不再支持；请安装或选择 DINOv2 模型。")
-    return payload if payload.get("backend") == "dinov2" else None
-
-
-def _dinov2_checkpoint_path(manifest_path: Path, manifest: dict[str, object]) -> Path:
-    raw = manifest.get("checkpoint")
-    if not isinstance(raw, str) or not raw.strip():
-        raise ValueError("DINOv2 模型 manifest 缺少 checkpoint。")
-    raw = raw.strip()
-    candidate = Path(raw)
-    if candidate.is_absolute() or "\\" in raw or any(
-        part in {"", ".", ".."} for part in candidate.parts
-    ):
-        raise ValueError("DINOv2 模型 checkpoint 路径不安全。")
-    checkpoint = (manifest_path.parent / candidate).resolve()
+    if payload.get("backend") != "dinov3":
+        return None
     try:
-        checkpoint.relative_to(manifest_path.parent.resolve())
+        from system.dinov3.runtime import read_manifest
+
+        return read_manifest(path)
     except ValueError as exc:
-        raise ValueError("DINOv2 模型 checkpoint 必须位于 manifest 目录内。") from exc
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"DINOv2 checkpoint 不存在: {checkpoint}")
-    return checkpoint
+        raise ValueError(f"DINOv3联合模型无效: {exc}") from exc
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"DINOv3联合模型无效: {exc}") from exc
 
 
-def _load_dinov2_model_classes(
+def _load_dinov3_model_classes(
     manifest_path: Path,
     manifest: dict[str, object],
 ) -> list[ModelClassInfo]:
-    checkpoint = load_checkpoint(_dinov2_checkpoint_path(manifest_path, manifest))
+    from system.dinov3.runtime import resolve_manifest_asset
+    from system.dinov3.model import DinoV3RidgeWithinModel
+    from system.dinov3.encoder import sha256
+
+    checkpoint = resolve_manifest_asset(manifest_path, manifest["checkpoint"])
+    if sha256(checkpoint) != manifest["checkpoint_sha256"]:
+        raise ValueError("DINOv3 classifier SHA-256 mismatch")
+    model = DinoV3RidgeWithinModel.load(checkpoint)
     return [
-        ModelClassInfo(id=index, name=name, display_name=name)
-        for index, name in enumerate(checkpoint.classes)
+        ModelClassInfo(id=index, name=str(name), display_name=str(name))
+        for index, name in enumerate(model.classes)
     ]
 
 
 def list_model_classes(model_path: str | None) -> list[ModelClassInfo]:
-    """Expose classes for DINOv2 manifests or legacy YOLO model files."""
+    """Expose classes for versioned DINO manifests or YOLO model files."""
     from . import services
 
     resolved_model_path = services._resolve_model_path(model_path)
     if not resolved_model_path.exists() or not resolved_model_path.is_file():
         raise FileNotFoundError(f"模型文件不存在: {resolved_model_path}")
 
-    manifest = _read_dinov2_manifest(resolved_model_path)
+    manifest = _read_classification_manifest(resolved_model_path)
     if manifest is not None:
-        return _load_dinov2_model_classes(resolved_model_path, manifest)
+        return _load_dinov3_model_classes(resolved_model_path, manifest)
+
+    if resolved_model_path.suffix.lower() in {".tflite", ".litert"}:
+        from system.dino.litert_detector import read_model_classes
+
+        translations = {"animal": "动物", "person": "人", "vehicle": "车辆"}
+        return [
+            ModelClassInfo(
+                id=index,
+                name=name,
+                display_name=translations.get(name, name),
+            )
+            for index, name in sorted(
+                read_model_classes(resolved_model_path).items()
+            )
+        ]
 
     missing = services.missing_yolo_dependencies()
     if missing:

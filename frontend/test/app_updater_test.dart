@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -239,90 +240,130 @@ void main() {
     );
   });
 
-  test(
-    'starts and completes the Windows updater when SHA-256 is absent',
-    () async {
-      if (!Platform.isWindows) return;
+  for (final corruptArchive in [false, true]) {
+    test(
+      corruptArchive
+          ? 'corrupt ZIP exits with failure and preserves installation without a modal dialog'
+          : 'starts and completes the Windows updater when SHA-256 is absent',
+      () async {
+        if (!Platform.isWindows) return;
 
-      final root = await Directory.systemTemp.createTemp('neri-updater-test-');
-      final payloadDirectory = Directory('${root.path}\\payload');
-      final updateDirectory = Directory('${root.path}\\update');
-      final installDirectory = Directory('${root.path}\\install');
-      final marker = File('${payloadDirectory.path}\\updated.txt');
-      final archive = File('${updateDirectory.path}\\Neri-test.zip');
-      final updater = AppUpdater();
-      Process? blocker;
-
-      try {
-        await payloadDirectory.create(recursive: true);
-        await updateDirectory.create(recursive: true);
-        await installDirectory.create(recursive: true);
-        await marker.writeAsString('updated');
-        final zipResult = await Process.run('powershell.exe', <String>[
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          r'''& { param([string]$Source, [string]$Destination) Compress-Archive -Path (Join-Path $Source '*') -DestinationPath $Destination -Force }''',
-          payloadDirectory.path,
-          archive.path,
-        ]);
-        expect(zipResult.exitCode, 0, reason: zipResult.stderr.toString());
-
-        blocker = await Process.start('powershell.exe', const <String>[
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          'Start-Sleep -Seconds 30',
-        ]);
-        final asset = AppUpdateAsset(
-          name: archive.uri.pathSegments.last,
-          downloadUri: Uri.parse('https://example.test/Neri-test.zip'),
-          sizeBytes: await archive.length(),
+        final root = await Directory.systemTemp.createTemp(
+          'neri-updater-test-',
         );
-        final release = AppUpdateRelease(
-          tag: 'v99.0.0-installer-test',
-          name: 'installer test',
-          notes: '',
-          pageUri: Uri.parse('https://example.test/release'),
-          prerelease: true,
-          asset: asset,
-        );
+        final payloadDirectory = Directory('${root.path}\\payload');
+        final updateDirectory = Directory('${root.path}\\update');
+        final installDirectory = Directory('${root.path}\\install');
+        final marker = File('${payloadDirectory.path}\\updated.txt');
+        final archive = File('${updateDirectory.path}\\Neri-test.zip');
+        final updater = AppUpdater();
+        Process? blocker;
+        Process? installer;
+        var installerExited = false;
 
-        await updater.launchInstaller(
-          update: DownloadedAppUpdate(
-            release: release,
-            archive: archive,
-            updateDirectory: updateDirectory,
-          ),
-          installDirectory: installDirectory,
-          restartExecutable: File('${root.path}\\missing.exe'),
-          parentProcessId: blocker.pid,
-        );
-        blocker.kill();
-
-        final installedMarker = File('${installDirectory.path}\\updated.txt');
-        final deadline = DateTime.now().add(const Duration(seconds: 10));
-        String? installedContents;
-        while (true) {
-          try {
-            // Copy-Item can create the file before releasing its write handle.
-            // Wait for readable, complete contents rather than existence alone.
-            installedContents = await installedMarker.readAsString();
-            if (installedContents == 'updated') break;
-          } on FileSystemException {
-            if (!DateTime.now().isBefore(deadline)) rethrow;
+        try {
+          await payloadDirectory.create(recursive: true);
+          await updateDirectory.create(recursive: true);
+          await installDirectory.create(recursive: true);
+          await marker.writeAsString('updated');
+          final installedMarker = File('${installDirectory.path}\\updated.txt');
+          await installedMarker.writeAsString('original');
+          if (corruptArchive) {
+            await archive.writeAsString(
+              'invalid ZIP for failure-path verification',
+            );
+          } else {
+            final zipResult = await Process.run('powershell.exe', <String>[
+              '-NoLogo',
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              r'''& { param([string]$Source, [string]$Destination) Compress-Archive -Path (Join-Path $Source '*') -DestinationPath $Destination -Force }''',
+              payloadDirectory.path,
+              archive.path,
+            ]).timeout(const Duration(seconds: 30));
+            expect(zipResult.exitCode, 0, reason: zipResult.stderr.toString());
           }
-          if (!DateTime.now().isBefore(deadline)) break;
-          await Future<void>.delayed(const Duration(milliseconds: 100));
+
+          blocker = await Process.start('powershell.exe', const <String>[
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Start-Sleep -Seconds 30',
+          ]);
+          final asset = AppUpdateAsset(
+            name: archive.uri.pathSegments.last,
+            downloadUri: Uri.parse('https://example.test/Neri-test.zip'),
+            sizeBytes: await archive.length(),
+          );
+          final release = AppUpdateRelease(
+            tag: 'v99.0.0-installer-test',
+            name: 'installer test',
+            notes: '',
+            pageUri: Uri.parse('https://example.test/release'),
+            prerelease: true,
+            asset: asset,
+          );
+
+          installer = await updater.launchInstaller(
+            update: DownloadedAppUpdate(
+              release: release,
+              archive: archive,
+              updateDirectory: updateDirectory,
+            ),
+            installDirectory: installDirectory,
+            restartExecutable: File('${root.path}\\missing.exe'),
+            parentProcessId: blocker.pid,
+            showFailureDialog: false,
+          );
+          blocker.kill();
+          await blocker.exitCode.timeout(const Duration(seconds: 10));
+          final logFile = File('${installDirectory.path}\\logs\\update.log');
+          final exitCode = await installer.exitCode.timeout(
+            const Duration(seconds: 60),
+            onTimeout: () async => throw TimeoutException(
+              'Updater did not exit. Log:\n${await logFile.readAsString()}',
+            ),
+          );
+          installerExited = true;
+          final log = await logFile.readAsString();
+          expect(exitCode, corruptArchive ? 1 : 0, reason: log);
+          if (corruptArchive) {
+            expect(await installedMarker.readAsString(), 'original');
+            expect(log, contains('更新失败'));
+            return;
+          }
+          expect(log, contains('重新启动的程序不存在'));
+
+          final deadline = DateTime.now().add(const Duration(seconds: 10));
+          String? installedContents;
+          while (true) {
+            try {
+              // Copy-Item can create the file before releasing its write handle.
+              // Wait for readable, complete contents rather than existence alone.
+              installedContents = await installedMarker.readAsString();
+              if (installedContents == 'updated') break;
+            } on FileSystemException {
+              if (!DateTime.now().isBefore(deadline)) rethrow;
+            }
+            if (!DateTime.now().isBefore(deadline)) break;
+            await Future<void>.delayed(const Duration(milliseconds: 100));
+          }
+          expect(installedContents, 'updated');
+        } finally {
+          blocker?.kill();
+          if (blocker != null) await blocker.exitCode;
+          if (installer != null && !installerExited) {
+            installer.kill();
+            await installer.exitCode;
+          }
+          updater.close();
+          await _deleteDirectoryWhenReleased(root);
         }
-        expect(installedContents, 'updated');
-      } finally {
-        blocker?.kill();
-        updater.close();
-        await _deleteDirectoryWhenReleased(root);
-      }
-    },
-  );
+      },
+      tags: const ['windows-integration'],
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+  }
 }

@@ -1,6 +1,7 @@
 """FastAPI entrypoint for the Flutter-based Neri client."""
 
 import ctypes
+import importlib.util
 import logging
 import os
 import sys
@@ -16,7 +17,6 @@ from system.config import APP_TITLE, APP_VERSION, SUPPORTED_IMAGE_EXTENSIONS, SU
 from system.settings_manager import SettingsManager
 from system.training import get_queue
 from system.training.api import privacy_router
-from system.dinov2.api import dinov2_registry_router
 
 from . import __version__
 from .crash_logging import configure_backend_crash_logging
@@ -88,6 +88,11 @@ background_preview_scan_coordinator = PreviewScanCoordinator()
 @asynccontextmanager
 async def app_lifespan(_app):
     queue = None
+    from .dinov3_learning import resume_learning, stop_learning
+    try:
+        resume_learning()
+    except Exception:
+        logger.exception("Automatic model learning could not resume")
     try:
         queue = get_queue()
         queue.start()
@@ -96,6 +101,7 @@ async def app_lifespan(_app):
     try:
         yield
     finally:
+        stop_learning()
         if queue is not None:
             queue.stop()
 
@@ -107,7 +113,6 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 app.include_router(privacy_router(get_queue))
-app.include_router(dinov2_registry_router())
 
 app.add_middleware(
     CORSMiddleware,
@@ -284,6 +289,23 @@ def settings() -> SettingsResponse:
             None,
         )
 
+    pytorch_available = importlib.util.find_spec("torch") is not None
+    litert_available = all(
+        importlib.util.find_spec(name) is not None
+        for name in ("ai_edge_litert", "cv2", "numpy")
+    )
+    litert_models = [
+        model for model in available_models if model.backend == "litert"
+    ]
+    missing_yolo = missing_yolo_dependencies()
+    detection_ready = not missing_yolo or (
+        litert_available and bool(litert_models)
+    )
+    if missing_yolo:
+        selected_classification_model = None
+        if litert_models:
+            selected_model = litert_models[0].path
+
     return SettingsResponse(
         app_title=APP_TITLE,
         app_version=APP_VERSION,
@@ -297,7 +319,10 @@ def settings() -> SettingsResponse:
         selected_classification_model=selected_classification_model,
         species_types=load_species_types(),
         gpu_available=detect_gpu_available(),
-        missing_yolo_dependencies=missing_yolo_dependencies(),
+        missing_yolo_dependencies=missing_yolo,
+        pytorch_available=pytorch_available,
+        litert_available=litert_available,
+        detection_ready=detection_ready,
         settings=stored_settings,
     )
 
@@ -510,6 +535,22 @@ def resume_job(job_id: str) -> JobSummary:
 
     try:
         return job_manager.resume_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/jobs/{job_id}/retry-failed",
+    response_model=JobSummary,
+    status_code=202,
+)
+def retry_failed_job(job_id: str) -> JobSummary:
+    """Create a new job containing only the failed items from one job."""
+
+    try:
+        return job_manager.retry_failed_job(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Job not found") from exc
     except ValueError as exc:

@@ -29,10 +29,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS, XPU_ENABLED
+from system.dinov3.observation_support import is_dinov3_box_mapping, make_dinov3_observation_id
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 from .preview_fast import load_media_indexes
 from .inference_batching import InferenceBatcher, prefetched_path_batches
+from system.host_memory import HostMemoryPressure, is_host_memory_error
 
 from .models import (
     CreateJobRequest,
@@ -89,8 +91,7 @@ def _checked_media_file(path: Path) -> bool:
 
 _BATCH_LOG_RETENTION = 5
 _BATCH_LOGGER_NAMES = (
-    __name__, "system.image_processor", "system.dinov2.image_processor",
-    "system.backend.dinov2_persistence_fast",
+    __name__, "system.image_processor", "system.dino.image_processor",
     "system.backend.inference_batching",
     "system.adaptive_batch",
 )
@@ -567,6 +568,27 @@ class ProcessingJobManager:
         self._executor.submit(self._run_job, job_id, request, initial_results)
         return snapshot
 
+    def retry_failed_job(self, job_id: str) -> JobSummary:
+        """Start a separate, explicitly selected task for failed source files."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise JobNotFoundError(job_id)
+            if job_id in self._active_job_ids or job.state in {JobState.QUEUED, JobState.RUNNING}:
+                raise ValueError("任务仍在运行，请等待任务结束后重试失败文件。")
+            request = self._job_requests.get(job_id)
+            if request is None:
+                raise ValueError("缺少原始任务参数，无法重试。")
+            failed_paths = list(dict.fromkeys(item.path for item in job.results if item.error))
+            if not failed_paths:
+                raise ValueError("没有需要重试的失败文件。")
+            retry_request = request.model_copy(
+                update={"input_paths": failed_paths, "output_dir": None}, deep=True,
+            )
+        # Keep the previous results and exports. The retry is its own selected
+        # input scope and never overwrites the successful parent task's table.
+        return self.create_job(retry_request)
+
     def delete_job(self, job_id: str) -> None:
         """Delete one job from the visible progress list."""
 
@@ -636,6 +658,7 @@ class ProcessingJobManager:
             updates = dict(changes)
             if "results" in updates:
                 updates["results"] = list(updates["results"])  # type: ignore[arg-type]
+                updates["failed_count"] = sum(bool(item.error) for item in updates["results"])
             updates["updated_at"] = utc_now()
             self._jobs[job_id] = current.model_copy(
                 update=updates,
@@ -715,6 +738,10 @@ class ProcessingJobManager:
         except Exception:
             pass
 
+    def _resolve_inputs(self, job_id: str, request: CreateJobRequest) -> tuple[Path, list[Path]]:
+        self._mutate_job(job_id, persist=False, message="正在预扫描输入文件")
+        return _resolve_job_inputs(request, cancelled=lambda: self._is_cancelled(job_id))
+
     def _run_job(
         self,
         job_id: str,
@@ -727,20 +754,15 @@ class ProcessingJobManager:
             self._active_job_ids.add(job_id)
         results = list(initial_results or [])
         batch_log_session = None
-        example_session = None
-        example_writer = None
         detector = None
         try:
             request = _effective_processing_request(request)
-            _validate_dinov2_job_options(
+            _validate_dino_job_options(
                 request.options.model_path,
                 request.options.classification_model_path,
                 request.options.video_mode,
             )
             batch_log_session = _start_batch_log_session(job_id)
-            from system.dinov2.registry_examples import background_example_writes
-            example_session = background_example_writes()
-            example_writer = example_session.__enter__()
             logger.info(
                 "Batch job started: job_id=%s input=%s output=%s resumed=%d options=%s",
                 job_id,
@@ -760,12 +782,9 @@ class ProcessingJobManager:
                 job_id,
                 persist=False,
                 state=JobState.RUNNING,
-                message="正在预扫描输入文件",
+                message="正在读取任务文件清单",
             )
-            input_path, files = _resolve_job_inputs(
-                request,
-                cancelled=lambda: self._is_cancelled(job_id),
-            )
+            input_path, files = self._resolve_inputs(job_id, request)
             image_count = sum(
                 path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
                 for path in files
@@ -786,6 +805,17 @@ class ProcessingJobManager:
                 video_count,
             )
             file_keys = {_path_key(path) for path in files}
+            joint_payload = (
+                _dino_manifest_payload(_resolve_classification_model_path(request.options.classification_model_path))
+                if request.options.enable_detection else None
+            )
+            is_dinov3_job = joint_payload is not None and joint_payload.get("backend") == "dinov3"
+            if is_dinov3_job:
+                if video_count and request.options.video_mode != "skip":
+                    raise ValueError("Neri1.1处理完整照片序列，不支持视频，请选择跳过视频。")
+                # Complete sequences and causal history cannot be reconstructed
+                # from old serialized classifications. Resume re-encodes photos.
+                initial_results = []
             results = [
                 item.model_copy(deep=True)
                 for item in _unique_detection_items(initial_results or [])
@@ -800,6 +830,78 @@ class ProcessingJobManager:
             speed_start_processed = start_processed
             total_files = len(files)
             missing_file_keys: set[str] = set()
+
+            def checkpoint_dinov3_cancellation(
+                current_results: list[DetectionItem],
+                *,
+                reason: str = "cancelled",
+            ) -> list[DetectionItem]:
+                if (
+                    not is_dinov3_job
+                    or detector is None
+                    or not current_results
+                    or all(
+                        item.error
+                        or (item.detection_data or {}).get("sequence_completed") is True
+                        for item in current_results
+                    )
+                ):
+                    return current_results
+                from system.dinov3.processor import (
+                    finalize_photo_job,
+                    mark_dinov3_sequence_incomplete,
+                )
+
+                try:
+                    checkpointed = finalize_photo_job(
+                        detector,
+                        current_results,
+                        input_path,
+                        is_cancelled=None,
+                        save_batch_fn=_save_detection_data_batch,
+                        apply_data_fn=_apply_detection_data,
+                        complete_sequence=False,
+                        incomplete_reason=reason,
+                        total_photos=total_files,
+                    )
+                    logger.info(
+                        "DINOv3 cancellation checkpoint completed: job_id=%s photos=%d reason=%s",
+                        job_id,
+                        len(checkpointed),
+                        reason,
+                    )
+                    return checkpointed
+                except Exception as exc:  # noqa: BLE001 - retain pending state on cleanup failure
+                    logger.warning(
+                        "DINOv3 cancellation checkpoint failed; retaining pending state: "
+                        "job_id=%s error=%s",
+                        job_id,
+                        exc,
+                    )
+                    try:
+                        return mark_dinov3_sequence_incomplete(
+                            current_results,
+                            reason=reason,
+                            processed_count=len(current_results),
+                            total_count=total_files,
+                            input_path=input_path,
+                            save_batch_fn=_save_detection_data_batch,
+                            apply_data_fn=_apply_detection_data,
+                        )
+                    except Exception as mark_exc:  # noqa: BLE001 - state checkpoint still must be safe
+                        logger.warning(
+                            "DINOv3 pending-state persistence failed; checkpointing in job state only: "
+                            "job_id=%s error=%s",
+                            job_id,
+                            mark_exc,
+                        )
+                        return mark_dinov3_sequence_incomplete(
+                            current_results,
+                            reason=reason,
+                            processed_count=len(current_results),
+                            total_count=total_files,
+                            apply_data_fn=_apply_detection_data,
+                        )
 
             def progress_metrics(current_processed: int) -> dict[str, object]:
                 now = time.monotonic()
@@ -876,7 +978,7 @@ class ProcessingJobManager:
 
             detection_index, _ = (
                 load_media_indexes(
-                    files, _candidate_detection_dbs_for_roots,
+                    remaining_files, _candidate_detection_dbs_for_roots,
                     include_validation=False,
                 )
                 if request.options.enable_detection else ({}, {})
@@ -926,9 +1028,13 @@ class ProcessingJobManager:
                     path for path in remaining_files if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
                 ]
                 inference_batcher = InferenceBatcher(request.options)
+                if image_files and hasattr(detector, "_photo_memory_guard"):
+                    detector._photo_memory_guard = inference_batcher.host_guard
                 image_batches = prefetched_path_batches(
                     image_files, lambda: inference_batcher.batch_size,
                     getattr(detector, "preload_batch_data", None),
+                    memory_guard=inference_batcher.host_guard,
+                    check_cancelled=lambda: _raise_if_cancelled(lambda: self._is_cancelled(job_id)),
                 )
 
                 def take_preloaded(future):
@@ -943,6 +1049,7 @@ class ProcessingJobManager:
                 with closing(image_batches):
                     for batch_index, (original_batch, preload_future) in enumerate(image_batches):
                         if self._is_cancelled(job_id):
+                            results = checkpoint_dinov3_cancellation(results)
                             self._mark_cancelled(job_id, results)
                             return
                         batch_started = time.perf_counter()
@@ -977,17 +1084,21 @@ class ProcessingJobManager:
                                 if path in surviving_items
                             ]
                         if not batch:
+                            preloaded_data = None
+                            preload_future = None
                             continue
                         detect_started = time.perf_counter()
-                        detected_items = _detect_image_batch(
-                            detector,
-                            batch,
-                            batch_items,
-                            request,
-                            input_path,
-                            preloaded_data=preloaded_data,
-                            inference_batcher=inference_batcher,
-                        )
+                        try:
+                            detected_items = _detect_image_batch(
+                                detector, batch, batch_items, request, input_path,
+                                preloaded_data=preloaded_data, inference_batcher=inference_batcher,
+                            )
+                        finally:
+                            preloaded_data = None
+                            preload_future = None
+                            release = getattr(detector, "release_batch_images", None)
+                            if callable(release):
+                                release()
                         detect_elapsed = time.perf_counter() - detect_started
                         logger.info(
                             (
@@ -1001,11 +1112,12 @@ class ProcessingJobManager:
                             detect_elapsed,
                             time.perf_counter() - batch_started,
                         )
-                        if self._is_cancelled(job_id):
-                            self._mark_cancelled(job_id, results)
-                            return
                         results.extend(detected_items)
                         processed += len(detected_items)
+                        if self._is_cancelled(job_id):
+                            results = checkpoint_dinov3_cancellation(results)
+                            self._mark_cancelled(job_id, results)
+                            return
                         last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
                         self._mutate_job(
                             job_id,
@@ -1018,6 +1130,29 @@ class ProcessingJobManager:
                                 f"(batch={len(batch)}): {last_path.name}"
                             ),
                         )
+                if is_dinov3_job:
+                    if self._is_cancelled(job_id):
+                        results = checkpoint_dinov3_cancellation(results)
+                        self._mark_cancelled(job_id, results)
+                        return
+                    from system.dinov3.processor import finalize_photo_job
+                    self._mutate_job(job_id, persist=False, message="正在汇总 Neri1.1完整照片序列并聚类拒识目标")
+                    results = finalize_photo_job(
+                        detector, results, input_path,
+                        is_cancelled=lambda: self._is_cancelled(job_id),
+                        save_batch_fn=_save_detection_data_batch,
+                        apply_data_fn=_apply_detection_data,
+                        complete_sequence=True,
+                        total_photos=total_files,
+                        job_id=job_id,
+                    )
+                    if self._is_cancelled(job_id):
+                        results = checkpoint_dinov3_cancellation(results)
+                        self._mark_cancelled(job_id, results)
+                        return
+                    from system.dinov3.processor import ensure_dinov3_sequences_completed
+                    ensure_dinov3_sequences_completed(results)
+                    self._mutate_job(job_id, persist=False, results=results, message="Neri1.1完整序列判定完成")
                 video_files = existing_paths(video_files)
                 if video_files:
                     reset_speed_metrics(processed)
@@ -1223,23 +1358,33 @@ class ProcessingJobManager:
                 if item.path and _checked_media_file(Path(item.path))
             ]
             total_files = len(results)
-            # A completed job must include all accepted background image writes.
-            example_writer.flush()
             if self._is_cancelled(job_id):
                 self._mark_cancelled(job_id, results)
                 return
-            exported_path = _export_results(request.output_dir, results)
+            successful_results = [item for item in results if not item.error]
+            failed_count = len(results) - len(successful_results)
+            exported_path = (
+                _export_results(request.output_dir, successful_results)
+                if successful_results else None
+            )
             message = "预扫描完成" if not request.options.enable_detection else "处理完成"
+            if failed_count:
+                message += f"，{failed_count} 个文件失败"
             if exported_path is not None:
-                message = f"处理完成，结果已导出到 {exported_path}"
+                message += f"，结果已导出到 {exported_path}"
+            all_failed = bool(results) and not successful_results
+            if all_failed:
+                message = f"处理失败，{failed_count} 个文件失败"
             self._mutate_job(
                 job_id,
-                state=JobState.COMPLETED,
+                state=JobState.FAILED if all_failed else JobState.COMPLETED,
                 total=total_files,
                 processed=total_files,
                 results=results,
                 **progress_metrics(total_files),
                 message=message,
+                failed_count=failed_count,
+                error=(f"全部文件处理失败。首个错误：{results[0].error}" if all_failed else None),
             )
             logger.info(
                 "Batch job completed: job_id=%s processed=%d exported=%s elapsed=%.3fs",
@@ -1261,6 +1406,8 @@ class ProcessingJobManager:
                     "存储访问失败，恢复访问后可继续任务"
                     if isinstance(exc, MediaStorageError) else "处理失败"
                 )
+                if isinstance(exc, HostMemoryPressure):
+                    message = "内存不足，释放内存后可继续任务"
                 # UI updates are throttled; completed local results may be newer
                 # than the last published snapshot when a later file fails.
                 self._mutate_job(
@@ -1268,29 +1415,13 @@ class ProcessingJobManager:
                     results=results, processed=len(results),
                 )
         finally:
-            try:
-                # Drain accepted writes on cancellation/failure too, before
-                # closing DINO state or marking this job inactive.
-                if example_writer is not None:
-                    example_session.__exit__(None, None, None)
-            except Exception as exc:
-                logger.warning("Background example writes failed: %s", exc)
-            if example_writer is not None and example_writer.failed_sources:
-                # Failed/unqueued example writes must be retried with their
-                # source media on resume; keep all other completed progress.
-                failed_keys = {_path_key(path) for path in example_writer.failed_sources}
-                with self._lock:
-                    current = self._jobs.get(job_id)
-                    retained = [item for item in current.results if _path_key(item.path) not in failed_keys] if current else None
-                if retained is not None:
-                    self._mutate_job(job_id, results=retained, processed=len(retained))
             if detector is not None:
-                runtime = getattr(detector, "dinov2_runtime", None)
+                runtime = getattr(detector, "dino_runtime", None)
                 if runtime is not None:
                     try:
                         runtime.close()
                     except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
-                        logger.warning("DINOv2 runtime cleanup failed: %s", exc)
+                        logger.warning("DINOv3 runtime cleanup failed: %s", exc)
             if detector is not None and hasattr(detector, "cleanup_runtime_cache"):
                 try:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
@@ -1566,7 +1697,7 @@ def _build_metadata_item(path: Path) -> DetectionItem:
 
 
 
-def _dinov2_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | None:
+def _dino_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | None:
     if not model_path:
         return None
     path = Path(model_path).expanduser()
@@ -1576,44 +1707,36 @@ def _dinov2_manifest_payload(model_path: str | Path | None) -> dict[str, Any] | 
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) and payload.get("backend") == "dinov2" else None
+    if not isinstance(payload, dict) or payload.get("backend") != "dinov3":
+        return None
+    from system.dinov3.runtime import read_manifest
+
+    return read_manifest(path)
 
 
-def _validate_dinov2_job_options(
+def _validate_dino_job_options(
     model_path: str | None,
     classification_model_path: str | None,
     video_mode: str,
 ) -> None:
-    payload = _dinov2_manifest_payload(classification_model_path)
+    if (
+        model_path
+        and Path(model_path).suffix.lower() in {".tflite", ".litert"}
+        and video_mode == "all"
+    ):
+        raise ValueError(
+            "LiteRT 探测暂不支持完整视频追踪，请使用快速识别或跳过视频。"
+        )
+    payload = _dino_manifest_payload(classification_model_path)
     if payload is None:
         return
     if not model_path:
-        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
+        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError("DINOv2 暂不支持视频完整识别，请使用快速识别或跳过视频。")
+        raise ValueError("Neri1.1 暂不支持视频完整识别，请选择跳过视频。")
 
 
-def _parse_dinov2_capture_time(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    candidates = (text, text.replace("Z", "+00:00"))
-    for candidate in candidates:
-        try:
-            return datetime.fromisoformat(candidate)
-        except ValueError:
-            pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def _persist_dinov2_observations(
+def _persist_dino_observations(
     detector,
     paths: list[Path],
     items: list[DetectionItem],
@@ -1624,21 +1747,11 @@ def _persist_dinov2_observations(
     timestamp_seconds: list[float | None] | None = None,
     preloaded_data: Any = None,
 ) -> None:
-    from .dinov2_feedback_service import persist_runtime_observations
-
-    persist_runtime_observations(
-        detector,
-        paths,
-        items,
-        input_path,
-        source_paths=source_paths,
-        frame_indices=frame_indices,
-        timestamp_seconds=timestamp_seconds,
-    )
+    return None
 
 
 def _load_detector(model_path: str | None, classification_model_path: str | None = None):
-    from system.image_processor import ImageProcessor
+    from system.dino.image_processor import ImageProcessor
 
     resolved_model_path = _resolve_model_path(model_path) if model_path else None
     resolved_classification_path = _resolve_classification_model_path(classification_model_path)
@@ -1647,28 +1760,60 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
     if resolved_model_path is None and resolved_classification_path is None:
         raise ValueError("探测模型和分类模型至少需要选择一个。")
 
-    dinov2_payload = _dinov2_manifest_payload(resolved_classification_path)
-    if dinov2_payload is not None and resolved_model_path is None:
-        raise ValueError("DINOv2 分类模型必须同时选择探测模型。")
+    suffix = resolved_model_path.suffix.lower() if resolved_model_path is not None else ""
+    if suffix in {".tflite", ".litert"}:
+        if resolved_classification_path is not None:
+            raise ValueError(
+                "LiteRT 探测暂不支持搭配分类模型；请取消分类模型或安装 PyTorch。"
+            )
+        from system.dino.litert_image_processor import LiteRtImageProcessor
+
+        try:
+            return LiteRtImageProcessor(str(resolved_model_path))
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "LiteRT 运行库未安装；请安装 requirements-privacy.txt 中的 "
+                "ai-edge-litert，或安装 PyTorch 后使用 .pt 模型。"
+            ) from exc
+    if (
+        resolved_model_path is not None
+        and importlib.util.find_spec("torch") is None
+        and resolved_classification_path is None
+    ):
+        raise RuntimeError(
+            "当前环境未安装 PyTorch。请选择 .tflite LiteRT 探测模型，"
+            "或在环境维护中安装 PyTorch。"
+        )
+    if (
+        resolved_classification_path is not None
+        and importlib.util.find_spec("torch") is None
+    ):
+        raise RuntimeError("分类模型需要 PyTorch；请安装 PyTorch 或取消分类模型。")
+
+    dino_payload = _dino_manifest_payload(resolved_classification_path)
+    if dino_payload is not None and resolved_model_path is None:
+        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+    if dino_payload is not None and importlib.util.find_spec("torch") is None:
+        raise RuntimeError("Neri1.1 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
 
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None
     )
     if resolved_classification_path is not None:
-        if dinov2_payload is not None:
-            from system.dinov2.runtime import load_dinov2_model
+        if dino_payload is not None:
+            from system.dinov3.runtime import load_dinov3_model
 
-            runtime = load_dinov2_model(resolved_classification_path)
-            detector.load_dinov2_classifier(runtime.classifier)
-            detector.dinov2_registry = runtime.registry
-            detector.dinov2_feedback = runtime.feedback
-            detector.dinov2_runtime = runtime
+            runtime = load_dinov3_model(resolved_classification_path)
+            detector.load_dino_classifier(runtime.classifier)
+            detector.dino_registry = None
+            detector.dino_feedback = None
+            detector.dino_runtime = runtime
         else:
             detector.load_cls_model(str(resolved_classification_path))
     if (
         detector.model is None
         and detector.cls_model is None
-        and getattr(detector, "dinov2_classifier", None) is None
+        and getattr(detector, "dino_classifier", None) is None
     ):
         raise RuntimeError("未能加载所选的探测模型或分类模型。")
     return detector
@@ -1761,7 +1906,12 @@ def _resolve_model_path(model_path: str | None) -> Path:
         models = sorted(candidate.glob("*.pt"))
         if models:
             return models[0]
-        raise FileNotFoundError(f"模型文件夹中未找到 .pt 模型: {candidate}")
+        lite_models = sorted(candidate.glob("*.tflite")) + sorted(
+            candidate.glob("*.litert")
+        )
+        if lite_models:
+            return lite_models[0]
+        raise FileNotFoundError(f"模型文件夹中未找到 .pt/.tflite 模型: {candidate}")
 
     return candidate
 
@@ -2018,7 +2168,11 @@ def _coerce_bbox(value: Any) -> list[float]:
     return bbox
 
 
-def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_detection_boxes(
+    data: dict[str, Any],
+    *,
+    file_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
     raw_boxes = _value_from_keys(data, ("检测框", "detect_results", "objects"))
     if not isinstance(raw_boxes, list):
         raw_tracks = data.get("tracks")
@@ -2027,7 +2181,7 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     boxes: list[dict[str, Any]] = []
-    for raw_box in raw_boxes:
+    for box_index, raw_box in enumerate(raw_boxes):
         if not isinstance(raw_box, dict):
             continue
         bbox = _coerce_bbox(_value_from_keys(raw_box, ("边界框", "bbox", "box", "xyxy")))
@@ -2055,18 +2209,40 @@ def _normalize_detection_boxes(data: dict[str, Any]) -> list[dict[str, Any]]:
         observation_id = _value_from_keys(metadata_source, ("observation_id",))
         registry_id = _coerce_int(_value_from_keys(metadata_source, ("registry_id",)))
         predicted_species = _value_from_keys(metadata_source, ("predicted_species",))
+        if predicted_species is None:
+            predicted_species = _value_from_keys(metadata_source, ("best_known_species",))
+        if predicted_species is None:
+            predicted_species = _value_from_keys(raw_box, ("best_known_species",))
+        if (
+            observation_id is None
+            and file_path is not None
+            and is_dinov3_box_mapping(raw_box, data)
+        ):
+            observation_id = make_dinov3_observation_id(file_path, box_index, bbox)
         if observation_id is not None:
             box_data["observation_id"] = str(observation_id)
         if registry_id is not None:
             box_data["registry_id"] = registry_id
         if predicted_species is not None:
             box_data["predicted_species"] = str(predicted_species)
+        feedback_status = _value_from_keys(raw_box, ("feedback_status",))
+        if feedback_status is not None:
+            box_data["feedback_status"] = str(feedback_status)
         if frame_index is not None:
             box_data["frame_index"] = frame_index
         if timestamp is not None:
             box_data["timestamp"] = timestamp
         if track_id is not None:
             box_data["track_id"] = str(track_id)
+        sequence_pending = raw_box.get("sequence_pending")
+        if isinstance(sequence_pending, bool):
+            box_data["sequence_pending"] = sequence_pending
+        sequence_status = raw_box.get("sequence_status")
+        if sequence_status is not None:
+            box_data["sequence_status"] = str(sequence_status)
+        rejection_cluster = raw_box.get("rejection_cluster")
+        if isinstance(rejection_cluster, dict):
+            box_data["rejection_cluster"] = dict(rejection_cluster)
         boxes.append(box_data)
     return boxes
 
@@ -2113,7 +2289,7 @@ def _boxes_from_tracks(raw_tracks: Any) -> list[dict[str, Any]]:
 
 
 def _apply_detection_data(item: DetectionItem, detection_data: dict[str, Any]) -> DetectionItem:
-    boxes = _normalize_detection_boxes(detection_data)
+    boxes = _normalize_detection_boxes(detection_data, file_path=item.path)
     species = _extract_species_list(detection_data, boxes)
     confidence = _coerce_float(_value_from_keys(detection_data, ("最低置信度", "confidence", "max_confidence")))
     if confidence is None and boxes:
@@ -2125,11 +2301,13 @@ def _apply_detection_data(item: DetectionItem, detection_data: dict[str, Any]) -
             "confidence": confidence,
             "detection_boxes": boxes,
             "detection_data": detection_data,
+            **({"error": detection_data["error"]} if "error" in detection_data else {}),
         }
     )
 
 
 def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str, Any]:
+    is_dinov3_detection = getattr(detector, "dinov3_classifier", None) is not None
     confidence_raw = _value_from_keys(detection, ("最低置信度", "confidence", "max_confidence"))
     raw_species = _value_from_keys(detection, ("物种名称", "species", "species_names"))
     species = raw_species if isinstance(raw_species, str) else ",".join(_extract_species_list({"species": raw_species}))
@@ -2139,10 +2317,19 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
     names_map: dict[Any, str] = {}
 
     results = detection.get("detect_results") or []
+    detection_output_seen = bool(results)
+    detection_shape_valid = True
+    detection_box_count = 0
+    detection_box_indices: list[int] = []
     for result in results:
         result_boxes = getattr(result, "boxes", None)
         if result_boxes is None:
+            detection_shape_valid = False
             continue
+        box_count = len(result_boxes)
+        box_start = detection_box_count
+        detection_box_count += box_count
+        detection_box_indices.extend(range(box_start, detection_box_count))
 
         names = getattr(result, "names", {}) or {}
         candidates_data = getattr(result, "candidates_data", {}) or {}
@@ -2184,16 +2371,22 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
                 translated_name = str(best_candidate.get("name", translated_name))
                 box_confidence = _coerce_float(best_candidate.get("conf")) or box_confidence
 
-            boxes.append(
-                {
-                    "物种": translated_name,
-                    "置信度": box_confidence,
-                    "边界框": bbox,
-                    "候选项": candidates if isinstance(candidates, list) else [],
-                }
-            )
+            box_data = {
+                "物种": translated_name,
+                "置信度": box_confidence,
+                "边界框": bbox,
+                "候选项": candidates if isinstance(candidates, list) else [],
+            }
+            if is_dinov3_detection:
+                box_data.update(
+                    {
+                        "sequence_pending": True,
+                        "sequence_status": "pending",
+                    }
+                )
+            boxes.append(box_data)
 
-    return {
+    detection_data = {
         "物种名称": species,
         "物种数量": detection.get("物种数量", ""),
         "最低置信度": confidence_raw,
@@ -2206,6 +2399,23 @@ def _serialize_detector_output(detector, detection: dict[str, Any]) -> dict[str,
         "all_classes": all_classes,
         "names_map": names_map,
     }
+    if is_dinov3_detection:
+        detection_completed = detection_output_seen and detection_shape_valid
+        detection_error = detection.get("error")
+        if not detection_completed and not detection_error:
+            detection_error = "图片未返回有效检测结果，请检查文件是否为空、损坏或无法解码。"
+        detection_data.update(
+            {
+                "detection_completed": detection_completed,
+                "error": detection_error,
+                "detection_box_count": detection_box_count,
+                "detection_box_indices": detection_box_indices,
+                "sequence_completed": False,
+                "sequence_pending": True,
+                "sequence_status": "pending",
+            }
+        )
+    return detection_data
 
 
 def _save_detection_data_for_path(path: Path, detection_data: dict[str, Any], input_path: Path) -> None:
@@ -2320,7 +2530,7 @@ def _detect_image_batch(
                 detected_items.append(_apply_detection_data(item, detection_data))
             serialize_elapsed += time.perf_counter() - serialize_started
             persist_started = time.perf_counter()
-            _persist_dinov2_observations(
+            _persist_dino_observations(
                 detector, batch_paths, batch_items, input_path,
                 preloaded_data=batch.preloaded_data,
             )
@@ -2344,6 +2554,8 @@ def _detect_image_batch(
     except MediaStorageError:
         raise
     except Exception as exc:  # noqa: BLE001 - preserve per-file metadata on batch failure
+        if is_host_memory_error(exc):
+            raise HostMemoryPressure("批量处理的主内存不足，已停止任务；释放内存后可继续。") from exc
         return [item.model_copy(update={"error": f"批量检测失败: {exc}"}) for item in items]
 
 
@@ -2366,7 +2578,7 @@ def _detect_image(detector, path: Path, item: DetectionItem, request: CreateJobR
             selected_species_names=request.options.selected_species_names,
         )
         detection = detections[0] if detections else {}
-        _persist_dinov2_observations(detector, [path], [item], input_path)
+        _persist_dino_observations(detector, [path], [item], input_path)
         detection_data = _serialize_detector_output(detector, detection)
         _save_detection_data_for_path(path, detection_data, input_path)
         return _apply_detection_data(item, detection_data)
@@ -2600,7 +2812,7 @@ def _detect_video_fast_batch(
                     batch_frames = frames[batch.start:batch.end]
                     batch_paths = original_paths[batch.start:batch.end]
                     persistence_started = time.perf_counter()
-                    _persist_dinov2_observations(
+                    _persist_dino_observations(
                         detector, batch_paths, frame_items[batch.start:batch.end], input_path,
                         source_paths=batch_paths,
                         frame_indices=[frame.frame_index for frame in batch_frames],
@@ -2742,7 +2954,9 @@ def _video_processing_temp_dir() -> Path:
 
 DEFAULT_EXPORT_COLUMNS = [
     "文件名",
+    "相对路径",
     "格式",
+    "检测状态",
     "拍摄日期",
     "拍摄时间",
     "工作天数",
@@ -2807,30 +3021,8 @@ def _learnable_observations_for_file(
     classification_model_path: str,
     file_path: Path,
 ):
-    """Return persisted DINOv2 observations belonging to one media file."""
-    from .dinov2_feedback_service import _open_feedback_state, _path_identity
-
-    feedback, _feature_center = _open_feedback_state(classification_model_path)
-    try:
-        target = _path_identity(file_path)
-        rows = feedback._conn.execute(  # noqa: SLF001 - same feedback-store boundary
-            "SELECT id,payload FROM observations ORDER BY id"
-        ).fetchall()
-        observations = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if _path_identity(payload.get("source_path", "")) != target:
-                continue
-            observation_id = str(row["id"] or "")
-            if not observation_id:
-                continue
-            observations.append(feedback.get_observation(observation_id))
-        return observations
-    finally:
-        feedback.close()
+    """Neri1.1 keeps annotations local and does not learn online."""
+    return []
 
 
 def _eligible_auto_feedback(observations):
@@ -2839,17 +3031,7 @@ def _eligible_auto_feedback(observations):
 
 
 def _checkpoint_species_for_model(classification_model_path: str) -> set[str] | None:
-    from .dinov2_registry_service import load_checkpoint_for_model
-    from system.dinov2.runtime import DinoV2ManifestError
-
-    try:
-        return set(load_checkpoint_for_model(classification_model_path).classes)
-    except (DinoV2ManifestError, FileNotFoundError):
-        # Preserve the historical feedback path when the model cannot be
-        # resolved (including mocked test paths). That path will surface
-        # the original model error rather than misclassifying it as a
-        # new-species Registry assignment.
-        return None
+    return None
 
 
 def _record_validation_registry_feedback(
@@ -2858,14 +3040,7 @@ def _record_validation_registry_feedback(
     operation_id: str,
     confirmed_species: str,
 ):
-    from .dinov2_feedback_service import record_registry_species_feedback
-
-    return record_registry_species_feedback(
-        classification_model_path,
-        observation,
-        operation_id,
-        confirmed_species,
-    )
+    return None
 
 
 def _record_validation_feedback(
@@ -2875,25 +3050,7 @@ def _record_validation_feedback(
     action: str,
     confirmed_species: str | None,
 ):
-    """Record one conservative file-level validation feedback event."""
-    from .dinov2_feedback_service import (
-        _affected_learning_species,
-        _open_feedback_state,
-    )
-
-    feedback, feature_center = _open_feedback_state(classification_model_path)
-    try:
-        record = feedback.record_feedback(
-            observation.id,
-            operation_id=operation_id,
-            action=action,
-            confirmed_species=confirmed_species,
-        )
-        for species in sorted(_affected_learning_species(record)):
-            feedback.recompute_species(species, feature_center)
-        return record
-    finally:
-        feedback.close()
+    return None
 
 
 def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
@@ -2908,6 +3065,8 @@ def mark_validation_item(request: ValidationMarkRequest) -> DetectionItem:
             remark=request.remark,
             classification_model_path=request.classification_model_path,
             feedback_operation_id=request.feedback_operation_id,
+            confidence_settings=getattr(request, "confidence_settings", None),
+            min_frame_ratio=getattr(request, "min_frame_ratio", 0.0),
         )
     )
     if not items:
@@ -2978,57 +3137,20 @@ def mark_validation_items(request: ValidationBatchMarkRequest) -> list[Detection
     for species_name, species_type in species_database_updates:
         _update_species_database(species_name, species_type)
 
-    if request.classification_model_path and request.action != "unverified":
-        operation_id = request.feedback_operation_id or uuid.uuid4().hex
-        confirmed_species = (
-            (request.species_name or "").strip() or None
-            if request.action == "update"
-            else None
-        )
-        checkpoint_species = (
-            _checkpoint_species_for_model(request.classification_model_path)
-            if request.action == "update" and confirmed_species
-            else set()
-        )
-        try:
-            for path in paths:
-                observations = _learnable_observations_for_file(
-                    request.classification_model_path,
-                    path,
-                )
-                observation = _eligible_auto_feedback(observations)
-                if observation is None:
-                    continue
-                if (
-                    request.action == "update"
-                    and confirmed_species
-                    and checkpoint_species is not None
-                    and confirmed_species not in checkpoint_species
-                ):
-                    _record_validation_registry_feedback(
-                        request.classification_model_path,
-                        observation,
-                        operation_id,
-                        confirmed_species,
-                    )
-                else:
-                    _record_validation_feedback(
-                        request.classification_model_path,
-                        observation,
-                        operation_id,
-                        request.action,
-                        confirmed_species,
-                    )
-        except Exception as exc:
-            raise RuntimeError(f"DINOv2 自动反馈失败: {exc}") from exc
-
     # Only journal after the user's local decision is saved. Compression/network run
     # on an independent worker; this optional feature must never break annotation.
     try:
         from system.training import get_queue
         contribution_queue = get_queue()
-        for path, detection_data, validated in updates:
-            contribution_queue.enqueue(path, detection_data, validated=validated is True)
+        enqueue_many_async = getattr(contribution_queue, "enqueue_many_async", None)
+        if callable(enqueue_many_async):
+            enqueue_many_async(
+                (path, detection_data, validated is True)
+                for path, detection_data, validated in updates
+            )
+        else:
+            for path, detection_data, validated in updates:
+                contribution_queue.enqueue(path, detection_data, validated=validated is True)
     except Exception as error:
         logger.warning("Training queue unavailable (%s)", type(error).__name__)
 
@@ -3060,17 +3182,53 @@ def _build_validation_update(
             species_name = "空"
             species_count = "空"
         elif request.action == "correct":
-            species_name = species_name or str(detection_data.get("物种名称") or "").strip()
-            if not species_name and existing_item.species:
-                species_name = ",".join(existing_item.species)
-            species_count = species_count or str(detection_data.get("物种数量") or "").strip()
-            if not species_count:
-                species_count = (
-                    str(max(1, len(existing_item.detection_boxes)))
-                    if species_name and species_name != "空"
-                    else "空"
+            annotation = detection_data.get("image_annotation")
+            manual = detection_data.get("最低置信度") == "人工校验" or (
+                isinstance(annotation, dict) and annotation.get("source") == "human"
+            )
+            has_evidence = any(key in detection_data for key in (
+                "tracks", "检测框", "分类候选项", "all_classes",
+            ))
+            if not manual and has_evidence:
+                from system.data_processor import (
+                    _resolve_confidence_settings, select_image_detections, select_track_detections,
                 )
 
+                thresholds = _resolve_confidence_settings(
+                    getattr(request, "confidence_settings", None) or {"global": 0.25},
+                )
+                if "tracks" in detection_data:
+                    counts, _ = select_track_detections(
+                        detection_data, thresholds, getattr(request, "min_frame_ratio", 0.0),
+                    )
+                else:
+                    counts, _ = select_image_detections(detection_data, thresholds)
+                species_name = species_name or ",".join(counts) or "空"
+                if not species_count:
+                    names = [name.strip() for name in re.split("[,，、]", species_name) if name.strip()]
+                    species_count = (
+                        ",".join(str(counts.get(name, 1)) for name in names)
+                        if species_name != "空" else "空"
+                    )
+            else:
+                species_name = species_name or str(detection_data.get("物种名称") or "").strip()
+                if not species_name and existing_item.species:
+                    species_name = ",".join(existing_item.species)
+                species_count = species_count or str(detection_data.get("物种数量") or "").strip()
+                if not species_count:
+                    species_count = (
+                        ",".join("1" for name in re.split("[,，、]", species_name) if name.strip())
+                        if species_name and species_name != "空" else "空"
+                    )
+
+        old_species = tuple(name.strip() for name in re.split(
+            "[,，、]", str(existing_data.get("物种名称") or ""),
+        ) if name.strip())
+        new_species = tuple(name.strip() for name in re.split("[,，、]", species_name) if name.strip())
+        if request.species_type is None and species_name and (
+            species_name == "空" or old_species != new_species
+        ):
+            detection_data.pop("物种类型", None)
         if species_name:
             detection_data["物种名称"] = species_name
         if species_count:
@@ -3104,12 +3262,20 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
         files, _candidate_detection_dbs_for_roots, include_validation=False,
     )
     rows_by_directory: dict[Path, list[dict[str, Any]]] = {}
+    relative_root = input_path if input_path.is_dir() else input_path.parent
 
     for path in files:
         metadata = _build_export_metadata(path)
         detection_data = detection_index.get(str(path))
         if detection_data:
             metadata.update(detection_data)
+        metadata["文件名"] = path.name
+        metadata["格式"] = path.suffix.lstrip(".").upper()
+        metadata["相对路径"] = path.relative_to(relative_root).as_posix()
+        metadata["检测状态"] = (
+            "人工校验" if detection_data and detection_data.get("最低置信度") == "人工校验"
+            else "已检测" if detection_data else "未检测"
+        )
         metadata["_source_path"] = str(path)
         rows_by_directory.setdefault(path.parent, []).append(metadata)
 
@@ -3120,6 +3286,8 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
     processed_by_directory: dict[Path, list[dict[str, Any]]] = {}
     # Camera folders have independent event timelines and deployment dates.
     for directory, rows in rows_by_directory.items():
+        # The date sort is stable: resolve same-second ties in CSV display order.
+        rows.sort(key=_export_filename_sort_key)
         camera_rows = DataProcessor.process_independent_detection(
             rows, confidence_settings, min_frame_ratio=request.min_frame_ratio,
         )
@@ -3130,6 +3298,7 @@ def export_validation_data(request: ValidationExportRequest) -> ValidationExport
         )
         if earliest_date:
             camera_rows = DataProcessor.calculate_working_days(camera_rows, earliest_date)
+        camera_rows.sort(key=_export_filename_sort_key)
         processed_data.extend(camera_rows)
         processed_by_directory[directory] = camera_rows
 
@@ -3283,8 +3452,12 @@ def _persist_validation_updates(
         db_path = get_db_path(str(root))
         init_db(db_path)
         upsert_detections_bulk(db_path, payloads)
-        delete_validation_bulk(db_path, validation_deletes_by_root.get(root, []))
-        upsert_validation_bulk(db_path, validation_upserts_by_root.get(root, []))
+        deletes = validation_deletes_by_root.get(root, [])
+        if deletes:
+            delete_validation_bulk(db_path, deletes)
+        upserts = validation_upserts_by_root.get(root, [])
+        if upserts:
+            upsert_validation_bulk(db_path, upserts)
 
 
 def _build_export_metadata(path: Path) -> dict[str, Any]:

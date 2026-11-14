@@ -295,7 +295,7 @@ def test_job_streams_all_videos_with_lazy_metadata_and_ordered_final_results(tmp
     metadata_reads, progress = [], []
     for module in (services, legacy):
         monkeypatch.setattr(module, "job_state_path", lambda: tmp_path / "state.json")
-    monkeypatch.setattr(legacy, "_validate_dinov2_job_options", lambda *args: None)
+    monkeypatch.setattr(legacy, "_validate_dino_job_options", lambda *args: None)
     monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy, "_resolve_job_inputs", lambda *args, **kwargs: (tmp_path, paths))
     monkeypatch.setattr(legacy, "load_media_indexes", lambda *args, **kwargs: ({}, {}))

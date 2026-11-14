@@ -84,7 +84,10 @@
 **模型管理**
 
 - 模型目录位于 `res/model/detect` 与 `res/model/cls`；用户模型放入各自的 `user` 子目录，NeriCloud 同步模型位于 `sync` 子目录
-- 目前仅支持 `.pt` 结尾的模型文件，可自行更换
+- 探测模型支持 `.pt` 文件，可自行更换
+- 分类模型还可选择 **Neri1.1**（DINOv3＋Ridge＋Within），支持完整照片序列拒识与人工确认后的补图更新；部署与调用见 [联合模型说明](docs/dinov3-ridge-within.md)。
+- 未安装 PyTorch 时，可选择 `.tflite` / `.litert` 探测模型，由 LiteRT 完成照片和快速视频抽帧探测；详见 [无 PyTorch 的 LiteRT 探测](docs/litert-detection.md)。
+- **环境维护 → Neri1.1（DINOv3 ViT-B/16）** 可一键安装或修复组件：软件从 NeriCloud `/Neri_Data/Model/DINOv3` 递归同步模型清单、checkpoint、冻结编码器与官方源码到 `res/model/DINOv3`，逐文件校验 SHA-256 后原子启用。
 
 **检测阈值设置**
 
@@ -186,6 +189,8 @@ python -m uvicorn system.backend.main:app --reload --app-dir . --host 127.0.0.1 
 ```
 
 后端文档地址：<http://127.0.0.1:721/docs>
+
+参加模型改进计划后，上传副本会在本机移除元数据，并通过 LiteRT 对检测到的人物、车辆、屏幕和书本整体打码；打码失败不会上传。打码运行库随轻量版程序提供，无需安装 PyTorch，首次实际处理时从 Ultralytics 官方 GitHub 下载约 2.9 MB 的检测模型。自动检测可能漏检，仍需自行检查敏感内容。开发环境可安装 `requirements-privacy.txt`，详见[上传前隐私处理](docs/upload-privacy-blurring.md)。
 
 ### 启动 Flutter 前端
 

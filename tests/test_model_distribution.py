@@ -12,18 +12,18 @@ from server.model_distribution.manifest import ManifestBuilder, ManifestError
 from server.model_distribution.storage import RemoteEntry, UpstreamLink
 
 
-class DinoV2DownloadProgressTests(unittest.TestCase):
+class DinoV3DownloadProgressTests(unittest.TestCase):
     def test_component_download_reports_progress_compatible_with_maintenance(self):
-        from system.backend.dinov2_maintenance import _progress
-        from system.dinov2.public_distribution import (
-            DinoV2DistributionClient, DinoV2DistributionEntry,
-            DinoV2DistributionManifest,
+        from system.backend.dinov3_maintenance import _progress
+        from system.dinov3.distribution import (
+            DinoV3DistributionClient, DinoV3DistributionEntry,
+            DinoV3DistributionManifest,
         )
         entries = (
-            DinoV2DistributionEntry('DINOv2/a.json', 'a.json', 4, 'a' * 64),
-            DinoV2DistributionEntry('DINOv2/model/b.bin', 'model/b.bin', 12, 'b' * 64),
+            DinoV3DistributionEntry('DINOv3/a.json', 'a.json', 4, 'a' * 64),
+            DinoV3DistributionEntry('DINOv3/model/b.bin', 'model/b.bin', 12, 'b' * 64),
         )
-        client = DinoV2DistributionClient()
+        client = DinoV3DistributionClient()
         updates = []
         download_updates = []
         maintenance_progress = _progress(55, 92)
@@ -39,7 +39,7 @@ class DinoV2DownloadProgressTests(unittest.TestCase):
                 on_progress(received, entry.size)
             target.write_bytes(b'x' * entry.size)
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            client, 'fetch_manifest', return_value=DinoV2DistributionManifest('c' * 64, entries)
+            client, 'fetch_manifest', return_value=DinoV3DistributionManifest('c' * 64, entries)
         ), patch.object(client, '_download_entry', side_effect=download), patch(
             'system.backend.maintenance._write_status', side_effect=updates.append
         ):
@@ -58,12 +58,12 @@ class DinoV2DownloadProgressTests(unittest.TestCase):
         self.assertEqual(values[-1], 92)
 
     def test_failed_component_download_does_not_report_completion(self):
-        from system.dinov2.public_distribution import (
-            DinoV2DistributionClient, DinoV2DistributionEntry,
-            DinoV2DistributionManifest,
+        from system.dinov3.distribution import (
+            DinoV3DistributionClient, DinoV3DistributionEntry,
+            DinoV3DistributionManifest,
         )
-        entry = DinoV2DistributionEntry('DINOv2/a.json', 'a.json', 4, 'a' * 64)
-        client = DinoV2DistributionClient()
+        entry = DinoV3DistributionEntry('DINOv3/a.json', 'a.json', 4, 'a' * 64)
+        client = DinoV3DistributionClient()
         updates = []
 
         def download(_manifest, _entry, _target, on_progress):
@@ -72,7 +72,7 @@ class DinoV2DownloadProgressTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, patch.object(
             client, 'fetch_manifest',
-            return_value=DinoV2DistributionManifest('c' * 64, (entry,)),
+            return_value=DinoV3DistributionManifest('c' * 64, (entry,)),
         ), patch.object(client, '_download_entry', side_effect=download):
             with self.assertRaisesRegex(OSError, 'download failed'):
                 client.download_tree(
@@ -121,6 +121,72 @@ class FakeStore:
 
 
 class ManifestBuilderTests(unittest.TestCase):
+    def test_publishes_litert_detector_files(self):
+        files = {
+            '/Neri_Data/Model/detect/camera.tflite': {
+                'data': b'camera',
+                'modified': '1',
+            },
+            '/Neri_Data/Model/detect/camera.litert': {
+                'data': b'camera',
+                'modified': '2',
+            },
+            '/Neri_Data/Model/detect/camera.labels.txt': {
+                'data': b'animal,0',
+                'modified': '3',
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = ManifestBuilder(Path(temp_dir), FakeStore(files)).build()
+        self.assertEqual(
+            [item.path for item in snapshot.files],
+            [
+                'detect/camera.labels.txt',
+                'detect/camera.litert',
+                'detect/camera.tflite',
+            ],
+        )
+
+    def test_dinov3_manifest_publishes_the_recursive_component_tree(self):
+        from server.model_distribution.manifest import DinoV3ManifestBuilder
+
+        class NestedFakeStore(FakeStore):
+            def list_dir(self, path):
+                prefix = path.rstrip('/') + '/'
+                entries = {}
+                for full, meta in self.files.items():
+                    if not full.startswith(prefix):
+                        continue
+                    rest = full[len(prefix):]
+                    if '/' in rest:
+                        name = rest.split('/', 1)[0]
+                        entries[name] = RemoteEntry(name, 0, meta.get('modified'), True)
+                    else:
+                        entries[rest] = RemoteEntry(
+                            rest, len(meta['data']), meta.get('modified'), False
+                        )
+                return list(entries.values())
+
+        files = {
+            '/Neri_Data/Model/DINOv3/dinov3-ridge-within.neri.json': {
+                'data': b'{}',
+                'modified': '1',
+            },
+            '/Neri_Data/Model/DINOv3/assets/model.neri-model': {
+                'data': b'model',
+                'modified': '2',
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = DinoV3ManifestBuilder(Path(temp_dir), NestedFakeStore(files)).build()
+        self.assertEqual(
+            [item.path for item in snapshot.files],
+            [
+                'DINOv3/assets/model.neri-model',
+                'DINOv3/dinov3-ridge-within.neri.json',
+            ],
+        )
+
     def test_short_or_oversized_stream_is_not_cached(self):
         from unittest.mock import patch
         store = FakeStore({'/Neri_Data/Model/detect/a.pt': {'data': b'abc', 'modified': '1'}})
@@ -517,10 +583,12 @@ class ProxyRangeTests(unittest.TestCase):
     def test_app_helpers_import_without_openlist_token(self):
         env = dict(os.environ)
         env.pop('NERI_OPENLIST_TOKEN', None)
+        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
         result = subprocess.run(
             [
                 sys.executable,
                 '-c',
+                'import sys; sys.path.insert(0, "."); '
                 'from server.model_distribution.app import valid_range_header; '
                 'assert valid_range_header("bytes=0-1")',
             ],

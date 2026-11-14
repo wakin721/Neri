@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import gc
 import logging
 import math
 import time
@@ -11,28 +11,104 @@ from typing import Any, Callable, Iterator
 
 from system.config import XPU_ENABLED
 from system.adaptive_batch import AdaptiveBatchSize, accelerator_memory, is_accelerator_oom
+from system.host_memory import PhotoMemoryGuard, HostMemoryPressure, is_host_memory_error
 from .models import ProcessingOptions
 
 logger = logging.getLogger(__name__)
 
 
-def prefetched_path_batches(paths, batch_size: Callable[[], int], preload=None):
-    """Bounded photo lookahead that picks up learned sizes as the job advances."""
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="neri-image-preload") if preload else None
-    pending = deque()
+def prefetched_path_batches(paths, batch_size: Callable[[], int], preload=None, *,
+                            memory_guard=None, check_cancelled=None):
+    """One byte-budgeted lookahead, with admission before any full-image decode.
+
+    The caller must release its previous Future/data before advancing. Unlike
+    the former three-batch queue, only the current batch and one lookahead can
+    own full-resolution image buffers. GPU tuning remains an upper bound.
+    """
+    if preload is None:
+        offset = 0
+        while offset < len(paths):
+            if check_cancelled:
+                check_cancelled()
+            end = min(len(paths), offset + max(1, batch_size()))
+            yield paths[offset:end], None
+            offset = end
+        return
+    guard = memory_guard or PhotoMemoryGuard()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="neri-image-preload")
     offset = 0
+    pending = None
+    retry_ceiling = None
+
+    def submit(start, count, cost):
+        batch = paths[start:start+count]
+        def guarded_load():
+            guard.ensure_decode(batch)
+            return preload([str(path) for path in batch])
+        return start, batch, executor.submit(guarded_load), cost
+
     try:
-        while pending or offset < len(paths):
-            while len(pending) < 3 and offset < len(paths):
-                end = min(len(paths), offset + max(1, batch_size()))
-                batch = paths[offset:end]
-                future = executor.submit(preload, [str(path) for path in batch]) if executor else None
-                pending.append((batch, future))
-                offset = end
-            yield pending.popleft()
+        while pending is not None or offset < len(paths):
+            if check_cancelled:
+                check_cancelled()
+            if pending is None:
+                maximum = min(batch_size(), retry_ceiling) if retry_ceiling else batch_size()
+                count, cost = guard.choose(paths[offset:], maximum, leave_lookahead=True)
+                pending = submit(offset, count, cost)
+                offset += count
+            start, batch, future, cost = pending
+            pending = None
+            retry = False
+            try:
+                while True:
+                    if check_cancelled:
+                        check_cancelled()
+                    try:
+                        future.result(timeout=.2)
+                        break
+                    except TimeoutError:
+                        if future.done():
+                            raise
+                guard.observe_decode(batch, future.result())
+            except Exception as exc:
+                if not is_host_memory_error(exc):
+                    raise
+                if len(batch) <= 1:
+                    raise HostMemoryPressure(
+                        "单张照片解码也超出安全内存预算，请释放内存后继续任务。") from exc
+                retry_ceiling = max(1, len(batch)//2)
+                offset = start
+                logger.warning("Host memory pressure before inference; retrying photo batch <= %d",
+                               retry_ceiling)
+                retry = True
+            if retry:
+                future = None
+                gc.collect()
+                continue
+            cost = sum(guard.estimate(path) for path in batch)
+            # Current allocations may have reduced headroom since admission.
+            # Do not decode additional photos when the OS is under pressure.
+            if cost // 2 > guard.budget():
+                if len(batch) > 1:
+                    retry_ceiling = max(1, len(batch)//2)
+                    offset = start
+                    future = None
+                    gc.collect()
+                    continue
+                raise HostMemoryPressure("图片已解码，但系统内存余量不足以安全开始推理；请释放内存后继续任务。")
+            if offset < len(paths):
+                maximum = min(batch_size(), retry_ceiling) if retry_ceiling else batch_size()
+                count, next_cost = guard.choose(paths[offset:], maximum, reserved=cost, optional=True)
+                if count:
+                    pending = submit(offset, count, next_cost)
+                    offset += count
+            yield batch, future
+            future = None
+            batch = None
     finally:
-        if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+        if pending is not None:
+            pending[2].cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _gpu_memory_available() -> int | None:
@@ -95,13 +171,15 @@ class InferenceBatcher:
     """Remember a safe batch size for one job without changing saved settings."""
 
     def __init__(self, options: ProcessingOptions):
+        self.host_guard = PhotoMemoryGuard()
         self.automatic = options.batch_size == 0
         size = (
             _automatic_batch_size(options) if self.automatic else options.batch_size
         )
         self._tuner = AdaptiveBatchSize(size, maximum=32, enabled=self.automatic, label="Detection")
         if self.automatic:
-            logger.info("Automatic inference batch selected: size=%d", self.batch_size)
+            logger.info("Automatic inference GPU batch ceiling: size=%d; photo RAM/commit guard enabled",
+                        self.batch_size)
 
     @property
     def batch_size(self) -> int:
@@ -130,12 +208,16 @@ class InferenceBatcher:
                     paths[start:end], preloaded_data=loaded, **kwargs,
                 )
             except Exception as exc:
-                if not self.automatic or end - start <= 1 or not is_accelerator_oom(exc):
+                accelerator_oom = is_accelerator_oom(exc)
+                host_oom = is_host_memory_error(exc)
+                if not self.automatic or end - start <= 1 or not (accelerator_oom or host_oom):
+                    if host_oom:
+                        raise HostMemoryPressure("推理所需的主内存不足，请释放内存后继续任务。") from exc
                     raise
                 self._tuner.reduce_after_oom(end - start)
                 logger.warning(
-                    "GPU memory exhausted; retrying automatic batch with size=%d",
-                    self.batch_size,
+                    "%s memory exhausted; retrying automatic batch with size=%d",
+                    "GPU" if accelerator_oom else "Host", self.batch_size,
                 )
             else:
                 self._tuner.observe(
@@ -148,9 +230,6 @@ class InferenceBatcher:
 
             # Release the failed call's traceback before emptying the cache so
             # tensors referenced by that stack can actually be reclaimed.
-            drain = getattr(detector, "drain_dinov2_observations", None)
-            if callable(drain):
-                drain()
             cleanup = getattr(detector, "cleanup_runtime_cache", None)
             if callable(cleanup):
                 cleanup(clear_cuda_cache=True)

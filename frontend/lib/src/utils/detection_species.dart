@@ -1,4 +1,5 @@
 import '../models/job.dart';
+import 'dino_rejection.dart';
 
 List<String> detectionSpeciesOptions(
   DetectionItem item, {
@@ -6,16 +7,26 @@ List<String> detectionSpeciesOptions(
 }) {
   final seen = <String>{};
   final options = <String>[];
+  final dino = isDinoItem(item);
 
   void add(Object? rawName) {
     final name = rawName?.toString().trim() ?? '';
-    if (name.isEmpty || name == 'Unknown' || name == '空' || !seen.add(name)) {
+    if (name.isEmpty ||
+        (!dino && name == 'Unknown') ||
+        name == '空' ||
+        !seen.add(name)) {
       return;
     }
     options.add(name);
   }
 
   add(globalOption);
+  if (dino) {
+    for (final box in item.detectionBoxes) {
+      add(dinoFinalBox(box).species);
+    }
+    return options;
+  }
   for (final species in item.species) {
     add(species);
   }

@@ -1,5 +1,23 @@
 # Training upload implementation and verification
 
+Box feedback also queues a false-positive photo after every detection box has
+been manually confirmed as empty. It uses the existing participation choice,
+upload destination, event deduplication, three-empty-photos-per-folder quota,
+and mandatory privacy processing. Partially reviewed photos are not submitted
+through this entry point. Undoing the empty decision, removing confirmation, or
+correcting a box to an animal cancels the pending empty submission or schedules
+its removal if it may already have reached the server. Local annotation must
+save successfully before any upload task is changed.
+
+Current verification (2026-10-25): the upload broker is deployed with schema 3,
+including device-ID directories. Ordinary and empty synthetic photos completed
+real uploads; all six remote files matched their expected hashes and were deleted
+after verification. Original records were unchanged. See the
+[live upload report](live-upload-verification-2026-10-25.md) and
+[upload privacy processing](upload-privacy-blurring.md) for details.
+
+## Earlier deployment snapshot (2026-09-05)
+
 Deployed 2026-09-05 to the authorized server. Health: https://myneri.top/api/training/health. Photos and paired JSON are sent from the desktop directly to Microsoft; this endpoint only authorizes, verifies and manages submissions. The destination is OneDrive `NeriCloud/Neri_Data/Training`, grouped by species, with confirmed empty photos under `空照片`.
 
 Server code: `/opt/neri-training/training_broker`. Unit: `neri-training.service`, dedicated user, loopback port 8001, one worker. Private state: `/var/lib/neri-training`. Protected environment: `/etc/neri-training.env`. No credentials are included in this repository. nginx, the existing website API and OpenList remained active after deployment. Deployment backup: `/var/backups/neri-training-20260905-132149`.

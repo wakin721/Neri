@@ -1,6 +1,7 @@
 """Durable opt-in upload journal, with one background compressor/uploader."""
 from __future__ import annotations
 
+from collections import deque
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from .events import TriggerEventResolver
 from .media import prepare_sample
+from .privacy import PrivacyBlurrer
 from .policy import (
     AGREEMENT_VERSION,
     IMAGE_SUFFIXES,
@@ -41,6 +43,7 @@ class TrainingQueue:
         debounce_seconds=10,
         species_db_path: Path | None = None,
         event_resolver: TriggerEventResolver | None = None,
+        privacy_blurrer=None,
     ):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -52,14 +55,18 @@ class TrainingQueue:
         self.debounce_seconds = debounce_seconds
         self.species_resolver = SpeciesNameResolver(species_db_path)
         self.event_resolver = event_resolver or TriggerEventResolver()
+        self.privacy_blurrer = privacy_blurrer if privacy_blurrer is not None else PrivacyBlurrer(self.state_dir / "privacy-models")
         self._lock = threading.RLock()
         self._processing_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_enqueues: deque[tuple[Path, dict, bool]] = deque()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
         with self._connect() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS consent (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS identity (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (
                     source_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, folder_key TEXT NOT NULL,
                     event_key TEXT NOT NULL DEFAULT '',
@@ -73,6 +80,13 @@ class TrainingQueue:
                 CREATE INDEX IF NOT EXISTS jobs_folder ON jobs(folder_key);
                 CREATE INDEX IF NOT EXISTS jobs_waiting ON jobs(state,next_attempt);
             ''')
+            # A random installation secret, independent of consent and hardware.
+            # A transaction also makes concurrent first launches choose one ID.
+            db.execute('INSERT OR IGNORE INTO identity(key,value) VALUES (?,?)',
+                       ('device_secret', secrets.token_urlsafe(32)))
+            self._device_secret = db.execute(
+                "SELECT value FROM identity WHERE key='device_secret'").fetchone()[0]
+            self.device_id = hashlib.sha256(self._device_secret.encode()).hexdigest()[:32]
         with self._connect() as db:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
             if 'remote_possible' not in columns:
@@ -117,6 +131,7 @@ class TrainingQueue:
             counts = dict(db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state"))
         return {
             "agreement_version": AGREEMENT_VERSION,
+            "device_id": self.device_id,
             "agreement_accepted": values.get("version") == AGREEMENT_VERSION,
             "participation_decided": values.get("version") == AGREEMENT_VERSION and "enabled" in values,
             "training_enabled": values.get("version") == AGREEMENT_VERSION and values.get("enabled") == "true",
@@ -133,6 +148,8 @@ class TrainingQueue:
                 ("decided_at", str(self.clock())),
             ])
             if not enabled:
+                with self._pending_lock:
+                    self._pending_enqueues.clear()
                 db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE state IN ('pending','failed','uploading')")
         self._wake.set()
         return self.status()
@@ -152,18 +169,66 @@ class TrainingQueue:
             "jpeg_quality": JPEG_QUALITY,
             "max_image_bytes": MAX_IMAGE_BYTES,
             "image_suffixes": sorted(IMAGE_SUFFIXES),
+            "privacy_blurring": self.privacy_blurrer.status(),
         }
 
     def clear_pending(self):
         with self._lock, self._connect() as db:
+            with self._pending_lock:
+                self._pending_enqueues.clear()
             db.execute("UPDATE jobs SET state='cancelled',empty_reserved=0 WHERE state IN ('pending','failed','uploading')")
         return self.status()
+
+    def enqueue_async(self, path, data: dict, validated=True) -> bool:
+        return self.enqueue_many_async([(path, data, validated)])
+
+    def enqueue_many_async(self, items) -> bool:
+        entries = [(Path(path), dict(data), bool(validated)) for path, data, validated in items]
+        if not entries:
+            return False
+        worker_alive = self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+        if not worker_alive:
+            accepted = False
+            for path, data, validated in entries:
+                accepted = self.enqueue(path, data, validated=validated) or accepted
+            return accepted
+        with self._pending_lock:
+            self._pending_enqueues.extend(entries)
+        self._wake.set()
+        return True
+
+    def _drain_pending_enqueues(self) -> None:
+        while not self._stop.is_set():
+            with self._pending_lock:
+                if not self._pending_enqueues:
+                    return
+                path, data, validated = self._pending_enqueues.popleft()
+            try:
+                self.enqueue(path, data, validated=validated)
+            except Exception:
+                continue
 
     def enqueue(self, path, data: dict, validated=True):
         with self._lock, self._connect() as db:
             if not self._enabled(db):
                 return False
-            path = Path(path).expanduser().resolve()
+        resolved_path = Path(path).expanduser().resolve()
+        payload = contribution_payload(data) if validated and resolved_path.suffix.lower() in IMAGE_SUFFIXES else None
+        event_key = ""
+        stamp = ""
+        if payload is not None:
+            try:
+                folder_hint = self._key(resolved_path.parent)
+                stamp = self._stamp(resolved_path)
+                event_key = self.event_resolver.event_key(resolved_path, folder_key=folder_hint)
+            except OSError:
+                return False
+            payload["training_names"] = self.species_resolver.resolve_many(payload["species"])
+
+        with self._lock, self._connect() as db:
+            if not self._enabled(db):
+                return False
+            path = resolved_path
             try:
                 key, folder = self._key(path), self._key(path.parent)
                 old = db.execute("SELECT * FROM jobs WHERE source_key=?", (key,)).fetchone()
@@ -175,7 +240,6 @@ class TrainingQueue:
             if old:
                 db.execute('UPDATE jobs SET source_path=? WHERE source_key=?', (str(path), key))
 
-            payload = contribution_payload(data) if validated and path.suffix.lower() in IMAGE_SUFFIXES else None
             if payload is None:
                 if old:
                     if old["remote_possible"] or old["uploaded_revision"] or old["state"] == "uploading":
@@ -190,7 +254,8 @@ class TrainingQueue:
 
             try:
                 stamp = self._stamp(path)
-                event_key = self.event_resolver.event_key(path, folder_key=folder)
+                if folder != folder_hint or not event_key:
+                    event_key = self.event_resolver.event_key(path, folder_key=folder)
             except OSError:
                 return False
 
@@ -202,7 +267,6 @@ class TrainingQueue:
                 if representative is not None:
                     return False
 
-            payload["training_names"] = self.species_resolver.resolve_many(payload["species"])
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             if (
                 old
@@ -301,6 +365,8 @@ class TrainingQueue:
                 return False
             job = dict(row)
             job["payload"] = json.loads(job["payload"])
+            job["device_id"] = self.device_id
+            job["device_secret"] = self._device_secret
             db.execute("UPDATE jobs SET state='uploading' WHERE source_key=?", (job["source_key"],))
         try:
             if job["operation"] == "delete":
@@ -309,7 +375,7 @@ class TrainingQueue:
                 path = Path(job["source_path"])
                 if self._stamp(path) != job["stamp"]:
                     raise ValueError("source_changed")
-                photo, annotation = prepare_sample(path, job)
+                photo, annotation = prepare_sample(path, job, privacy_blurrer=self.privacy_blurrer)
                 if self._stamp(path) != job["stamp"]:
                     raise ValueError("source_changed")
                 if not self._current(job):
@@ -376,6 +442,7 @@ class TrainingQueue:
     def _run(self):
         while not self._stop.is_set():
             try:
+                self._drain_pending_enqueues()
                 if self.process_once():
                     continue
             except Exception:

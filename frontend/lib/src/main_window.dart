@@ -13,7 +13,7 @@ import 'api_client.dart';
 import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
-import 'dinov2_startup_check.dart';
+import 'dino_startup_check.dart';
 import 'frontend_version.dart';
 import 'local_maintenance_status.dart';
 import 'models/close_behavior.dart';
@@ -41,12 +41,9 @@ import 'widgets/app_menu_style.dart';
 const _lastInputPathKey = 'last_input_path';
 const _lastBrowseDirectoryKey = 'last_browse_directory';
 
-String? resolveDinoV2ValidationModelPath(
-  ModelInfo? model,
-  String? selectedPath,
-) {
+String? resolveDinoValidationModelPath(ModelInfo? model, String? selectedPath) {
   final path = selectedPath?.trim() ?? '';
-  if (model?.isDinoV2 != true || path.isEmpty) return null;
+  if (model?.isDino != true || path.isEmpty) return null;
   return path;
 }
 
@@ -58,14 +55,14 @@ class MainWindow extends StatefulWidget {
   const MainWindow({
     required this.apiClient,
     required this.themeNotifier,
-    this.dinoV2StartupCheck,
+    this.dinoStartupCheck,
     this.previewCache,
     super.key,
   });
 
   final NeriApiClient apiClient;
   final ValueNotifier<ThemeSettings> themeNotifier;
-  final DinoV2StartupCheck? dinoV2StartupCheck;
+  final DinoStartupCheck? dinoStartupCheck;
   final PreviewSnapshotCache? previewCache;
 
   @override
@@ -124,8 +121,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   final Set<int> _expectedBackendExitPids = <int>{};
   final _maintenanceStatusStore = LocalMaintenanceStatusStore();
   final _appUpdater = AppUpdater();
-  late final DinoV2StartupCheck _dinoV2StartupCheck =
-      widget.dinoV2StartupCheck ?? DinoV2StartupCheck();
+  late final DinoStartupCheck _dinoStartupCheck =
+      widget.dinoStartupCheck ?? DinoStartupCheck();
 
   NeriSettings? _settings;
   List<ProcessingJob> _jobs = const <ProcessingJob>[];
@@ -209,8 +206,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       0.25;
   String? _selectedModelPath;
   String? _selectedClassificationModelPath;
-  Set<String> _dinov2ValidationPaths = <String>{};
-  int _dinov2ValidationRequestedCount = 0;
+  Set<String> _dinoValidationPaths = <String>{};
+  int _dinoValidationRequestedCount = 0;
   MaintenanceStatus? _startupMaintenanceStatus;
   String _backendOutputTail = '';
   String _videoMode = defaultVideoProcessingMode;
@@ -891,10 +888,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     if (!mounted || _closeFlowBlocksBackendStartup || !_backendReady) return;
     timing.mark('shell_ready');
     unawaited(
-      _dinoV2StartupCheck.run(
+      _dinoStartupCheck.run(
         generation: _backendStartupGeneration,
         apiClient: widget.apiClient,
         onMessage: _showSnackBar,
+        selectedModelPath: _selectedClassificationModelPath ?? '',
       ),
     );
     _scheduleStartupUpdateCheck();
@@ -1751,9 +1749,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       await _refresh(silent: true);
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       final latest = _jobs.where((current) => current.id == job.id).firstOrNull;
+      final complete = latest == null ? null : _completeJobsById[job.id];
       setState(() {
         if (latest != null &&
-            jobResultsNeedRefresh(latest, _completeJobsById[job.id])) {
+            (jobResultsNeedRefresh(latest, complete) ||
+                latest.state == 'completed' &&
+                    latest.hasFailedItems &&
+                    _failedResultCount(complete) < latest.failedCount)) {
           _failedJobDetailIds.add(job.id);
         }
       });
@@ -2279,12 +2281,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   DetectionItem _mergeValidationUpdate(
     DetectionItem fallback,
-    DetectionItem update,
-  ) {
-    final current = _previewItems.firstWhere(
-      (item) => item.path == update.path,
-      orElse: () => fallback,
-    );
+    DetectionItem update, {
+    Map<String, DetectionItem>? currentByPath,
+  }) {
+    final current =
+        currentByPath?[update.path] ??
+        _previewMetadataCache[update.path] ??
+        _previewItems.firstWhere(
+          (item) => item.path == update.path,
+          orElse: () => fallback,
+        );
     return current.mergeValidationUpdate(update);
   }
 
@@ -2387,20 +2393,24 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       backendResponded = true;
       _backendReady = true;
       final previousById = {for (final job in _jobs) job.id: job};
-      final changedJobs = summaries
-          .where(
-            (job) =>
-                includeJobResults &&
+      final changedJobs = summaries.where((job) {
+        final complete = _completeJobsById[job.id];
+        final expanded =
+            _selectedIndex == 0 && _expandedJobIds.contains(job.id);
+        final missingFailureDetails =
+            expanded &&
+            job.state == 'completed' &&
+            job.hasFailedItems &&
+            _failedResultCount(complete) < job.failedCount;
+        return includeJobResults &&
+            (missingFailureDetails ||
                 shouldFetchJobResults(
                   summary: job,
                   previous: previousById[job.id],
-                  complete: _completeJobsById[job.id],
-                  resultsRequested:
-                      mayFetchCompleteJobResults ||
-                      (_selectedIndex == 0 && _expandedJobIds.contains(job.id)),
-                ),
-          )
-          .toList();
+                  complete: complete,
+                  resultsRequested: mayFetchCompleteJobResults || expanded,
+                ));
+      }).toList();
       final fetchedJobs = <ProcessingJob>[];
       final deletedIds = <String>{};
       for (var start = 0; start < changedJobs.length; start += 4) {
@@ -2442,6 +2452,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           if (_jobs[i].id != jobs[i].id ||
               _jobs[i].state != jobs[i].state ||
               _jobs[i].processed != jobs[i].processed ||
+              _jobs[i].failedCount != jobs[i].failedCount ||
               _jobs[i].active != jobs[i].active ||
               _jobs[i].results.length != jobs[i].results.length ||
               _jobs[i].message != jobs[i].message ||
@@ -2590,6 +2601,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             outputDir: summary.outputDir,
             total: summary.total,
             processed: summary.processed,
+            failedCount: summary.failedCount,
             elapsedSeconds: summary.elapsedSeconds,
             speed: summary.speed,
             remainingSeconds: summary.remainingSeconds,
@@ -2601,6 +2613,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         else
           summary,
     ];
+  }
+
+  int _failedResultCount(ProcessingJob? job) {
+    return job?.results.where((item) => item.error != null).length ?? 0;
   }
 
   Future<void> _saveAdvancedSettings(Map<String, dynamic> settings) async {
@@ -2728,9 +2744,15 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   String _effectiveVideoMode() {
     final normalized = normalizeVideoProcessingMode(_videoMode);
     final classification = _selectedClassificationModelInfo();
+    if (classification?.supportsVideoFast == false &&
+        normalized == videoProcessingModeFast) {
+      return videoProcessingModeSkip;
+    }
     if (classification?.supportsVideoAll == false &&
         normalized == videoProcessingModeAll) {
-      return videoProcessingModeFast;
+      return classification?.supportsVideoFast == false
+          ? videoProcessingModeSkip
+          : videoProcessingModeFast;
     }
     return normalized;
   }
@@ -2747,8 +2769,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     return null;
   }
 
-  String? _selectedDinoV2ValidationModelPath() {
-    return resolveDinoV2ValidationModelPath(
+  String? _selectedDinoValidationModelPath() {
+    return resolveDinoValidationModelPath(
       _selectedClassificationModelInfo(),
       _selectedClassificationModelPath,
     );
@@ -2901,13 +2923,13 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final hasClassificationModel =
         _selectedClassificationModelPath?.trim().isNotEmpty == true;
     final classification = _selectedClassificationModelInfo();
-    if (classification?.isDinoV2 == true && !hasDetectionModel) {
+    if (classification?.requiresDetector == true && !hasDetectionModel) {
       if (!mounted) return false;
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('DINOv2 需要探测模型'),
-          content: const Text('DINOv2 是二阶段分类模型。请先选择 YOLO 探测模型，再开始识别。'),
+          title: const Text('分类模型需要探测模型'),
+          content: const Text('请先选择 YOLO 探测模型，再使用所选的二阶段分类模型开始识别。'),
           actions: [
             FilledButton(
               onPressed: () => Navigator.of(context).pop(),
@@ -3004,21 +3026,32 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   }
 
   Future<void> _resumeJob(ProcessingJob job) async {
-    if (mounted && job.id.isNotEmpty) {
+    final retryFailedItems = job.canRetryFailed;
+    if (mounted && job.id.isNotEmpty && !retryFailedItems) {
       setState(() {
         _pendingStartJobBaselines[job.id] = job.processed;
       });
       unawaited(_updateWindowsShellStatus());
     }
     try {
-      await widget.apiClient.resumeJob(job.id);
+      final queuedJob = retryFailedItems
+          ? await widget.apiClient.retryFailedJob(job.id)
+          : await widget.apiClient.resumeJob(job.id);
+      if (mounted && queuedJob.id.isNotEmpty) {
+        setState(() {
+          _pendingStartJobBaselines[queuedJob.id] = queuedJob.processed;
+        });
+        unawaited(_updateWindowsShellStatus());
+      }
       await _refresh(silent: true);
-      _showSnackBar('已继续任务');
+      _showSnackBar(retryFailedItems ? '已创建仅重试失败文件的新任务' : '已继续任务');
     } catch (error) {
       if (!mounted) return;
-      setState(() => _pendingStartJobBaselines.remove(job.id));
+      if (!retryFailedItems) {
+        setState(() => _pendingStartJobBaselines.remove(job.id));
+      }
       unawaited(_updateWindowsShellStatus());
-      _showSnackBar('继续任务失败：$error');
+      _showSnackBar(retryFailedItems ? '重试失败文件失败：$error' : '继续任务失败：$error');
     }
   }
 
@@ -3148,7 +3181,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         inputDir: item.path,
         modelPath: _selectedModelPath,
         classificationModelPath: _selectedClassificationModelPath,
-        confidence: _previewConfidenceThreshold,
+        confidence: _selectedDinoValidationModelPath() != null
+            ? _doubleSetting(_settingsOrEmpty(), 'confidence', 0.25)
+            : _previewConfidenceThreshold,
         iou: _iou,
         useFp16: _effectiveUseFp16(),
         useAugment: _useAugment(),
@@ -3224,6 +3259,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesType,
     String? remark,
     String? feedbackOperationId,
+    Map<String, double>? confidenceSettings,
+    double? minFrameRatio,
   }) async {
     return _runValidationBusy(() async {
       final inputPath = _inputController.text.trim();
@@ -3239,8 +3276,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
-        classificationModelPath: _selectedDinoV2ValidationModelPath(),
+        classificationModelPath: _selectedDinoValidationModelPath(),
         feedbackOperationId: feedbackOperationId,
+        confidenceSettings: confidenceSettings,
+        minFrameRatio: minFrameRatio ?? 0,
       );
       final merged = _mergeValidationUpdate(item, updated);
 
@@ -3249,6 +3288,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         _cacheMarkedSpeciesTypes(speciesName, speciesType);
         _previewMetadataCache[merged.path] = merged;
         _previewItems = _replacePreviewItems(_previewItems, [merged]);
+        _directoryScope.update(_previewItems, _inputController.text.trim());
       });
       return merged;
     });
@@ -3262,6 +3302,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     String? speciesType,
     String? remark,
     String? feedbackOperationId,
+    Map<String, double>? confidenceSettings,
+    double? minFrameRatio,
   }) async {
     return _runValidationBusy(() async {
       final inputPath = _inputController.text.trim();
@@ -3277,17 +3319,23 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         speciesCount: speciesCount,
         speciesType: speciesType,
         remark: remark,
-        classificationModelPath: _selectedDinoV2ValidationModelPath(),
+        classificationModelPath: _selectedDinoValidationModelPath(),
         feedbackOperationId: feedbackOperationId,
+        confidenceSettings: confidenceSettings,
+        minFrameRatio: minFrameRatio ?? 0,
       );
       final fallbackByPath = <String, DetectionItem>{
         for (final item in items) item.path: item,
+      };
+      final currentByPath = <String, DetectionItem>{
+        for (final item in _previewItems) item.path: item,
       };
       final updatedItems = <DetectionItem>[
         for (final updated in rawUpdatedItems)
           _mergeValidationUpdate(
             fallbackByPath[updated.path] ?? updated,
             updated,
+            currentByPath: currentByPath,
           ),
       ];
 
@@ -3298,8 +3346,19 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           _previewMetadataCache[item.path] = item;
         }
         _previewItems = _replacePreviewItems(_previewItems, updatedItems);
+        _directoryScope.update(_previewItems, _inputController.text.trim());
       });
       return updatedItems;
+    });
+  }
+
+  void _handleValidationItemUpdated(DetectionItem updated) {
+    if (!mounted) return;
+    final merged = _mergeValidationUpdate(updated, updated);
+    setState(() {
+      _previewMetadataCache[merged.path] = merged;
+      _previewItems = _replacePreviewItems(_previewItems, [merged]);
+      _directoryScope.update(_previewItems, _inputController.text.trim());
     });
   }
 
@@ -3482,7 +3541,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
                   children: [
                     _buildTitleLogo(size: 28),
                     const SizedBox(width: 10),
-                    Text('Neri ${frontendVersion.split('-').first}'),
+                    Text(
+                      'Neri ${frontendVersion.split(RegExp(r'[-_+(]')).first}',
+                    ),
                     if ((_selectedIndex == 1 || _selectedIndex == 2) &&
                         _directoryScope.directories.isNotEmpty) ...[
                       const SizedBox(width: 16),
@@ -3736,10 +3797,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       } else {
         _selectedModelPath = normalizedValue;
       }
-      if (_selectedClassificationModelInfo()?.supportsVideoAll == false &&
-          normalizeVideoProcessingMode(_videoMode) == videoProcessingModeAll) {
-        _videoMode = videoProcessingModeFast;
-      }
+      _videoMode = _effectiveVideoMode();
       final current = _settings;
       if (current != null) {
         final nextSettings = Map<String, dynamic>.from(current.settings)
@@ -3824,13 +3882,10 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           _updateStartModelSelection(value, classification: true),
       videoMode: _effectiveVideoMode(),
       onVideoModeChanged: (value) {
-        final classification = _selectedClassificationModelInfo();
-        final normalized =
-            classification?.supportsVideoAll == false &&
-                value == videoProcessingModeAll
-            ? videoProcessingModeFast
-            : value;
-        setState(() => _videoMode = normalized);
+        setState(() {
+          _videoMode = value;
+          _videoMode = _effectiveVideoMode();
+        });
       },
       vidStride: _vidStride,
       onVidStrideChanged: (value) => setState(() => _vidStride = value),
@@ -3894,8 +3949,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         .toSet();
     if (!mounted) return;
     setState(() {
-      _dinov2ValidationPaths = normalized;
-      _dinov2ValidationRequestedCount = normalized.length;
+      _dinoValidationPaths = normalized;
+      _dinoValidationRequestedCount = normalized.length;
       _selectedIndex = 2;
     });
     unawaited(_refreshVisibleResultsPage());
@@ -3904,8 +3959,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   void _clearDinoCandidateValidation() {
     if (!mounted) return;
     setState(() {
-      _dinov2ValidationPaths = <String>{};
-      _dinov2ValidationRequestedCount = 0;
+      _dinoValidationPaths = <String>{};
+      _dinoValidationRequestedCount = 0;
     });
   }
 
@@ -4141,11 +4196,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Widget _buildValidationPage() {
     final inputPath = _directoryScope.inputPath;
-    final hasDinoFilter = _dinov2ValidationPaths.isNotEmpty;
+    final hasDinoFilter = _dinoValidationPaths.isNotEmpty;
     final items = _validationItemsCache.itemsFor(
       _directoryScope.items,
       inputPath,
-      _dinov2ValidationPaths,
+      _dinoValidationPaths,
       alreadyScoped: true,
     );
     final settings = _settingsOrEmpty();
@@ -4165,7 +4220,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       exportFormatMode: normalizeExportFormatMode(
         _stringSetting(settings, 'export_format_mode', 'csv'),
       ),
-      classificationModelPath: _selectedDinoV2ValidationModelPath(),
+      classificationModelPath: _selectedDinoValidationModelPath(),
+      detectionConfidence: _doubleSetting(settings, 'confidence', 0.25),
       items: items,
       loading: _previewLoading,
       refreshVersion: _previewContentVersion,
@@ -4222,6 +4278,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       onOpenExternal: _openFileWithSystem,
       onMarkItem: _markValidationItem,
       onMarkItems: _markValidationItems,
+      onItemUpdated: _handleValidationItemUpdated,
       onQuickMarkUsed: _recordQuickMarkUsage,
       onQuickMarkReverted: _revertQuickMarkUsage,
       onRedetectItems: _redetectValidationItems,
@@ -4234,7 +4291,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     );
     if (!hasDinoFilter) return validationScreen;
 
-    final requested = _dinov2ValidationRequestedCount;
+    final requested = _dinoValidationRequestedCount;
     final missing = (requested - items.length).clamp(0, requested).toInt();
     return Column(
       children: [
@@ -4243,7 +4300,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           child: ListTile(
             dense: true,
             leading: const Icon(Icons.filter_alt_rounded),
-            title: const Text('DINOv2 Candidate 验证筛选'),
+            title: const Text('Neri1.1 Candidate 验证筛选'),
             subtitle: Text(
               missing > 0
                   ? '当前显示 ${items.length}/$requested 个代表事件；$missing 个历史文件不在当前任务中。'

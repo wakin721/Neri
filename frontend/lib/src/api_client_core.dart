@@ -3,11 +3,11 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
-import 'models/dinov2_explanation.dart';
-import 'models/dinov2_feedback.dart';
-import 'models/dinov2_registry.dart';
+import 'models/dino_explanation.dart';
+import 'models/dino_feedback.dart';
 import 'models/export_result.dart';
 import 'models/job.dart';
+import 'models/rejection_cluster.dart';
 import 'models/settings.dart';
 import 'models/video_processing_mode.dart';
 import 'privacy/privacy_status.dart';
@@ -55,169 +55,61 @@ class NeriApiClient {
     );
   }
 
-  Future<List<DinoV2RegistryEntry>> fetchDinoV2Registry(
-    String classificationModelPath, {
-    String? status,
+  Future<ClusterLearningResult> confirmDinoCluster({
+    required String inputPath,
+    required String classificationModelPath,
+    required String clusterId,
+    required List<String> observationIds,
+    required String speciesName,
+    required String feedbackOperationId,
   }) async {
-    final uri = _uri('/api/dinov2/registry').replace(
-      queryParameters: {
-        'classification_model_path': classificationModelPath,
-        if (status != null && status.isNotEmpty) 'status': status,
-      },
-    );
-    final response = await _httpClient.get(uri);
-    _ensureSuccess(response);
-    return (jsonDecode(response.body) as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .map(DinoV2RegistryEntry.fromJson)
-        .toList();
-  }
-
-  Future<List<DinoV2RegistryEntry>> fetchDinoV2RegistryCatalog(
-    String classificationModelPath,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/catalog').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.get(uri);
-    _ensureSuccess(response);
-    final decoded = jsonDecode(response.body);
-    if (decoded is! List<dynamic>) {
-      // Compatibility with older backends and existing mocked clients that do
-      // not expose the unified catalog endpoint yet.
-      return fetchDinoV2Registry(classificationModelPath);
-    }
-    return decoded
-        .whereType<Map<String, dynamic>>()
-        .map(DinoV2RegistryEntry.fromJson)
-        .toList();
-  }
-
-  Future<DinoV2RegistryEntry> fetchDinoV2RegistryEntry(
-    String classificationModelPath,
-    int registrationId,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/$registrationId').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.get(uri);
-    _ensureSuccess(response);
-    return DinoV2RegistryEntry.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
-  }
-
-  Future<List<DinoV2RegistryEvent>> fetchDinoV2RegistryEvents(
-    String classificationModelPath,
-    int registrationId,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/$registrationId/events').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.get(uri);
-    _ensureSuccess(response);
-    return (jsonDecode(response.body) as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .map(DinoV2RegistryEvent.fromJson)
-        .toList();
-  }
-
-  Future<List<DinoV2RegistryCluster>> fetchDinoV2RegistryClusters(
-    String classificationModelPath,
-    int registrationId,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/$registrationId/clusters').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.get(uri);
-    _ensureSuccess(response);
-    return (jsonDecode(response.body) as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .map(DinoV2RegistryCluster.fromJson)
-        .toList(growable: false);
-  }
-
-  Future<Uint8List> fetchDinoV2RegistryExample(
-    String classificationModelPath,
-    int registrationId,
-    int eventId,
-  ) async {
-    final uri =
-        _uri(
-          '/api/dinov2/registry/$registrationId/events/$eventId/example',
-        ).replace(
-          queryParameters: {
+    final response = await _httpClient
+        .post(
+          _uri('/api/dino/feedback/cluster'),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode({
+            'input_path': inputPath,
             'classification_model_path': classificationModelPath,
-          },
-        );
-    final response = await _httpClient.get(uri);
+            'cluster_id': clusterId,
+            'observation_ids': observationIds,
+            'species_name': speciesName,
+            'feedback_operation_id': feedbackOperationId,
+          }),
+        )
+        .timeout(const Duration(minutes: 2));
     _ensureSuccess(response);
-    return response.bodyBytes;
-  }
-
-  Future<void> deleteDinoV2RegistryEntry(
-    String classificationModelPath,
-    int registrationId,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/$registrationId').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.delete(uri);
-    _ensureSuccess(response);
-  }
-
-  Future<int> clearDinoV2UnregisteredCandidates(
-    String classificationModelPath,
-  ) async {
-    final uri = _uri('/api/dinov2/registry/candidates').replace(
-      queryParameters: {'classification_model_path': classificationModelPath},
-    );
-    final response = await _httpClient.delete(uri);
-    _ensureSuccess(response);
-    final decoded = jsonDecode(response.body);
-    if (decoded is Map<String, dynamic>) {
-      return (decoded['deleted'] as num?)?.toInt() ?? 0;
-    }
-    return 0;
-  }
-
-  Future<DinoV2RegistryEntry> updateDinoV2RegistryIdentity({
-    required String classificationModelPath,
-    required int registrationId,
-    required String commonName,
-    String scientificName = '',
-  }) async {
-    final response = await _httpClient.patch(
-      _uri('/api/dinov2/registry/$registrationId/identity'),
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode({
-        'classification_model_path': classificationModelPath,
-        'common_name': commonName,
-        'scientific_name': scientificName,
-      }),
-    );
-    _ensureSuccess(response);
-    return DinoV2RegistryEntry.fromJson(
+    return ClusterLearningResult.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
 
-  Future<DinoV2RegistryEntry> registerDinoV2Species({
-    required String classificationModelPath,
-    required int registrationId,
-  }) async {
-    final response = await _httpClient.post(
-      _uri('/api/dinov2/registry/$registrationId/register'),
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode({'classification_model_path': classificationModelPath}),
-    );
+  Future<Map<String, RejectionCluster>> fetchDinoRejectionClusters(
+    String classificationModelPath,
+    List<String> observationIds,
+  ) async {
+    final response = await _httpClient
+        .post(
+          _uri('/api/dino/feedback/rejection-clusters'),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode({
+            'classification_model_path': classificationModelPath,
+            'observation_ids': observationIds,
+          }),
+        )
+        // First density verification can be expensive for large saved pools;
+        // subsequent requests reuse the backend's revision-scoped cache.
+        .timeout(const Duration(minutes: 15));
     _ensureSuccess(response);
-    return DinoV2RegistryEntry.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return decoded.map(
+      (key, value) => MapEntry(
+        key,
+        RejectionCluster.fromJson(value as Map<String, dynamic>),
+      ),
     );
   }
 
-  Future<DinoV2BoxFeedbackResult> markDinoV2BoxFeedback({
+  Future<DinoBoxFeedbackResult> markDinoBoxFeedback({
     required String inputPath,
     required String filePath,
     required String classificationModelPath,
@@ -227,7 +119,7 @@ class NeriApiClient {
     required String feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
-      _uri('/api/dinov2/feedback/box'),
+      _uri('/api/dino/feedback/box'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({
         'input_path': inputPath,
@@ -241,18 +133,18 @@ class NeriApiClient {
       }),
     );
     _ensureSuccess(response);
-    return DinoV2BoxFeedbackResult.fromJson(
+    return DinoBoxFeedbackResult.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
 
-  Future<DinoV2FeatureExplanation> fetchDinoV2FeatureExplanation(
+  Future<DinoFeatureExplanation> fetchDinoFeatureExplanation(
     String classificationModelPath,
     String observationId,
   ) async {
     final uri =
         _uri(
-          '/api/dinov2/feedback/observations/${Uri.encodeComponent(observationId)}/explain',
+          '/api/dino/feedback/observations/${Uri.encodeComponent(observationId)}/explain',
         ).replace(
           queryParameters: {
             'classification_model_path': classificationModelPath,
@@ -260,18 +152,18 @@ class NeriApiClient {
         );
     final response = await _httpClient.get(uri);
     _ensureSuccess(response);
-    return DinoV2FeatureExplanation.fromJson(
+    return DinoFeatureExplanation.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
 
-  Future<Uint8List> fetchDinoV2ObservationExample(
+  Future<Uint8List> fetchDinoObservationExample(
     String classificationModelPath,
     String observationId,
   ) async {
     final uri =
         _uri(
-          '/api/dinov2/feedback/observations/${Uri.encodeComponent(observationId)}/example',
+          '/api/dino/feedback/observations/${Uri.encodeComponent(observationId)}/example',
         ).replace(
           queryParameters: {
             'classification_model_path': classificationModelPath,
@@ -282,12 +174,12 @@ class NeriApiClient {
     return response.bodyBytes;
   }
 
-  Future<DinoV2FeedbackRevertResult> revertDinoV2Feedback({
+  Future<DinoFeedbackRevertResult> revertDinoFeedback({
     required String classificationModelPath,
     required String feedbackOperationId,
   }) async {
     final response = await _httpClient.post(
-      _uri('/api/dinov2/feedback/revert'),
+      _uri('/api/dino/feedback/revert'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({
         'classification_model_path': classificationModelPath,
@@ -295,7 +187,7 @@ class NeriApiClient {
       }),
     );
     _ensureSuccess(response);
-    return DinoV2FeedbackRevertResult.fromJson(
+    return DinoFeedbackRevertResult.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
   }
@@ -651,6 +543,8 @@ class NeriApiClient {
     String? remark,
     String? classificationModelPath,
     String? feedbackOperationId,
+    Map<String, double>? confidenceSettings,
+    double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark'),
@@ -659,6 +553,9 @@ class NeriApiClient {
         'input_path': inputPath,
         'file_path': filePath,
         'action': action,
+        if (confidenceSettings != null)
+          'confidence_settings': confidenceSettings,
+        'min_frame_ratio': minFrameRatio,
         if (speciesName != null) 'species_name': speciesName,
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
@@ -687,6 +584,8 @@ class NeriApiClient {
     String? remark,
     String? classificationModelPath,
     String? feedbackOperationId,
+    Map<String, double>? confidenceSettings,
+    double minFrameRatio = 0,
   }) async {
     final response = await _httpClient.post(
       _uri('/api/validation/mark/batch'),
@@ -695,6 +594,9 @@ class NeriApiClient {
         'input_path': inputPath,
         'file_paths': filePaths,
         'action': action,
+        if (confidenceSettings != null)
+          'confidence_settings': confidenceSettings,
+        'min_frame_ratio': minFrameRatio,
         if (speciesName != null) 'species_name': speciesName,
         if (speciesCount != null) 'species_count': speciesCount,
         if (speciesType != null) 'species_type': speciesType,
@@ -724,6 +626,8 @@ class NeriApiClient {
             remark: remark,
             classificationModelPath: classificationModelPath,
             feedbackOperationId: feedbackOperationId,
+            confidenceSettings: confidenceSettings,
+            minFrameRatio: minFrameRatio,
           ),
         );
       }
@@ -813,6 +717,14 @@ class NeriApiClient {
 
   Future<ProcessingJob> resumeJob(String id) async {
     final response = await _httpClient.post(_uri('/api/jobs/$id/resume'));
+    _ensureSuccess(response);
+    return ProcessingJob.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<ProcessingJob> retryFailedJob(String id) async {
+    final response = await _httpClient.post(_uri('/api/jobs/$id/retry-failed'));
     _ensureSuccess(response);
     return ProcessingJob.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,

@@ -1,7 +1,7 @@
 """Active API schemas for the Neri backend.
 
 The legacy schema module is retained temporarily while the clean-break migration
-is in progress. Active model discovery uses DINOv2 only.
+is in progress. Active model discovery supports DINOv3 joint models.
 """
 from typing import Literal
 
@@ -12,4 +12,4 @@ from . import models_legacy as _legacy
 class ModelInfo(_legacy.ModelInfo):
     """A model discovered under the canonical local model directory."""
 
-    backend: Literal["yolo", "dinov2"] = "yolo"
+    backend: Literal["yolo", "dinov3", "litert"] = "yolo"

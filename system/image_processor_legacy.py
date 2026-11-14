@@ -7,7 +7,6 @@ import logging
 import concurrent.futures
 import gc
 import time
-import uuid
 from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union, Tuple
 from collections import Counter, defaultdict
 import json
@@ -19,6 +18,7 @@ from system.confidence import (
     combined_confidence_weights,
 )
 from system.utils import resource_path
+from system.host_memory import is_host_memory_error
 import cv2
 
 if TYPE_CHECKING:
@@ -43,8 +43,6 @@ class ImageProcessor:
         self.model = self._load_model(model_path) if model_path else None
         self.translation_dict = self._load_translation_file()
         self.cls_model = None
-        self.dinov2_classifier = None
-        self._dinov2_observations = []
 
     def _load_model(self, model_path: str) -> Optional[YOLO]:
         """加载YOLO模型"""
@@ -84,17 +82,6 @@ class ImageProcessor:
             logger.error(f"加载分类模型失败: {e}")
             self.cls_model = None
 
-    def load_dinov2_classifier(self, classifier) -> None:
-        """Attach a native DINOv2 second-stage classifier."""
-        self.dinov2_classifier = classifier
-        self._dinov2_observations = []
-
-    def drain_dinov2_observations(self):
-        """Return and clear ephemeral DINOv2 observations from the last call."""
-        observations = tuple(self._dinov2_observations)
-        self._dinov2_observations = []
-        return observations
-
     @staticmethod
     def _sync_device(device_name: str) -> None:
         try:
@@ -130,6 +117,15 @@ class ImageProcessor:
                 xpu.empty_cache()
         except Exception as e:
             logger.warning(f"Runtime cache cleanup failed: {e}")
+
+    def release_batch_images(self) -> None:
+        """Drop predictor-owned full images after their metadata is persisted."""
+        for model in (self.model, self.cls_model):
+            predictor = getattr(model, "predictor", None)
+            if predictor is not None:
+                predictor.results = []
+                predictor.batch = None
+                predictor.dataset = None
 
     @staticmethod
     def _cuda_cache_pressure_high(min_free_ratio: float = 0.15) -> bool:
@@ -288,6 +284,8 @@ class ImageProcessor:
             orig_rgb = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
             return (idx, proc_img, orig_rgb)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             logger.warning(f"处理图片 {path} 失败: {e}")
             return None
 
@@ -300,12 +298,20 @@ class ImageProcessor:
             valid_indices = []
             original_imgs_rgb = []
 
-            max_workers = min(len(img_paths), 8)
+            guard = getattr(self, '_photo_memory_guard', None)
+            if guard is not None:
+                guard.ensure_decode(img_paths)
+            max_workers = guard.decode_workers(img_paths) if guard is not None else min(len(img_paths), 8)
+
+            def decode(task):
+                if guard is not None:
+                    guard.ensure_decode([task[1]])
+                return self._process_single_image_task(task)
 
             # 使用线程池并行读取和预处理
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
-                    executor.submit(self._process_single_image_task, (idx, path))
+                    executor.submit(decode, (idx, path))
                     for idx, path in enumerate(img_paths)
                 ]
 
@@ -322,6 +328,8 @@ class ImageProcessor:
 
             return (valid_indices, processed_imgs, original_imgs_rgb)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             logger.error(f"预加载数据失败: {e}")
             return None
 
@@ -369,6 +377,8 @@ class ImageProcessor:
                     )
                 return (r_idx, b_idx, crop)
         except Exception as e:
+            if is_host_memory_error(e):
+                raise
             pass
         return None
 
@@ -493,9 +503,6 @@ class ImageProcessor:
         device_name, use_fp16 = self._determine_device(use_fp16)
         w_det, w_cls = combined_confidence_weights(confidence_priority)
         batch_results_info = []
-        if self.dinov2_classifier is not None:
-            self._dinov2_observations = []
-
         if not self.model:
             if self.cls_model:
                 classification_results = self._classify_batch_species(
@@ -605,7 +612,7 @@ class ImageProcessor:
                 batch_candidates_maps = [{} for _ in det_results]
                 batch_selected_candidate_maps = [{} for _ in det_results]
 
-                if self.cls_model or self.dinov2_classifier is not None:
+                if self.cls_model:
                     crop_tasks = []
                     # 收集所有需要裁剪的任务
                     for r_idx, r in enumerate(det_results):
@@ -634,114 +641,66 @@ class ImageProcessor:
                     if all_crops:
                         self._sync_device(device_name)
                         classify_start = time.perf_counter()
-                        if self.dinov2_classifier is not None:
-                            from system.dinov2.classifier import DinoV2Observation
+                        cls_results_list = self.cls_model(
+                            all_crops,
+                            half=use_fp16,
+                            device=device_name,
+                            save=False,
+                            project=temp_run_project,
+                            name="cls_log",
+                            exist_ok=True
+                        )
 
-                            predictions = self.dinov2_classifier.classify_crops(
-                                all_crops,
-                                array_color="rgb",
-                            )
-                            if len(predictions) != len(crop_map_info):
-                                raise RuntimeError(
-                                    "DINOv2 classifier returned a different number of predictions than crops"
-                                )
-                            for prediction, (r_idx, b_idx) in zip(predictions, crop_map_info):
-                                box = det_results[r_idx].boxes[b_idx]
-                                det_conf = float(box.conf.item())
-                                bbox = tuple(float(value) for value in box.xyxy.tolist()[0])
-                                observation_id = uuid.uuid4().hex
-                                candidate = prediction.as_candidate(
-                                    detection_confidence=det_conf
-                                )
-                                candidate.update({
-                                    "observation_id": observation_id,
-                                    "predicted_species": prediction.species,
+                        # 5. 映射回原结果 (Map Back)
+                        for i, cls_res in enumerate(cls_results_list):
+                            r_idx, b_idx = crop_map_info[i]
+
+                            # 获取原始检测置信度
+                            det_conf = float(det_results[r_idx].boxes[b_idx].conf.item())
+
+                            # 温度缩放 & TopK
+                            original_probs = cls_res.probs.data
+                            smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
+                            ranked_indices = torch.argsort(
+                                smoothed_probs,
+                                descending=True,
+                            ).tolist()
+
+                            candidates = []
+                            for c_idx in ranked_indices:
+                                raw_name = cls_res.names[int(c_idx)]
+                                trans_name = self.translation_dict.get(raw_name, raw_name)
+                                if not candidate_matches_selected_species(
+                                    str(raw_name),
+                                    str(trans_name),
+                                    selected_species_names,
+                                ):
+                                    continue
+                                cls_conf_val = float(smoothed_probs[int(c_idx)].item())
+
+                                # 加权置信度
+                                weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
+
+                                candidates.append({
+                                    "name": trans_name,
+                                    "conf": weighted_conf,
+                                    "raw_cls_conf": cls_conf_val,
+                                    "raw_det_conf": det_conf
                                 })
-                                batch_candidates_maps[r_idx][b_idx] = [candidate]
-                                batch_selected_candidate_maps[r_idx][b_idx] = (
-                                    candidate if prediction.accepted else None
-                                )
-                                self._dinov2_observations.append(
-                                    DinoV2Observation(
-                                        result_index=valid_indices[r_idx],
-                                        box_index=b_idx,
-                                        embedding=prediction.embedding,
-                                        accepted=prediction.accepted,
-                                        species=prediction.species,
-                                        source=prediction.source,
-                                        registry_id=prediction.registry_id,
-                                        registration_status=prediction.registration_status,
-                                        known_score=prediction.known_score,
-                                        threshold=prediction.threshold,
-                                        detection_confidence=det_conf,
-                                        observation_id=observation_id,
-                                        best_known_species=prediction.best_known_species,
-                                        bbox=bbox,
-                                        squared_distance=prediction.squared_distance,
-                                        registry_action=prediction.registry_action,
-                                    )
-                                )
-                        else:
-                            cls_results_list = self.cls_model(
-                                all_crops,
-                                half=use_fp16,
-                                device=device_name,
-                                save=False,
-                                project=temp_run_project,
-                                name="cls_log",
-                                exist_ok=True
+                                if len(candidates) >= 3:
+                                    break
+
+                            candidates.sort(key=lambda x: x["conf"], reverse=True)
+                            batch_candidates_maps[r_idx][b_idx] = candidates
+                            selected_candidate = next(
+                                (
+                                    candidate
+                                    for candidate in candidates
+                                    if float(candidate["conf"]) >= conf
+                                ),
+                                None,
                             )
-
-                            # 5. 映射回原结果 (Map Back)
-                            for i, cls_res in enumerate(cls_results_list):
-                                r_idx, b_idx = crop_map_info[i]
-
-                                # 获取原始检测置信度
-                                det_conf = float(det_results[r_idx].boxes[b_idx].conf.item())
-
-                                # 温度缩放 & TopK
-                                original_probs = cls_res.probs.data
-                                smoothed_probs = self._apply_temperature_scaling(original_probs, temperature=3.0)
-                                ranked_indices = torch.argsort(
-                                    smoothed_probs,
-                                    descending=True,
-                                ).tolist()
-
-                                candidates = []
-                                for c_idx in ranked_indices:
-                                    raw_name = cls_res.names[int(c_idx)]
-                                    trans_name = self.translation_dict.get(raw_name, raw_name)
-                                    if not candidate_matches_selected_species(
-                                        str(raw_name),
-                                        str(trans_name),
-                                        selected_species_names,
-                                    ):
-                                        continue
-                                    cls_conf_val = float(smoothed_probs[int(c_idx)].item())
-
-                                    # 加权置信度
-                                    weighted_conf = (det_conf * w_det) + (cls_conf_val * w_cls)
-
-                                    candidates.append({
-                                        "name": trans_name,
-                                        "conf": weighted_conf,
-                                        "raw_cls_conf": cls_conf_val,
-                                        "raw_det_conf": det_conf
-                                    })
-                                    if len(candidates) >= 3:
-                                        break
-
-                                candidates.sort(key=lambda x: x["conf"], reverse=True)
-                                batch_candidates_maps[r_idx][b_idx] = candidates
-                                selected_candidate = next(
-                                    (
-                                        candidate
-                                        for candidate in candidates
-                                        if float(candidate["conf"]) >= conf
-                                    ),
-                                    None,
-                                )
-                                batch_selected_candidate_maps[r_idx][b_idx] = selected_candidate
+                            batch_selected_candidate_maps[r_idx][b_idx] = selected_candidate
                         self._sync_device(device_name)
                         classify_elapsed = time.perf_counter() - classify_start
 
@@ -780,7 +739,7 @@ class ImageProcessor:
                         for i, box in enumerate(r.boxes):
                             final_name = ""
                             final_confidence = float(box.conf.item())
-                            if self.cls_model is not None or self.dinov2_classifier is not None:
+                            if self.cls_model is not None:
                                 selected_candidate = selected_candidates_map.get(i)
                                 if not hasattr(r, 'candidates_data'):
                                     r.candidates_data = {}

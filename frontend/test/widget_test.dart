@@ -20,7 +20,9 @@ void main() {
     expect(
       find.descendant(
         of: find.byType(AppBar),
-        matching: find.text('Neri ${frontendVersion.split('-').first}'),
+        matching: find.text(
+          'Neri ${frontendVersion.split(RegExp(r'[-_+(]')).first}',
+        ),
       ),
       findsOneWidget,
     );

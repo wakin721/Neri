@@ -37,7 +37,7 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
     photos = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
     for photo in photos:
         photo.write_bytes(b"fixture")
-    monkeypatch.setattr(legacy, "_validate_dinov2_job_options", lambda *args: None)
+    monkeypatch.setattr(legacy, "_validate_dino_job_options", lambda *args: None)
     monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy, "_resolve_job_inputs", lambda *args, **kwargs: (tmp_path, photos))
     monkeypatch.setattr(legacy, "_preview_detection_db_roots", lambda *args, **kwargs: [])
@@ -45,10 +45,15 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
     monkeypatch.setattr(legacy, "_build_metadata_item", lambda path: DetectionItem(
         filename=path.name, path=str(path), file_type="jpg"))
     monkeypatch.setattr(legacy, "_serialize_detector_output", lambda *args: {})
-    monkeypatch.setattr(legacy, "_persist_dinov2_observations", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy, "_persist_dino_observations", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy, "_selected_inference_class_ids", lambda *args: None)
     monkeypatch.setattr(legacy, "_export_results", lambda *args: None)
     detected = []
+    indexed = []
+    def load_indexes(paths, *args, **kwargs):
+        indexed.append(list(paths))
+        return {}, {}
+    monkeypatch.setattr(legacy, "load_media_indexes", load_indexes)
     class Detector:
         def detect_batch_species(self, paths, **kwargs):
             detected.extend(paths)
@@ -92,6 +97,7 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
         assert finished.state == JobState.COMPLETED
         assert finished.processed == 2
         assert detected == [str(photos[1])]
+        assert indexed == [photos, photos[1:]]
         assert writes == ["first.jpg", "second.jpg"]
     finally:
         manager._executor.shutdown()

@@ -12,6 +12,9 @@ class NeriSettings {
     required this.settings,
     required this.gpuAvailable,
     required this.missingYoloDependencies,
+    this.pytorchAvailable = true,
+    this.litertAvailable = false,
+    this.detectionReady = true,
     this.selectedModel,
     this.selectedClassificationModel,
   });
@@ -30,8 +33,7 @@ class NeriSettings {
                   const <dynamic>[])
               .map((item) => item.toString())
               .toList(),
-      modelDirectory:
-          json['model_directory'] as String? ?? 'res/model/detect',
+      modelDirectory: json['model_directory'] as String? ?? 'res/model/detect',
       classificationModelDirectory:
           json['classification_model_directory'] as String? ?? 'res/model/cls',
       availableModels:
@@ -59,6 +61,13 @@ class NeriSettings {
                   const <dynamic>[])
               .map((item) => item.toString())
               .toList(),
+      pytorchAvailable: json['pytorch_available'] as bool? ?? true,
+      litertAvailable: json['litert_available'] as bool? ?? false,
+      detectionReady:
+          json['detection_ready'] as bool? ??
+          ((json['missing_yolo_dependencies'] as List<dynamic>? ??
+                  const <dynamic>[])
+              .isEmpty),
     );
   }
 
@@ -76,6 +85,9 @@ class NeriSettings {
   final Map<String, dynamic> settings;
   final bool gpuAvailable;
   final List<String> missingYoloDependencies;
+  final bool pytorchAvailable;
+  final bool litertAvailable;
+  final bool detectionReady;
 
   NeriSettings copyWith({
     String? appTitle,
@@ -92,6 +104,9 @@ class NeriSettings {
     Map<String, dynamic>? settings,
     bool? gpuAvailable,
     List<String>? missingYoloDependencies,
+    bool? pytorchAvailable,
+    bool? litertAvailable,
+    bool? detectionReady,
   }) {
     return NeriSettings(
       appTitle: appTitle ?? this.appTitle,
@@ -114,6 +129,9 @@ class NeriSettings {
       gpuAvailable: gpuAvailable ?? this.gpuAvailable,
       missingYoloDependencies:
           missingYoloDependencies ?? this.missingYoloDependencies,
+      pytorchAvailable: pytorchAvailable ?? this.pytorchAvailable,
+      litertAvailable: litertAvailable ?? this.litertAvailable,
+      detectionReady: detectionReady ?? this.detectionReady,
     );
   }
 }
@@ -167,8 +185,10 @@ class ModelInfo {
   final bool supportsVideoAll;
   final String? checkpointPath;
 
-  bool get isDinoV2 => backend == 'dinov2';
-
+  bool get isDinoV3 => backend == 'dinov3';
+  bool get isLiteRt => backend == 'litert';
+  bool get isDino => isDinoV3;
+  bool get isDinoClassifier => isDino && kind == 'cls';
 
   String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
   String get displayName => '$sourceLabel / $rawName';

@@ -77,13 +77,13 @@ class StartupBackend {
           200,
         );
       }
-      if (path == '/api/environment/dinov2-status') {
+      if (path == '/api/environment/dinov3-status') {
         dinoStatusRequests++;
         return http.Response(
           jsonEncode({
             'installed': false,
             'healthy': false,
-            'message': 'DINOv2 未安装。',
+            'message': 'Neri1.1 未安装。',
           }),
           200,
           headers: {'content-type': 'application/json; charset=utf-8'},
@@ -259,13 +259,13 @@ void main() {
       expect(backend.settingsRequests, 0);
       expect(backend.dinoStatusRequests, 0);
       expect(
-        find.text('Neri ${frontendVersion.split('-').first}'),
+        find.text('Neri ${frontendVersion.split(RegExp(r'[-_+(]')).first}'),
         findsOneWidget,
       );
       backend.healthResponse!.complete(http.Response('{}', 200));
       await settleStartup(tester);
       expect(
-        find.text('Neri ${frontendVersion.split('-').first}'),
+        find.text('Neri ${frontendVersion.split(RegExp(r'[-_+(]')).first}'),
         findsOneWidget,
       );
       expect(backend.settingsRequests, 1);
@@ -362,7 +362,8 @@ void main() {
       } else {
         expect(find.byType(LinearProgressIndicator), findsNothing);
         expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
-        expect(find.text('暂无待校验图像。'), findsOneWidget);
+        expect(find.text('正在读取待校验图像…'), findsOneWidget);
+        expect(find.text('暂无待校验图像。'), findsNothing);
         final refresh = find.widgetWithText(FilledButton, '重新获取');
         expect(tester.widget<FilledButton>(refresh).onPressed, isNull);
         expect(

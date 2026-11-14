@@ -336,11 +336,12 @@ class AppUpdater {
     }
   }
 
-  Future<void> launchInstaller({
+  Future<Process> launchInstaller({
     required DownloadedAppUpdate update,
     required Directory installDirectory,
     required File restartExecutable,
     int? parentProcessId,
+    bool showFailureDialog = true,
   }) async {
     if (!isSupported) {
       throw UnsupportedError('自动安装更新目前仅支持 Windows');
@@ -390,6 +391,7 @@ class AppUpdater {
         arguments.addAll(<String>['-ExpectedSha256', expectedSha256]);
       }
       arguments.addAll(<String>['-ReadyPath', readyFile.path]);
+      if (!showFailureDialog) arguments.add('-NoFailureDialog');
 
       final process = await Process.start(
         powershellExecutable,
@@ -434,6 +436,9 @@ class AppUpdater {
           '${output.isEmpty ? '' : '：${_shorten(output, 800)}'}',
         );
       }
+      // Launch readiness is distinct from completion. Callers normally exit
+      // now; integration tests can await the child before deleting its cwd.
+      return process;
     } catch (_) {
       if (await script.exists()) await script.delete();
       if (await readyFile.exists()) await readyFile.delete();
@@ -959,7 +964,8 @@ const _windowsUpdaterScript = r'''param(
     [Parameter(Mandatory = $true)][string]$RestartExecutable,
     [Parameter(Mandatory = $true)][string]$UpdateDirectory,
     [string]$ExpectedSha256 = '',
-    [Parameter(Mandatory = $true)][string]$ReadyPath
+    [Parameter(Mandatory = $true)][string]$ReadyPath,
+    [switch]$NoFailureDialog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1076,15 +1082,17 @@ try {
 } catch {
     $Message = $_.Exception.Message
     Write-UpdateLog "更新失败：$Message"
-    try {
-        Add-Type -AssemblyName PresentationFramework
-        [System.Windows.MessageBox]::Show(
-            "Neri 更新失败：`n`n$Message`n`n详情请查看：$LogPath",
-            'Neri 更新失败',
-            'OK',
-            'Error'
-        ) | Out-Null
-    } catch {}
+    if (-not $NoFailureDialog) {
+        try {
+            Add-Type -AssemblyName PresentationFramework
+            [System.Windows.MessageBox]::Show(
+                "Neri 更新失败：`n`n$Message`n`n详情请查看：$LogPath",
+                'Neri 更新失败',
+                'OK',
+                'Error'
+            ) | Out-Null
+        } catch {}
+    }
 } finally {
     try {
         Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
@@ -1099,14 +1107,21 @@ try {
 }
 
 if ($Succeeded) {
-    try {
-        Start-Process -FilePath $RestartExecutable -WorkingDirectory $InstallDirectory
-    } catch {
-        Write-UpdateLog "更新完成，但重新启动失败：$($_.Exception.Message)"
+    if (Test-Path -LiteralPath $RestartExecutable -PathType Leaf) {
+        try {
+            Start-Process -FilePath $RestartExecutable -WorkingDirectory $InstallDirectory
+        } catch {
+            Write-UpdateLog "更新完成，但重新启动失败：$($_.Exception.Message)"
+        }
+    } else {
+        # ShellExecute may display a blocking system dialog for a missing exe,
+        # even when PowerShell itself is non-interactive.
+        Write-UpdateLog "更新完成，但重新启动的程序不存在：$RestartExecutable"
     }
 }
 
 try {
     Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 } catch {}
+if (-not $Succeeded) { exit 1 }
 ''';

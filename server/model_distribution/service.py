@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .capabilities import CapabilityStore, safe_direct_headers, valid_direct_download_url
-from .manifest import DinoV2ManifestBuilder, ManifestBuilder, ManifestEntry, ManifestSnapshot
+from .manifest import DinoV2ManifestBuilder, DinoV3ManifestBuilder, ManifestBuilder, ManifestEntry, ManifestSnapshot
 
 
 class DistributionError(RuntimeError):
@@ -15,14 +15,20 @@ class DistributionService:
         self.store = store
         state_dir = Path(state_dir)
         self.builder = ManifestBuilder(state_dir, store)
+        self.dinov3_builder = DinoV3ManifestBuilder(state_dir, store)
         self.dinov2_builder = DinoV2ManifestBuilder(state_dir, store)
         self.capabilities = CapabilityStore(state_dir, ttl_seconds=ttl_seconds)
         self._snapshot: ManifestSnapshot | None = None
+        self._dinov3_snapshot: ManifestSnapshot | None = None
         self._dinov2_snapshot: ManifestSnapshot | None = None
 
     def manifest(self) -> ManifestSnapshot:
         self._snapshot = self.builder.build()
         return self._snapshot
+
+    def dinov3_manifest(self) -> ManifestSnapshot:
+        self._dinov3_snapshot = self.dinov3_builder.build()
+        return self._dinov3_snapshot
 
     def dinov2_manifest(self) -> ManifestSnapshot:
         self._dinov2_snapshot = self.dinov2_builder.build()
@@ -49,14 +55,14 @@ class DistributionService:
             self._snapshot or self.manifest(), manifest_id, path, sha256
         )
 
-    def _current_dinov2_entry(
+    def _current_dinov3_entry(
         self,
         manifest_id: str,
         path: str,
         sha256: str,
     ) -> ManifestEntry:
         return self._entry_from_snapshot(
-            self._dinov2_snapshot or self.dinov2_manifest(),
+            self._dinov3_snapshot or self.dinov3_manifest(),
             manifest_id,
             path,
             sha256,
@@ -93,10 +99,15 @@ class DistributionService:
             self._current_entry(manifest_id, path, sha256)
         )
 
-    def dinov2_direct(self, manifest_id: str, path: str, sha256: str) -> dict:
+    def dinov3_direct(self, manifest_id: str, path: str, sha256: str) -> dict:
         return self._direct_for_entry(
-            self._current_dinov2_entry(manifest_id, path, sha256)
+            self._current_dinov3_entry(manifest_id, path, sha256)
         )
 
     def consume_proxy(self, token: str):
         return self.capabilities.consume(token)
+
+    def dinov2_direct(self, manifest_id: str, path: str, sha256: str) -> dict:
+        return self._direct_for_entry(self._entry_from_snapshot(
+            self._dinov2_snapshot or self.dinov2_manifest(), manifest_id, path, sha256,
+        ))

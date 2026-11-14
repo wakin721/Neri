@@ -36,11 +36,11 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            requirements-within-seq.txt
+            requirements-privacy.txt
 
       - name: Install Python backend and test dependencies
         run: |
-          python -m pip install -r requirements-within-seq.txt pytest httpx numpy
+          python -m pip install -r requirements.txt pytest httpx numpy
           if ($LASTEXITCODE -ne 0) { throw "Backend and test dependency installation failed." }
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           if ($LASTEXITCODE -ne 0) { throw "PyTorch installation failed." }
@@ -64,7 +64,13 @@ jobs:
 
       - name: Run Flutter tests
         working-directory: frontend
-        run: flutter test
+        run: |
+          flutter test --exclude-tags windows-integration
+          if ($LASTEXITCODE -ne 0) { throw "Flutter unit/widget tests failed." }
+          # Real updater processes have OS-level handles and cold PowerShell
+          # startup costs; run them separately from parallel widget workers.
+          flutter test --tags windows-integration --concurrency=1
+          if ($LASTEXITCODE -ne 0) { throw "Windows updater integration test failed." }
 
       - name: Build Flutter Windows release
         working-directory: frontend
@@ -95,5 +101,7 @@ jobs:
         run: |
           $python = Join-Path $env:GITHUB_WORKSPACE "downloaded-package\Neri\toolkit\python.exe"
           # Isolated mode prevents the build environment from masking missing files.
-          & $python -I -c "import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; from hdbscan import HDBSCAN as WithinSeqHDBSCAN"
+          & $python -I -c "import importlib.util, sys; from pathlib import Path; sys.path.insert(0, str(Path('downloaded-package/Neri').resolve())); assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; from sklearn.cluster import HDBSCAN; import system.model_sync.catalog, system.backend.dinov3_environment"
           if ($LASTEXITCODE -ne 0) { throw "Downloaded application dependency check failed." }
+          & $python "scripts/package_litert_resources.py" --verify "downloaded-package/Neri/res"
+          if ($LASTEXITCODE -ne 0) { throw "Downloaded artifact contains non-LiteRT models or corrupt model assets." }

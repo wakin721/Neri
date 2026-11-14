@@ -4,22 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal, Sequence
 
 from .layout import ModelLayout
 
-try:
-    from system.dinov2.component import dinov2_component_status
-except ImportError:
-    def dinov2_component_status(**_kwargs):
-        return {"installed": False, "healthy": False}
+from system.dinov3.component import dinov3_component_status, installed_dinov3_manifests
 
 
 ModelKind = Literal["detect", "cls"]
 ModelSource = Literal["user", "sync"]
-ModelBackend = Literal["yolo", "dinov2"]
-_DETECT_EXTENSIONS = frozenset({".pt"})
+ModelBackend = Literal["yolo", "dinov3", "litert"]
+_DETECT_EXTENSIONS = frozenset({".pt", ".tflite", ".litert"})
 _CLS_EXTENSIONS = frozenset({".pt", ".onnx", ".engine"})
 _MANIFEST_SUFFIX = ".neri.json"
 _SOURCE_ORDER: dict[ModelSource, int] = {"user": 0, "sync": 1}
@@ -58,7 +54,7 @@ def _read_manifest(path: Path) -> dict | None:
 
 def _manifest_reference(path: Path) -> tuple[dict | None, Path | None]:
     payload = _read_manifest(path)
-    if not payload or payload.get("backend") not in {"dinov2", "dinov3"}:
+    if not payload or payload.get("backend") != "dinov3":
         return payload, None
     name = payload.get("checkpoint")
     if not isinstance(name, str) or not name.strip():
@@ -69,34 +65,34 @@ def _manifest_reference(path: Path) -> tuple[dict | None, Path | None]:
 
 def _manifest_model(path: Path, source: ModelSource):
     payload, checkpoint = _manifest_reference(path)
-    if (
-        not payload
-        or payload.get("backend") != "dinov2"
-        or checkpoint is None
-    ):
+    if not payload or checkpoint is None:
         return None
-    dim = payload.get("feature_dim")
-    dim = dim if isinstance(dim, int) else None
-    name = str(payload.get("display_name") or path.name)
-    # Keep existing installations on the current display name without rewriting
-    # their verified manifests or changing model paths.
-    if name == "DINOv2 Seq Memory Val90 (42类)":
-        name = "DINOv2 Seq"
-    model = DiscoveredModel(
-        name,
-        str(path.resolve()),
-        _size(checkpoint),
-        source,
-        "cls",
-        "dinov2",
-        str(payload.get("architecture") or "") or None,
-        dim,
-        bool(payload.get("requires_detector", True)),
-        bool(payload.get("supports_video_fast", True)),
-        bool(payload.get("supports_video_all", False)),
-        str(checkpoint),
-    )
-    return model, checkpoint
+    backend = payload.get("backend")
+    if backend == "dinov3":
+        try:
+            from system.dinov3.runtime import read_manifest
+            valid_payload = read_manifest(path)
+        except Exception:
+            return None
+        dim = valid_payload.get("feature_dim")
+        dim = dim if isinstance(dim, int) else 768
+        name = str(valid_payload.get("display_name") or path.name)
+        model = DiscoveredModel(
+            name,
+            str(path.resolve()),
+            _size(checkpoint),
+            source,
+            "cls",
+            "dinov3",
+            str(valid_payload.get("architecture") or "") or None,
+            dim,
+            bool(valid_payload.get("requires_detector", True)),
+            bool(valid_payload.get("supports_video_fast", False)),
+            bool(valid_payload.get("supports_video_all", False)),
+            str(checkpoint),
+        )
+        return model, checkpoint
+    return None
 
 
 def _scan(
@@ -116,9 +112,15 @@ def _scan(
         ):
             _payload, checkpoint = _manifest_reference(manifest)
             if checkpoint is not None:
-                # DINOv3 manifests are intentionally hidden, but their .pt files
-                # must also remain hidden so they cannot fall through as YOLO.
+                # DINOv3 model checkpoints must remain hidden so they cannot
+                # fall through as YOLO models.
                 referenced.add(checkpoint)
+            if _payload and _payload.get("backend") == "dinov3":
+                weights_name = _payload.get("encoder_weights")
+                if isinstance(weights_name, str) and weights_name.strip():
+                    weights_path = (manifest.parent / weights_name).resolve()
+                    if weights_path.is_file():
+                        referenced.add(weights_path)
             resolved = _manifest_model(manifest, source)
             if resolved:
                 items.append(resolved[0])
@@ -128,6 +130,12 @@ def _scan(
             and path.suffix.lower() in extensions
             and path.resolve() not in referenced
         ):
+            backend: ModelBackend = (
+                "litert"
+                if kind == "detect"
+                and path.suffix.lower() in {".tflite", ".litert"}
+                else "yolo"
+            )
             items.append(
                 DiscoveredModel(
                     path.name,
@@ -135,43 +143,15 @@ def _scan(
                     _size(path),
                     source,
                     kind,
+                    backend,
+                    None,
+                    None,
+                    False,
+                    True,
+                    backend != "litert",
                 )
             )
     return sorted(items, key=lambda item: item.name.casefold())
-
-
-def _declared_dinov2_manifest(root: Path) -> Path | None:
-    try:
-        payload = json.loads((root / "install.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    classifier = payload.get("classifier")
-    if not isinstance(classifier, dict):
-        return None
-    raw = classifier.get("manifest")
-    if (
-        not isinstance(raw, str)
-        or not raw
-        or raw != raw.strip()
-        or "\\" in raw
-        or raw.startswith("/")
-    ):
-        return None
-    relative = PurePosixPath(raw)
-    if relative.is_absolute() or any(
-        part in {"", ".", ".."} for part in relative.parts
-    ):
-        return None
-    manifest = root.joinpath(*relative.parts)
-    try:
-        manifest.resolve().relative_to(root.resolve())
-    except (OSError, ValueError):
-        return None
-    if not manifest.is_file():
-        return None
-    return manifest
 
 
 def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredModel]:
@@ -193,13 +173,20 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
         models.extend(_scan(directory, source, kind))
 
     if kind == "cls":
-        status = dinov2_component_status(root=layout.dinov2_root)
+        status = dinov3_component_status(root=layout.dinov3_root)
         if status.get("healthy") is True:
-            manifest = _declared_dinov2_manifest(layout.dinov2_root)
-            if manifest is not None:
-                resolved = _manifest_model(manifest, "user")
-                if resolved is not None:
-                    models.append(resolved[0])
+            known_paths = {model.path for model in models}
+            known_names = {model.name.casefold() for model in models}
+            for manifest in installed_dinov3_manifests(root=layout.dinov3_root):
+                resolved = _manifest_model(manifest, "sync")
+                if resolved is None:
+                    continue
+                model = resolved[0]
+                if model.path in known_paths or model.name.casefold() in known_names:
+                    continue
+                models.append(model)
+                known_paths.add(model.path)
+                known_names.add(model.name.casefold())
 
     unique: dict[str, DiscoveredModel] = {}
     for model in models:
