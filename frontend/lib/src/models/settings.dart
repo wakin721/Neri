@@ -190,7 +190,11 @@ class ModelInfo {
   bool get isDino => isDinoV3;
   bool get isDinoClassifier => isDino && kind == 'cls';
 
-  String get sourceLabel => source == 'sync' ? 'NeriCloud' : '用户模型';
+  String get sourceLabel => switch (source) {
+    'bundled' => '内置模型',
+    'sync' => 'NeriCloud',
+    _ => '用户模型',
+  };
   String get displayName => '$sourceLabel / $rawName';
   String get name => hasExplicitSource ? displayName : rawName;
 }

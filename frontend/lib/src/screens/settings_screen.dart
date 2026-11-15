@@ -3373,10 +3373,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
-  final userModels = models.where((model) => model.source != 'sync').toList();
+  final bundledModels = models
+      .where((model) => model.source == 'bundled')
+      .toList();
+  final userModels = models
+      .where((model) => model.source != 'sync' && model.source != 'bundled')
+      .toList();
   final cloudModels = models.where((model) => model.source == 'sync').toList();
   return <_SettingsOption<String>>[
     const _SettingsOption<String>(value: '', label: '不使用'),
+    if (bundledModels.isNotEmpty) ...[
+      const _SettingsOption<String>(
+        value: '__neri_header_bundled__',
+        label: '内置模型',
+        enabled: false,
+      ),
+      for (final model in bundledModels)
+        _SettingsOption<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
+    ],
     if (userModels.isNotEmpty) ...[
       const _SettingsOption<String>(
         value: '__neri_header_user__',

@@ -8,6 +8,15 @@ from system.model_sync.layout import get_model_layout
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_saved_cloud_path_of_older_bundled_detector_resolves_after_upgrade(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = get_model_layout(Path(temp_dir)/'res')
+            model = layout.detect_bundled/'MDV6-yolov10-c.tflite'
+            model.write_bytes(b'fixture')
+            models = discover_models(layout, 'detect')
+            old = r'D:\Application\Neri\res\model\detect\sync\MDV6-yolov10-c.tflite'
+            self.assertEqual(resolve_saved_model_path(old, models), str(model.resolve()))
+
     def test_discovers_duplicate_names_from_user_and_sync(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             layout = get_model_layout(Path(temp_dir) / "res")

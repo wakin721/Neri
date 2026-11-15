@@ -50,6 +50,7 @@ ENV/
 /res/model/cls/user/dinov3-ridge-within-assets-*/
 /res/model/cls/user/dinov3-experiment-local.neri.json
 /res/model/cls/user/dinov3-experiment-local-assets-*/
+/res/model/.dinov3-download-cache/
 
 # Build outputs
 build/

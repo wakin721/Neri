@@ -43,10 +43,27 @@ String _modelSelectorHelperText({
 }
 
 List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
-  final userModels = models.where((model) => model.source != 'sync').toList();
+  final bundledModels = models
+      .where((model) => model.source == 'bundled')
+      .toList();
+  final userModels = models
+      .where((model) => model.source != 'sync' && model.source != 'bundled')
+      .toList();
   final cloudModels = models.where((model) => model.source == 'sync').toList();
   return <DropdownMenuEntry<String>>[
     const DropdownMenuEntry<String>(value: '', label: '不使用'),
+    if (bundledModels.isNotEmpty) ...[
+      const DropdownMenuEntry<String>(
+        value: '__neri_header_bundled__',
+        label: '内置模型',
+        enabled: false,
+      ),
+      for (final model in bundledModels)
+        DropdownMenuEntry<String>(
+          value: model.path,
+          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+        ),
+    ],
     if (userModels.isNotEmpty) ...[
       const DropdownMenuEntry<String>(
         value: '__neri_header_user__',
