@@ -24,6 +24,17 @@ import 'package:neri_flutter/src/widgets/input_folder_field.dart';
 import 'package:neri_flutter/src/widgets/selectable_list_card.dart';
 
 void main() {
+  test('bundled LiteRT detector has a separate model source', () {
+    final model = ModelInfo.fromJson({
+      'name': 'MDV6-yolov10-c.tflite',
+      'path': 'res/model/detect/bundled/MDV6-yolov10-c.tflite',
+      'source': 'bundled',
+      'backend': 'litert',
+    });
+    expect(model.isLiteRt, isTrue);
+    expect(model.sourceLabel, '内置模型');
+    expect(model.displayName, '内置模型 / MDV6-yolov10-c.tflite');
+  });
   test('视频处理模式保留跳过视频并兼容旧值', () {
     expect(defaultVideoProcessingMode, videoProcessingModeFast);
     expect(defaultVideoSampleCount, 3);

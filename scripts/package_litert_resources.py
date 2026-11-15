@@ -15,7 +15,8 @@ EXCLUDED_EXTENSIONS = {
 }
 MODEL_ROOTS = {"model", "model_cls", "dinov2", "dinov3"}
 SIDECARS = (".labels.txt", ".labels.json", ".LICENSE.md", ".SOURCE.md")
-CANONICAL_DIRECTORIES = ("detect/user", "detect/sync", "cls/user", "cls/sync")
+CANONICAL_DIRECTORIES = ("detect/bundled", "detect/user", "detect/sync", "cls/user", "cls/sync")
+BUILTIN_DETECTOR = 'model/detect/bundled/MDV6-yolov10-c.tflite'
 INVENTORY = "packaged-models.json"
 
 
@@ -86,7 +87,7 @@ def copy_resources(source, destination):
     return verify_resources(destination)
 
 
-def verify_resources(resources):
+def verify_resources(resources, *, require_bundled_detector=False):
     resources = Path(resources).resolve()
     inventory = json.loads((resources / INVENTORY).read_text("utf-8"))
     if inventory.get("policy") != "litert-only" or not inventory.get("models"):
@@ -121,6 +122,8 @@ def verify_resources(resources):
                 raise ValueError(f"Unexpected model asset in package: {relative}")
     if actual != set(expected):
         raise ValueError("Packaged model inventory differs from actual model files")
+    if require_bundled_detector and BUILTIN_DETECTOR not in expected:
+        raise ValueError('Missing bundled LiteRT detector: ' + BUILTIN_DETECTOR)
     return dict(passed=True, policy="litert-only", models=list(expected.values()))
 
 
@@ -129,11 +132,14 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path)
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--verify", type=Path, help="Read-only verification of an existing res directory")
+    parser.add_argument('--require-bundled-detector', action='store_true')
     args = parser.parse_args()
     if args.verify:
-        report = verify_resources(args.verify)
+        report = verify_resources(args.verify, require_bundled_detector=args.require_bundled_detector)
     elif args.source and args.destination:
         report = copy_resources(args.source, args.destination)
+        if args.require_bundled_detector:
+            report = verify_resources(args.destination, require_bundled_detector=True)
     else:
         parser.error("Use --source/--destination or --verify")
     print(json.dumps(report, ensure_ascii=False, indent=2))

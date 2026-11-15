@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Sequence
 
 from system.dinov3.component import install_dinov3_component, remove_dinov3_component
+from system.dinov3.download_diagnostics import event_line, exception_details, redact, sanitize_tree
 
 from . import maintenance as _maintenance
 
@@ -147,6 +148,27 @@ def _progress(start: int, end: int):
     return callback
 
 
+def _download_event(event: dict) -> None:
+    log = _maintenance.maintenance_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('a', encoding='utf-8') as stream:
+        stream.write(event_line(event) + '\n')
+    fields = {f'download_{key}': event[key] for key in
+              ('phase', 'file', 'attempt', 'http_status', 'server_detail', 'offset') if key in event}
+    if fields:
+        _maintenance._write_status(fields)
+
+
+def _failure(exc: Exception, *, phase: str) -> dict:
+    details = exception_details(exc)
+    details.update(sanitize_tree(getattr(exc, 'details', {})))
+    try:
+        _download_event({**details, 'state': 'failed', 'phase': details.get('phase', phase)})
+    except OSError:
+        pass
+    return details
+
+
 def _run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -188,7 +210,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
                 progress_start=35,
                 progress_end=55,
             )
-            install_dinov3_component(on_progress=_progress(55, 92))
+            install_dinov3_component(on_progress=_progress(55, 92), on_event=_download_event)
             final_message = "Neri1.2preview（DINOv3 ViT-B/16）安装完成，Python 后端已重启。"
         else:
             _maintenance._write_status(
@@ -216,22 +238,27 @@ def _run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except Exception as exc:  # noqa: BLE001 - maintenance boundary
+        details = _failure(exc, phase='maintenance')
+        current = _maintenance.read_maintenance_status()
         _maintenance._write_status(
             {
                 "state": "failed",
-                "message": f"Neri1.2preview 环境维护失败: {exc}",
-                "progress": 100,
+                "message": f"Neri1.2preview 环境维护失败: {redact(exc)}",
+                "progress": min(99, max(0, int(current.get('progress') or 0))),
                 "return_code": 1,
-                "error": str(exc),
+                "error": redact(exc),
+                "error_details": details,
+                "download_cache_preserved": args.operation == 'install_dinov3',
             }
         )
         try:
             _maintenance._start_backend()
         except Exception as restart_exc:  # noqa: BLE001
+            _failure(restart_exc, phase='backend_restart')
             _maintenance._write_status(
                 {
-                    "message": f"Neri1.2preview 环境维护失败，且 Python 后端恢复失败: {restart_exc}",
-                    "error": f"{exc}; restart failed: {restart_exc}",
+                    "message": f"Neri1.2preview 环境维护失败，且 Python 后端恢复失败: {redact(restart_exc)}",
+                    "error": f"{redact(exc)}; restart failed: {redact(restart_exc)}",
                 }
             )
         return 1

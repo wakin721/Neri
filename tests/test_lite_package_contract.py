@@ -10,6 +10,39 @@ from scripts.package_litert_resources import copy_resources, verify_resources, C
 
 
 class LitePackageContractTests(unittest.TestCase):
+    def test_packaged_detector_survives_startup_sync_and_remains_discoverable(self):
+        from system.model_sync.layout import get_model_layout
+        from system.model_sync.catalog import discover_models
+        from system.model_sync.manager import ModelSyncManager
+        from system.model_sync.protocol import ModelManifest
+        from tests.test_model_sync_manager import FakeClient
+        from scripts.package_litert_resources import BUILTIN_DETECTOR
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)/'res'
+            copy_resources(Path(__file__).resolve().parents[1]/'res', output)
+            report = verify_resources(output, require_bundled_detector=True)
+            self.assertTrue(any(row['path'] == BUILTIN_DETECTOR for row in report['models']))
+            layout = get_model_layout(output)
+            status = ModelSyncManager(layout, FakeClient(ModelManifest('a'*64, ()))).sync_once_for_test()
+            self.assertEqual(status.state, 'completed')
+            model = next(row for row in discover_models(layout, 'detect')
+                         if row.name == 'MDV6-yolov10-c.tflite')
+            self.assertEqual(model.source, 'bundled')
+            self.assertEqual(model.backend, 'litert')
+            self.assertTrue(Path(model.path).is_file())
+            self.assertEqual(Path(model.path).read_bytes(),
+                (Path(__file__).resolve().parents[1]/'res'/BUILTIN_DETECTOR).read_bytes())
+
+    def test_distribution_verifier_requires_the_builtin_detector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, output = Path(tmp)/'source', Path(tmp)/'output'
+            other = source/'model/detect/user/another.tflite'
+            other.parent.mkdir(parents=True)
+            other.write_bytes(b'other model')
+            copy_resources(source, output)
+            with self.assertRaisesRegex(ValueError, 'Missing bundled LiteRT'):
+                verify_resources(output, require_bundled_detector=True)
+
     def test_lite_model_catalog_and_component_api_import_without_torch(self):
         result = subprocess.run([sys.executable, '-c', textwrap.dedent('''
             import importlib.abc, sys, tempfile

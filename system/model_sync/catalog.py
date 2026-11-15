@@ -13,12 +13,12 @@ from system.dinov3.component import dinov3_component_status, installed_dinov3_ma
 
 
 ModelKind = Literal["detect", "cls"]
-ModelSource = Literal["user", "sync"]
+ModelSource = Literal["bundled", "user", "sync"]
 ModelBackend = Literal["yolo", "dinov3", "litert"]
 _DETECT_EXTENSIONS = frozenset({".pt", ".tflite", ".litert"})
 _CLS_EXTENSIONS = frozenset({".pt", ".onnx", ".engine"})
 _MANIFEST_SUFFIX = ".neri.json"
-_SOURCE_ORDER: dict[ModelSource, int] = {"user": 0, "sync": 1}
+_SOURCE_ORDER: dict[ModelSource, int] = {"bundled": 0, "user": 1, "sync": 2}
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,7 @@ def _scan(
 def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredModel]:
     if kind == "detect":
         directories: tuple[tuple[Path, ModelSource], ...] = (
+            (layout.detect_bundled, 'bundled'),
             (layout.detect_user, "user"),
             (layout.detect_sync, "sync"),
         )
@@ -217,6 +218,13 @@ def resolve_saved_model_path(
             model.checkpoint_path
             and _saved_path_matches(value, model.checkpoint_path)
         ):
+            return model.path
+    # Older lite builds put the built-in detector in the cloud-owned folder.
+    # Preserve that saved selection when upgrading to the isolated bundle.
+    normalized = value.replace('\\', '/').casefold()
+    for model in models:
+        if model.source == 'bundled' and normalized.endswith(
+                '/model/detect/sync/' + Path(model.path).name.casefold()):
             return model.path
     named = [
         model

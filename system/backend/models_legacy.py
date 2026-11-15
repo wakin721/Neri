@@ -30,7 +30,7 @@ class ModelInfo(BaseModel):
     name: str
     path: str
     size_bytes: int | None = None
-    source: Literal["user", "sync"] = "user"
+    source: Literal["bundled", "user", "sync"] = "user"
     kind: Literal["detect", "cls"] = "detect"
     backend: Literal["yolo", "dinov3", "litert"] = "yolo"
     architecture: str | None = None

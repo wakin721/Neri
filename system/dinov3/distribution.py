@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import http.client
 import json
@@ -14,10 +16,14 @@ import tempfile
 import time
 import unicodedata
 import urllib.parse
+import urllib.error
 import urllib.request
 from typing import Any, Callable
 
 from system.model_sync.protocol import valid_direct_url
+from .download_cache import (checkpoint_partial, discard_partial, partial_paths,
+                             restore_partial)
+from .download_diagnostics import SERVER_DETAILS, exception_details, redact
 
 DINO_DISTRIBUTION_URL_ENV = "NERI_DINOV3_DISTRIBUTION_URL"
 DINO_DEFAULT_DISTRIBUTION_URL = "https://myneri.top/api/models/v1"
@@ -26,10 +32,14 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 PROXY_SEGMENT_BYTES = 1024 * 1024
 PROXY_SEGMENT_THRESHOLD = 8 * 1024 * 1024
 PROXY_SEGMENT_ATTEMPTS = 5
+JSON_REQUEST_ATTEMPTS = 5
+_JSON_LIMIT = 16 * 1024 * 1024
 
 
 class DinoV3DistributionError(RuntimeError):
-    pass
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -60,7 +70,8 @@ def _relative_component_path(path: Any) -> str:
     if not isinstance(path, str) or not path.startswith("DINOv3/"):
         raise DinoV3DistributionError("invalid_dinov3_distribution_path")
     relative = path[len("DINOv3/") :]
-    if not relative or "\\" in relative or "\x00" in relative:
+    if (not relative or "\\" in relative or "\x00" in relative or ':' in relative
+            or any(part in {'', '.', '..'} for part in relative.split('/'))):
         raise DinoV3DistributionError("invalid_dinov3_distribution_path")
     pure = PurePosixPath(relative)
     if pure.is_absolute() or any(
@@ -71,7 +82,8 @@ def _relative_component_path(path: Any) -> str:
 
 
 class DinoV3DistributionClient:
-    def __init__(self, origin: str | None = None, *, opener=None):
+    def __init__(self, origin: str | None = None, *, opener=None,
+                 cache_dir: Path | None = None, on_event=None):
         configured = (
             origin
             or os.environ.get(DINO_DISTRIBUTION_URL_ENV)
@@ -92,6 +104,59 @@ class DinoV3DistributionClient:
         )
         self.opener = opener or urllib.request.urlopen
         self._native_fallback = opener is None and os.name == "nt"
+        self._json_native = False
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir is not None else None
+        self.on_event = on_event
+
+    def _event(self, **event):
+        if self.on_event is not None:
+            try:
+                self.on_event(event)
+            except Exception:
+                # Diagnostic output must not turn a good transfer into failure.
+                pass
+
+    def _native_json_response(self, request):
+        executable = shutil.which('curl.exe')
+        if executable is None:
+            raise OSError('Windows curl is unavailable')
+        with tempfile.TemporaryDirectory(prefix='neri-api-') as scratch:
+            root = Path(scratch)
+            response_file, header_file = root/'response', root/'headers'
+            command = [executable, '--disable', '--silent', '--show-error',
+                       '--connect-timeout', '15', '--max-time', '30',
+                       '--max-filesize', str(_JSON_LIMIT + 1),
+                       '--request', request.get_method(),
+                       '--header', 'Accept: application/json',
+                       '--dump-header', str(header_file),
+                       '--output', str(response_file), '--write-out', '%{http_code}']
+            if request.data is not None:
+                body = root/'request'
+                body.write_bytes(request.data)
+                command += ['--header', 'Content-Type: application/json',
+                            '--data-binary', '@'+str(body)]
+            command.append(request.full_url)
+            try:
+                result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                    capture_output=True, timeout=40,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError('Windows metadata request timed out') from exc
+            if result.returncode:
+                raise OSError(f'Windows metadata request failed ({result.returncode}): '
+                              + redact(result.stderr.decode('utf-8', errors='replace'))[:200])
+            raw = response_file.read_bytes()
+            status = int(result.stdout.strip())
+            if status >= 300:
+                import io
+                import email.parser
+                blocks = header_file.read_text('iso-8859-1').split('\n\n')
+                final_headers = next(block for block in reversed(blocks)
+                                     if block.startswith('HTTP/'))
+                headers = email.parser.Parser().parsestr(final_headers.split('\n', 1)[-1])
+                raise urllib.error.HTTPError(request.full_url, status,
+                    'metadata request failed', headers, io.BytesIO(raw))
+            return raw
 
     def _json_request(
         self,
@@ -112,14 +177,69 @@ class DinoV3DistributionClient:
             headers=headers,
             method=method,
         )
-        try:
-            with self.opener(request, timeout=30) as response:
-                raw = response.read(16 * 1024 * 1024 + 1)
-        except Exception as exc:
-            raise DinoV3DistributionError(
-                f"DINOv3 模型分发请求失败: {endpoint}"
-            ) from exc
-        if len(raw) > 16 * 1024 * 1024:
+        phase = 'capability' if endpoint.endswith('/direct') else 'manifest'
+        file = payload.get('path') if payload else None
+        for attempt in range(JSON_REQUEST_ATTEMPTS):
+            started = time.monotonic()
+            self._event(phase=phase, endpoint=endpoint, file=file,
+                        attempt=attempt + 1, state='requesting',
+                        transport='windows_curl' if self._json_native else 'urllib')
+            try:
+                if self._json_native:
+                    raw = self._native_json_response(request)
+                else:
+                    with self.opener(request, timeout=30) as response:
+                        raw = response.read(_JSON_LIMIT + 1)
+                break
+            except Exception as exc:
+                detail = exception_details(exc)
+                status = detail.get('http_status')
+                retryable = isinstance(exc, (OSError, http.client.HTTPException))
+                delay = min(8, 2 ** attempt)
+                if isinstance(exc, urllib.error.HTTPError):
+                    retryable = exc.code in {408, 425, 429, 500, 502, 503, 504}
+                    try:
+                        body = json.loads(exc.read(4096))
+                        code = body.get('detail') if isinstance(body, dict) else None
+                        if isinstance(code, str) and code in SERVER_DETAILS:
+                            detail['server_detail'] = code
+                    except Exception:
+                        pass
+                    retry_after = exc.headers.get('Retry-After') if exc.headers else None
+                    if retry_after:
+                        try:
+                            wait = (float(retry_after) if retry_after.strip().isdigit()
+                                    else (parsedate_to_datetime(retry_after) -
+                                          datetime.now(timezone.utc)).total_seconds())
+                            detail['retry_after_seconds'] = max(0, wait)
+                            if wait > 60:
+                                retryable = False
+                            else:
+                                delay = max(delay, max(0, wait))
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                    try:
+                        exc.close()
+                    except Exception:
+                        pass
+                elif retryable and self._native_fallback and shutil.which('curl.exe'):
+                    self._json_native = True
+                detail.update(phase=phase, endpoint=endpoint, file=file,
+                              attempt=attempt + 1, max_attempts=JSON_REQUEST_ATTEMPTS,
+                              elapsed_seconds=round(time.monotonic() - started, 3))
+                retrying = retryable and attempt + 1 < JSON_REQUEST_ATTEMPTS
+                self._event(**detail, state='retrying' if retrying else 'failed',
+                            retry_delay_seconds=delay if retrying else 0)
+                if not retrying:
+                    suffix = f'HTTP {status}' if status else detail['exception_type']
+                    if detail.get('server_detail'):
+                        suffix += ': ' + detail['server_detail']
+                    raise DinoV3DistributionError(
+                        f'DINOv3 模型分发请求失败: {endpoint}'
+                        f'（文件: {file or "清单"}；{suffix}；尝试 {attempt + 1} 次）',
+                        details=detail) from exc
+                time.sleep(delay)
+        if len(raw) > _JSON_LIMIT:
             raise DinoV3DistributionError("DINOv3 模型分发响应过大。")
         try:
             value = json.loads(raw.decode("utf-8"))
@@ -288,30 +408,40 @@ class DinoV3DistributionClient:
         on_progress=None,
     ) -> None:
         """Bound each TLS stream and retry a segment before committing its bytes."""
-        temp = target.with_name(target.name + ".download")
-        temp.unlink(missing_ok=True)
         target.parent.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256()
+        persistent = self.cache_dir is not None
+        if persistent:
+            temp, metadata, offset, digest = restore_partial(
+                target, entry.size, entry.sha256, PROXY_SEGMENT_BYTES)
+        else:
+            temp, metadata = partial_paths(target)
+            discard_partial(target)
+            offset, digest = 0, hashlib.sha256()
+        self._event(phase='download', file=entry.relative_path,
+                    state='resuming' if offset else 'downloading', offset=offset, total=entry.size)
+        if on_progress is not None and offset:
+            on_progress(offset, entry.size)
         capability_uses = 0
         use_native = False
         try:
-            with temp.open("wb") as output:
-                for start in range(0, entry.size, PROXY_SEGMENT_BYTES):
+            with temp.open('r+b' if offset else 'wb') as output:
+                output.seek(offset)
+                for start in range(offset, entry.size, PROXY_SEGMENT_BYTES):
                     end = min(start + PROXY_SEGMENT_BYTES, entry.size) - 1
                     length = end - start + 1
                     for attempt in range(PROXY_SEGMENT_ATTEMPTS):
                         # Capabilities have a small, bounded use count and TTL.
                         # Renew within the use count, and on every retry.
-                        if capability_uses >= 3 or attempt:
-                            capability = self._capability(manifest, entry)
-                            capability_uses = 0
-                        capability_uses += 1
-                        request = urllib.request.Request(
-                            self.origin + "/proxy/" + capability.proxy_token,
-                            headers={"User-Agent": "Neri DINOv3 installer",
-                                     "Range": f"bytes={start}-{end}"}, method="GET",
-                        )
                         try:
+                            if capability_uses >= 3 or attempt:
+                                capability = self._capability(manifest, entry)
+                                capability_uses = 0
+                            capability_uses += 1
+                            request = urllib.request.Request(
+                                self.origin + "/proxy/" + capability.proxy_token,
+                                headers={"User-Agent": "Neri DINOv3 installer",
+                                         "Range": f"bytes={start}-{end}"}, method="GET",
+                            )
                             if use_native:
                                 data = self._native_proxy_segment(
                                     request.full_url, start, end, entry.size, target.parent)
@@ -324,26 +454,44 @@ class DinoV3DistributionClient:
                                     if len(data) != length:
                                         raise DinoV3DistributionError("dinov3_download_size_mismatch")
                             break
-                        except (OSError, http.client.HTTPException):
+                        except (OSError, http.client.HTTPException) as exc:
+                            self._event(**exception_details(exc), phase='segment',
+                                file=entry.relative_path, offset=start,
+                                attempt=attempt + 1, state='retrying')
                             if self._native_fallback and shutil.which("curl.exe"):
                                 use_native = True
                             if attempt + 1 == PROXY_SEGMENT_ATTEMPTS:
                                 raise
                             time.sleep(min(8, 2 ** attempt))
-                        except DinoV3DistributionError:
+                        except DinoV3DistributionError as exc:
+                            # JSON requests already exhausted their own retry
+                            # budget, or received a permanent HTTP error.
+                            if exc.details.get('phase') == 'capability':
+                                raise
+                            self._event(**exception_details(exc), phase='segment',
+                                file=entry.relative_path, offset=start,
+                                attempt=attempt + 1, state='retrying')
                             if attempt + 1 == PROXY_SEGMENT_ATTEMPTS:
                                 raise
                     output.write(data)
                     digest.update(data)
+                    if persistent:
+                        output.flush()
+                        os.fsync(output.fileno())
+                        checkpoint_partial(metadata, size=entry.size, sha256=entry.sha256,
+                            segment_size=PROXY_SEGMENT_BYTES, offset=end + 1, digest=digest)
                     if on_progress is not None:
                         on_progress(end + 1, entry.size)
             if temp.stat().st_size != entry.size:
                 raise DinoV3DistributionError("dinov3_download_size_mismatch")
             if digest.hexdigest() != entry.sha256:
+                discard_partial(target)
                 raise DinoV3DistributionError("dinov3_download_sha256_mismatch")
             temp.replace(target)
+            metadata.unlink(missing_ok=True)
         except Exception:
-            temp.unlink(missing_ok=True)
+            if not persistent:
+                discard_partial(target)
             raise
 
     def _download_entry(
@@ -354,7 +502,8 @@ class DinoV3DistributionClient:
         on_progress=None,
     ) -> None:
         capability = self._capability(manifest, entry)
-        if capability.direct_url is not None:
+        if capability.direct_url is not None and not (
+                self.cache_dir is not None and partial_paths(target)[0].exists()):
             try:
                 self._stream_to_file(
                     capability.direct_url,
@@ -429,12 +578,27 @@ class DinoV3DistributionClient:
                         f"正在下载 Neri1.2preview: {entry.relative_path}",
                     )
 
-                self._download_entry(
-                    manifest,
-                    entry,
-                    target.joinpath(*local_parts),
-                    on_progress=report_bytes,
-                )
+                destination = target.joinpath(*local_parts)
+                if self.cache_dir is None:
+                    self._download_entry(manifest, entry, destination, on_progress=report_bytes)
+                else:
+                    cache_root = self.cache_dir / manifest.manifest_id
+                    cached = cache_root.joinpath(*PurePosixPath(entry.relative_path).parts)
+                    cached.resolve().relative_to(cache_root.resolve())
+                    valid = cached.is_file() and cached.stat().st_size == entry.size
+                    if valid:
+                        with cached.open('rb') as stream:
+                            valid = hashlib.file_digest(stream, 'sha256').hexdigest() == entry.sha256
+                    if valid:
+                        self._event(phase='cache', file=entry.relative_path, state='verified')
+                        report_bytes(entry.size, entry.size)
+                    else:
+                        if cached.exists():
+                            self._event(phase='cache', file=entry.relative_path, state='invalid')
+                        cached.unlink(missing_ok=True)
+                        self._download_entry(manifest, entry, cached, on_progress=report_bytes)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cached, destination)
                 completed_bytes += entry.size
         if on_progress is not None:
             on_progress(100, "Neri1.2preview 下载完成，正在校验组件。")

@@ -183,6 +183,7 @@ def install_dinov3_component(
     distribution_client=None,
     seed_dir: Path | None = None,
     on_progress=None,
+    on_event=None,
 ) -> dict:
     component_root = _component_root(root)
     component_root.parent.mkdir(parents=True, exist_ok=True)
@@ -202,7 +203,9 @@ def install_dinov3_component(
             if distribution_client is None:
                 from .distribution import DinoV3DistributionClient
 
-                distribution_client = DinoV3DistributionClient()
+                distribution_client = DinoV3DistributionClient(
+                    cache_dir=component_root.parent / '.dinov3-download-cache',
+                    on_event=on_event)
             distribution_client.download_tree("", staging, on_progress=on_progress)
 
         healthy, message, _payload, _classes, _dim = _component_health(staging)
