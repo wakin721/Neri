@@ -910,7 +910,7 @@ def test_services_legacy_full_completion_passes_job_id_to_finalize(monkeypatch, 
     monkeypatch.setattr(legacy, "_selected_inference_class_ids", lambda *a: None)
     monkeypatch.setattr(legacy, "_save_detection_data_batch", lambda *a, **kw: None)
     monkeypatch.setattr(legacy, "_export_results", lambda *a, **kw: None)
-    monkeypatch.setattr(legacy, "_load_detector", lambda *a: object())
+    monkeypatch.setattr(legacy, "_load_detector", lambda *a: type("Detector", (), {})())
     monkeypatch.setattr(legacy, "_detect_image_batch", lambda detector, batch, batch_items, *a, **kw: batch_items)
 
     import system.dinov3.processor as processor

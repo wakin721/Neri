@@ -365,19 +365,29 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final job = _windowsShellJob;
     final isRunning = job?.isWorkerActive ?? false;
     final isFailed = job?.state == 'failed';
-    final hasProgress = job != null && job.total > 0;
+    final hasProgress =
+        job != null &&
+        (job.isSummarizing ? job.sequenceProgress != null : job.total > 0);
     final progress = hasProgress
-        ? job.progress.clamp(0.0, 1.0).toDouble()
+        ? (job.isSummarizing ? job.sequenceProgress! : job.progress)
+              .clamp(0.0, 1.0)
+              .toDouble()
         : 0.0;
     final percent = (progress * 100).round();
 
     String tooltip = 'Neri';
     if (job != null) {
       final counts = hasProgress
-          ? ' ($percent% · ${job.processed}/${job.total})'
+          ? job.isSummarizing
+                ? ' ($percent% · ${job.sequenceProcessed}/${job.sequenceTotal})'
+                : ' ($percent% · ${job.processed}/${job.total})'
           : '';
       if (isRunning) {
-        tooltip = hasProgress ? 'Neri - 任务进度$counts' : 'Neri - 任务准备中';
+        tooltip = job.isSummarizing
+            ? 'Neri - 序列汇总：${job.sequenceStage}$counts'
+            : hasProgress
+            ? 'Neri - 任务进度$counts'
+            : 'Neri - 任务准备中';
       } else if (isFailed) {
         tooltip = 'Neri - 任务失败$counts';
       } else {
@@ -1651,6 +1661,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final job = jobsById[id];
       return job == null ||
           !job.isWorkerActive ||
+          job.state == 'running' ||
           job.processed > baselineProcessed;
     });
     changed = changed || _pendingStartJobBaselines.length != beforeStartCount;
@@ -2605,6 +2616,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
             elapsedSeconds: summary.elapsedSeconds,
             speed: summary.speed,
             remainingSeconds: summary.remainingSeconds,
+            sequenceStage: summary.sequenceStage,
+            sequenceProcessed: summary.sequenceProcessed,
+            sequenceTotal: summary.sequenceTotal,
             message: summary.message,
             results: cachedById[summary.id]!.results,
             error: summary.error,

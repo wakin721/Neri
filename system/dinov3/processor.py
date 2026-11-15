@@ -39,6 +39,10 @@ class DinoV3SequenceFinalizationError(RuntimeError):
     """Raised when a full DINOv3 sequence summary cannot be completed safely."""
 
 
+class _SequenceCancelled(Exception):
+    pass
+
+
 @dataclass
 class DinoV3CropRecord:
     image_path: str
@@ -70,20 +74,19 @@ class DinoV3CropCollector:
     """Deduplicating collector for crop embeddings during batch detection."""
 
     def __init__(self):
-        # Keyed by (norm_path, box_index) to prevent duplicate entries on OOM retries
-        self._records_by_key: dict[tuple[str, int], DinoV3CropRecord] = {}
+        # Index by photo as well as box to keep checkpointing/restore linear
+        # in job size, while deduplicating OOM retries.
+        self._records_by_path: dict[str, dict[int, DinoV3CropRecord]] = {}
 
     def record_crop(self, record: DinoV3CropRecord) -> None:
-        key = (os.path.normcase(os.path.abspath(record.image_path)), record.box_index)
-        self._records_by_key[key] = record
+        path = os.path.normcase(os.path.abspath(record.image_path))
+        self._records_by_path.setdefault(path, {})[record.box_index] = record
 
     def discard_paths(self, paths: Iterable[str | Path]) -> None:
         """Discard any recorded crops for the given paths before batch retry."""
         targets = {os.path.normcase(os.path.abspath(str(p))) for p in paths}
-        self._records_by_key = {
-            k: v for k, v in self._records_by_key.items()
-            if k[0] not in targets
-        }
+        for path in targets:
+            self._records_by_path.pop(path, None)
 
     def clear_path(self, path: str | Path) -> None:
         self.discard_paths([path])
@@ -94,14 +97,14 @@ class DinoV3CropCollector:
 
     def get_crops_for_path(self, path: str | Path) -> list[DinoV3CropRecord]:
         norm_path = os.path.normcase(os.path.abspath(str(path)))
-        matching = [r for (p, _), r in self._records_by_key.items() if p == norm_path]
+        matching = self._records_by_path.get(norm_path, {}).values()
         return sorted(matching, key=lambda c: c.box_index)
 
     def get_all_crops(self) -> list[DinoV3CropRecord]:
-        return list(self._records_by_key.values())
+        return [r for crops in self._records_by_path.values() for r in crops.values()]
 
     def clear(self) -> None:
-        self._records_by_key.clear()
+        self._records_by_path.clear()
 
 
 def _annotate_sequence_state(
@@ -206,12 +209,15 @@ def _save_in_chunks(
     payloads: Sequence[tuple[Path, dict[str, Any]]],
     input_path: Path | None,
     save_batch_fn: Callable[[list[tuple[Path, dict[str, Any]]], Path], None],
+    progress_fn=None,
 ) -> None:
     if not payloads:
         return
     root = input_path or (payloads[0][0].parent if payloads else Path.cwd())
     for start in range(0, len(payloads), _SEQUENCE_SAVE_CHUNK_SIZE):
         save_batch_fn(list(payloads[start:start + _SEQUENCE_SAVE_CHUNK_SIZE]), root)
+        if progress_fn is not None:
+            progress_fn(min(start + _SEQUENCE_SAVE_CHUNK_SIZE, len(payloads)), len(payloads))
 
 
 def ensure_dinov3_sequences_completed(results: Sequence[Any]) -> None:
@@ -288,6 +294,7 @@ def _mark_completed_without_crops(
     save_batch_fn: Callable[[list[tuple[Path, dict[str, Any]]], Path], None] | None,
     apply_data_fn: Callable[[Any, dict[str, Any]], Any] | None,
     mutate_job: Callable[..., None] | None,
+    progress_fn=None,
 ) -> list[Any]:
     status = SEQUENCE_STATUS_COMPLETE if complete_sequence else SEQUENCE_STATUS_PARTIAL
     updated_results: list[Any] = []
@@ -305,7 +312,7 @@ def _mark_completed_without_crops(
         if getattr(updated_item, "path", None):
             payloads.append((Path(updated_item.path), data))
     if save_batch_fn is not None:
-        _save_in_chunks(payloads, input_path, save_batch_fn)
+        _save_in_chunks(payloads, input_path, save_batch_fn, progress_fn=progress_fn)
     if mutate_job is not None:
         mutate_job(
             results=updated_results,
@@ -333,6 +340,7 @@ def finalize_photo_job(
     complete_sequence: bool = True,
     incomplete_reason: str = "incomplete_job",
     total_photos: int | None = None,
+    progress_fn: Callable[[str, int, int], None] | None = None,
 ) -> list[Any]:
     """Hook called when all photo batches have finished inference.
 
@@ -377,7 +385,16 @@ def finalize_photo_job(
             apply_data_fn=apply_data_fn,
         )
 
+    def report(stage, done=0, total=0):
+        if complete_sequence and is_cancelled is not None and is_cancelled():
+            raise _SequenceCancelled()
+        if progress_fn is not None:
+            progress_fn(stage, done, total)
+        if complete_sequence and is_cancelled is not None and is_cancelled():
+            raise _SequenceCancelled()
+
     try:
+        report("校验照片特征", 0, len(results))
         failed_items = [item for item in results if getattr(item, "error", None)]
         if failed_items:
             # A bad source file has no embedding to aggregate. Keep its error
@@ -390,6 +407,7 @@ def finalize_photo_job(
                     apply_data_fn=apply_data_fn, job_id=job_id,
                     complete_sequence=complete_sequence,
                     incomplete_reason=incomplete_reason, total_photos=total_photos,
+                    progress_fn=progress_fn,
                 )
                 if valid_items else []
             )
@@ -430,7 +448,7 @@ def finalize_photo_job(
             for crop in crops:
                 crop_items.append((item, crop))
 
-        for item in results:
+        for photo_index, item in enumerate(results):
             item_path = getattr(item, "path", None)
             if not item_path:
                 continue
@@ -454,13 +472,15 @@ def finalize_photo_job(
                     "DINOv3 sequence summary requires completed detection output for empty photo: "
                     f"{item_path}"
                 )
+            report("校验照片特征", photo_index + 1, len(results))
 
         if not crop_items:
             logger.info(
                 "DINOv3 finalization found no crops across %d successfully completed empty photos",
                 len(results),
             )
-            return _mark_completed_without_crops(
+            report("写入序列结果", 0, len(results))
+            updated = _mark_completed_without_crops(
                 results,
                 complete_sequence=complete_sequence,
                 incomplete_reason=incomplete_reason,
@@ -470,16 +490,22 @@ def finalize_photo_job(
                 save_batch_fn=save_batch_fn,
                 apply_data_fn=apply_data_fn,
                 mutate_job=mutate_job,
+                progress_fn=lambda done, total: report("写入序列结果", done, total),
             )
+            report("写入序列结果", len(results), len(results))
+            return updated
 
         logger.info("DINOv3 finalization starting: %d total crops across %d photos", len(crop_items), len(results))
 
         # Precompute file SHA-256 digests for unique images for true content deduplication
         image_digests: dict[str, str] = {}
+        digest_total = len({str(item.path) for item, _ in crop_items})
+        report("计算照片指纹", 0, digest_total)
         for item, _ in crop_items:
             p = str(item.path)
             if p not in image_digests:
                 image_digests[p] = _image_file_digest(p)
+                report("计算照片指纹", len(image_digests), digest_total)
 
         # Prepare metadata for event grouping
         event_input_records: list[dict[str, Any]] = []
@@ -502,6 +528,7 @@ def finalize_photo_job(
                 }
             )
 
+        report("划分事件与目标轨迹")
         grouped_events = group_job_events(event_input_records, gap_seconds=1800)
         by_crop_idx = {g["crop_idx"]: g for g in grouped_events}
 
@@ -527,12 +554,21 @@ def finalize_photo_job(
 
         # Build causal history index
         config = HistoryConfig(days=7.0, max_history=64, short_term=0, seed=20261105)
+        report("构建因果历史", 0, len(history_records))
         history_index = FastCausalHistoryIndex(history_records, config=config)
-        history = history_index.build().indices
+        history = np.full((len(history_records), config.max_history), -1, dtype=np.int64)
+        for start in range(0, len(history_records), 256):
+            end = min(start + 256, len(history_records))
+            history[start:end] = history_index.build(range(start, end)).indices
+            report("构建因果历史", end, len(history_records))
 
         # Stack raw embeddings preserving source precision
         raw_features = np.stack([crop.raw_embedding for _, crop in crop_items], axis=0)
-        adapted_features = adapt_with_history(raw_features, history, temperature=0.1, alpha=0.1)
+        report("整合历史特征", 0, len(raw_features))
+        adapted_features = adapt_with_history(
+            raw_features, history, temperature=0.1, alpha=0.1,
+            progress_fn=lambda done, total: report("整合历史特征", done, total),
+        )
 
         camera_ids = [r["camera_id"] for r in history_records]
         sequence_ids = track_sequence_ids
@@ -549,6 +585,7 @@ def finalize_photo_job(
         except Exception:
             t_ctx = nullcontext()
 
+        report("全序列分类")
         with t_ctx:
             predictions = classifier.classify_features(
                 raw_features,
@@ -573,6 +610,7 @@ def finalize_photo_job(
         # raw crop features and individual tracks even for experiment_full.
         rejection_clusters = {}
         if complete_sequence:
+            report("聚类拒识目标")
             from .rejection_clustering import (
                 ClusteringCancelled, cluster_rejections, failed_rejections,
             )
@@ -623,6 +661,7 @@ def finalize_photo_job(
         updated_results: list[Any] = []
         detections_to_save: list[tuple[Path, dict[str, Any]]] = []
 
+        report("生成序列结果", 0, len(results))
         for item in results:
             key = os.path.normcase(os.path.abspath(str(item.path)))
             item_preds = final_preds_by_path.get(key)
@@ -642,6 +681,7 @@ def finalize_photo_job(
                 )
                 updated_results.append(updated_item)
                 detections_to_save.append((Path(item.path), existing_data))
+                report("生成序列结果", len(updated_results), len(results))
                 continue
 
             new_boxes: list[dict[str, Any]] = []
@@ -861,9 +901,14 @@ def finalize_photo_job(
 
             updated_results.append(updated_item)
             detections_to_save.append((Path(item.path), existing_data))
+            report("生成序列结果", len(updated_results), len(results))
 
         if save_batch_fn is not None and detections_to_save:
-            _save_in_chunks(detections_to_save, input_path, save_batch_fn)
+            report("写入序列结果", 0, len(detections_to_save))
+            _save_in_chunks(
+                detections_to_save, input_path, save_batch_fn,
+                progress_fn=lambda done, total: report("写入序列结果", done, total),
+            )
 
         if mutate_job is not None:
             mutate_job(
@@ -883,5 +928,7 @@ def finalize_photo_job(
         if complete_sequence:
             ensure_dinov3_sequences_completed(updated_results)
         return updated_results
+    except _SequenceCancelled:
+        return results
     finally:
         collector.clear()

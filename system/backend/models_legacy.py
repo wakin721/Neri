@@ -478,6 +478,9 @@ class JobSummary(BaseModel):
     elapsed_seconds: float = 0.0
     speed: float = 0.0
     remaining_seconds: float | None = None
+    sequence_stage: str | None = None
+    sequence_processed: int = 0
+    sequence_total: int = 0
     message: str = ""
     results: list[DetectionItem] = Field(default_factory=list)
     error: str | None = None

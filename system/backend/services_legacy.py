@@ -755,6 +755,8 @@ class ProcessingJobManager:
         results = list(initial_results or [])
         batch_log_session = None
         detector = None
+        dinov3_cache = None
+        restored_collector = None
         try:
             request = _effective_processing_request(request)
             _validate_dino_job_options(
@@ -782,6 +784,9 @@ class ProcessingJobManager:
                 job_id,
                 persist=False,
                 state=JobState.RUNNING,
+                sequence_stage=None,
+                sequence_processed=0,
+                sequence_total=0,
                 message="正在读取任务文件清单",
             )
             input_path, files = self._resolve_inputs(job_id, request)
@@ -813,9 +818,35 @@ class ProcessingJobManager:
             if is_dinov3_job:
                 if video_count and request.options.video_mode != "skip":
                     raise ValueError("Neri1.1处理完整照片序列，不支持视频，请选择跳过视频。")
-                # Complete sequences and causal history cannot be reconstructed
-                # from old serialized classifications. Resume re-encodes photos.
-                initial_results = []
+                from system.dinov3.job_cache import DinoV3JobCache, file_stamp
+                from system.dinov3.processor import DinoV3CropCollector
+
+                model_path = _resolve_model_path(request.options.model_path)
+                dinov3_cache = DinoV3JobCache(job_state_path(), job_id, {
+                    "options": request.options.model_dump(mode="json"),
+                    "manifest": joint_payload,
+                    "detector_path": str(model_path),
+                    "detector_stamp": file_stamp(model_path) if model_path.exists() else None,
+                })
+                restored_collector = DinoV3CropCollector()
+                last_restore_publish = 0.0
+
+                def restore_progress(done, total):
+                    nonlocal last_restore_publish
+                    _raise_if_cancelled(lambda: self._is_cancelled(job_id))
+                    now = time.monotonic()
+                    if done == total or now - last_restore_publish >= 0.2:
+                        self._mutate_job(
+                            job_id, persist=False,
+                            message=f"正在恢复 Neri1.1照片特征 {done}/{total}",
+                        )
+                        last_restore_publish = now
+
+                # Serialized classifications alone are insufficient. Only skip
+                # photos whose complete features and source identity are valid.
+                initial_results = dinov3_cache.restore(
+                    files, restored_collector, progress_fn=restore_progress,
+                )
             results = [
                 item.model_copy(deep=True)
                 for item in _unique_detection_items(initial_results or [])
@@ -882,6 +913,7 @@ class ProcessingJobManager:
                         return mark_dinov3_sequence_incomplete(
                             current_results,
                             reason=reason,
+                            status="partial",
                             processed_count=len(current_results),
                             total_count=total_files,
                             input_path=input_path,
@@ -898,6 +930,7 @@ class ProcessingJobManager:
                         return mark_dinov3_sequence_incomplete(
                             current_results,
                             reason=reason,
+                            status="partial",
                             processed_count=len(current_results),
                             total_count=total_files,
                             apply_data_fn=_apply_detection_data,
@@ -988,6 +1021,8 @@ class ProcessingJobManager:
                     request.options.model_path,
                     request.options.classification_model_path,
                 )
+                if restored_collector is not None:
+                    detector._dinov3_collector = restored_collector
                 logger.info(
                     "Batch detector ready: detection_model=%s classification_model=%s",
                     request.options.model_path or "",
@@ -1088,11 +1123,22 @@ class ProcessingJobManager:
                             preload_future = None
                             continue
                         detect_started = time.perf_counter()
+                        source_stamps = {}
+                        if dinov3_cache is not None:
+                            for path in batch:
+                                try:
+                                    source_stamps[str(path)] = file_stamp(path)
+                                except OSError:
+                                    pass
                         try:
                             detected_items = _detect_image_batch(
                                 detector, batch, batch_items, request, input_path,
                                 preloaded_data=preloaded_data, inference_batcher=inference_batcher,
                             )
+                            if dinov3_cache is not None:
+                                dinov3_cache.save_batch(
+                                    detected_items, detector._dinov3_collector, source_stamps,
+                                )
                         finally:
                             preloaded_data = None
                             preload_future = None
@@ -1136,7 +1182,27 @@ class ProcessingJobManager:
                         self._mark_cancelled(job_id, results)
                         return
                     from system.dinov3.processor import finalize_photo_job
-                    self._mutate_job(job_id, persist=False, message="正在汇总 Neri1.1完整照片序列并聚类拒识目标")
+                    # Restore input order, including photos inferred after a
+                    # cache miss, so sequence outputs match an uninterrupted run.
+                    result_order = {_path_key(path): index for index, path in enumerate(files)}
+                    results.sort(key=lambda item: result_order[_path_key(item.path)])
+                    last_sequence_publish = 0.0
+                    last_sequence_stage = None
+
+                    def sequence_progress(stage, done, total):
+                        nonlocal last_sequence_publish, last_sequence_stage
+                        now = time.monotonic()
+                        if stage != last_sequence_stage or done == total or now - last_sequence_publish >= 0.2:
+                            suffix = f" {done}/{total}" if total else ""
+                            self._mutate_job(
+                                job_id, persist=False,
+                                sequence_stage=stage, sequence_processed=done, sequence_total=total,
+                                message=f"Neri1.1序列汇总：{stage}{suffix}",
+                                elapsed_seconds=max(0.0, now - job_started_at),
+                                speed=0.0, remaining_seconds=None,
+                            )
+                            last_sequence_stage, last_sequence_publish = stage, now
+
                     results = finalize_photo_job(
                         detector, results, input_path,
                         is_cancelled=lambda: self._is_cancelled(job_id),
@@ -1145,6 +1211,7 @@ class ProcessingJobManager:
                         complete_sequence=True,
                         total_photos=total_files,
                         job_id=job_id,
+                        progress_fn=sequence_progress,
                     )
                     if self._is_cancelled(job_id):
                         results = checkpoint_dinov3_cancellation(results)
@@ -1152,7 +1219,10 @@ class ProcessingJobManager:
                         return
                     from system.dinov3.processor import ensure_dinov3_sequences_completed
                     ensure_dinov3_sequences_completed(results)
-                    self._mutate_job(job_id, persist=False, results=results, message="Neri1.1完整序列判定完成")
+                    self._mutate_job(
+                        job_id, persist=False, results=results, sequence_stage=None,
+                        sequence_processed=0, sequence_total=0, message="Neri1.1完整序列判定完成",
+                    )
                 video_files = existing_paths(video_files)
                 if video_files:
                     reset_speed_metrics(processed)
@@ -1427,6 +1497,16 @@ class ProcessingJobManager:
                     detector.cleanup_runtime_cache(clear_cuda_cache=self._is_cancelled(job_id))
                 except Exception as exc:  # noqa: BLE001 - cleanup should not mask job status
                     logger.warning("Detector cleanup failed: %s", exc)
+            with self._lock:
+                cache_job = self._jobs.get(job_id)
+                remove_features = job_id in self._deleted_jobs or (
+                    cache_job is not None and cache_job.state == JobState.COMPLETED
+                )
+            if dinov3_cache is not None and remove_features:
+                try:
+                    dinov3_cache.remove(job_state_path(), job_id)
+                except OSError:
+                    logger.warning("Cannot remove completed DINOv3 features: %s", job_id, exc_info=True)
             final_job: JobSummary | None = None
             with self._lock:
                 self._active_job_ids.discard(job_id)

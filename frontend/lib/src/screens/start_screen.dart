@@ -879,17 +879,27 @@ class _JobsCard extends StatelessWidget {
   }
 
   double? _jobProgressValue(ProcessingJob job) {
-    if (pendingStartJobIds.contains(job.id) ||
-        pendingStopJobIds.contains(job.id)) {
+    if (pendingStopJobIds.contains(job.id) ||
+        (pendingStartJobIds.contains(job.id) && job.state != 'running')) {
       return null;
     }
     if (job.total == 0 && job.isActive) return null;
+    if (job.isSummarizing) return job.sequenceProgress;
     return job.progress;
   }
 
   String _jobRuntimeText(ProcessingJob job) {
     final parts = <String>[];
-    if (job.speed > 0) {
+    if (job.isSummarizing) {
+      parts.add('序列汇总 · ${job.sequenceStage}');
+      if (job.sequenceTotal > 0) {
+        parts.add(
+          '${job.sequenceProcessed}/${job.sequenceTotal}'
+          ' (${(job.sequenceProgress! * 100).round()}%)',
+        );
+      }
+    }
+    if (!job.isSummarizing && job.speed > 0) {
       parts.add('${job.speed.toStringAsFixed(job.speed >= 10 ? 1 : 2)} 个/秒');
     }
     if (job.elapsedSeconds > 0) {
@@ -897,6 +907,7 @@ class _JobsCard extends StatelessWidget {
     }
     final remaining = job.remainingSeconds;
     if (job.isActive &&
+        !job.isSummarizing &&
         remaining != null &&
         remaining.isFinite &&
         remaining >= 0) {

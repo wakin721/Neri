@@ -102,6 +102,7 @@ frontend/test/*
 !frontend/test/app_updater_test.dart
 !frontend/test/close_behavior_test.dart
 !frontend/test/job_result_refresh_test.dart
+!frontend/test/job_sequence_progress_test.dart
 !frontend/test/ui_performance_test.dart
 !frontend/test/model_selection_test.dart
 !frontend/test/species_validation_box_dialog_test.dart

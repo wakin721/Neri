@@ -221,6 +221,9 @@ class ProcessingJob {
     this.elapsedSeconds = 0,
     this.speed = 0,
     this.remainingSeconds,
+    this.sequenceStage,
+    this.sequenceProcessed = 0,
+    this.sequenceTotal = 0,
     this.message = '',
     this.results = const <DetectionItem>[],
     this.error,
@@ -239,6 +242,9 @@ class ProcessingJob {
       elapsedSeconds: _doubleFromJobJson(json['elapsed_seconds']) ?? 0,
       speed: _doubleFromJobJson(json['speed']) ?? 0,
       remainingSeconds: _doubleFromJobJson(json['remaining_seconds']),
+      sequenceStage: json['sequence_stage'] as String?,
+      sequenceProcessed: (json['sequence_processed'] as num?)?.toInt() ?? 0,
+      sequenceTotal: (json['sequence_total'] as num?)?.toInt() ?? 0,
       message: json['message'] as String? ?? '',
       results: (json['results'] as List<dynamic>? ?? const <dynamic>[])
           .whereType<Map<String, dynamic>>()
@@ -261,6 +267,9 @@ class ProcessingJob {
   final double elapsedSeconds;
   final double speed;
   final double? remainingSeconds;
+  final String? sequenceStage;
+  final int sequenceProcessed;
+  final int sequenceTotal;
   final String message;
   final List<DetectionItem> results;
   final String? error;
@@ -269,6 +278,10 @@ class ProcessingJob {
   final String updatedAt;
 
   double get progress => total == 0 ? 0 : processed / total;
+  bool get isSummarizing => state == 'running' && sequenceStage != null;
+  double? get sequenceProgress => sequenceTotal > 0
+      ? (sequenceProcessed / sequenceTotal).clamp(0.0, 1.0).toDouble()
+      : null;
   bool get isActive => state == 'queued' || state == 'running';
   bool get isWorkerActive => isActive || active;
   bool get hasFailedItems => failedCount > 0;

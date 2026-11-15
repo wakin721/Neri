@@ -277,6 +277,7 @@ def adapt_with_history(
     temperature: float = 0.1,
     alpha: float = 0.1,
     chunk_size: int = 128,
+    progress_fn=None,
 ) -> np.ndarray:
     """Adapt query features against historical representations via Q/K attention.
 
@@ -313,6 +314,8 @@ def adapt_with_history(
         valid = hh >= 0
         active = valid.any(axis=1)
         if not active.any():
+            if progress_fn is not None:
+                progress_fn(end, len(queries))
             continue
 
         q = raw[queries[begin:end]][active]
@@ -332,6 +335,8 @@ def adapt_with_history(
 
         pooled = np.einsum("bm,bmd->bd", weights, h)
         output[begin + np.flatnonzero(active)] = unit((1.0 - alpha) * q + alpha * pooled)
+        if progress_fn is not None:
+            progress_fn(end, len(queries))
 
     return output.astype(np.float32)
 

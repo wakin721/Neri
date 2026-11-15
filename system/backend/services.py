@@ -98,6 +98,28 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
         except Exception:
             logger.warning("Failed to checkpoint job progress", exc_info=True)
 
+    def _remove_photo_features(self, job_ids) -> None:
+        from system.dinov3.job_cache import DinoV3JobCache
+
+        for job_id in job_ids:
+            try:
+                DinoV3JobCache.remove(job_state_path(), job_id)
+            except OSError:
+                logger.warning("Cannot remove DINOv3 features: %s", job_id, exc_info=True)
+
+    def delete_job(self, job_id: str) -> None:
+        with self._lock:
+            active = job_id in self._active_job_ids
+        super().delete_job(job_id)
+        if not active:
+            self._remove_photo_features([job_id])
+
+    def clear_jobs(self) -> None:
+        with self._lock:
+            inactive = set(self._jobs) - self._active_job_ids
+        super().clear_jobs()
+        self._remove_photo_features(inactive)
+
     def _resolve_inputs(self, job_id: str, request: CreateJobRequest) -> tuple[Path, list[Path]]:
         # Scope the snapshot to this task and the settings that affect discovery.
         # Continuing a task processes its original files; a new task discovers additions.
