@@ -82,9 +82,9 @@ def _start(
         raise RuntimeError("已有环境维护任务正在执行，请等待其完成。")
     source_key, _, _ = _maintenance.resolve_package_source(package_source)
     message = (
-        "Neri1.2preview 安装已开始。"
+        "联合模型组件安装已开始。"
         if operation == "install_dinov3"
-        else "Neri1.2preview 删除已开始。"
+        else "联合模型组件删除已开始。"
     )
     status = {
         "operation": operation,
@@ -184,7 +184,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
     _maintenance._write_status(
         {
             "state": "running",
-            "message": "正在准备 Neri1.2preview 环境维护...",
+            "message": "正在准备联合模型组件环境维护...",
             "progress": 2,
         }
     )
@@ -211,13 +211,13 @@ def _run(argv: Sequence[str] | None = None) -> int:
                 progress_end=55,
             )
             install_dinov3_component(on_progress=_progress(55, 92), on_event=_download_event)
-            final_message = "Neri1.2preview（DINOv3 ViT-B/16）安装完成，Python 后端已重启。"
+            final_message = "联合模型组件安装完成，Python 后端已重启。"
         else:
             _maintenance._write_status(
-                {"message": "正在删除 Neri1.2preview 模型资产...", "progress": 55}
+                {"message": "正在删除联合模型组件资产...", "progress": 55}
             )
             remove_dinov3_component()
-            final_message = "Neri1.2preview 已删除；共享 PyTorch 环境已保留。"
+            final_message = "联合模型组件已删除；共享 PyTorch 环境已保留。"
 
         _maintenance._write_status(
             {
@@ -243,7 +243,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
         _maintenance._write_status(
             {
                 "state": "failed",
-                "message": f"Neri1.2preview 环境维护失败: {redact(exc)}",
+                "message": f"联合模型组件环境维护失败: {redact(exc)}",
                 "progress": min(99, max(0, int(current.get('progress') or 0))),
                 "return_code": 1,
                 "error": redact(exc),
@@ -257,7 +257,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
             _failure(restart_exc, phase='backend_restart')
             _maintenance._write_status(
                 {
-                    "message": f"Neri1.2preview 环境维护失败，且 Python 后端恢复失败: {redact(restart_exc)}",
+                    "message": f"联合模型组件环境维护失败，且 Python 后端恢复失败: {redact(restart_exc)}",
                     "error": f"{redact(exc)}; restart failed: {redact(restart_exc)}",
                 }
             )

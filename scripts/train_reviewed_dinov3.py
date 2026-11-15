@@ -19,6 +19,7 @@ from threadpoolctl import threadpool_limits
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from system.dinov3.encoder import DinoV3Encoder, PREPROCESSING, sha256
 from system.dino.preprocess import preprocess_image
+from system.dinov3.experiment import PRODUCTION_DISPLAY_NAME
 
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -452,7 +453,7 @@ def fit(source, out, known_probes_per_species=50, probe_seed=20261107, validatio
     manifest = publish_model(model, manifest_path,
         encoder_weights=source/"models/dinov3-vitb16/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
         encoder_code=source/"models/dinov3-code", existing_manifest=existing,
-        display_name="Neri1.1", calibration_data=dict(features=c_raw, adapted_features=c_adapted,
+        display_name=PRODUCTION_DISPLAY_NAME, calibration_data=dict(features=c_raw, adapted_features=c_adapted,
             cameras=c_camera, sequences=c_seq, contents=c_content, labels=c_truth))
     report["model_manifest"] = str(manifest)
     write_json(out / "training_report.json", report)

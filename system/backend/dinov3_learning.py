@@ -1,4 +1,4 @@
-"""Durable, automatic human-reviewed learning for the joint Neri1.1 model.
+"""Durable, automatic human-reviewed learning for DINOv3 joint models.
 
 Annotations stage source-bound crops; a background worker coalesces confirmations,
 replays calibration, and atomically publishes a new generation.
@@ -10,6 +10,7 @@ from contextlib import closing, contextmanager, nullcontext
 import hashlib
 import json
 from pathlib import Path
+from system.dinov3.display import model_display_name
 import sqlite3
 import threading
 import zipfile
@@ -94,7 +95,7 @@ def stage_feedback(model_path, input_path, file_path, box, action, operation_id,
                      bbox[2] <= bbox[0] or bbox[3] <= bbox[1]):
         raise ValueError("补图需要有效的目标检测框。")
     if eligible and box.get("frame_index") is not None:
-        raise ValueError("Neri1.1 补图暂只支持照片。")
+        raise ValueError("联合模型补图暂只支持照片。")
     stat = file_path.stat()
     primary = (box.get("候选项") or [{}])[0]
     camera = camera_id_for_path(file_path, root=input_path)
@@ -318,7 +319,7 @@ def import_calibration(model_path, calibration_path):
         data = _read_calibration(calibration_path, payload["encoder_sha256"])
         _recalibrate(model, data)
         publish_model(model, manifest, existing_manifest=payload,
-                      display_name=payload.get("display_name", "Neri1.1"), calibration_data=data)
+                      display_name=model_display_name(payload), calibration_data=data)
     schedule_learning(model_path)
     return learning_status(manifest)
 
@@ -460,7 +461,7 @@ def update_model(model_path):
         try:
             if changed:
                 publish_model(model, manifest, existing_manifest=payload,
-                              display_name=payload.get("display_name", "Neri1.1"), calibration_data=cal,
+                              display_name=model_display_name(payload), calibration_data=cal,
                               publication_guard=commit_guard)
             else:
                 with commit_guard():

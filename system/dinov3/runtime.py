@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from .encoder import FEATURE_DIM, PREPROCESSING, DinoV3Encoder, sha256
 from .experiment import PRODUCTION_RECIPE, head_type
+from .display import model_display_name
 
 ARCHITECTURE = "dinov3_vitb16"
 HEAD_TYPE = "ridge_within"
@@ -98,5 +99,6 @@ def load_dinov3_model(model_path, *, device=None, encoder_factory=None, **_kwarg
         weights,
         resolve_manifest_asset(path, payload["encoder_code"]), payload["encoder_sha256"], device=device)
     classifier = DinoV3Classifier(model, encoder=encoder)
+    classifier.display_name = model_display_name(payload)
     classifier.model_fingerprint = f"{payload['encoder_sha256']}:{payload['checkpoint_sha256']}"
     return DinoV3Runtime(path, model, classifier)

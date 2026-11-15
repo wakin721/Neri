@@ -1096,10 +1096,7 @@ void main() {
         find.text('二维图用于展示白化特征空间近邻；实际判定结合因果历史适配、Within 近邻与 Ridge 序列门控。'),
         findsOneWidget,
       );
-      expect(
-        find.textContaining('该检测框没有 Neri1.1 observation ID'),
-        findsNothing,
-      );
+      expect(find.textContaining('该检测框缺少检测框标识'), findsNothing);
 
       for (final label in ['正确', '修改物种', '空 / 误检', '不参与学习']) {
         final button = find.descendant(

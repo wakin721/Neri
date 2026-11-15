@@ -7,6 +7,7 @@ from .balanced_unknown_calibration import fit_unknown_threshold
 
 PRODUCTION_RECIPE = "production_dual"
 EXPERIMENT_RECIPE = "experiment_full"
+PRODUCTION_DISPLAY_NAME = "Neri1.1"
 PREVIEW_DISPLAY_NAME = "Neri1.2preview"
 INFERENCE_RECIPES = (PRODUCTION_RECIPE, EXPERIMENT_RECIPE)
 

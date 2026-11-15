@@ -93,7 +93,9 @@ def test_resume_after_restart_reuses_features_and_reports_sequence_progress(
     monkeypatch.setattr(legacy, "_start_batch_log_session", lambda *a: None)
     monkeypatch.setattr(legacy, "_resolve_job_inputs", lambda *a, **kw: (tmp_path, paths))
     monkeypatch.setattr(legacy, "_resolve_classification_model_path", lambda p: Path(p))
-    monkeypatch.setattr(legacy, "_dino_manifest_payload", lambda p: {"backend": "dinov3"})
+    monkeypatch.setattr(legacy, "_dino_manifest_payload", lambda p: {
+        "backend": "dinov3", "display_name": "Neri1.2preview",
+    })
     monkeypatch.setattr(legacy, "load_media_indexes", lambda *a, **kw: ({}, {}))
     monkeypatch.setattr(legacy, "_save_detection_data_batch", lambda *a, **kw: None)
     monkeypatch.setattr(legacy, "_export_results", lambda *a, **kw: None)
@@ -103,6 +105,7 @@ def test_resume_after_restart_reuses_features_and_reports_sequence_progress(
 
     class Classifier:
         backend = "dinov3"
+        display_name = "Neri1.2preview"
         model_fingerprint = "fixture"
         model = SimpleNamespace(inference_recipe="production_dual")
 
@@ -190,6 +193,7 @@ def test_resume_after_restart_reuses_features_and_reports_sequence_progress(
         assert {u["sequence_stage"] for u in updates} >= {
             "计算照片指纹", "构建因果历史", "整合历史特征", "全序列分类", "聚类拒识目标", "写入序列结果",
         }
+        assert all(u["message"].startswith("Neri1.2preview序列汇总：") for u in updates)
         assert any(u["sequence_total"] > 0 and u["sequence_processed"] == u["sequence_total"]
                    for u in updates)
         np.testing.assert_array_equal(classifications[-1], np.stack([crop(p).raw_embedding for p in paths[:2]]))

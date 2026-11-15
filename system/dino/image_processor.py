@@ -177,7 +177,7 @@ class ImageProcessor:
                     raise
 
         if self.model is None:
-            raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+            raise ValueError("联合分类模型必须同时选择探测模型。")
 
         preloaded_data = kwargs.get("preloaded_data")
         loaded = preloaded_data or self.preload_batch_data(img_paths)

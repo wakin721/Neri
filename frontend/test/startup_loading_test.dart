@@ -50,10 +50,10 @@ class StartupBackend {
     'id': id,
     'input_dir': id,
     'state': id == 'running' ? 'running' : 'completed',
-    'processed': processed,
+    'processed': id == 'running' ? processed : 1,
     'total': 3008,
     'created_at': 'created',
-    'updated_at': '$processed',
+    'updated_at': id == 'running' ? '$processed' : 'completed',
   };
 
   late final api = NeriApiClient(
@@ -274,14 +274,20 @@ void main() {
       expect(backend.previewRequests, 1);
       expect(backend.details, isEmpty);
       expect(find.text('程序启动中'), findsNothing);
-      // The preview is still pending but the global shell progress has ended.
-      expect(find.byType(LinearProgressIndicator), findsNWidgets(2));
+      // Histories render only in their dialog; startup has no global spinner.
+      expect(find.byType(LinearProgressIndicator), findsNothing);
       await tester.pump(const Duration(seconds: 2));
       await settleStartup(tester);
       expect(backend.summaryRequests, greaterThanOrEqualTo(2));
       expect(backend.details, isEmpty);
-      final screen = tester.widget<StartScreen>(find.byType(StartScreen));
-      screen.onJobExpansionChanged!(screen.jobs.first, true);
+      final history = find.byTooltip('任务历史');
+      await tester.ensureVisible(history);
+      await tester.pump();
+      await tester.tap(history);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(LinearProgressIndicator), findsNWidgets(2));
+      expect(backend.details, isEmpty);
+      await tester.tap(find.text('history'));
       await tester.pump();
       await settleStartup(tester);
       expect(backend.details, ['history']);
@@ -289,6 +295,12 @@ void main() {
         tester.widget<StartScreen>(find.byType(StartScreen)).failedJobDetailIds,
         isEmpty,
       );
+      await tester.tap(find.byTooltip('关闭任务历史'));
+      await tester.pump(const Duration(milliseconds: 300));
+      backend.processed++;
+      await tester.pump(const Duration(seconds: 2));
+      await settleStartup(tester);
+      expect(backend.details, ['history']);
       await cleanup(tester, backend);
     },
   );

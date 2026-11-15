@@ -30,6 +30,7 @@ from typing import Any, Iterable
 
 from system.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS, XPU_ENABLED
 from system.dinov3.observation_support import is_dinov3_box_mapping, make_dinov3_observation_id
+from system.dinov3.display import model_display_name
 from system.metadata_extractor import ImageMetadataExtractor
 from system.utils import resource_path
 from .preview_fast import load_media_indexes
@@ -815,9 +816,10 @@ class ProcessingJobManager:
                 if request.options.enable_detection else None
             )
             is_dinov3_job = joint_payload is not None and joint_payload.get("backend") == "dinov3"
+            joint_model_name = model_display_name(joint_payload)
             if is_dinov3_job:
                 if video_count and request.options.video_mode != "skip":
-                    raise ValueError("Neri1.1处理完整照片序列，不支持视频，请选择跳过视频。")
+                    raise ValueError(f"{joint_model_name}处理完整照片序列，不支持视频，请选择跳过视频。")
                 from system.dinov3.job_cache import DinoV3JobCache, file_stamp
                 from system.dinov3.processor import DinoV3CropCollector
 
@@ -838,7 +840,7 @@ class ProcessingJobManager:
                     if done == total or now - last_restore_publish >= 0.2:
                         self._mutate_job(
                             job_id, persist=False,
-                            message=f"正在恢复 Neri1.1照片特征 {done}/{total}",
+                            message=f"正在检查 {joint_model_name}照片特征缓存 {done}/{total}",
                         )
                         last_restore_publish = now
 
@@ -846,6 +848,10 @@ class ProcessingJobManager:
                 # photos whose complete features and source identity are valid.
                 initial_results = dinov3_cache.restore(
                     files, restored_collector, progress_fn=restore_progress,
+                )
+                self._mutate_job(
+                    job_id, persist=False,
+                    message=f"{joint_model_name}已恢复 {len(initial_results)} 张照片特征，待处理 {len(files) - len(initial_results)} 张",
                 )
             results = [
                 item.model_copy(deep=True)
@@ -1197,7 +1203,7 @@ class ProcessingJobManager:
                             self._mutate_job(
                                 job_id, persist=False,
                                 sequence_stage=stage, sequence_processed=done, sequence_total=total,
-                                message=f"Neri1.1序列汇总：{stage}{suffix}",
+                                message=f"{joint_model_name}序列汇总：{stage}{suffix}",
                                 elapsed_seconds=max(0.0, now - job_started_at),
                                 speed=0.0, remaining_seconds=None,
                             )
@@ -1221,7 +1227,7 @@ class ProcessingJobManager:
                     ensure_dinov3_sequences_completed(results)
                     self._mutate_job(
                         job_id, persist=False, results=results, sequence_stage=None,
-                        sequence_processed=0, sequence_total=0, message="Neri1.1完整序列判定完成",
+                        sequence_processed=0, sequence_total=0, message=f"{joint_model_name}完整序列判定完成",
                     )
                 video_files = existing_paths(video_files)
                 if video_files:
@@ -1811,9 +1817,9 @@ def _validate_dino_job_options(
     if payload is None:
         return
     if not model_path:
-        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+        raise ValueError(f"{model_display_name(payload)} 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError("Neri1.1 暂不支持视频完整识别，请选择跳过视频。")
+        raise ValueError(f"{model_display_name(payload)} 暂不支持视频完整识别，请选择跳过视频。")
 
 
 def _persist_dino_observations(
@@ -1872,9 +1878,9 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
 
     dino_payload = _dino_manifest_payload(resolved_classification_path)
     if dino_payload is not None and resolved_model_path is None:
-        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+        raise ValueError(f"{model_display_name(dino_payload)} 分类模型必须同时选择探测模型。")
     if dino_payload is not None and importlib.util.find_spec("torch") is None:
-        raise RuntimeError("Neri1.1 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
+        raise RuntimeError(f"{model_display_name(dino_payload)} 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
 
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None
@@ -3101,7 +3107,7 @@ def _learnable_observations_for_file(
     classification_model_path: str,
     file_path: Path,
 ):
-    """Neri1.1 keeps annotations local and does not learn online."""
+    """Keep joint-model annotations local; reviewed learning has its own service."""
     return []
 
 

@@ -1,4 +1,4 @@
-"""Lifecycle helpers for Neri's offline DINOv3 (Neri1.2preview) component."""
+"""Lifecycle helpers for Neri's offline DINOv3 joint-model component."""
 from __future__ import annotations
 
 import json
@@ -67,7 +67,7 @@ def _select_valid_manifest(root: Path) -> tuple[Path, dict]:
     if not valid:
         if legacy:
             raise ValueError("检测到旧版 DINOv3 多原型组件，需迁移为当前联合模型格式；独立安装的用户模型不受影响。")
-        raise ValueError("未找到有效的 Neri1.2preview 模型清单。")
+        raise ValueError("未找到有效的联合模型清单。")
     if len(valid) > 1:
         raise ValueError("DINOv3 组件中包含多个模型清单。")
     return valid[0]
@@ -99,7 +99,7 @@ def _component_health(
     root: Path,
 ) -> tuple[bool, str, dict | None, int | None, int | None]:
     if not root.is_dir() or not any(root.iterdir()):
-        return False, "Neri1.2preview 未安装。", None, None, None
+        return False, "联合模型组件未安装。", None, None, None
     try:
         manifest_path, payload = _select_valid_manifest(root)
         checkpoint = resolve_manifest_asset(manifest_path, payload["checkpoint"])

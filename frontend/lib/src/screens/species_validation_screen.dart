@@ -1682,7 +1682,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     else
                       Text(
                         classificationModelPath.isEmpty
-                            ? '请先选择 Neri1.1 或 Neri1.1 分类模型'
+                            ? '请先选择联合分类模型'
                             : '该检测框没有可用的特征空间数据',
                       ),
                   ],
@@ -1986,11 +1986,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         .take(4)
         .map((value) => value.toStringAsFixed(1))
         .join(', ');
-    final primaryCandidate = box.candidates.isNotEmpty
-        ? box.candidates.first
-        : const <String, dynamic>{};
-    final isNeri1Box =
-        box.candidates.isNotEmpty && _isDinoV3Candidate(primaryCandidate);
     final rejectionInfo = dinoRejectionInfo(box);
     final rawDetConf = rejectionInfo.rawDetConf;
     final boxKnownScore = rejectionInfo.boxScore;
@@ -2115,9 +2110,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                   if ((box.trackId?.trim() ?? '').isNotEmpty)
                     Text('Track：${box.trackId!.trim()}'),
                   if ((box.predictedSpecies?.trim() ?? '').isNotEmpty)
-                    Text(
-                      '${isNeri1Box ? 'Neri1.1' : 'Neri1.1'}：${box.predictedSpecies!.trim()}',
-                    ),
+                    Text('模型预测：${box.predictedSpecies!.trim()}'),
                 ],
               ),
             ),
@@ -2128,7 +2121,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             if (observationId.isEmpty) ...[
               const SizedBox(height: 6),
               Text(
-                '该检测框没有 Neri1.1 observation ID：可查看检测详情，但不能提交学习反馈。',
+                '该检测框缺少检测框标识：可查看检测详情，但不能提交学习反馈。',
                 style: TextStyle(
                   fontSize: 12,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -4891,7 +4884,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         final classificationModelPath =
             widget.classificationModelPath?.trim() ?? '';
         if (classificationModelPath.isEmpty) {
-          throw StateError('缺少 Neri1.1 分类模型路径，无法撤回学习反馈。');
+          throw StateError('缺少联合分类模型路径，无法撤回学习反馈。');
         }
         await widget.apiClient.revertDinoFeedback(
           classificationModelPath: classificationModelPath,

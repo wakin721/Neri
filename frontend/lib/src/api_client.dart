@@ -247,7 +247,7 @@ class DinoComponentStatus {
       healthy: json['healthy'] as bool? ?? false,
       architecture: json['architecture'] as String? ?? 'DINOv3 ViT-B/16',
       componentVersion: (json['component_version'] as num?)?.toInt() ?? 1,
-      displayName: json['display_name'] as String? ?? 'Neri1.2preview',
+      displayName: json['display_name'] as String? ?? '联合模型',
       classCount: (json['class_count'] as num?)?.toInt(),
       featureDim: (json['feature_dim'] as num?)?.toInt(),
       manifest: json['manifest'] as String?,

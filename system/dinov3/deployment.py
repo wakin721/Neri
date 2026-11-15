@@ -12,11 +12,11 @@ import numpy as np
 
 from .encoder import PREPROCESSING, sha256
 from .runtime import ARCHITECTURE
-from .experiment import head_type
+from .experiment import PRODUCTION_DISPLAY_NAME, head_type
 
 
 def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=None,
-                  display_name="Neri1.1", existing_manifest=None, calibration_data=None,
+                  display_name=PRODUCTION_DISPLAY_NAME, existing_manifest=None, calibration_data=None,
                   publication_guard=None):
     """Publish a new generation; an unsuccessful build keeps the old manifest usable."""
     if model.calibration is None:

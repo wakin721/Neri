@@ -166,12 +166,12 @@ void main() {
       ),
     );
 
+    final history = find.byTooltip('任务历史');
+    await tester.ensureVisible(history);
+    await tester.pump();
+    await tester.tap(history);
+    await tester.pumpAndSettle();
     final jobTitle = find.text(r'C:\photos');
-    await tester.scrollUntilVisible(
-      jobTitle,
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
     expect(find.text('处理完成，1 个文件失败'), findsOneWidget);
     await tester.tap(jobTitle);
     await tester.pumpAndSettle();

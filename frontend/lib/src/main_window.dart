@@ -4314,7 +4314,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           child: ListTile(
             dense: true,
             leading: const Icon(Icons.filter_alt_rounded),
-            title: const Text('Neri1.1 Candidate 验证筛选'),
+            title: const Text('联合模型候选验证筛选'),
             subtitle: Text(
               missing > 0
                   ? '当前显示 ${items.length}/$requested 个代表事件；$missing 个历史文件不在当前任务中。'

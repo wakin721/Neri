@@ -575,7 +575,7 @@ class DinoV3DistributionClient:
                     reported_percent = max(reported_percent, percent)
                     on_progress(
                         reported_percent,
-                        f"正在下载 Neri1.2preview: {entry.relative_path}",
+                        f"正在下载联合模型组件: {entry.relative_path}",
                     )
 
                 destination = target.joinpath(*local_parts)
@@ -601,4 +601,4 @@ class DinoV3DistributionClient:
                     shutil.copy2(cached, destination)
                 completed_bytes += entry.size
         if on_progress is not None:
-            on_progress(100, "Neri1.2preview 下载完成，正在校验组件。")
+            on_progress(100, "联合模型组件下载完成，正在校验组件。")

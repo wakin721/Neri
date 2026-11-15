@@ -25,6 +25,7 @@ from .context import (
     parse_capture_time,
 )
 from .observation_support import make_dinov3_observation_id
+from .display import model_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,7 @@ def _mark_completed_without_crops(
     apply_data_fn: Callable[[Any, dict[str, Any]], Any] | None,
     mutate_job: Callable[..., None] | None,
     progress_fn=None,
+    model_name="联合模型",
 ) -> list[Any]:
     status = SEQUENCE_STATUS_COMPLETE if complete_sequence else SEQUENCE_STATUS_PARTIAL
     updated_results: list[Any] = []
@@ -317,9 +319,9 @@ def _mark_completed_without_crops(
         mutate_job(
             results=updated_results,
             message=(
-                f"Neri1.1序列聚合完成: {len(updated_results)} 张空照片已确认"
+                f"{model_name}序列聚合完成: {len(updated_results)} 张空照片已确认"
                 if complete_sequence
-                else f"Neri1.1序列部分聚合: {len(updated_results)} 张空照片，任务仍需继续"
+                else f"{model_name}序列部分聚合: {len(updated_results)} 张空照片，任务仍需继续"
             ),
         )
     if complete_sequence:
@@ -358,6 +360,7 @@ def finalize_photo_job(
     classifier = getattr(detector, "dinov3_classifier", None)
     if classifier is None:
         classifier = getattr(detector, "dino_classifier", None)
+    model_name = model_display_name({"display_name": getattr(classifier, "display_name", None)})
     if classifier is None or getattr(classifier, "backend", None) != "dinov3":
         if complete_sequence:
             raise DinoV3SequenceFinalizationError("DINOv3 classifier is unavailable")
@@ -491,6 +494,7 @@ def finalize_photo_job(
                 apply_data_fn=apply_data_fn,
                 mutate_job=mutate_job,
                 progress_fn=lambda done, total: report("写入序列结果", done, total),
+                model_name=model_name,
             )
             report("写入序列结果", len(results), len(results))
             return updated
@@ -914,9 +918,9 @@ def finalize_photo_job(
             mutate_job(
                 results=updated_results,
                 message=(
-                    f"Neri1.1序列聚合完成: {len(updated_results)} 张照片已确认"
+                    f"{model_name}序列聚合完成: {len(updated_results)} 张照片已确认"
                     if complete_sequence
-                    else f"Neri1.1序列部分聚合: {len(updated_results)} 张照片，任务仍需继续"
+                    else f"{model_name}序列部分聚合: {len(updated_results)} 张照片，任务仍需继续"
                 ),
             )
 

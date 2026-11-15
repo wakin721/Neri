@@ -6,6 +6,14 @@ import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
 
 void main() {
+  test('missing component identity uses a neutral label', () {
+    final status = DinoComponentStatus.fromJson({
+      'installed': false,
+      'healthy': false,
+    });
+    expect(status.displayName, '联合模型');
+  });
+
   test('parses DINOv3 environment status', () async {
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
