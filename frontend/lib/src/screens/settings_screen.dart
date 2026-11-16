@@ -1971,7 +1971,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 '${_dinoStatus?.displayName ?? '联合模型'}（${_dinoStatus?.architecture ?? 'DINOv3 ViT-B/16'}）',
             subtitle: _loadingDinoStatus
                 ? widget.backendReady
-                      ? '正在读取 DINOv3 组件状态...'
+                      ? '正在检查组件...'
                       : '等待后端就绪...'
                 : _dinoStatus == null
                 ? '无法读取 DINOv3 组件状态。'
@@ -1982,9 +1982,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Builder(
               builder: (context) {
                 if (_loadingDinoStatus) {
-                  return const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                  return Semantics(
+                    liveRegion: true,
+                    child: const SizedBox.square(
+                      dimension: 44,
+                      key: Key('dino-component-loading'),
+                      child: Center(
+                        child: SizedBox.square(
+                          dimension: 28,
+                          child: CircularProgressIndicator(strokeWidth: 3),
+                        ),
+                      ),
+                    ),
                   );
                 }
                 final status = _dinoStatus;
@@ -2042,7 +2051,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           if (canSwitchHealthyVersion) ...[
                             FilledButton(
                               key: const Key('dino-component-switch'),
-                              onPressed: _maintenanceBusy ? null : _installDinoV3,
+                              onPressed: _maintenanceBusy
+                                  ? null
+                                  : _installDinoV3,
                               child: const Text('安装/切换'),
                             ),
                             const SizedBox(width: 8),
@@ -2052,12 +2063,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             onPressed: _maintenanceBusy ? null : _removeDinoV3,
                             child: const Text('删除'),
                           ),
-                        ] else
+                        ] else ...[
                           FilledButton(
                             key: const Key('dino-component-action'),
                             onPressed: _maintenanceBusy ? null : _installDinoV3,
                             child: Text(status.installed ? '安装/修复' : '安装'),
                           ),
+                          if (status.installed) ...[
+                            const SizedBox(width: 8),
+                            OutlinedButton(
+                              key: const Key('dino-component-remove'),
+                              onPressed: _maintenanceBusy
+                                  ? null
+                                  : _removeDinoV3,
+                              child: const Text('删除'),
+                            ),
+                          ],
+                        ],
                       ],
                     ),
                     const SizedBox(height: 6),
@@ -3567,10 +3589,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in bundledModels)
-        _SettingsOption<String>(
-          value: model.path,
-          label: model.selectorLabel,
-        ),
+        _SettingsOption<String>(value: model.path, label: model.selectorLabel),
     ],
     if (userModels.isNotEmpty) ...[
       const _SettingsOption<String>(
@@ -3579,10 +3598,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in userModels)
-        _SettingsOption<String>(
-          value: model.path,
-          label: model.selectorLabel,
-        ),
+        _SettingsOption<String>(value: model.path, label: model.selectorLabel),
     ],
     if (cloudModels.isNotEmpty) ...[
       const _SettingsOption<String>(
@@ -3591,10 +3607,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
         enabled: false,
       ),
       for (final model in cloudModels)
-        _SettingsOption<String>(
-          value: model.path,
-          label: model.selectorLabel,
-        ),
+        _SettingsOption<String>(value: model.path, label: model.selectorLabel),
     ],
   ];
 }

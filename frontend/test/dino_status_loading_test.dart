@@ -10,15 +10,16 @@ import 'package:neri_flutter/src/models/settings.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
 
-http.Response statusResponse({bool installed = false}) => http.Response(
-  jsonEncode({
-    'installed': installed,
-    'healthy': installed,
-    'message': installed ? 'Neri1.1 已安装。' : 'Neri1.1 未安装。',
-  }),
-  200,
-  headers: {'content-type': 'application/json; charset=utf-8'},
-);
+http.Response statusResponse({bool installed = false, bool? healthy}) =>
+    http.Response(
+      jsonEncode({
+        'installed': installed,
+        'healthy': healthy ?? installed,
+        'message': installed ? 'Neri1.1 已安装。' : 'Neri1.1 未安装。',
+      }),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
 
 class StatusHarness {
   StatusHarness(Future<http.Response> Function(int) response) {
@@ -26,6 +27,13 @@ class StatusHarness {
       httpClient: MockClient((request) async {
         if (request.url.path == '/api/environment/dinov3-status') {
           return response(++requests);
+        }
+        if (request.url.path == '/api/environment/remove-dinov3') {
+          removeRequests += 1;
+          return http.Response(
+            '{"operation":"remove_dinov3","state":"starting","message":"正在删除","progress":0}',
+            202,
+          );
         }
         return http.Response('{}', 200);
       }),
@@ -39,6 +47,7 @@ class StatusHarness {
   bool active = true;
   int generation = 1;
   int requests = 0;
+  int removeRequests = 0;
 
   Widget screen() => MaterialApp(
     home: Scaffold(
@@ -74,6 +83,36 @@ Future<void> mount(WidgetTester tester, StatusHarness harness) async {
 }
 
 void main() {
+  testWidgets('unhealthy installed component offers deletion beside repair', (
+    tester,
+  ) async {
+    final harness = StatusHarness(
+      (_) async => statusResponse(installed: true, healthy: false),
+    );
+    await mount(tester, harness);
+    await tester.pumpAndSettle();
+    final repair = find.widgetWithText(FilledButton, '安装/修复');
+    final remove = find.byKey(const Key('dino-component-remove'));
+    expect(repair, findsOneWidget);
+    expect(remove, findsOneWidget);
+    expect(
+      tester.getCenter(remove).dx,
+      greaterThan(tester.getRect(repair).right),
+    );
+    await tester.tap(remove);
+    await tester.pumpAndSettle();
+    expect(find.text('删除联合模型组件'), findsOneWidget);
+    expect(find.textContaining('人工校验记录与补图数据会保留'), findsOneWidget);
+    final confirmation = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.text('删除'),
+    );
+    await tester.tap(confirmation);
+    await tester.pumpAndSettle();
+    expect(harness.removeRequests, 1);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'waits for backend readiness and avoids requests on settings polling',
     (tester) async {
@@ -84,6 +123,13 @@ void main() {
       await mount(tester, harness);
       expect(harness.requests, 0);
       expect(find.text('等待后端就绪...'), findsOneWidget);
+      expect(find.text('等待后端就绪'), findsNothing);
+      expect(
+        tester.getRect(find.text('等待后端就绪...')).right,
+        lessThan(
+          tester.getRect(find.byKey(const Key('dino-component-loading'))).left,
+        ),
+      );
       harness.ready = true;
       harness.generation = 1;
       await tester.pumpWidget(harness.screen());
@@ -95,6 +141,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(harness.requests, 1);
       expect(find.text('Neri1.1 未安装。'), findsOneWidget);
+      expect(find.byKey(const Key('dino-component-remove')), findsNothing);
       expect(find.byKey(const Key('dino-status-retry')), findsNothing);
       await tester.pumpWidget(const SizedBox());
     },
@@ -114,12 +161,14 @@ void main() {
     await tester.tap(find.byKey(const Key('dino-status-retry')));
     await tester.pump();
     expect(harness.requests, 2);
-    expect(find.text('正在读取 DINOv3 组件状态...'), findsOneWidget);
+    expect(find.text('正在检查组件...'), findsOneWidget);
+    expect(find.text('正在检查组件'), findsNothing);
     expect(find.byKey(const Key('dino-status-retry')), findsNothing);
     retry.complete(statusResponse(installed: true));
     await tester.pumpAndSettle();
     expect(find.text('Neri1.1 已安装。'), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, '删除'), findsOneWidget);
+    expect(find.byKey(const Key('dino-component-remove')), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 
