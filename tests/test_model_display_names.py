@@ -18,7 +18,7 @@ def test_validation_messages_identify_the_selected_model(monkeypatch, name):
     assert str(error.value) == f"{name} 分类模型必须同时选择探测模型。"
     with pytest.raises(ValueError) as error:
         services._validate_dino_job_options("detector.pt", "model.neri.json", "all")
-    assert str(error.value) == f"{name} 暂不支持视频识别，请选择跳过视频。"
+    assert str(error.value) == f"{name} 暂不支持完整视频追踪，请使用快速识别或跳过视频。"
 
 
 @pytest.mark.parametrize("manifest", [None, {}, {"display_name": None}, {"display_name": " "}])

@@ -123,6 +123,7 @@ class ImageProcessor:
         original_imgs_rgb,
         *,
         source_indices=None,
+        defer_sequence=False,
     ):
         if self.dino_classifier is None:
             return [{} for _ in det_results], [{} for _ in det_results]
@@ -151,25 +152,34 @@ class ImageProcessor:
         if not crops:
             return candidate_maps, selected_maps
 
-        predictions = self.dino_classifier.classify_crops(crops, array_color="rgb")
+        if defer_sequence:
+            # A video is classified once all sampled frames are available.
+            # Both the PyTorch and LiteRT encoders implement this contract.
+            embeddings = self.dino_classifier.encoder.encode(crops, array_color="rgb")
+            predictions = [None] * len(embeddings)
+        else:
+            predictions = self.dino_classifier.classify_crops(crops, array_color="rgb")
+            embeddings = [prediction.embedding for prediction in predictions]
         if len(predictions) != len(crop_map):
             raise RuntimeError(
                 "DINOv3 classifier returned a different number of predictions than crops"
             )
         from system.dinov3.processor import DinoV3CropRecord
 
-        for prediction, (result_index, box_index) in zip(predictions, crop_map):
+        for prediction, embedding, (result_index, box_index) in zip(predictions, embeddings, crop_map):
             box = det_results[result_index].boxes[box_index]
             detection_confidence = float(box.conf.item())
             bbox = tuple(float(value) for value in box.xyxy.tolist()[0])
-            candidate = prediction.as_candidate(
-                detection_confidence=detection_confidence
-            )
-            candidate.update({"predicted_species": prediction.species})
-            candidate_maps[result_index][box_index] = [candidate]
-            selected_maps[result_index][box_index] = (
-                candidate if prediction.accepted else None
-            )
+            candidate = {}
+            if prediction is not None:
+                candidate = prediction.as_candidate(
+                    detection_confidence=detection_confidence
+                )
+                candidate.update({"predicted_species": prediction.species})
+                candidate_maps[result_index][box_index] = [candidate]
+                selected_maps[result_index][box_index] = (
+                    candidate if prediction.accepted else None
+                )
             source_index = (
                 source_indices[result_index]
                 if source_indices is not None
@@ -192,7 +202,7 @@ class ImageProcessor:
                     box_index=box_index,
                     bbox=bbox,
                     detection_confidence=detection_confidence,
-                    raw_embedding=prediction.embedding.copy(),
+                    raw_embedding=embedding.copy(),
                     initial_prediction=prediction,
                     initial_candidate=dict(candidate),
                 )
@@ -274,6 +284,7 @@ class ImageProcessor:
             det_results,
             original_imgs_rgb,
             source_indices=valid_indices,
+            defer_sequence=bool(kwargs.get("defer_dinov3_sequence", False)),
         )
         logger.info(
             "DINOv3 batch timing: images=%d detect=%.3fs classify=%.3fs fp16=%s",

@@ -63,7 +63,7 @@ def test_dinov3_catalog_discovery_and_hiding_referenced_weights(tmp_path):
     assert model.architecture == "dinov3_vitb16"
     assert model.feature_dim == 768
     assert model.requires_detector is True
-    assert model.supports_video_fast is False
+    assert model.supports_video_fast is True
     assert model.supports_video_all is False
     assert model.checkpoint_path == str(checkpoint.resolve())
 
@@ -92,6 +92,27 @@ def test_old_dinov3_manifest_is_hidden_from_catalog(tmp_path):
     )
     models = discover_models(layout, "cls")
     assert models == []
+
+
+def test_model_services_exposes_fast_video_for_old_and_new_dinov3_manifests(
+    tmp_path, monkeypatch
+):
+    layout = get_model_layout(tmp_path)
+    old_manifest, _, _, old_payload = _make_fake_dinov3_assets(layout.cls_user)
+    assert old_payload["supports_video_fast"] is False
+
+    new_dir = layout.cls_sync
+    new_manifest, _, _, new_payload = _make_fake_dinov3_assets(new_dir)
+    new_payload = dict(new_payload, display_name="Neri1.2", supports_video_fast=True)
+    new_manifest.write_text(json.dumps(new_payload), encoding="utf-8")
+
+    monkeypatch.setattr(model_services, "get_model_layout", lambda: layout)
+    models = model_services.list_available_classification_models()
+    by_name = {model.name: model for model in models}
+    assert set(by_name) == {"Neri1.1", "Neri1.2"}
+    for model in by_name.values():
+        assert model.supports_video_fast is True
+        assert model.supports_video_all is False
 
 
 def test_model_services_list_classes_without_loading_encoder(tmp_path, monkeypatch):
@@ -158,11 +179,11 @@ def test_services_validate_dinov3_job_options(tmp_path):
     with pytest.raises(ValueError, match="Neri1.1 分类模型必须同时选择探测模型。"):
         services._validate_dino_job_options(None, str(manifest), "fast")
 
-    # Rejects video_mode == 'all' with message recommending skip
-    with pytest.raises(ValueError, match="Neri1.1 暂不支持视频识别，请选择跳过视频。"):
+    # Rejects video_mode == 'all' with message recommending fast or skip
+    with pytest.raises(ValueError, match="Neri1.1 暂不支持完整视频追踪，请使用快速识别或跳过视频。"):
         services._validate_dino_job_options("detector.pt", str(manifest), "all")
 
-    # Allows 'fast' and 'skip' during job options validation (photos task with fast default)
+    # Allows 'fast' and 'skip' during job options validation
     services._validate_dino_job_options("detector.pt", str(manifest), "fast")
     services._validate_dino_job_options("detector.pt", str(manifest), "skip")
 

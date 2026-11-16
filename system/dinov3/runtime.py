@@ -40,8 +40,13 @@ def read_manifest(path):
     expected = dict(schema_version=1, backend="dinov3", architecture=ARCHITECTURE,
                     feature_dim=FEATURE_DIM, preprocessing=PREPROCESSING,
                     event_aggregation="complete_sequence", requires_detector=True,
-                    supports_video_fast=False, supports_video_all=False)
-    if not isinstance(payload, dict) or any(payload.get(k) != v for k, v in expected.items()):
+                    supports_video_all=False)
+    if (
+        not isinstance(payload, dict)
+        or any(payload.get(k) != v for k, v in expected.items())
+        or not isinstance(payload.get("supports_video_fast"), bool)
+        or not isinstance(payload.get("supports_video_all"), bool)
+    ):
         raise ValueError("Unsupported DINOv3 Ridge/Within manifest contract")
     if payload.get("head_type") != head_type(payload.get("inference_recipe", PRODUCTION_RECIPE)):
         raise ValueError("DINOv3 head type and inference recipe differ")

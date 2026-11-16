@@ -42,7 +42,7 @@ def test_bundled_classifier_discovery_and_api_metadata(tmp_path):
     assert model.backend=='dinov3' and model.encoder_backend=='litert'
     info=_to_model_info(model)
     assert info.encoder_backend=='litert' and info.requires_detector
-    assert not info.supports_video_fast and not info.supports_video_all
+    assert info.supports_video_fast and not info.supports_video_all
 
 
 def test_litert_detector_and_classifier_collect_real_crop_contract_without_torch(tmp_path,monkeypatch):

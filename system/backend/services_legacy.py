@@ -813,6 +813,16 @@ class ProcessingJobManager:
                 video_count,
             )
             file_keys = {_path_key(path) for path in files}
+            photo_files = [
+                path for path in files if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+            ]
+            photo_file_keys = {_path_key(path) for path in photo_files}
+            video_file_keys = {
+                _path_key(path)
+                for path in files
+                if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+            }
+            result_order = {_path_key(path): index for index, path in enumerate(files)}
             joint_payload = (
                 _dino_manifest_payload(_resolve_classification_model_path(request.options.classification_model_path))
                 if request.options.enable_detection else None
@@ -820,8 +830,19 @@ class ProcessingJobManager:
             is_dinov3_job = joint_payload is not None and joint_payload.get("backend") == "dinov3"
             joint_model_name = model_display_name(joint_payload)
             if is_dinov3_job:
-                if video_count and request.options.video_mode != "skip":
-                    raise ValueError(f"{joint_model_name}处理完整照片序列，不支持视频，请选择跳过视频。")
+                if video_count and request.options.video_mode not in {"fast", "skip"}:
+                    raise ValueError(
+                        f"{joint_model_name} 暂不支持完整视频追踪，请使用快速识别或跳过视频。"
+                    )
+                preserved_video_results = [
+                    item.model_copy(deep=True)
+                    for item in _unique_detection_items(initial_results or [])
+                    if (
+                        _path_key(item.path) in video_file_keys
+                        and not item.error
+                        and (item.detection_data or {}).get("sequence_completed") is True
+                    )
+                ]
                 from system.dinov3.job_cache import DinoV3JobCache, file_stamp
                 from system.dinov3.processor import DinoV3CropCollector
 
@@ -848,13 +869,22 @@ class ProcessingJobManager:
 
                 # Serialized classifications alone are insufficient. Only skip
                 # photos whose complete features and source identity are valid.
-                initial_results = dinov3_cache.restore(
-                    files, restored_collector, progress_fn=restore_progress,
+                restored_photo_results = dinov3_cache.restore(
+                    photo_files, restored_collector, progress_fn=restore_progress,
                 )
                 self._mutate_job(
                     job_id, persist=False,
-                    message=f"{joint_model_name}已恢复 {len(initial_results)} 张照片特征，待处理 {len(files) - len(initial_results)} 张",
+                    message=(
+                        f"{joint_model_name}已恢复 {len(restored_photo_results)} 张照片特征，"
+                        f"待处理 {len(photo_files) - len(restored_photo_results)} 张"
+                        + (
+                            f"，保留 {len(preserved_video_results)} 个已完成视频"
+                            if preserved_video_results
+                            else ""
+                        )
+                    ),
                 )
+                initial_results = [*restored_photo_results, *preserved_video_results]
             results = [
                 item.model_copy(deep=True)
                 for item in _unique_detection_items(initial_results or [])
@@ -870,19 +900,31 @@ class ProcessingJobManager:
             total_files = len(files)
             missing_file_keys: set[str] = set()
 
+            def active_photo_count() -> int:
+                return sum(
+                    1
+                    for path in photo_files
+                    if _path_key(path) not in missing_file_keys
+                )
+
             def checkpoint_dinov3_cancellation(
                 current_results: list[DetectionItem],
                 *,
                 reason: str = "cancelled",
             ) -> list[DetectionItem]:
+                photo_items = [
+                    item
+                    for item in current_results
+                    if _path_key(item.path) in photo_file_keys
+                ]
                 if (
                     not is_dinov3_job
                     or detector is None
-                    or not current_results
+                    or not photo_items
                     or all(
                         item.error
                         or (item.detection_data or {}).get("sequence_completed") is True
-                        for item in current_results
+                        for item in photo_items
                     )
                 ):
                     return current_results
@@ -891,17 +933,18 @@ class ProcessingJobManager:
                     mark_dinov3_sequence_incomplete,
                 )
 
+                photo_total = active_photo_count()
                 try:
                     checkpointed = finalize_photo_job(
                         detector,
-                        current_results,
+                        photo_items,
                         input_path,
                         is_cancelled=None,
                         save_batch_fn=_save_detection_data_batch,
                         apply_data_fn=_apply_detection_data,
                         complete_sequence=False,
                         incomplete_reason=reason,
-                        total_photos=total_files,
+                        total_photos=photo_total,
                     )
                     logger.info(
                         "DINOv3 cancellation checkpoint completed: job_id=%s photos=%d reason=%s",
@@ -909,7 +952,6 @@ class ProcessingJobManager:
                         len(checkpointed),
                         reason,
                     )
-                    return checkpointed
                 except Exception as exc:  # noqa: BLE001 - retain pending state on cleanup failure
                     logger.warning(
                         "DINOv3 cancellation checkpoint failed; retaining pending state: "
@@ -918,12 +960,12 @@ class ProcessingJobManager:
                         exc,
                     )
                     try:
-                        return mark_dinov3_sequence_incomplete(
-                            current_results,
+                        checkpointed = mark_dinov3_sequence_incomplete(
+                            photo_items,
                             reason=reason,
                             status="partial",
-                            processed_count=len(current_results),
-                            total_count=total_files,
+                            processed_count=len(photo_items),
+                            total_count=photo_total,
                             input_path=input_path,
                             save_batch_fn=_save_detection_data_batch,
                             apply_data_fn=_apply_detection_data,
@@ -935,14 +977,21 @@ class ProcessingJobManager:
                             job_id,
                             mark_exc,
                         )
-                        return mark_dinov3_sequence_incomplete(
-                            current_results,
+                        checkpointed = mark_dinov3_sequence_incomplete(
+                            photo_items,
                             reason=reason,
                             status="partial",
-                            processed_count=len(current_results),
-                            total_count=total_files,
+                            processed_count=len(photo_items),
+                            total_count=photo_total,
                             apply_data_fn=_apply_detection_data,
                         )
+                checkpointed_by_key = {
+                    _path_key(item.path): item for item in checkpointed
+                }
+                return [
+                    checkpointed_by_key.get(_path_key(item.path), item)
+                    for item in current_results
+                ]
 
             def progress_metrics(current_processed: int) -> dict[str, object]:
                 now = time.monotonic()
@@ -1189,48 +1238,62 @@ class ProcessingJobManager:
                         results = checkpoint_dinov3_cancellation(results)
                         self._mark_cancelled(job_id, results)
                         return
-                    from system.dinov3.processor import finalize_photo_job
+                    from system.dinov3.processor import (
+                        ensure_dinov3_sequences_completed,
+                        finalize_photo_job,
+                    )
                     # Restore input order, including photos inferred after a
                     # cache miss, so sequence outputs match an uninterrupted run.
-                    result_order = {_path_key(path): index for index, path in enumerate(files)}
-                    results.sort(key=lambda item: result_order[_path_key(item.path)])
-                    last_sequence_publish = 0.0
-                    last_sequence_stage = None
+                    results.sort(key=lambda item: result_order.get(_path_key(item.path), len(files)))
+                    photo_results = [
+                        item for item in results if _path_key(item.path) in photo_file_keys
+                    ]
+                    video_results = [
+                        item for item in results if _path_key(item.path) in video_file_keys
+                    ]
+                    if photo_results:
+                        last_sequence_publish = 0.0
+                        last_sequence_stage = None
 
-                    def sequence_progress(stage, done, total):
-                        nonlocal last_sequence_publish, last_sequence_stage
-                        now = time.monotonic()
-                        if stage != last_sequence_stage or done == total or now - last_sequence_publish >= 0.2:
-                            suffix = f" {done}/{total}" if total else ""
-                            self._mutate_job(
-                                job_id, persist=False,
-                                sequence_stage=stage, sequence_processed=done, sequence_total=total,
-                                message=f"{joint_model_name}序列汇总：{stage}{suffix}",
-                                elapsed_seconds=max(0.0, now - job_started_at),
-                                speed=0.0, remaining_seconds=None,
-                            )
-                            last_sequence_stage, last_sequence_publish = stage, now
+                        def sequence_progress(stage, done, total):
+                            nonlocal last_sequence_publish, last_sequence_stage
+                            now = time.monotonic()
+                            if stage != last_sequence_stage or done == total or now - last_sequence_publish >= 0.2:
+                                suffix = f" {done}/{total}" if total else ""
+                                self._mutate_job(
+                                    job_id, persist=False,
+                                    sequence_stage=stage, sequence_processed=done, sequence_total=total,
+                                    message=f"{joint_model_name}序列汇总：{stage}{suffix}",
+                                    elapsed_seconds=max(0.0, now - job_started_at),
+                                    speed=0.0, remaining_seconds=None,
+                                )
+                                last_sequence_stage, last_sequence_publish = stage, now
 
-                    results = finalize_photo_job(
-                        detector, results, input_path,
-                        is_cancelled=lambda: self._is_cancelled(job_id),
-                        save_batch_fn=_save_detection_data_batch,
-                        apply_data_fn=_apply_detection_data,
-                        complete_sequence=True,
-                        total_photos=total_files,
-                        job_id=job_id,
-                        progress_fn=sequence_progress,
-                    )
-                    if self._is_cancelled(job_id):
-                        results = checkpoint_dinov3_cancellation(results)
-                        self._mark_cancelled(job_id, results)
-                        return
-                    from system.dinov3.processor import ensure_dinov3_sequences_completed
-                    ensure_dinov3_sequences_completed(results)
-                    self._mutate_job(
-                        job_id, persist=False, results=results, sequence_stage=None,
-                        sequence_processed=0, sequence_total=0, message=f"{joint_model_name}完整序列判定完成",
-                    )
+                        photo_results = finalize_photo_job(
+                            detector, photo_results, input_path,
+                            is_cancelled=lambda: self._is_cancelled(job_id),
+                            save_batch_fn=_save_detection_data_batch,
+                            apply_data_fn=_apply_detection_data,
+                            complete_sequence=True,
+                            total_photos=active_photo_count(),
+                            job_id=job_id,
+                            progress_fn=sequence_progress,
+                        )
+                        results = sorted(
+                            [*photo_results, *video_results],
+                            key=lambda item: result_order.get(_path_key(item.path), len(files)),
+                        )
+                        if self._is_cancelled(job_id):
+                            results = checkpoint_dinov3_cancellation(results)
+                            self._mark_cancelled(job_id, results)
+                            return
+                        ensure_dinov3_sequences_completed(results)
+                        self._mutate_job(
+                            job_id, persist=False, results=results, sequence_stage=None,
+                            sequence_processed=0, sequence_total=0, message=f"{joint_model_name}完整序列判定完成",
+                        )
+                    elif video_results:
+                        ensure_dinov3_sequences_completed(results)
                 video_files = existing_paths(video_files)
                 if video_files:
                     reset_speed_metrics(processed)
@@ -1252,7 +1315,7 @@ class ProcessingJobManager:
                         len(video_files),
                     )
 
-                if request.options.video_mode == "fast":
+                if video_files and request.options.video_mode == "fast":
                     last_video_publish = 0.0
 
                     def build_video_item(path):
@@ -1286,10 +1349,29 @@ class ProcessingJobManager:
                     )
                     # Preserve input order in the final export; progress is
                     # published as each video is saved, regardless of decode order.
-                    results = base_results + [
-                        item for item in detected_items if _path_key(item.path) not in missing_file_keys
-                    ]
-                else:
+                    results = sorted(
+                        [
+                            *base_results,
+                            *[
+                                item
+                                for item in detected_items
+                                if _path_key(item.path) not in missing_file_keys
+                            ],
+                        ],
+                        key=lambda item: result_order.get(_path_key(item.path), len(files)),
+                    )
+                    if self._is_cancelled(job_id):
+                        self._mark_cancelled(job_id, results)
+                        return
+                    if is_dinov3_job:
+                        from system.dinov3.processor import ensure_dinov3_sequences_completed
+
+                        ensure_dinov3_sequences_completed([
+                            item
+                            for item in results
+                            if not (item.error and _path_key(item.path) in video_file_keys)
+                        ])
+                elif video_files:
                     video_items: list[DetectionItem] = []
                     for path in video_files:
                         item = _build_metadata_item(path)
@@ -2786,9 +2868,13 @@ def _detect_video_fast_batch(
 ) -> list[DetectionItem]:
     from .video_frames import VideoSampleResult, prepared_video_batches
 
+    dino_classifier = getattr(detector, "dinov3_classifier", None)
+    dino_collector = getattr(detector, "_dinov3_collector", None) if dino_classifier is not None else None
+    dino_frame_keys: set[str] = set()
     result_items: list[DetectionItem | None] = [None] * len(paths)
     video_infos: list[dict[str, Any] | None] = [None] * len(paths)
-    detections_by_video: list[list[tuple[int, int, dict[str, Any]]]] = [
+    # DINO records also carry this frame's crops until sequence finalization.
+    detections_by_video: list[list[tuple]] = [
         [] for _ in paths
     ]
     completed: set[int] = set()
@@ -2804,11 +2890,29 @@ def _detect_video_fast_batch(
             if result is None:
                 if info is None or len(detections_by_video[index]) < len(info.get("frame_points", [])):
                     continue
+                frame_records = sorted(detections_by_video[index], key=lambda record: record[0])
+                if dino_classifier is not None:
+                    from system.dinov3.video import finalize_video_frames
+
+                    try:
+                        frame_records = finalize_video_frames(
+                            dino_classifier, paths[index], frame_records,
+                            fps=info.get("fps") or 25, input_path=input_path,
+                            check_cancelled=lambda: _raise_if_cancelled(cancelled),
+                        )
+                    except Exception as exc:
+                        _raise_if_cancelled(cancelled)
+                        ready.append((index, items[index].model_copy(
+                            update={"error": f"视频序列判定失败: {exc}"},
+                        )))
+                        continue
                 data = _build_fast_video_detection_data(
                     detector, paths[index], info,
-                    sorted(detections_by_video[index], key=lambda record: record[0]),
+                    frame_records,
                     video_mode=request.options.video_mode,
                 )
+                if dino_classifier is not None:
+                    data.update(sequence_completed=True, sequence_pending=False, sequence_status="complete")
                 result = _apply_detection_data(items[index], data)
                 payloads.append((paths[index], data))
             ready.append((index, result))
@@ -2870,11 +2974,18 @@ def _detect_video_fast_batch(
                 frame_count += len(frames)
                 preload_elapsed += value.preload_seconds
                 original_paths = [paths[frame.video_index] for frame in frames]
+                inference_paths = [str(path) for path in original_paths]
+                if dino_classifier is not None:
+                    from system.dinov3.video import video_frame_key
+
+                    inference_paths = [video_frame_key(path, frame.frame_index)
+                                       for path, frame in zip(original_paths, frames)]
+                    dino_frame_keys.update(inference_paths)
                 frame_items = [items[frame.video_index] for frame in frames]
                 inference_started = time.perf_counter()
                 batches = inference_batcher.detect(
                     detector,
-                    [str(path) for path in original_paths],
+                    inference_paths,
                     conf=request.options.confidence,
                     iou=request.options.iou,
                     use_fp16=request.options.use_fp16,
@@ -2885,6 +2996,7 @@ def _detect_video_fast_batch(
                     confidence_priority=request.options.confidence_priority,
                     selected_species_names=request.options.selected_species_names,
                     preloaded_data=value.preloaded_data,
+                    **({"defer_dinov3_sequence": True} if dino_classifier is not None else {}),
                     check_cancelled=lambda: _raise_if_cancelled(cancelled),
                 )
                 for batch in batches:
@@ -2909,10 +3021,16 @@ def _detect_video_fast_batch(
                         detection = batch.detections[index] if index < len(batch.detections) else {}
                         if not isinstance(detection, dict):
                             detection = {}
-                        detections_by_video[frame.video_index].append((
-                            frame.frame_order, frame.frame_index,
-                            _serialize_detector_output(detector, detection),
-                        ))
+                        record = (frame.frame_order, frame.frame_index,
+                                  _serialize_detector_output(detector, detection))
+                        if dino_classifier is not None:
+                            frame_key = inference_paths[batch.start + index]
+                            record += (dino_collector.get_crops_for_path(frame_key),)
+                        detections_by_video[frame.video_index].append(record)
+                    if dino_collector is not None:
+                        batch_keys = inference_paths[batch.start:batch.end]
+                        dino_collector.discard_paths(batch_keys)
+                        dino_frame_keys.difference_update(batch_keys)
                     serialize_elapsed += time.perf_counter() - serialize_started
                     publish_finished(frame.video_index for frame in batch_frames)
                     inference_started = time.perf_counter()
@@ -2952,6 +3070,9 @@ def _detect_video_fast_batch(
                 )
         publish_finished(range(len(paths)))
         return result_items
+    finally:
+        if dino_collector is not None:
+            dino_collector.discard_paths(dino_frame_keys)
 
 
 def _raise_if_cancelled(cancelled) -> None:
@@ -2979,6 +3100,11 @@ def _build_fast_video_detection_data(
 
     for _frame_order, frame_index, detection_data in frame_detections:
         frame_species = _extract_species_list(detection_data)
+        if detection_data.get("sequence_completed") is True:
+            # Rejected DINO targets still occupy boxes and count as Unknown.
+            # The generic species extractor deliberately omits that label.
+            frame_species = [name.strip() for name in str(detection_data.get("物种名称") or "").split(",")
+                             if name.strip() not in {"", "空"}]
         for species in frame_species:
             species_votes[species] += 1
         raw_counts = str(detection_data.get("物种数量") or "")

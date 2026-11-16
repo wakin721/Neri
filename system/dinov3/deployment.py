@@ -72,7 +72,7 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
                        head_type=head_type(model.inference_recipe), inference_recipe=model.inference_recipe,
                        feature_dim=768, preprocessing=PREPROCESSING,
                        event_aggregation="complete_sequence", requires_detector=True,
-                       supports_video_fast=False, supports_video_all=False,
+                       supports_video_fast=True, supports_video_all=False,
                        display_name=display_name, checkpoint=f"{generation.name}/{checkpoint.name}",
                        checkpoint_sha256=sha256(checkpoint), encoder_sha256=digest,
                        encoder_weights=weights_relative)

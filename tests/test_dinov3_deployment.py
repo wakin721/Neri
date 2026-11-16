@@ -121,3 +121,55 @@ def test_update_command_publishes_new_joint_generation_with_frozen_geometry(depl
     np.testing.assert_array_equal(after.transform_, before.transform_)
     assert after.ridge_head.class_counts_[0] == before.ridge_head.class_counts_[0] + 2
     assert after.calibration is not None
+
+
+def test_publish_model_exposes_fast_video_only_on_new_and_updated_manifests(deployed):
+    manifest, model, _ = deployed
+    published = read_manifest(manifest)
+    assert published["supports_video_fast"] is True
+    assert published["supports_video_all"] is False
+
+    legacy_payload = dict(published, supports_video_fast=False, supports_video_all=False)
+    manifest.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    with threadpool_limits(limits=1):
+        publish_model(model, manifest, existing_manifest=read_manifest(manifest))
+    republished = read_manifest(manifest)
+    assert republished["supports_video_fast"] is True
+    assert republished["supports_video_all"] is False
+
+
+def test_read_manifest_accepts_old_false_and_new_true_fast_video_flags(deployed):
+    manifest, _, _ = deployed
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    for fast_flag in (False, True):
+        candidate = dict(payload, supports_video_fast=fast_flag, supports_video_all=False)
+        manifest.write_text(json.dumps(candidate), encoding="utf-8")
+        loaded = read_manifest(manifest)
+        assert loaded["supports_video_fast"] is fast_flag
+        assert loaded["supports_video_all"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"supports_video_all": True},
+        {"supports_video_all": 0},
+        {"supports_video_fast": "true"},
+        {"supports_video_fast": 1},
+        {"supports_video_fast": 0},
+        {"_drop": "supports_video_fast"},
+        {"_drop": "supports_video_all"},
+    ],
+)
+def test_read_manifest_rejects_invalid_video_capability_flags(deployed, mutation):
+    manifest, _, _ = deployed
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    drop_key = mutation.get("_drop")
+    if drop_key:
+        payload.pop(drop_key, None)
+    else:
+        payload.update(mutation)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="contract"):
+        read_manifest(manifest)

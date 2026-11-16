@@ -203,7 +203,9 @@ def _validate_dino_job_options(
     if not model_path:
         raise ValueError(f"{model_display_name(payload)} 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError(f"{model_display_name(payload)} 暂不支持视频识别，请选择跳过视频。")
+        raise ValueError(
+            f"{model_display_name(payload)} 暂不支持完整视频追踪，请使用快速识别或跳过视频。"
+        )
 
 
 def _persist_dino_observations(*args, **kwargs):

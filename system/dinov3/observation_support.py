@@ -568,18 +568,22 @@ def explain_dinov3_observation(
 def render_dinov3_observation_example(observation_id: str) -> bytes:
     from system.backend import services
     from system.backend.media_examples import render_media_example
+    from system.config import SUPPORTED_VIDEO_EXTENSIONS
 
     source_path, box_index, bbox = parse_dinov3_observation_id(observation_id)
-    if not bbox or len(bbox) < 4:
+    raw_box = {}
+    if not bbox or len(bbox) < 4 or source_path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
         detection_data = services._load_detection_data_for_path(source_path, [source_path.parent])
         boxes = detection_data.get("检测框") if isinstance(detection_data, dict) else None
         if isinstance(boxes, list) and 0 <= box_index < len(boxes) and isinstance(boxes[box_index], Mapping):
-            bbox = _box_bbox(boxes[box_index])
+            raw_box = boxes[box_index]
+            if not bbox or len(bbox) < 4:
+                bbox = _box_bbox(raw_box)
     return render_media_example(
         source_path=str(source_path),
         bbox=tuple(bbox[:4]),
-        frame_index=None,
-        timestamp_seconds=None,
+        frame_index=raw_box.get("frame_index"),
+        timestamp_seconds=raw_box.get("timestamp"),
     )
 
 
