@@ -94,6 +94,15 @@ const _emptyPhotoDeleteAlways = 'delete';
 const _emptyPhotoDeleteNever = 'keep';
 const _detectionConfidencePriority = 'detection';
 const _classificationConfidencePriority = 'classification';
+const _dinoRuntimeChoiceKey = 'dino_runtime_choice';
+
+String _normalizedDinoRuntimeChoice(String? value) {
+  return switch (value?.trim().toLowerCase()) {
+    'cpu' => 'cpu',
+    'gpu' => 'gpu',
+    _ => 'auto',
+  };
+}
 
 ModelInfo? _modelInfoForPath(List<ModelInfo> models, String? path) {
   if (path == null || path.isEmpty) return null;
@@ -173,6 +182,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   DinoComponentStatus? _dinoStatus;
   bool _loadingDinoStatus = true;
   int _dinoStatusRequestId = 0;
+  String? _localDinoRuntimeChoice;
   String? _modelClassesPath;
   List<ModelClassInfo> _modelClassOptions = const <ModelClassInfo>[];
 
@@ -238,6 +248,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     final dependenciesReady = settings == null || settings.detectionReady;
     final gpuAvailable = settings?.gpuAvailable == true;
+    final savedDinoRuntimeRaw = saved[_dinoRuntimeChoiceKey]?.toString().trim();
+    final hasSavedDinoRuntime =
+        savedDinoRuntimeRaw != null && savedDinoRuntimeRaw.isNotEmpty;
+    final resolvedDinoRuntimeChoice = _normalizedDinoRuntimeChoice(
+      hasSavedDinoRuntime
+          ? savedDinoRuntimeRaw
+          : (_localDinoRuntimeChoice ?? _dinoStatus?.runtimeChoice),
+    );
+    if (hasSavedDinoRuntime) {
+      _localDinoRuntimeChoice = resolvedDinoRuntimeChoice;
+    }
     _draft = <String, dynamic>{
       ...saved,
       'selected_model': _stringSetting(
@@ -254,6 +275,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'pytorch_version': _normalizedPytorchVersion(
         _stringSetting(saved, 'pytorch_version', '自动检测'),
       ),
+      _dinoRuntimeChoiceKey: resolvedDinoRuntimeChoice,
       'confidence': _doubleSetting(saved, 'confidence', 0.25),
       'iou': _doubleSetting(saved, 'iou', 0.30),
       'imgsz': _intSetting(saved, 'imgsz', 1920),
@@ -513,6 +535,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() {
         _dinoStatus = status;
         _loadingDinoStatus = false;
+        if (_localDinoRuntimeChoice == null &&
+            status.runtimeChoice != null &&
+            status.runtimeChoice!.isNotEmpty) {
+          _draft[_dinoRuntimeChoiceKey] = _normalizedDinoRuntimeChoice(
+            status.runtimeChoice,
+          );
+        }
       });
     } catch (_) {
       if (!mounted || requestId != _dinoStatusRequestId) return;
@@ -530,6 +559,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       message: '正在检查联合模型组件安装环境...',
     );
 
+    final runtimeChoice = _dinoRuntimeChoice();
     final envChoice = _normalizedPytorchVersion(
       _string('pytorch_version', '自动检测'),
     );
@@ -544,12 +574,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (packageSource == null || !mounted) return;
     final repairing = _dinoStatus?.installed == true;
+    final title = repairing ? '修复联合模型组件' : '安装联合模型组件';
+    final message = switch (runtimeChoice) {
+      'cpu' =>
+        '将从 NeriCloud 下载 CPU（LiteRT FP32）版本，无需安装 PyTorch。\n\n'
+            '已保存的补图、新物种和校验等共享学习记录会保留。',
+      'gpu' =>
+        '将从 NeriCloud 下载 GPU（PyTorch）版本；若当前缺少 PyTorch 运行环境，将按设置自动补齐。\n\n'
+            '已保存的补图、新物种和校验等共享学习记录会保留。',
+      _ =>
+        '将从 NeriCloud 下载联合模型组件：检测到支持 GPU 的硬件时安装 GPU（PyTorch）版本并按需补齐 PyTorch 环境，'
+            '否则安装 CPU（LiteRT FP32）版本。\n\n'
+            '已保存的补图、新物种和校验等共享学习记录会保留。',
+    };
     final confirmed = await _confirmPythonInstallation(
-      title: repairing ? '修复联合模型组件' : '安装联合模型组件',
-      message:
-          '将从 NeriCloud 严格同步当前联合模型组件到 res/model/DINOv3，'
-          '并校验 Ridge + Within 模型、官方 source 与 SHA-256。'
-          '如果共享 PyTorch 环境缺失，会按当前运行环境自动补齐。',
+      title: title,
+      message: message,
     );
     if (confirmed != true || !mounted) return;
 
@@ -562,6 +602,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final response = await widget.apiClient.installDinoV3(
         envChoice: envChoice,
         packageSource: packageSource.source,
+        runtimeChoice: runtimeChoice,
       );
       if (!mounted) return;
       _startMaintenanceWatch(
@@ -1371,29 +1412,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     settings?.availableClassificationModels ??
                         const <ModelInfo>[],
                   ),
-                  onChanged: (value) {
-                    _set('selected_classification_model', value);
-                    final modelInfo = _modelInfoForPath(
-                      settings?.availableClassificationModels ??
-                          const <ModelInfo>[],
-                      value,
-                    );
-                    if (modelInfo?.supportsVideoAll == false &&
-                        _string('video_mode') == videoProcessingModeAll) {
-                      _set(
-                        'video_mode',
-                        modelInfo?.supportsVideoFast == false
-                            ? videoProcessingModeSkip
-                            : videoProcessingModeFast,
-                      );
-                    }
-                    if (modelInfo?.supportsVideoFast == false &&
-                        _string('video_mode') == videoProcessingModeFast) {
-                      _set('video_mode', videoProcessingModeSkip);
-                    }
-                    _set('selected_species_names', <String>[]);
-                    _loadModelClassesForSelection();
-                  },
+                  onChanged: _selectClassificationModel,
                 ),
                 if (selectedClassificationInfo?.isDinoV3 == true) ...[
                   if (selectedModel?.isEmpty ?? true) ...[
@@ -1977,17 +1996,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     label: const Text('重试'),
                   );
                 }
-                if (status.healthy) {
-                  return OutlinedButton(
-                    key: const Key('dino-component-action'),
-                    onPressed: _maintenanceBusy ? null : _removeDinoV3,
-                    child: const Text('删除'),
-                  );
-                }
-                return FilledButton(
-                  key: const Key('dino-component-action'),
-                  onPressed: _maintenanceBusy ? null : _installDinoV3,
-                  child: Text(status.installed ? '安装/修复' : '安装'),
+                final runtimeChoice = _dinoRuntimeChoice();
+                final installedRuntimeLabel = _dinoInstalledRuntimeLabel(
+                  status,
+                );
+                final canSwitchHealthyVersion =
+                    status.healthy &&
+                    _shouldOfferDinoVersionSwitch(status, runtimeChoice);
+                final hintStyle = Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    );
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Row(
+                      children: [
+                        Text('下载版本', style: hintStyle),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _SettingsMenuButton<String>(
+                            key: const Key('dino-runtime-choice'),
+                            value: runtimeChoice,
+                            enabled: !_maintenanceBusy,
+                            options: const [
+                              _SettingsOption<String>(
+                                value: 'auto',
+                                label: '自动检测（默认）',
+                              ),
+                              _SettingsOption<String>(
+                                value: 'cpu',
+                                label: 'CPU（LiteRT FP32）',
+                              ),
+                              _SettingsOption<String>(
+                                value: 'gpu',
+                                label: 'GPU（PyTorch）',
+                              ),
+                            ],
+                            onChanged: _selectDinoRuntimeChoice,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (status.healthy) ...[
+                          if (canSwitchHealthyVersion) ...[
+                            FilledButton(
+                              key: const Key('dino-component-switch'),
+                              onPressed: _maintenanceBusy ? null : _installDinoV3,
+                              child: const Text('安装/切换'),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          OutlinedButton(
+                            key: const Key('dino-component-action'),
+                            onPressed: _maintenanceBusy ? null : _removeDinoV3,
+                            child: const Text('删除'),
+                          ),
+                        ] else
+                          FilledButton(
+                            key: const Key('dino-component-action'),
+                            onPressed: _maintenanceBusy ? null : _installDinoV3,
+                            child: Text(status.installed ? '安装/修复' : '安装'),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    if (installedRuntimeLabel != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          '当前已安装：$installedRuntimeLabel',
+                          textAlign: TextAlign.end,
+                          style: hintStyle,
+                        ),
+                      ),
+                    Text(
+                      _dinoRuntimeChoiceHint(runtimeChoice),
+                      textAlign: TextAlign.end,
+                      style: hintStyle,
+                    ),
+                  ],
                 );
               },
             ),
@@ -3277,6 +3365,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _scheduleAutoSave();
   }
 
+  void _selectClassificationModel(String? value) {
+    final models =
+        widget.settings?.availableClassificationModels ?? const <ModelInfo>[];
+    final previousInfo = _modelInfoForPath(
+      models,
+      _string('selected_classification_model'),
+    );
+    final modelInfo = _modelInfoForPath(models, value);
+    _set('selected_classification_model', value);
+    if (modelInfo?.supportsVideoAll == false &&
+        _string('video_mode') == videoProcessingModeAll) {
+      _set(
+        'video_mode',
+        modelInfo?.supportsVideoFast == false
+            ? videoProcessingModeSkip
+            : videoProcessingModeFast,
+      );
+    }
+    if (modelInfo?.supportsVideoFast == false &&
+        _string('video_mode') == videoProcessingModeFast) {
+      _set('video_mode', videoProcessingModeSkip);
+    }
+    final sameLearningFamily =
+        previousInfo?.learningFamilyId != null &&
+        previousInfo?.learningFamilyId == modelInfo?.learningFamilyId;
+    if (!sameLearningFamily) {
+      _set('selected_species_names', <String>[]);
+    }
+    _loadModelClassesForSelection();
+  }
+
+  String _dinoRuntimeChoice() {
+    return _normalizedDinoRuntimeChoice(
+      _string(_dinoRuntimeChoiceKey, _localDinoRuntimeChoice ?? 'auto'),
+    );
+  }
+
+  void _selectDinoRuntimeChoice(String value) {
+    final normalized = _normalizedDinoRuntimeChoice(value);
+    _localDinoRuntimeChoice = normalized;
+    _set(_dinoRuntimeChoiceKey, normalized);
+  }
+
+  String? _dinoInstalledRuntimeLabel(DinoComponentStatus status) {
+    final backend = status.encoderBackend?.trim().toLowerCase();
+    final resolved = status.resolvedRuntimeChoice?.trim().toLowerCase();
+    if (backend == 'litert' || resolved == 'cpu') {
+      return 'CPU（LiteRT FP32）';
+    }
+    if (backend == 'pytorch' || resolved == 'gpu') {
+      return 'GPU（PyTorch）';
+    }
+    return null;
+  }
+
+  bool _shouldOfferDinoVersionSwitch(
+    DinoComponentStatus status,
+    String selectedRuntimeChoice,
+  ) {
+    final backend = status.encoderBackend?.trim().toLowerCase();
+    final resolved = status.resolvedRuntimeChoice?.trim().toLowerCase();
+    final installedMode = switch (resolved) {
+      'cpu' => 'cpu',
+      'gpu' => 'gpu',
+      _ => switch (backend) {
+        'litert' => 'cpu',
+        'pytorch' => 'gpu',
+        _ => null,
+      },
+    };
+    if (installedMode == null) return false;
+    if (selectedRuntimeChoice == 'cpu' || selectedRuntimeChoice == 'gpu') {
+      return selectedRuntimeChoice != installedMode;
+    }
+    final statusChoice = status.runtimeChoice?.trim().toLowerCase();
+    return statusChoice != null &&
+        statusChoice.isNotEmpty &&
+        statusChoice != 'auto';
+  }
+
+  String _dinoRuntimeChoiceHint(String runtimeChoice) {
+    return switch (runtimeChoice) {
+      'cpu' => 'CPU（LiteRT FP32）不要求安装 PyTorch，可在无 PyTorch 环境下运行。',
+      'gpu' =>
+        widget.settings?.gpuAvailable == false
+            ? 'GPU（PyTorch）需要 PyTorch 环境；安装或修复时若缺失将自动补齐（当前未检测到可用 GPU）。'
+            : 'GPU（PyTorch）需要 PyTorch 环境；安装或修复时若缺失将自动补齐。',
+      _ => '自动检测将按当前硬件与环境选择 GPU（PyTorch）或 CPU（LiteRT FP32）；仅 GPU 模式要求 PyTorch。',
+    };
+  }
+
   bool _bool(String key, [bool fallback = false]) {
     return _boolSetting(_draft, key, fallback);
   }
@@ -3390,7 +3569,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
       for (final model in bundledModels)
         _SettingsOption<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (userModels.isNotEmpty) ...[
@@ -3402,7 +3581,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
       for (final model in userModels)
         _SettingsOption<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (cloudModels.isNotEmpty) ...[
@@ -3414,7 +3593,7 @@ List<_SettingsOption<String>> _modelSettingsOptions(List<ModelInfo> models) {
       for (final model in cloudModels)
         _SettingsOption<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
   ];

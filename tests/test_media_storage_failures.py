@@ -62,13 +62,11 @@ def test_database_write_failure_stops_batch_and_resumes_unsaved_photo(monkeypatc
     from system import detection_db
     writes = []
     disconnected = True
-    monkeypatch.setattr(detection_db, "init_db", lambda *args: None)
-    monkeypatch.setattr(detection_db, "upsert_validation_bulk", lambda *args: None)
-    def save(path, payloads):
+    def save(path, payloads, validations):
         if disconnected and payloads[0][1] == "second.jpg":
             raise sqlite3.OperationalError("unable to open database file")
         writes.extend(row[1] for row in payloads)
-    monkeypatch.setattr(detection_db, "upsert_detections_bulk", save)
+    monkeypatch.setattr(detection_db, "upsert_media_batch", save)
     request = CreateJobRequest(input_dir=str(tmp_path), options=ProcessingOptions(
         enable_detection=True, model_path="fake.pt", batch_size=1, thread_count=1, video_mode="skip"))
     now = services.utc_now()

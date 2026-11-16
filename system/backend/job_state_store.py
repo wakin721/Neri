@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import time
+
+logger = logging.getLogger(__name__)
 
 
 class JobStateStore:
@@ -79,6 +83,7 @@ class JobStateStore:
                 )
 
     def save(self, jobs, requests):
+        started = time.perf_counter()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=5)
         try:
@@ -118,19 +123,22 @@ class JobStateStore:
                          json.dumps(request.model_dump(mode="json"), ensure_ascii=False) if request else None),
                     )
                     old_results = previous[2] if previous else ()
-                    append = len(job.results) >= len(old_results) and all(
-                        old is new for old, new in zip(old_results, job.results)
-                    )
-                    if previous is None or not append:
-                        conn.execute("DELETE FROM results WHERE job_id=?", (key,))
-                    start = len(old_results) if append else 0
+                    # Corrections replace only their own positions. Finalization
+                    # may replace every object, but must not delete/rebuild the
+                    # task's result tree or rewrite byte-identical payloads.
                     conn.executemany(
-                        "INSERT INTO results VALUES(?,?,?)",
-                        ((key, index, json.dumps(item.model_dump(mode="json"), ensure_ascii=False))
-                         for index, item in enumerate(job.results[start:], start)),
+                        "INSERT INTO results VALUES(?,?,?) "
+                        "ON CONFLICT(job_id,position) DO UPDATE SET payload=excluded.payload "
+                        "WHERE results.payload<>excluded.payload",
+                        ((key, index, item.model_dump_json())
+                         for index, item in enumerate(job.results)
+                         if index >= len(old_results) or old_results[index] is not item),
                     )
+                    if previous is None or len(job.results) < len(old_results):
+                        conn.execute("DELETE FROM results WHERE job_id=? AND position>=?", (key, len(job.results)))
                 conn.execute("INSERT OR REPLACE INTO metadata VALUES('initialized','1')")
             # Advance the in-memory baseline only after a successful commit.
             self.remember(jobs, requests)
         finally:
             conn.close()
+            logger.info("Job state checkpoint timing: elapsed=%.3fs", time.perf_counter() - started)

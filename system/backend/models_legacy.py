@@ -39,6 +39,8 @@ class ModelInfo(BaseModel):
     supports_video_fast: bool = True
     supports_video_all: bool = True
     checkpoint_path: str | None = None
+    encoder_backend: Literal["pytorch", "litert"] | None = None
+    learning_family_id: str | None = None
 
 
 class ModelClassInfo(BaseModel):

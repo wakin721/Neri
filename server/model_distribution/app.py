@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
@@ -103,12 +104,15 @@ def create_app(
     budget: BudgetStore | None = None,
 ) -> FastAPI:
     config = config or DistributionConfig.from_env()
-    service = service or DistributionService(
-        config.state_dir,
-        LocalComponentOverlay(OpenListModelStore(config), config.dinov3_root)
-        if config.dinov3_root else OpenListModelStore(config),
-        ttl_seconds=config.capability_ttl_seconds,
-    )
+    if service is None:
+        store = OpenListModelStore(config)
+        if config.dinov3_root:
+            store = LocalComponentOverlay(store, config.dinov3_root)
+        if config.dinov3_cpu_root:
+            store = LocalComponentOverlay(store, config.dinov3_cpu_root,
+                                          prefix='/Neri_Data/Model/DINOv3/cpu')
+        service = DistributionService(config.state_dir, store,
+                                      ttl_seconds=config.capability_ttl_seconds)
     budget = budget or BudgetStore(
         config.state_dir,
         secret=_budget_secret(config),
@@ -158,9 +162,9 @@ def create_app(
         return service.direct(payload.manifest_id, payload.path, payload.sha256)
 
     @app.get("/v1/dinov3/manifest")
-    def dinov3_manifest(request: Request):
+    def dinov3_manifest(request: Request, runtime: Literal['cpu', 'gpu'] = 'gpu'):
         consume_request_budget(request)
-        return snapshot_payload(service.dinov3_manifest())
+        return snapshot_payload(service.dinov3_manifest(runtime))
 
     @app.post("/v1/dinov3/direct")
     def dinov3_direct(payload: DinoV3DirectRequest, request: Request):

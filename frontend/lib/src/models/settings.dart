@@ -150,6 +150,8 @@ class ModelInfo {
     this.supportsVideoFast = true,
     this.supportsVideoAll = true,
     this.checkpointPath,
+    this.encoderBackend,
+    this.learningFamilyId,
   }) : rawName = name,
        source = source ?? 'user',
        hasExplicitSource = source != null;
@@ -168,6 +170,8 @@ class ModelInfo {
       supportsVideoFast: json['supports_video_fast'] as bool? ?? true,
       supportsVideoAll: json['supports_video_all'] as bool? ?? true,
       checkpointPath: json['checkpoint_path'] as String?,
+      encoderBackend: json['encoder_backend'] as String?,
+      learningFamilyId: _normalizedOptionalString(json['learning_family_id']),
     );
   }
 
@@ -184,9 +188,11 @@ class ModelInfo {
   final bool supportsVideoFast;
   final bool supportsVideoAll;
   final String? checkpointPath;
+  final String? encoderBackend;
+  final String? learningFamilyId;
 
   bool get isDinoV3 => backend == 'dinov3';
-  bool get isLiteRt => backend == 'litert';
+  bool get isLiteRt => backend == 'litert' || encoderBackend == 'litert';
   bool get isDino => isDinoV3;
   bool get isDinoClassifier => isDino && kind == 'cls';
 
@@ -197,6 +203,18 @@ class ModelInfo {
   };
   String get displayName => '$sourceLabel / $rawName';
   String get name => hasExplicitSource ? displayName : rawName;
+  String get selectorLabel {
+    final base = rawName.trim();
+    if (!isLiteRt) return base;
+    if (base.toLowerCase().contains('litert')) return base;
+    return '$base·LiteRT';
+  }
+}
+
+String? _normalizedOptionalString(dynamic value) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  return trimmed.isEmpty ? null : trimmed;
 }
 
 class ModelClassInfo {

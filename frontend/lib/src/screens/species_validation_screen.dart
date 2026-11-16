@@ -9,6 +9,7 @@ import '../api_client.dart';
 import '../models/export_result.dart';
 import '../models/job.dart';
 import '../models/rejection_cluster.dart';
+import '../models/video_processing_mode.dart';
 import '../utils/detection_species.dart';
 import '../utils/dino_rejection.dart';
 import '../utils/quick_mark_sort.dart';
@@ -351,6 +352,7 @@ class SpeciesValidationScreen extends StatefulWidget {
     required this.inputPath,
     this.classificationModelPath,
     this.detectionConfidence = 0.25,
+    this.videoMode = defaultVideoProcessingMode,
     required this.items,
     required this.rootInputPath,
     required this.rootItems,
@@ -397,6 +399,7 @@ class SpeciesValidationScreen extends StatefulWidget {
   final String inputPath;
   final String? classificationModelPath;
   final double detectionConfidence;
+  final String videoMode;
   final List<DetectionItem> items;
   final String rootInputPath;
   final List<DetectionItem> rootItems;
@@ -541,6 +544,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   String? _selectionAnchorPath;
   String? _selectedGroupSignature;
   bool? _bucketCacheAutoGroup;
+  String? _bucketCacheVideoMode;
   bool? _bucketCacheAutoGroupDetectBurst;
   int? _bucketCacheBurstSize;
   int? _bucketCacheGapSeconds;
@@ -765,13 +769,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         final group = groups[i];
         final species = widget.autoGroup
             ? _primarySpeciesForGroup(group)
-            : _primarySpeciesAfterConfidenceFilter(group.items.first);
+            : _bucketSpeciesForItem(group.items.first);
         labels[group.signature] =
             widget.autoGroup && _usesDinoClusterGrouping(group)
             ? _clusterBucketLabels(group, species).single.$2
             : species;
         groupIndices[group.signature] = i;
-        final validated = group.items.every(_isItemValidated);
+        final validated = _groupComplete(group);
         for (final label in _clusterBucketLabels(group, species)) {
           final key = '${validated ? 1 : 0}::${label.$1}';
           final bucket = bucketMap.putIfAbsent(
@@ -852,6 +856,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
               .map((item) => item.path)
               .toSet();
       _bucketCacheAutoGroup = widget.autoGroup;
+      _bucketCacheVideoMode = normalizeVideoProcessingMode(widget.videoMode);
       _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
       _bucketCacheBurstSize = widget.autoGroupBurstSize;
       _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
@@ -973,6 +978,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final groupingSettingsChanged =
         oldWidget.inputPath != widget.inputPath ||
         oldWidget.classificationModelPath != widget.classificationModelPath ||
+        oldWidget.videoMode != widget.videoMode ||
         oldWidget.refreshVersion != widget.refreshVersion ||
         oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
@@ -1474,8 +1480,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                     },
                     tileColorBuilder: (index, row) {
                       if (!widget.autoGroup) return null;
-                      final groupIndex = row.groupIndex;
-                      if (groupIndex.isEven) return null;
+                      if (row.visibleGroupIndex.isEven) return null;
                       return colorScheme.surfaceContainerHighest.withValues(
                         alpha: 0.42,
                       );
@@ -2436,8 +2441,18 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _ValidationFileRow? row,
   }) {
     final targetItem = row != null && row.isGroupHeader ? row.item : item;
+    // Focus can change while a modifier is held, so the page may never have
+    // received its key-down event. Read the current keyboard state on click.
+    _selectionModifiers.synchronize(
+      HardwareKeyboard.instance.logicalKeysPressed,
+    );
     final rangeSelection = _selectionModifiers.rangeSelection;
     final toggleSelection = _selectionModifiers.toggleSelection;
+
+    if (toggleSelection && !rangeSelection) {
+      _toggleItemSelection(targetItem, row: row);
+      return;
+    }
 
     setState(() {
       _selectedPath = targetItem.path;
@@ -2446,14 +2461,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _selectedPaths
           ..clear()
           ..addAll(_rangeSelectionPaths(visibleItems, targetItem.path));
-      } else if (toggleSelection) {
-        if (_selectedPaths.contains(targetItem.path) &&
-            _selectedPaths.length > 1) {
-          _selectedPaths.remove(targetItem.path);
-        } else {
-          _selectedPaths.add(targetItem.path);
-        }
-        _selectionAnchorPath = targetItem.path;
       } else {
         _selectedPaths
           ..clear()
@@ -2472,24 +2479,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _toggleItemSelection(DetectionItem item, {_ValidationFileRow? row}) {
     final targetItem = row != null && row.isGroupHeader ? row.item : item;
+    var activeItem = targetItem;
     setState(() {
-      _selectedPath = targetItem.path;
       _activeList = _ValidationListFocus.photos;
       if (_selectedPaths.contains(targetItem.path) &&
           _selectedPaths.length > 1) {
         _selectedPaths.remove(targetItem.path);
+        activeItem = _itemByPath(_selectedPaths.last)!;
       } else {
         _selectedPaths.add(targetItem.path);
       }
+      _selectedPath = activeItem.path;
       _selectionAnchorPath = targetItem.path;
-      if (row == null) {
-        _setSelectedGroupFromItem(targetItem);
-      } else {
-        _setSelectedGroupFromRow(row);
-      }
+      _setSelectedGroupFromItem(activeItem);
       _resetPendingMark();
     });
-    unawaited(widget.onLoadMetadata(targetItem));
+    unawaited(widget.onLoadMetadata(activeItem));
   }
 
   Iterable<String> _rangeSelectionPaths(
@@ -2920,7 +2925,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           cluster.number,
         );
       } else {
-        label = ('hdbscan::noise', '拒识（未成簇）', null);
+        label = ('hdbscan::noise', '噪声', null);
       }
       labels[label.$1] = label;
     }
@@ -2989,6 +2994,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (_usesDinoClusterGrouping(group)) {
       final labels = <String, (String, String, int?)>{};
       for (final item in group.items) {
+        if (_isSkippedUnrecognizedVideo(item)) continue;
         for (final label in _dinoItemBucketLabels(item)) {
           labels[label.$1] = label;
         }
@@ -3069,7 +3075,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           '$prefix拒识簇 #${cluster.number}',
           cluster.number,
         ),
-      if (noise) ('${known.join('、')}::noise', '$prefix拒识（噪声/证据不足）', null),
+      if (noise) ('${known.join('、')}::noise', '${prefix}噪声', null),
       if (unassigned || (clusters.isEmpty && !noise))
         (
           '${known.join('、')}::unassigned',
@@ -3085,8 +3091,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     for (final group in groups) {
       final species = widget.autoGroup
           ? _groupSpeciesLabel(group)
-          : _primarySpeciesAfterConfidenceFilter(group.items.first);
-      final isValidated = group.items.every(_isItemValidated);
+          : _bucketSpeciesForItem(group.items.first);
+      final isValidated = _groupComplete(group);
       for (final label in _clusterBucketLabels(group, species)) {
         final key = '${isValidated ? 1 : 0}::${label.$1}';
         map.putIfAbsent(
@@ -3113,6 +3119,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (_preparing) return const [];
     final hasSameGroupingSettings =
         _bucketCacheAutoGroup == widget.autoGroup &&
+        _bucketCacheVideoMode ==
+            normalizeVideoProcessingMode(widget.videoMode) &&
         _bucketCacheAutoGroupDetectBurst == widget.autoGroupDetectBurst &&
         _bucketCacheBurstSize == widget.autoGroupBurstSize &&
         _bucketCacheGapSeconds == widget.autoGroupGapSeconds &&
@@ -3181,6 +3189,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         .toSet();
 
     _bucketCacheAutoGroup = widget.autoGroup;
+    _bucketCacheVideoMode = normalizeVideoProcessingMode(widget.videoMode);
     _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
     _bucketCacheBurstSize = widget.autoGroupBurstSize;
     _bucketCacheGapSeconds = widget.autoGroupGapSeconds;
@@ -3617,7 +3626,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   bool _groupComplete(_ValidationMediaGroup group) {
-    return group.items.isNotEmpty && group.items.every(_isItemValidated);
+    final classified = group.items.where(
+      (item) => !_isSkippedUnrecognizedVideo(item),
+    );
+    return classified.isNotEmpty && classified.every(_isItemValidated);
   }
 
   List<_ValidationMediaGroup> _buildAutoGroups(List<DetectionItem> items) {
@@ -3753,6 +3765,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final fallbackVotes = <String, _SpeciesVote>{};
 
     for (final item in group.items) {
+      if (_isSkippedUnrecognizedVideo(item)) continue;
       final speciesNames = _splitGroupSpeciesNames(
         _primarySpeciesAfterConfidenceFilter(item),
       );
@@ -3784,6 +3797,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
     if (orderedValidSpecies.isNotEmpty) return orderedValidSpecies.join('、');
     if (fallbackVotes.isNotEmpty) return _topVotedSpecies(fallbackVotes);
+    if (group.items.any(_isSkippedUnrecognizedVideo)) return '已跳过视频';
     return '未检测';
   }
 
@@ -4171,6 +4185,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   String _finalResultLabel(DetectionItem item) {
+    if (_isSkippedUnrecognizedVideo(item)) return _skippedVideoGroupLabel(item);
     final filteredSpecies = _primarySpeciesAfterConfidenceFilter(item);
     final primarySpecies = _primarySpecies(item);
     if (filteredSpecies == '空' || filteredSpecies != primarySpecies) {
@@ -4295,6 +4310,15 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     DetectionItem item,
     List<DetectionBox> visibleBoxes,
   ) {
+    if (_isSkippedUnrecognizedVideo(item)) {
+      final summary = _DetectionSummary(
+        species: _skippedVideoGroupLabel(item),
+        count: '',
+        type: '视频',
+        confidence: '已跳过',
+      );
+      return _pendingSummaryFor(item, summary) ?? summary;
+    }
     var species = _primarySpeciesAfterConfidenceFilter(item);
     var count = item.detectionData['物种数量']?.toString() ?? '';
     var confidence = item.detectionData['最低置信度']?.toString() ?? '';
@@ -4406,6 +4430,42 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   bool _isVideo(DetectionItem item) {
     return _validationVideoTypes.contains(item.fileType.toLowerCase());
+  }
+
+  bool _isSkippedUnrecognizedVideo(DetectionItem item) {
+    if (normalizeVideoProcessingMode(widget.videoMode) !=
+            videoProcessingModeSkip ||
+        !_isVideo(item) ||
+        item.error != null ||
+        _isItemValidated(item) ||
+        _isManualDetection(item) ||
+        item.isSequencePending ||
+        isDinoItem(item) ||
+        item.detectionBoxes.isNotEmpty ||
+        item.confidence != null) {
+      return false;
+    }
+    final data = item.detectionData;
+    if (data['detection_completed'] == true ||
+        (data['检测时间']?.toString().trim().isNotEmpty ?? false) ||
+        (data['最低置信度']?.toString().trim().isNotEmpty ?? false) ||
+        (data['检测框'] is List && (data['检测框'] as List).isNotEmpty) ||
+        (data['分类候选项'] is List && (data['分类候选项'] as List).isNotEmpty)) {
+      return false;
+    }
+    const placeholders = {'', 'Unknown', '未检测', '未识别'};
+    return item.species.every((name) => placeholders.contains(name.trim())) &&
+        placeholders.contains(data['物种名称']?.toString().trim() ?? '');
+  }
+
+  String _bucketSpeciesForItem(DetectionItem item) =>
+      _isSkippedUnrecognizedVideo(item)
+      ? '已跳过视频'
+      : _primarySpeciesAfterConfidenceFilter(item);
+
+  String _skippedVideoGroupLabel(DetectionItem item) {
+    final group = _bucketCacheGroupByPath[item.path]?.group;
+    return group == null ? '已跳过视频' : _groupSpeciesLabel(group);
   }
 
   Map<String, int> _boxCountsBySpecies(List<DetectionBox> boxes) {
@@ -5608,6 +5668,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     if (_selectedBucketKey == null) return const [];
     final bucket = _selectedBucketFrom(buckets);
     final rows = <_ValidationFileRow>[];
+    var visibleGroupIndex = 0;
 
     for (var index = 0; index < bucket.groups.length; index++) {
       final group = bucket.groups[index];
@@ -5630,6 +5691,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
             groupExpanded: expanded,
             group: group,
             groupIndex: globalGroupIndex,
+            visibleGroupIndex: visibleGroupIndex,
           ),
         );
 
@@ -5642,6 +5704,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                 groupExpanded: true,
                 group: group,
                 groupIndex: globalGroupIndex,
+                visibleGroupIndex: visibleGroupIndex,
               ),
             );
           }
@@ -5655,10 +5718,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
               groupExpanded: false,
               group: group,
               groupIndex: globalGroupIndex,
+              visibleGroupIndex: visibleGroupIndex,
             ),
           );
         }
       }
+      visibleGroupIndex++;
     }
     return rows;
   }
@@ -5975,7 +6040,8 @@ class _EmptyValidationInputState extends StatelessWidget {
 
 bool _isRejectedSpeciesName(String species) {
   final name = species.trim();
-  return name.toLowerCase() == 'unknown' ||
+  return name == '噪声' ||
+      name.toLowerCase() == 'unknown' ||
       RegExp(r'^簇\d+$').hasMatch(name) ||
       name.contains('拒识') ||
       name.startsWith('未知物种 #') ||
@@ -6034,7 +6100,9 @@ class _SpeciesBucket {
     );
     if (known) return rejected ? 1 : 0;
     if (clusterNumber != null) return 2;
-    if (species.contains('拒识（未成簇）') || species.contains('拒识（噪声/证据不足）')) {
+    if (species.contains('噪声') ||
+        species.contains('拒识（未成簇）') ||
+        species.contains('拒识（噪声/证据不足）')) {
       return 3;
     }
     return 4;
@@ -6090,6 +6158,7 @@ class _ValidationFileRow {
     required this.groupExpanded,
     required this.group,
     required this.groupIndex,
+    required this.visibleGroupIndex,
   });
 
   final DetectionItem item;
@@ -6097,6 +6166,7 @@ class _ValidationFileRow {
   final bool groupExpanded;
   final _ValidationMediaGroup group;
   final int groupIndex;
+  final int visibleGroupIndex;
 }
 
 class _ValidationGroupIndexEntry {

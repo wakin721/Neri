@@ -1,0 +1,279 @@
+{
+  "baseline_commit": "ced18f357f7eaa384d54b9f2cfba427e739977fb",
+  "repeats": 3,
+  "seed": 20261115,
+  "environment": {
+    "python": "3.13.11 (tags/v3.13.11:6278944, Dec  5 2025, 16:26:58) [MSC v.1944 64 bit (AMD64)]",
+    "executable": "C:\\Users\\wakin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "numpy": "2.5.3",
+    "sqlite": "3.50.4",
+    "cpu_threads": 4,
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "C:\\Users\\wakin\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\numpy.libs\\libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+        "version": "0.3.34.106.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      }
+    ],
+    "torch": "2.14.0+cu132",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "gpu_memory_bytes": 17066360832,
+    "tf32": false
+  },
+  "source_sha256": {
+    "system/dinov3/context.py": "7569f9a63313f050926a1a6594564478e6b41f6227c7f99aa21a53dc047cb22c",
+    "system/dinov3/processor.py": "1854ec9945e9ea47c35d7a7923df3f177641d605bf491da6151094b3fe812921",
+    "system/detection_db.py": "8c4819dc20715de12cdf8ab42ee9a7651e85b56f7691496ecf15b04344503388",
+    "system/backend/job_state_store.py": "70210e22b705388e00813caaedb25b9e36fe09acd2bd19ecafef97464c2efe7f"
+  },
+  "results": [
+    {
+      "name": "history_1000",
+      "before_seconds": 0.16027740000026824,
+      "after_seconds": 0.01600969999890367,
+      "speedup": 10.01126816937506,
+      "reduction_percent": 90.01125548650222,
+      "before_runs": [
+        0.15470660000028147,
+        0.16027740000026824,
+        0.17181520000121964
+      ],
+      "after_runs": [
+        0.01389990000097896,
+        0.01600969999890367,
+        0.016490500000145403
+      ],
+      "output_parity": true,
+      "includes_index_construction": true,
+      "crops": 1000,
+      "events": 10
+    },
+    {
+      "name": "history_4000",
+      "before_seconds": 1.9985011000007944,
+      "after_seconds": 0.13699979999910283,
+      "speedup": 14.587620565970767,
+      "reduction_percent": 93.14487242468627,
+      "before_runs": [
+        2.094614499999807,
+        1.9985011000007944,
+        1.98325019999902
+      ],
+      "after_runs": [
+        0.13782970000102068,
+        0.13699979999910283,
+        0.1317672000004677
+      ],
+      "output_parity": true,
+      "includes_index_construction": true,
+      "crops": 4000,
+      "events": 40
+    },
+    {
+      "name": "group_300_crops",
+      "before_seconds": 1.846949599999789,
+      "after_seconds": 0.003031999998711399,
+      "speedup": 609.1522430028837,
+      "reduction_percent": 99.8358374262778,
+      "before_runs": [
+        1.8571883999993588,
+        1.846949599999789,
+        1.822381799998766
+      ],
+      "after_runs": [
+        0.0032208000011451077,
+        0.003021700000317651,
+        0.003031999998711399
+      ],
+      "output_parity": true,
+      "frames": 100,
+      "crops": 300,
+      "dimensions": 768
+    },
+    {
+      "name": "adapt_4000",
+      "before_seconds": 0.6762208000000101,
+      "after_seconds": 0.32677370000055816,
+      "speedup": 2.0693856329283995,
+      "reduction_percent": 51.67647904344952,
+      "before_runs": [
+        0.6780022000002646,
+        0.6762208000000101,
+        0.6666865999995935
+      ],
+      "after_runs": [
+        0.32677370000055816,
+        0.3265745999997307,
+        0.336869900000238
+      ],
+      "output_parity": true,
+      "crops": 4000,
+      "dimensions": 768,
+      "history": 64
+    },
+    {
+      "name": "job_store_4000_all_changed",
+      "before_seconds": 0.28471450000142795,
+      "after_seconds": 0.14085130000057688,
+      "speedup": 2.0213835442076986,
+      "reduction_percent": 50.528933370140805,
+      "before_runs": [
+        0.28382150000106776,
+        0.28471450000142795,
+        0.2871007000012469
+      ],
+      "after_runs": [
+        0.1413990000000922,
+        0.14085130000057688,
+        0.1297712000014144
+      ],
+      "output_parity": true,
+      "crops": 12000,
+      "photos": 4000,
+      "changed_fraction": 1,
+      "all_result_objects_replaced": true,
+      "initial_checkpoint_excluded": true
+    },
+    {
+      "name": "job_store_4000_one_percent_changed",
+      "before_seconds": 0.31471529999907943,
+      "after_seconds": 0.08232609999868146,
+      "speedup": 3.8227888847415334,
+      "reduction_percent": 73.84108748480857,
+      "before_runs": [
+        0.29649000000063097,
+        0.3765476000007766,
+        0.31471529999907943
+      ],
+      "after_runs": [
+        0.08224340000015218,
+        0.08337329999994836,
+        0.08232609999868146
+      ],
+      "output_parity": true,
+      "crops": 12000,
+      "photos": 4000,
+      "changed_fraction": 0.01,
+      "all_result_objects_replaced": true,
+      "initial_checkpoint_excluded": true
+    },
+    {
+      "name": "media_db_4096_16_directories",
+      "before_seconds": 1.7225389999985055,
+      "after_seconds": 1.9083002999996097,
+      "speedup": 0.9026561490342258,
+      "reduction_percent": -10.784156411045863,
+      "before_runs": [
+        2.2317239999993035,
+        1.7038726000009774,
+        1.7225389999985055
+      ],
+      "after_runs": [
+        2.1748206000011123,
+        1.4106611999995948,
+        1.9083002999996097
+      ],
+      "output_parity": true,
+      "photos": 4096,
+      "directories": 16,
+      "chunk_size": 512,
+      "before_connections": 384,
+      "after_connections": 128,
+      "filesystem_checks_excluded": true,
+      "initial_detections_excluded": true
+    },
+    {
+      "name": "decode_and_hash_64_png",
+      "before_seconds": 0.04419989999951213,
+      "after_seconds": 0.022664400001303875,
+      "speedup": 1.950190607162304,
+      "reduction_percent": 48.72296090816033,
+      "before_runs": [
+        0.04419989999951213,
+        0.04913010000018403,
+        0.043979899999612826
+      ],
+      "after_runs": [
+        0.02096499999970547,
+        0.022664400001303875,
+        0.029818599999998696
+      ],
+      "output_parity": true,
+      "photos": 64,
+      "bytes": 50457856,
+      "decode_workers": 8,
+      "includes_initial_hash_cost": true,
+      "os_cache": "warm"
+    },
+    {
+      "name": "cuda_prototype_adapt_1000",
+      "before_seconds": 0.083712600000581,
+      "after_seconds": 0.00312359999952605,
+      "speedup": 26.800038421463338,
+      "reduction_percent": 96.26866206580088,
+      "before_runs": [
+        0.08834089999982098,
+        0.08158349999939674,
+        0.083712600000581
+      ],
+      "after_runs": [
+        0.005206599998928141,
+        0.00312359999952605,
+        0.0028333999998721993
+      ],
+      "output_parity": true,
+      "prototype_only": true,
+      "baseline": "optimized_CPU",
+      "dtype": "float32",
+      "cpu_chunk": 128,
+      "cuda_chunk": 512,
+      "includes_transfers": true,
+      "parity_tolerance": {
+        "rtol": 2e-05,
+        "atol": 3e-07
+      },
+      "max_absolute_error": 2.2351741790771484e-08
+    },
+    {
+      "name": "cuda_prototype_adapt_10000",
+      "before_seconds": 0.6240781999986211,
+      "after_seconds": 0.033985100000791135,
+      "speedup": 18.363288617190864,
+      "reduction_percent": 94.55435232301558,
+      "before_runs": [
+        0.8679663999992044,
+        0.6240781999986211,
+        0.5876952999988134
+      ],
+      "after_runs": [
+        0.03871480000088923,
+        0.033985100000791135,
+        0.03366860000096494
+      ],
+      "output_parity": true,
+      "prototype_only": true,
+      "baseline": "optimized_CPU",
+      "dtype": "float32",
+      "cpu_chunk": 128,
+      "cuda_chunk": 512,
+      "includes_transfers": true,
+      "parity_tolerance": {
+        "rtol": 2e-05,
+        "atol": 3e-07
+      },
+      "max_absolute_error": 2.9802322387695312e-08
+    }
+  ],
+  "limitations": [
+    "Synthetic workloads, not a complete inference job or real photo dataset.",
+    "Local SQLite files and OS-cached generated PNG files; no cold-disk or SMB measurement.",
+    "CUDA history implementation is an isolated prototype, not integrated production code.",
+    "CUDA timings include feature/index uploads and result download; initialization is warmed up."
+  ]
+}

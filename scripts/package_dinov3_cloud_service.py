@@ -12,6 +12,9 @@ def package(output):
     sources = list((repo/'server/model_distribution').glob('*.py')) + [
         repo/'scripts/verify_dinov3_cloud.py',
         repo/'system/dinov3/distribution.py',
+        repo/'system/dinov3/download_cache.py',
+        repo/'system/dinov3/download_diagnostics.py',
+        repo/'system/dinov3/runtime_selection.py',
         repo/'system/model_sync/protocol.py',
     ]
     files = {path.relative_to(repo).as_posix(): path.read_bytes() for path in sources}

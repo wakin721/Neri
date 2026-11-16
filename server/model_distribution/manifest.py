@@ -154,6 +154,8 @@ class DinoV3ManifestBuilder(ManifestBuilder):
         for entry in self.store.list_dir(remote_dir):
             if not self._safe_name(entry.name):
                 raise ManifestError(f"invalid_{self.component.lower()}_path")
+            if self.component == 'DINOv3' and logical_dir == 'DINOv3' and entry.name == 'cpu':
+                continue
             remote = f"{remote_dir}/{entry.name}"
             logical = f"{logical_dir}/{entry.name}"
             if entry.is_dir:
@@ -180,3 +182,7 @@ class DinoV2ManifestBuilder(DinoV3ManifestBuilder):
     """The legacy component retains its separate directory and identity."""
 
     component = "DINOv2"
+
+
+class DinoV3CpuManifestBuilder(DinoV3ManifestBuilder):
+    component = "DINOv3/cpu"

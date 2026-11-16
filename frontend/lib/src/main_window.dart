@@ -13,6 +13,7 @@ import 'api_client.dart';
 import 'app_updater.dart';
 import 'crash_reporter.dart';
 import 'crash_watchdog.dart';
+import 'python_runtime.dart';
 import 'dino_startup_check.dart';
 import 'frontend_version.dart';
 import 'local_maintenance_status.dart';
@@ -1253,7 +1254,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     final backendLogFile = CrashReporter.createBackendLogFile();
     _backendOutputTail = '';
     backendLogFile.writeAsStringSync(
-      'Command: ${pythonExe.path} -m uvicorn system.backend.main:app --app-dir . --host 127.0.0.1 --port 721\n'
+      'Command: ${pythonExe.path} ${pythonIsolationArguments.join(' ')} -m uvicorn system.backend.main:app --app-dir . --host 127.0.0.1 --port 721\n'
       'Working directory: ${projectRoot.path}\n\n',
       encoding: utf8,
       mode: FileMode.append,
@@ -1265,6 +1266,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       process = await Process.start(
         pythonExe.path,
         const <String>[
+          ...pythonIsolationArguments,
           '-m',
           'uvicorn',
           'system.backend.main:app',
@@ -1276,8 +1278,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           '721',
         ],
         workingDirectory: projectRoot.path,
-        environment: <String, String>{'NERI_PARENT_PID': pid.toString()},
-        includeParentEnvironment: true,
+        environment: pythonProcessEnvironment()
+          ..['NERI_PARENT_PID'] = pid.toString(),
+        includeParentEnvironment: false,
         runInShell: false,
       );
     } catch (_) {
@@ -4236,6 +4239,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       ),
       classificationModelPath: _selectedDinoValidationModelPath(),
       detectionConfidence: _doubleSetting(settings, 'confidence', 0.25),
+      videoMode: _effectiveVideoMode(),
       items: items,
       loading: _previewLoading,
       refreshVersion: _previewContentVersion,

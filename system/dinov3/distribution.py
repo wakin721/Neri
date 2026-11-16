@@ -24,6 +24,7 @@ from system.model_sync.protocol import valid_direct_url
 from .download_cache import (checkpoint_partial, discard_partial, partial_paths,
                              restore_partial)
 from .download_diagnostics import SERVER_DETAILS, exception_details, redact
+from .runtime_selection import validate_resolved_runtime
 
 DINO_DISTRIBUTION_URL_ENV = "NERI_DINOV3_DISTRIBUTION_URL"
 DINO_DEFAULT_DISTRIBUTION_URL = "https://myneri.top/api/models/v1"
@@ -66,10 +67,12 @@ class DinoV3DownloadCapability:
     proxy_token: str
 
 
-def _relative_component_path(path: Any) -> str:
-    if not isinstance(path, str) or not path.startswith("DINOv3/"):
+def _relative_component_path(path: Any, *, runtime: str = "gpu") -> str:
+    resolved_runtime = validate_resolved_runtime(runtime)
+    expected_prefix = "DINOv3/cpu/" if resolved_runtime == "cpu" else "DINOv3/"
+    if not isinstance(path, str) or not path.startswith(expected_prefix):
         raise DinoV3DistributionError("invalid_dinov3_distribution_path")
-    relative = path[len("DINOv3/") :]
+    relative = path[len(expected_prefix) :]
     if (not relative or "\\" in relative or "\x00" in relative or ':' in relative
             or any(part in {'', '.', '..'} for part in relative.split('/'))):
         raise DinoV3DistributionError("invalid_dinov3_distribution_path")
@@ -83,7 +86,7 @@ def _relative_component_path(path: Any) -> str:
 
 class DinoV3DistributionClient:
     def __init__(self, origin: str | None = None, *, opener=None,
-                 cache_dir: Path | None = None, on_event=None):
+                 cache_dir: Path | None = None, on_event=None, runtime: str | None = None):
         configured = (
             origin
             or os.environ.get(DINO_DISTRIBUTION_URL_ENV)
@@ -107,6 +110,7 @@ class DinoV3DistributionClient:
         self._json_native = False
         self.cache_dir = Path(cache_dir).resolve() if cache_dir is not None else None
         self.on_event = on_event
+        self.runtime = validate_resolved_runtime(runtime) if runtime is not None else None
 
     def _event(self, **event):
         if self.on_event is not None:
@@ -251,8 +255,15 @@ class DinoV3DistributionClient:
             raise DinoV3DistributionError("DINOv3 模型分发响应格式无效。")
         return value
 
-    def fetch_manifest(self) -> DinoV3DistributionManifest:
-        value = self._json_request("GET", "/dinov3/manifest")
+    def fetch_manifest(self, runtime: str | None = None) -> DinoV3DistributionManifest:
+        selected_runtime = (
+            self.runtime if runtime is None else validate_resolved_runtime(runtime)
+        )
+        effective_runtime = selected_runtime or "gpu"
+        endpoint = (
+            "/dinov3/manifest?runtime=cpu" if effective_runtime == "cpu" else "/dinov3/manifest"
+        )
+        value = self._json_request("GET", endpoint)
         if value.get("schema_version") != 1:
             raise DinoV3DistributionError(
                 "unsupported_dinov3_distribution_manifest"
@@ -269,7 +280,7 @@ class DinoV3DistributionClient:
             if not isinstance(item, dict):
                 raise DinoV3DistributionError("invalid_dinov3_distribution_entry")
             path = item.get("path")
-            relative = _relative_component_path(path)
+            relative = _relative_component_path(path, runtime=effective_runtime)
             size = item.get("size")
             sha256 = item.get("sha256")
             if isinstance(size, bool) or not isinstance(size, int) or size < 0:
@@ -532,6 +543,8 @@ class DinoV3DistributionClient:
         relative_path: str,
         target: Path,
         on_progress=None,
+        *,
+        runtime: str | None = None,
     ) -> None:
         raw = str(relative_path or "").replace("\\", "/").strip("/")
         if raw:
@@ -543,7 +556,14 @@ class DinoV3DistributionClient:
             prefix = pure.as_posix().rstrip("/") + "/"
         else:
             prefix = ""
-        manifest = self.fetch_manifest()
+        selected_runtime = (
+            self.runtime if runtime is None else validate_resolved_runtime(runtime)
+        )
+        manifest = (
+            self.fetch_manifest()
+            if selected_runtime is None
+            else self.fetch_manifest(runtime=selected_runtime)
+        )
         selected = [
             entry
             for entry in manifest.files

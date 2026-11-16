@@ -84,16 +84,12 @@ def gate_score(pooled, radial, calibration):
 
 
 def predict(model, raw, cameras, sequences, sites, contents, adapted):
-    within = model._compute_within_scores(raw, adapted_features=adapted)
-    ridge = model.scores(raw, adapted_features=adapted)
+    within, ridge, norm, labels, support_cameras = model._prediction_evidence(raw, adapted)
     # Count cameras in the training supports, never in queries or calibration.
-    _, labels, support_cameras = model.within_updater.bank()
     counts = np.asarray([len(np.unique(support_cameras[labels == c])) for c in model.classes_])
     bias = .02*np.log(np.maximum(counts, 1)/3)
     blended = .55*row_zscore(within-bias[None, :])+.45*row_zscore(ridge)
     fused = event_fuse(blended, sites, sequences, contents)
-    query = adapted if adapted is not None else raw
-    norm = np.linalg.norm((np.asarray(query, np.float64)-model.origin_)@model.transform_, axis=1)
     margin, pooled, radial = pooled_evidence(within, norm, cameras, sequences)
     score = gate_score(pooled, radial, model._calibration)
     accepted = score >= model.threshold

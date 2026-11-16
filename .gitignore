@@ -56,6 +56,10 @@ ENV/
 # Build outputs
 build/
 dist/
+/package/
+# Local Neri1.2preview LiteRT shards and reassembled assets (distributed via NeriCloud, not GitHub).
+/res/bundled-models/
+/res/model/cls/bundled/Neri1.2preview-litert*
 /Neri.exe
 /Neri.pdb
 /launcher.obj
@@ -157,3 +161,7 @@ frontend/windows/runner/*
 !/tests/test_adaptive_video.py
 !/tests/test_example_writer.py
 !frontend/test/video_processing_settings_test.dart
+
+# Python runtime isolation regression tests
+!/tests/test_python_isolation.py
+!frontend/test/python_runtime_test.dart

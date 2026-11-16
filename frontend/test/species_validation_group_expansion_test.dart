@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -57,6 +58,391 @@ void main() {
     if (await tempDir.exists()) {
       await tempDir.delete(recursive: true);
     }
+  });
+
+  List<DetectionItem> selectionItems({int groupSize = 4}) {
+    return [
+      for (var group = 0; group < 4; group++)
+        for (var member = 0; member < groupSize; member++)
+          DetectionItem(
+            filename: 'group-$group-$member.jpg',
+            path: '${tempDir.path}/group-$group-$member.jpg',
+            fileType: 'jpg',
+            dateTaken: '2026-09-${10 + group}T12:00:0${member}Z',
+            width: 10,
+            height: 10,
+            species: [group == 2 ? '野猪' : '豹猫'],
+            confidence: 0.95,
+            detectionData: {'物种名称': group == 2 ? '野猪' : '豹猫'},
+          ),
+    ];
+  }
+
+  void setSelectionTestSize(WidgetTester tester) {
+    tester.view.physicalSize = const Size(1600, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+    });
+  }
+
+  Future<void> pumpSelection(WidgetTester tester) async {
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> selectFixtureSpecies(WidgetTester tester) async {
+    await pumpSelection(tester);
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('validation-species-list')),
+        matching: find.text('豹猫'),
+      ),
+    );
+    await pumpSelection(tester);
+  }
+
+  Finder fileTiles() => find.byWidgetPredicate(
+    (widget) =>
+        widget is ListTile &&
+        widget.subtitle is Text &&
+        ((widget.subtitle! as Text).data?.startsWith('第 ') ?? false),
+  );
+
+  Finder groupTile(int ordinal) => find.byWidgetPredicate(
+    (widget) =>
+        widget is ListTile &&
+        widget.subtitle is Text &&
+        ((widget.subtitle! as Text).data?.startsWith('第 $ordinal/4 组') ??
+            false),
+  );
+
+  testWidgets(
+    'skipped video inherits its photo group without becoming a detection',
+    (tester) async {
+      setSelectionTestSize(tester);
+      // Grouping uses persisted metadata; native image decoding is outside this test.
+      await tester.runAsync(() async {
+        for (final item in items) {
+          await File(item.path).delete();
+        }
+      });
+      final video = DetectionItem(
+        filename: 'skipped.mp4',
+        path: '${tempDir.path}/skipped.mp4',
+        fileType: 'mp4',
+        modifiedAt: '2026-09-11T12:00:01Z',
+      );
+      await tester.pumpWidget(
+        _GroupExpansionHarness(
+          apiClient: apiClient,
+          initialItems: [items.first, video],
+          reorderMetadata: false,
+          videoMode: 'skip',
+        ),
+      );
+      await pumpSelection(tester);
+      final list = find.byKey(const ValueKey('validation-species-list'));
+      expect(
+        find.descendant(of: list, matching: find.text('豹猫')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: list, matching: find.text('未检测')),
+        findsNothing,
+      );
+      await tester.tap(find.descendant(of: list, matching: find.text('豹猫')));
+      await pumpSelection(tester);
+      final expand = find.byTooltip('展开组内文件');
+      if (expand.evaluate().isNotEmpty) {
+        await tester.tap(expand.first);
+        await pumpSelection(tester);
+      }
+      expect(video.species, isEmpty);
+      expect(video.detectionData, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() async {
+        imageCache.clear();
+        imageCache.clearLiveImages();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pump();
+    },
+  );
+
+  testWidgets('video-only skipped bucket changes when mode changes', (
+    tester,
+  ) async {
+    setSelectionTestSize(tester);
+    // Grouping uses persisted metadata; native image decoding is outside this test.
+    await tester.runAsync(() async {
+      for (final item in items) {
+        await File(item.path).delete();
+      }
+    });
+    final video = DetectionItem(
+      filename: 'skipped.mp4',
+      path: '${tempDir.path}/skipped.mp4',
+      fileType: 'mp4',
+    );
+    final key = GlobalKey<_GroupExpansionHarnessState>();
+    Future<void> show(String mode) async {
+      await tester.pumpWidget(
+        _GroupExpansionHarness(
+          key: key,
+          apiClient: apiClient,
+          initialItems: [items.first, video],
+          reorderMetadata: false,
+          autoGroup: false,
+          videoMode: mode,
+        ),
+      );
+      await pumpSelection(tester);
+    }
+
+    await show('skip');
+    final list = find.byKey(const ValueKey('validation-species-list'));
+    expect(
+      find.descendant(of: list, matching: find.text('已跳过视频')),
+      findsOneWidget,
+    );
+    expect(find.descendant(of: list, matching: find.text('未检测')), findsNothing);
+    await show('fast');
+    expect(
+      find.descendant(of: list, matching: find.text('未检测')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: list, matching: find.text('已跳过视频')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() async {
+      imageCache.clear();
+      imageCache.clearLiveImages();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+  });
+
+  testWidgets('skip mode preserves historical video detections and errors', (
+    tester,
+  ) async {
+    setSelectionTestSize(tester);
+    // Grouping uses persisted metadata; native image decoding is outside this test.
+    await tester.runAsync(() async {
+      for (final item in items) {
+        await File(item.path).delete();
+      }
+    });
+    final video = DetectionItem(
+      filename: 'recognized.mp4',
+      path: '${tempDir.path}/recognized.mp4',
+      fileType: 'mp4',
+      species: const ['野猪'],
+      detectionData: const {'物种名称': '野猪'},
+    );
+    final failed = DetectionItem(
+      filename: 'failed.mp4',
+      path: '${tempDir.path}/failed.mp4',
+      fileType: 'mp4',
+      error: 'decode failure',
+    );
+    await tester.pumpWidget(
+      _GroupExpansionHarness(
+        apiClient: apiClient,
+        initialItems: [items.first, video, failed],
+        reorderMetadata: false,
+        autoGroup: false,
+        videoMode: 'skip',
+      ),
+    );
+    await pumpSelection(tester);
+    final list = find.byKey(const ValueKey('validation-species-list'));
+    expect(
+      find.descendant(of: list, matching: find.text('野猪')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: list, matching: find.text('错误')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: list, matching: find.text('已跳过视频')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() async {
+      imageCache.clear();
+      imageCache.clearLiveImages();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+  });
+
+  testWidgets('group stripes follow visible groups and survive expansion', (
+    tester,
+  ) async {
+    setSelectionTestSize(tester);
+    await tester.pumpWidget(
+      _GroupExpansionHarness(
+        apiClient: apiClient,
+        initialItems: selectionItems(),
+        reorderMetadata: false,
+      ),
+    );
+    await selectFixtureSpecies(tester);
+
+    final tiles = tester.widgetList<ListTile>(fileTiles()).toList();
+    expect(tiles.length, 3);
+    expect(tiles[0].tileColor, isNull);
+    expect(tiles[1].tileColor, isNotNull);
+    expect(tiles[2].tileColor, tiles[0].tileColor);
+
+    await tester.tap(
+      find.descendant(of: groupTile(2), matching: find.byType(IconButton)),
+    );
+    await pumpSelection(tester);
+    final expandedTiles = tester.widgetList<ListTile>(groupTile(2)).toList();
+    expect(expandedTiles.length, 5);
+    expect(expandedTiles.map((tile) => tile.tileColor).toSet(), {
+      tiles[1].tileColor,
+    });
+    expect(tester.widget<ListTile>(groupTile(4)).tileColor, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final autoGroup in [false, true]) {
+    for (final modifier in [
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.shiftLeft,
+      LogicalKeyboardKey.metaLeft,
+    ]) {
+      testWidgets(
+        'multi-selection reads held ${modifier.keyLabel} after focus changes ($autoGroup)',
+        (tester) async {
+          setSelectionTestSize(tester);
+          final outsideFocus = FocusNode();
+          addTearDown(() async {
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pump();
+            outsideFocus.dispose();
+          });
+          final harness = GlobalKey<_GroupExpansionHarnessState>();
+          final fixtures = selectionItems(groupSize: autoGroup ? 4 : 1);
+          await tester.pumpWidget(
+            Focus(
+              focusNode: outsideFocus,
+              child: _GroupExpansionHarness(
+                key: harness,
+                apiClient: apiClient,
+                initialItems: fixtures,
+                autoGroup: autoGroup,
+                reorderMetadata: false,
+              ),
+            ),
+          );
+          await selectFixtureSpecies(tester);
+          final tileFinder = autoGroup
+              ? groupTile(1)
+              : find.widgetWithText(ListTile, 'group-0-0.jpg');
+          await tester.tap(tileFinder);
+          await pumpSelection(tester);
+
+          // The key is pressed outside the validation page's focus subtree.
+          outsideFocus.requestFocus();
+          await tester.pump();
+          await tester.sendKeyDownEvent(modifier);
+          final target = autoGroup
+              ? groupTile(4)
+              : find.widgetWithText(ListTile, 'group-3-0.jpg');
+          await tester.tap(target);
+          await pumpSelection(tester);
+          await tester.sendKeyUpEvent(modifier);
+          final photoTiles = autoGroup
+              ? fileTiles()
+              : find.byWidgetPredicate(
+                  (widget) =>
+                      widget is ListTile &&
+                      widget.title is Text &&
+                      ((widget.title! as Text).data?.startsWith('group-') ??
+                          false),
+                );
+          final isRange = modifier == LogicalKeyboardKey.shiftLeft;
+          expect(
+            tester
+                .widgetList<ListTile>(photoTiles)
+                .where((t) => t.selected)
+                .length,
+            isRange ? 3 : 2,
+          );
+
+          await tester.tap(find.text('正确').first);
+          await pumpSelection(tester);
+          final selectedGroups = isRange ? {0, 1, 3} : {0, 3};
+          expect(harness.currentState!._markedPaths, {
+            for (final item in fixtures)
+              if (selectedGroups.any(
+                (group) => item.filename.startsWith('group-$group-'),
+              ))
+                item.path,
+          });
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('Ctrl click deselects the active group', (tester) async {
+    setSelectionTestSize(tester);
+    await tester.pumpWidget(
+      _GroupExpansionHarness(
+        apiClient: apiClient,
+        initialItems: selectionItems(),
+        reorderMetadata: false,
+      ),
+    );
+    await selectFixtureSpecies(tester);
+    await tester.tap(groupTile(1));
+    await pumpSelection(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.tap(groupTile(2));
+    await pumpSelection(tester);
+    expect(tester.widget<ListTile>(groupTile(2)).selected, isTrue);
+    await tester.tap(groupTile(2));
+    await pumpSelection(tester);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    expect(tester.widget<ListTile>(groupTile(2)).selected, isFalse);
+    expect(tester.widget<ListTile>(groupTile(1)).selected, isTrue);
+    await tester.tap(groupTile(4));
+    await pumpSelection(tester);
+    expect(tester.widget<ListTile>(groupTile(1)).selected, isFalse);
+    expect(tester.widget<ListTile>(groupTile(4)).selected, isTrue);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('expanded group stays open when metadata reorders its members', (
@@ -400,7 +786,7 @@ void main() {
         '家羊、拒识簇 #2',
         '拒识簇 #2',
         '拒识簇 #10',
-        '拒识（噪声/证据不足）',
+        '噪声',
         '拒识（未分簇）',
         '空',
         '野猪',
@@ -413,11 +799,9 @@ void main() {
       expect(subtitle('拒识簇 #2'), endsWith('3 个文件'));
       expect(subtitle('拒识簇 #10'), endsWith('2 个文件'));
       expect(subtitle('拒识（未分簇）'), endsWith('2 个文件'));
-      expect(subtitle('拒识（噪声/证据不足）'), autoGroup ? '2 组 / 5 个文件' : '5 个文件');
+      expect(subtitle('噪声'), autoGroup ? '2 组 / 5 个文件' : '5 个文件');
       expect(requests, 1);
-      await tester.tap(
-        find.descendant(of: list, matching: find.text('拒识（噪声/证据不足）')),
-      );
+      await tester.tap(find.descendant(of: list, matching: find.text('噪声')));
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byTooltip('确认簇物种并学习'), findsNothing);
       await tester.tap(
@@ -474,6 +858,7 @@ class _GroupExpansionHarness extends StatefulWidget {
     this.autoGroup = true,
     this.reorderMetadata = true,
     this.classificationModelPath,
+    this.videoMode = 'fast',
     super.key,
   });
 
@@ -482,6 +867,7 @@ class _GroupExpansionHarness extends StatefulWidget {
   final bool autoGroup;
   final bool reorderMetadata;
   final String? classificationModelPath;
+  final String videoMode;
 
   @override
   State<_GroupExpansionHarness> createState() => _GroupExpansionHarnessState();
@@ -489,6 +875,7 @@ class _GroupExpansionHarness extends StatefulWidget {
 
 class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   late List<DetectionItem> _items = widget.initialItems;
+  final Set<String> _markedPaths = {};
   int _metadataRequests = 0;
   bool _metadataApplied = false;
 
@@ -546,6 +933,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
   }
 
   DetectionItem _confirmItem(DetectionItem item) {
+    _markedPaths.add(item.path);
     final updated = item.mergeValidationUpdate(
       DetectionItem(
         filename: item.filename,
@@ -573,6 +961,7 @@ class _GroupExpansionHarnessState extends State<_GroupExpansionHarness> {
         body: SpeciesValidationScreen(
           apiClient: widget.apiClient,
           classificationModelPath: widget.classificationModelPath,
+          videoMode: widget.videoMode,
           inputPath: File(widget.initialItems.first.path).parent.path,
           rootInputPath: File(widget.initialItems.first.path).parent.path,
           rootItems: _items,

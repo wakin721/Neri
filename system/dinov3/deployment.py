@@ -35,11 +35,20 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
         digest = sha256(weights)
         if model.provenance.get("encoder_sha256") != digest:
             raise ValueError("Feature provenance and supplied encoder weights differ")
+        encoder_backend = "pytorch"
     else:
-        from .runtime import resolve_manifest_asset
         digest = existing_manifest["encoder_sha256"]
         if model.provenance.get("encoder_sha256") != digest:
             raise ValueError("Updated model encoder provenance differs")
+        encoder_backend = existing_manifest.get("encoder_backend", "pytorch")
+        if encoder_backend not in {"pytorch", "litert"}:
+            raise ValueError(f"Unsupported DINOv3 encoder_backend: {encoder_backend!r}")
+        if encoder_backend == "litert":
+            litert_digest = existing_manifest.get("encoder_litert_sha256")
+            if not isinstance(litert_digest, str) or len(litert_digest) != 64 or any(
+                c not in "0123456789abcdef" for c in litert_digest
+            ):
+                raise ValueError("Invalid DINOv3 encoder_litert_sha256")
     stem = manifest_path.name.removesuffix(".neri.json")
     generation = manifest_path.parent / f"{stem}-assets-{uuid.uuid4().hex[:12]}"
     generation.mkdir()
@@ -54,7 +63,7 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
             code_relative = f"{generation.name}/encoder-code"
         else:
             weights_relative = existing_manifest["encoder_weights"]
-            code_relative = existing_manifest["encoder_code"]
+            code_relative = existing_manifest["encoder_code"] if encoder_backend == "pytorch" else None
         checkpoint = generation / "model.neri-model"
         model.save(checkpoint)
         # Verify the archive before making it discoverable by the software.
@@ -66,7 +75,19 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
                        supports_video_fast=False, supports_video_all=False,
                        display_name=display_name, checkpoint=f"{generation.name}/{checkpoint.name}",
                        checkpoint_sha256=sha256(checkpoint), encoder_sha256=digest,
-                       encoder_weights=weights_relative, encoder_code=code_relative)
+                       encoder_weights=weights_relative)
+        if encoder_backend == "litert":
+            payload["encoder_backend"] = "litert"
+            payload["encoder_litert_sha256"] = existing_manifest["encoder_litert_sha256"]
+        else:
+            payload["encoder_code"] = code_relative
+            if existing_manifest is not None and "encoder_backend" in existing_manifest:
+                payload["encoder_backend"] = "pytorch"
+        if existing_manifest is not None:
+            for key in ('shared_learning','learning_family_id','learning_base','learning_base_sha256',
+                        'learning_base_calibration_id','learning_encoder_hashes','learning_encoder_variants'):
+                if key in existing_manifest:
+                    payload[key]=existing_manifest[key]
         if calibration_data is not None:
             fields = {"features", "labels", "cameras", "sequences"}
             optional = {"sites", "contents", "source_contents", "adapted_features", "datetimes"}
@@ -93,6 +114,21 @@ def publish_model(model, manifest_path, *, encoder_weights=None, encoder_code=No
             handle.write("\n")
         try:
             with (publication_guard() if publication_guard else nullcontext()):
+                if existing_manifest is not None and existing_manifest.get('learning_family_id'):
+                    latest=json.loads(manifest_path.read_text('utf8'))
+                    # Preserve a newly registered peer and the user's current
+                    # backend choice while publishing the common learned head.
+                    payload['learning_encoder_variants']={
+                        **payload.get('learning_encoder_variants',{}),
+                        **latest.get('learning_encoder_variants',{})}
+                    payload['learning_encoder_hashes']=sorted(set(payload.get('learning_encoder_hashes',[]))
+                                                              |set(latest.get('learning_encoder_hashes',[])))
+                    for key in ('encoder_backend','encoder_weights','encoder_code','encoder_litert_sha256','display_name'):
+                        if key in latest:
+                            payload[key]=latest[key]
+                        else:
+                            payload.pop(key,None)
+                    temp.write_text(json.dumps(payload,ensure_ascii=False,indent=2,allow_nan=False)+'\n','utf8')
                 temp.replace(manifest_path)
                 published = True
         finally:

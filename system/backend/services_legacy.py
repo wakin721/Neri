@@ -94,6 +94,8 @@ _BATCH_LOG_RETENTION = 5
 _BATCH_LOGGER_NAMES = (
     __name__, "system.image_processor", "system.dino.image_processor",
     "system.backend.inference_batching",
+    "system.backend.job_state_store",
+    "system.dinov3",
     "system.adaptive_batch",
 )
 
@@ -2512,25 +2514,22 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     """Keep old-format DBs beside media, without mirroring filename keys upward."""
     payloads_by_root: dict[Path, list[tuple[str, str, dict[str, Any]]]] = {}
     validations_by_root: dict[Path, list[tuple[str, bool]]] = {}
+    resolved_roots: dict[Path, Path] = {}
     for path, detection_data in detections:
         if not _checked_media_file(path):
             logger.info("Not saving detection data for deleted file: %s", path)
             continue
-        roots = [path.parent]
-
-        seen: set[Path] = set()
-        for root in roots:
+        root = path.parent
+        if root not in resolved_roots:
             try:
-                resolved = root.resolve()
+                resolved_roots[root] = root.resolve()
             except OSError:
-                resolved = root
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            payloads_by_root.setdefault(resolved, []).append(
-                (path.stem, path.name, detection_data)
-            )
-            validations_by_root.setdefault(resolved, []).append((path.name, False))
+                resolved_roots[root] = root
+        resolved = resolved_roots[root]
+        payloads_by_root.setdefault(resolved, []).append(
+            (path.stem, path.name, detection_data)
+        )
+        validations_by_root.setdefault(resolved, []).append((path.name, False))
 
     if not payloads_by_root:
         return
@@ -2538,9 +2537,7 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     try:
         from system.detection_db import (
             get_db_path,
-            init_db,
-            upsert_detections_bulk,
-            upsert_validation_bulk,
+            upsert_media_batch,
         )
     except Exception as exc:
         logger.warning("Detection DB bulk helpers unavailable: %s", exc)
@@ -2549,9 +2546,7 @@ def _save_detection_data_batch(detections: Iterable[tuple[Path, dict[str, Any]]]
     for root, payloads in payloads_by_root.items():
         try:
             db_path = get_db_path(str(root))
-            init_db(db_path)
-            upsert_detections_bulk(db_path, payloads)
-            upsert_validation_bulk(db_path, validations_by_root.get(root, []))
+            upsert_media_batch(db_path, payloads, validations_by_root.get(root, []))
         except (OSError, sqlite3.Error) as exc:
             raise MediaStorageError(root, "保存检测结果", exc) from exc
 
@@ -3737,7 +3732,7 @@ def _export_results(output_dir: str | None, results: list[DetectionItem]) -> Pat
         )
         writer.writeheader()
         for item in results:
-            row = item.model_dump()
+            row = item.model_dump(include=set(writer.fieldnames))
             row["species"] = ",".join(item.species)
             writer.writerow(row)
     return output_path

@@ -13,11 +13,20 @@ from system.model_sync.layout import get_model_layout
 from .encoder import sha256
 from .runtime import read_manifest, resolve_manifest_asset
 from .experiment import PREVIEW_DISPLAY_NAME, PRODUCTION_RECIPE, head_type
+from .runtime_selection import (
+    RUNTIME_CHOICES,
+    expected_encoder_backend,
+    resolve_runtime_choice,
+    runtime_choice_from_encoder_backend,
+    validate_resolved_runtime,
+    validate_runtime_choice,
+)
 
 COMPONENT_VERSION = 1
 DINO_COMPONENT_ARCHITECTURE = "DINOv3 ViT-B/16"
 DINO_COMPONENT_DISPLAY_NAME = PREVIEW_DISPLAY_NAME
 _MANIFEST_SUFFIX = ".neri.json"
+_RUNTIME_META_FILE = ".dinov3_runtime.json"
 
 
 @dataclass(frozen=True)
@@ -104,25 +113,68 @@ def _component_health(
         manifest_path, payload = _select_valid_manifest(root)
         checkpoint = resolve_manifest_asset(manifest_path, payload["checkpoint"])
         weights = resolve_manifest_asset(manifest_path, payload["encoder_weights"])
-        code = resolve_manifest_asset(manifest_path, payload["encoder_code"])
         if sha256(checkpoint) != payload["checkpoint_sha256"]:
             raise ValueError("模型文件 SHA-256 不匹配。")
-        if sha256(weights) != payload["encoder_sha256"]:
-            raise ValueError("编码器权重 SHA-256 不匹配。")
+        encoder_backend = payload.get("encoder_backend", "pytorch")
+        if encoder_backend == "litert":
+            if not weights.is_file() or weights.suffix.lower() not in {".tflite", ".litert"}:
+                raise ValueError("LiteRT 编码器权重文件无效。")
+            if sha256(weights) != payload["encoder_litert_sha256"]:
+                raise ValueError("LiteRT 编码器权重 SHA-256 不匹配。")
+        else:
+            if not weights.is_file() or weights.suffix.lower() not in {".pth", ".pt"}:
+                raise ValueError("编码器权重文件无效。")
+            if sha256(weights) != payload["encoder_sha256"]:
+                raise ValueError("编码器权重 SHA-256 不匹配。")
+            code = resolve_manifest_asset(manifest_path, payload["encoder_code"])
+            if not code.is_dir():
+                raise ValueError("编码器源码目录不存在。")
+            if not (code / "LICENSE.md").is_file():
+                raise ValueError("编码器源码缺少 LICENSE.md。")
+            if not (code / "dinov3" / "hub" / "backbones.py").is_file():
+                raise ValueError("编码器源码不完整。")
         if "calibration" in payload:
             calibration = resolve_manifest_asset(manifest_path, payload["calibration"])
             if sha256(calibration) != payload["calibration_sha256"]:
                 raise ValueError("校准集 SHA-256 不匹配。")
-        if not code.is_dir():
-            raise ValueError("编码器源码目录不存在。")
-        if not (code / "LICENSE.md").is_file():
-            raise ValueError("编码器源码缺少 LICENSE.md。")
-        if not (code / "dinov3" / "hub" / "backbones.py").is_file():
-            raise ValueError("编码器源码不完整。")
         class_count, feature_dim = _model_manifest_summary(checkpoint)
     except Exception as exc:  # noqa: BLE001 - status boundary
         return False, str(exc), None, None, None
     return True, f"{payload.get('display_name') or DINO_COMPONENT_DISPLAY_NAME} 已安装。", payload, class_count, feature_dim
+
+
+def _read_runtime_metadata(root: Path, resolved_runtime: str | None) -> str | None:
+    if resolved_runtime is None:
+        return None
+    meta_path = root / _RUNTIME_META_FILE
+    if not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("resolved_runtime_choice") != resolved_runtime:
+        return None
+    choice = meta.get("runtime_choice")
+    return choice if isinstance(choice, str) and choice in RUNTIME_CHOICES else None
+
+
+def _write_runtime_metadata(root: Path, runtime_choice: str, resolved_runtime: str) -> None:
+    meta_path = root / _RUNTIME_META_FILE
+    meta_path.write_text(
+        json.dumps(
+            {
+                "runtime_choice": runtime_choice,
+                "resolved_runtime_choice": resolved_runtime,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def dinov3_component_status(*, root: Path | None = None) -> dict:
@@ -137,6 +189,11 @@ def dinov3_component_status(*, root: Path | None = None) -> dict:
             manifest_name = _select_valid_manifest(component_root)[0].name
         except (OSError, ValueError):
             manifest_name = None
+    encoder_backend = (
+        str(payload.get("encoder_backend", "pytorch")) if healthy and payload else None
+    )
+    resolved_runtime = runtime_choice_from_encoder_backend(encoder_backend)
+    recorded_choice = _read_runtime_metadata(component_root, resolved_runtime)
     result = {
         "installed": installed,
         "healthy": healthy,
@@ -151,6 +208,9 @@ def dinov3_component_status(*, root: Path | None = None) -> dict:
         "feature_dim": feature_dim,
         "manifest": manifest_name,
         "message": message,
+        "encoder_backend": encoder_backend,
+        "runtime_choice": recorded_choice,
+        "resolved_runtime_choice": resolved_runtime,
     }
     return result
 
@@ -182,9 +242,19 @@ def install_dinov3_component(
     root: Path | None = None,
     distribution_client=None,
     seed_dir: Path | None = None,
+    runtime_choice: str | None = None,
+    resolved_runtime_choice: str | None = None,
     on_progress=None,
     on_event=None,
 ) -> dict:
+    validated_choice = (
+        validate_runtime_choice(runtime_choice) if runtime_choice is not None else None
+    )
+    resolved_runtime = (
+        validate_resolved_runtime(resolved_runtime_choice)
+        if resolved_runtime_choice is not None
+        else None
+    )
     component_root = _component_root(root)
     component_root.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
@@ -200,17 +270,41 @@ def install_dinov3_component(
                 else:
                     shutil.copy2(child, target)
         else:
+            if distribution_client is None and validated_choice is None:
+                validated_choice = "auto"
+            if validated_choice is not None and resolved_runtime is None:
+                resolved_runtime = resolve_runtime_choice(validated_choice)
             if distribution_client is None:
                 from .distribution import DinoV3DistributionClient
 
                 distribution_client = DinoV3DistributionClient(
                     cache_dir=component_root.parent / '.dinov3-download-cache',
-                    on_event=on_event)
-            distribution_client.download_tree("", staging, on_progress=on_progress)
+                    on_event=on_event,
+                    runtime=resolved_runtime)
+            if resolved_runtime is None:
+                distribution_client.download_tree("", staging, on_progress=on_progress)
+            else:
+                distribution_client.download_tree(
+                    "",
+                    staging,
+                    on_progress=on_progress,
+                    runtime=resolved_runtime,
+                )
 
-        healthy, message, _payload, _classes, _dim = _component_health(staging)
+        healthy, message, payload, _classes, _dim = _component_health(staging)
         if not healthy:
             raise RuntimeError(message)
+        actual_backend = str((payload or {}).get("encoder_backend", "pytorch"))
+        if seed_dir is None and resolved_runtime is not None:
+            expected_backend = expected_encoder_backend(resolved_runtime)
+            if actual_backend != expected_backend:
+                raise RuntimeError(
+                    f"下载的 DINOv3 组件 ({actual_backend}) 与目标运行时 ({resolved_runtime}) 不匹配。"
+                )
+        if validated_choice is not None:
+            actual_resolved = runtime_choice_from_encoder_backend(actual_backend)
+            if actual_resolved is not None:
+                _write_runtime_metadata(staging, validated_choice, actual_resolved)
 
         backup = component_root.with_name(component_root.name + ".old")
         if backup.exists():

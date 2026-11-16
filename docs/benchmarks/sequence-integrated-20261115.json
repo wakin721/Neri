@@ -1,0 +1,135 @@
+{
+  "baseline_commit": "ced18f357f7eaa384d54b9f2cfba427e739977fb",
+  "kind": "integrated-code verification on deployed classifier checkpoints and synthetic queries",
+  "query_count": 640,
+  "repeats": 3,
+  "classifiers": [
+    {
+      "manifest": "dinov3-ridge-within.neri.json",
+      "recipe": "production_dual",
+      "classes": 51,
+      "reference_events": 4718,
+      "old_predict_seconds": 0.15469580000171845,
+      "new_predict_seconds": 0.1338073999995686,
+      "speedup": 1.156107958171351,
+      "runs": [
+        [
+          0.15469580000171845,
+          0.15516179999940505,
+          0.14820789999976114
+        ],
+        [
+          0.13649989999976242,
+          0.1315135000004375,
+          0.1338073999995686
+        ]
+      ],
+      "decision_parity": {
+        "predictions": true,
+        "accepted": true,
+        "box_accepted": true,
+        "sequence_accepted": true,
+        "resolved_tracks": true
+      },
+      "cpu_evidence_bitwise_equal": true,
+      "cuda_feature_max_abs_error": 2.9802322387695312e-08,
+      "cuda_gate_score_max_abs_error": 9.493385646486274e-07
+    },
+    {
+      "manifest": "dinov3-experiment-local.neri.json",
+      "recipe": "experiment_full",
+      "classes": 45,
+      "reference_events": 4865,
+      "old_predict_seconds": 0.1837120000000141,
+      "new_predict_seconds": 0.11477569999988191,
+      "speedup": 1.6006175523233848,
+      "runs": [
+        [
+          0.22143009999854257,
+          0.1837120000000141,
+          0.17681790000096953
+        ],
+        [
+          0.11477569999988191,
+          0.1201669000001857,
+          0.11110519999965618
+        ]
+      ],
+      "decision_parity": {
+        "predictions": true,
+        "accepted": true,
+        "sequence_accepted": true,
+        "resolved_tracks": true
+      },
+      "cpu_evidence_bitwise_equal": true,
+      "cuda_feature_max_abs_error": 2.9802322387695312e-08,
+      "cuda_gate_score_max_abs_error": 1.4550344440422691e-06
+    }
+  ],
+  "adaptation": [
+    {
+      "rows": 1000,
+      "cpu_seconds": 0.05932129999928293,
+      "cuda_seconds": 0.003588899999158457,
+      "speedup": 16.5291036287422,
+      "includes_transfers": true,
+      "runs": [
+        [
+          0.06385790000058478,
+          0.05932129999928293,
+          0.05776519999926677
+        ],
+        [
+          0.0041947999998228624,
+          0.003516499999022926,
+          0.003588899999158457
+        ]
+      ]
+    },
+    {
+      "rows": 10000,
+      "cpu_seconds": 0.6560029000011127,
+      "cuda_seconds": 0.04244440000002214,
+      "speedup": 15.455581890679818,
+      "includes_transfers": true,
+      "runs": [
+        [
+          0.6438863000003039,
+          0.6560029000011127,
+          0.7169873999991978
+        ],
+        [
+          0.043566199999986566,
+          0.04244440000002214,
+          0.041418099999646074
+        ]
+      ]
+    }
+  ],
+  "seed": 20261115,
+  "environment": {
+    "python": "3.13.11",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "numpy": "2.5.3",
+    "cpu_blas_threads": 4,
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "cuda_dtype": "float32",
+    "cuda_matmul_precision": "highest",
+    "cuda_max_chunk": 512,
+    "cpu_chunk": 128
+  },
+  "source_sha256": {
+    "system\\dinov3\\history_acceleration.py": "b5406b907533463c6877990b2671d2bae0e75c6aa1a3ac1a36ed067b4798dafb",
+    "system\\dinov3\\processor.py": "2f5122ce0e27200ccf88acaa43bae772cc12f4b121ea86e40b806fa4df1c7ccf",
+    "system\\dinov3\\model.py": "0daade07f3236518724c665d95104bbfcc959c3726c8c99947c874b25ae0a78c",
+    "system\\dinov3\\experiment.py": "f2772b0410c38ed5e8ba75b0ca1d0b2488b0bc0577705e3ee132851584c41f41"
+  },
+  "validation": {
+    "pytest_passed": 258,
+    "cuda_oom_retry_and_cpu_fallback": true,
+    "cancel_propagation": true,
+    "optional_pytorch_import": true,
+    "ambient_fp16_disabled_and_precision_restored": true,
+    "batch_log_capture": true
+  }
+}

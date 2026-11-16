@@ -16,22 +16,24 @@ LOCAL_SCHEME = "neri-local-dinov3:"
 
 
 class LocalComponentOverlay:
-    def __init__(self, upstream, root: Path):
+    def __init__(self, upstream, root: Path, *, prefix: str = PREFIX):
         self.upstream = upstream
+        if prefix not in {PREFIX, PREFIX + '/cpu'}:
+            raise StorageError("invalid_local_component_prefix")
+        self.prefix = prefix
         # Resolve once: a release change requires restarting the service, so
         # outstanding capabilities cannot silently switch to another release.
         self.root = Path(root).resolve(strict=True)
         if not self.root.is_dir():
             raise StorageError("invalid_local_component_root")
 
-    @staticmethod
-    def _is_local(path: str) -> bool:
-        return path == PREFIX or path.startswith(PREFIX + "/")
+    def _is_local(self, path: str) -> bool:
+        return path == self.prefix or path.startswith(self.prefix + "/")
 
     def _path(self, remote: str) -> Path:
         if not self._is_local(remote) or "\\" in remote or "\x00" in remote:
             raise StorageError("invalid_local_component_path")
-        relative = remote[len(PREFIX) + 1:] if remote != PREFIX else ""
+        relative = remote[len(self.prefix) + 1:] if remote != self.prefix else ""
         parts = relative.split("/") if relative else []
         if any(part in {"", ".", ".."} or ":" in part for part in parts):
             raise StorageError("invalid_local_component_path")
@@ -72,7 +74,8 @@ class LocalComponentOverlay:
         return UpstreamLink(LOCAL_SCHEME + quote(path, safe="/"), {})
 
     def iter_bytes(self, link: UpstreamLink, range_header: str | None = None):
-        if not link.url.startswith(LOCAL_SCHEME):
+        if (not link.url.startswith(LOCAL_SCHEME)
+                or not self._is_local(unquote(link.url[len(LOCAL_SCHEME):]))):
             yield from self.upstream.iter_bytes(link, range_header=range_header)
             return
         target = self._path(unquote(link.url[len(LOCAL_SCHEME):]))

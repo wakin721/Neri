@@ -28,6 +28,10 @@ class ModelLayout:
     def detect_bundled(self) -> Path:
         return self.root / 'detect' / 'bundled'
 
+    @property
+    def cls_bundled(self) -> Path:
+        return self.root / 'cls' / 'bundled'
+
 
 @dataclass(frozen=True)
 class MigrationReport:
@@ -131,6 +135,7 @@ def _build_layout(resource_root: Path) -> ModelLayout:
 def _ensure_layout_directories(layout: ModelLayout) -> None:
     for directory in (
         layout.detect_bundled,
+        layout.cls_bundled,
         layout.detect_user,
         layout.detect_sync,
         layout.cls_user,

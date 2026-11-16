@@ -39,13 +39,45 @@ class ImageProcessor:
         if legacy is not None:
             return legacy
 
-        from system.image_processor_legacy import ImageProcessor as LegacyImageProcessor
+        from pathlib import Path
+        if self.model_path and Path(self.model_path).suffix.lower() in {".tflite", ".litert"}:
+            from .litert_image_processor import LiteRtImageProcessor as LegacyImageProcessor
+        else:
+            from system.image_processor_legacy import ImageProcessor as LegacyImageProcessor
 
         legacy = LegacyImageProcessor(self.model_path)
+        legacy._image_reader = self._read_image
         self._legacy = legacy
         self.model = legacy.model
         self.cls_model = legacy.cls_model
         return legacy
+
+    @staticmethod
+    def _crop_single_box(args):
+        """Keep the calibrated 10% expansion and square padding without torch."""
+        import cv2
+        from system.host_memory import is_host_memory_error
+        result_index, box_index, box, image = args
+        try:
+            height, width = image.shape[:2]
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            pad_w, pad_h = int((x2-x1)*.1), int((y2-y1)*.1)
+            left, top = max(0,x1-pad_w), max(0,y1-pad_h)
+            right, bottom = min(width,x2+pad_w), min(height,y2+pad_h)
+            if right <= left or bottom <= top:
+                return None
+            crop = image[top:bottom,left:right]
+            ch, cw = crop.shape[:2]
+            size = max(ch,cw)
+            pt, pl = (size-ch)//2, (size-cw)//2
+            if ch != cw:
+                crop = cv2.copyMakeBorder(crop,pt,size-ch-pt,pl,size-cw-pl,
+                                         cv2.BORDER_CONSTANT,value=(114,114,114))
+            return result_index, box_index, crop
+        except Exception as exc:
+            if is_host_memory_error(exc):
+                raise
+            return None
 
     def __getattr__(self, name: str):
         if name == "_legacy":
@@ -71,6 +103,15 @@ class ImageProcessor:
         legacy = self._ensure_legacy()
         legacy._photo_memory_guard = self._photo_memory_guard
         return legacy.preload_batch_data(img_paths)
+
+    def _read_image(self, path):
+        if self._dinov3_collector is not None:
+            from system.dinov3.processor import read_image_with_digest
+
+            return read_image_with_digest(path, self._dinov3_collector)
+        import cv2
+
+        return cv2.imread(path)
 
     def release_batch_images(self):
         if self._legacy is not None:

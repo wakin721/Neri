@@ -128,3 +128,69 @@ def test_legacy_dinov2_still_has_its_own_manifest_and_capabilities(tmp_path):
     assert result['sha256'] == hashlib.sha256(b'old').hexdigest()
     with pytest.raises(DistributionError):
         service.dinov3_direct(payload['manifest_id'], entry['path'], entry['sha256'])
+
+
+def test_cpu_and_gpu_releases_have_independent_manifests_and_capabilities(tmp_path):
+    from fastapi.testclient import TestClient
+
+    gpu = tmp_path / 'gpu'
+    cpu = tmp_path / 'cpu'
+    gpu.mkdir()
+    cpu.mkdir()
+    (gpu / 'encoder.pth').write_bytes(b'gpu-weights')
+    (cpu / 'encoder.tflite').write_bytes(b'cpu-weights')
+    config = DistributionConfig(tmp_path / 'state', openlist_token='test',
+                                dinov3_root=gpu, dinov3_cpu_root=cpu)
+    with TestClient(create_app(config)) as client:
+        gpu_manifest = client.get('/v1/dinov3/manifest').json()
+        cpu_manifest = client.get('/v1/dinov3/manifest?runtime=cpu').json()
+        assert [e['path'] for e in gpu_manifest['files']] == ['DINOv3/encoder.pth']
+        assert [e['path'] for e in cpu_manifest['files']] == ['DINOv3/cpu/encoder.tflite']
+        assert client.get('/v1/dinov3/manifest?runtime=unknown').status_code == 422
+        # Fetching the other variant must not invalidate outstanding capabilities.
+        for snapshot, expected in ((gpu_manifest, b'gpu-weights'), (cpu_manifest, b'cpu-weights')):
+            entry = snapshot['files'][0]
+            response = client.post('/v1/dinov3/direct', json={
+                'manifest_id': snapshot['manifest_id'], 'path': entry['path'],
+                'sha256': entry['sha256']})
+            assert response.status_code == 200
+            capability = response.json()
+            assert capability['direct_url'] is None
+            assert client.get('/v1/proxy/' + capability['proxy_token']).content == expected
+        entry = cpu_manifest['files'][0]
+        assert client.post('/v1/dinov3/direct', json={
+            'manifest_id': gpu_manifest['manifest_id'], 'path': entry['path'],
+            'sha256': entry['sha256']}).status_code == 409
+
+
+def test_cpu_cloud_staging_checks_all_assets_before_publishing(tmp_path):
+    from scripts.publish_dinov3_litert_cloud import prepare, verify_release
+
+    assets = tmp_path / 'assets'
+    metadata = tmp_path / 'metadata'
+    assets.mkdir()
+    metadata.mkdir()
+    inventory = []
+    for name in ('encoder.tflite', 'model.neri-model', 'calibration.npz'):
+        data = ('verified-' + name).encode()
+        (assets / name).write_bytes(data)
+        inventory.append(dict(path='assets/' + name, size=len(data),
+                              sha256=hashlib.sha256(data).hexdigest()))
+    payload = dict(encoder_backend='litert', display_name='Neri1.2preview·LiteRT',
+                   checkpoint='assets/model.neri-model', encoder_weights='assets/encoder.tflite',
+                   calibration='assets/calibration.npz')
+    index = metadata / 'assets.json'
+    index.write_text(json.dumps(dict(manifest=payload, assets=inventory)), encoding='utf8')
+    (metadata / 'Neri1.2preview-litert.LICENSE.md').write_text('license')
+    release = tmp_path / 'published'
+    prepare(index, assets, release)
+    receipt = verify_release(release)
+    assert receipt['name'] == 'Neri1.2preview·LiteRT'
+    assert json.loads((release / 'Neri1.2preview.neri.json').read_text('utf8')) == payload
+    (assets / 'calibration.npz').write_bytes(b'corrupt')
+    with pytest.raises(ValueError, match='checksum'):
+        prepare(index, assets, tmp_path / 'failed')
+    assert not (tmp_path / 'failed').exists()
+    (release / 'unexpected.bin').write_bytes(b'not in receipt')
+    with pytest.raises(ValueError, match='inventory'):
+        verify_release(release)

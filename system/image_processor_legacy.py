@@ -275,7 +275,8 @@ class ImageProcessor:
         idx, path = args
         try:
             # 这里的 self._preprocess_image 需要确保能被访问
-            img = cv2.imread(path)
+            reader = getattr(self, "_image_reader", cv2.imread)
+            img = reader(path)
             if img is None:
                 return None
             # 预处理 (LAB增强等)

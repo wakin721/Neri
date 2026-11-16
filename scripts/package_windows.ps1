@@ -43,8 +43,7 @@ $engineDll = Join-Path $package "flutter_windows.dll"
 & python "scripts\flutter_accessibility_hotfix.py" $engineDll $engineDll
 if ($LASTEXITCODE -ne 0) { throw "Flutter accessibility hotfix failed; review the engine version/hash." }
 Copy-Item "system" $package -Recurse -Force
-# Build a clean resource tree; local optional classifiers/encoders never enter
-# the portable lite artifact, even when packaging from a developer checkout.
+# Package MDV6 bundled LiteRT detector only; Neri1.2preview downloads on demand via NeriCloud.
 & python "scripts\package_litert_resources.py" --source "res" --destination (Join-Path $package "res") --require-bundled-detector
 if ($LASTEXITCODE -ne 0) { throw "LiteRT-only resource packaging failed." }
 Copy-Item "requirements.txt" $package -Force
@@ -55,6 +54,7 @@ $requiredModelPaths = @(
   "res\model\detect\bundled",
   "res\model\detect\user",
   "res\model\detect\sync",
+  "res\model\cls\bundled",
   "res\model\cls\user",
   "res\model\cls\sync"
 )
@@ -102,5 +102,10 @@ if (Test-Path $generatedExe) {
 
 & "$toolkit\python.exe" -I -c "import importlib.util, sys; sys.path.insert(0, r'$package'); assert importlib.util.find_spec('torch') is None; from ai_edge_litert.interpreter import Interpreter; import cv2, fastapi, lap, openpyxl, pandas, PIL, pydantic, pypinyin, uvicorn; import system.model_sync.manager, system.model_sync.catalog, system.backend.dinov3_environment"
 if ($LASTEXITCODE -ne 0) { throw "Packaged Python import check failed." }
-& "$toolkit\python.exe" "scripts\package_litert_resources.py" --verify (Join-Path $package "res") --require-bundled-detector
+& "$toolkit\python.exe" -E -s "scripts\package_litert_resources.py" --verify (Join-Path $package "res") --require-bundled-detector
 if ($LASTEXITCODE -ne 0) { throw "Packaged model policy verification failed." }
+& "$toolkit\python.exe" -I "scripts\verify_bundled_litert.py" --application-root $package
+if ($LASTEXITCODE -ne 0) { throw "Bundled LiteRT detector verification failed." }
+
+& "$toolkit\python.exe" -I "scripts\verify_python_isolation.py" --application-root $package
+if ($LASTEXITCODE -ne 0) { throw "Packaged Python isolation check failed." }

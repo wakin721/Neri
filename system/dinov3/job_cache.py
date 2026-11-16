@@ -50,6 +50,9 @@ class DinoV3JobCache:
                 "path TEXT PRIMARY KEY, stamp TEXT NOT NULL, result TEXT NOT NULL, "
                 "crops TEXT NOT NULL, features BLOB NOT NULL)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(photos)")}
+            if "content_digest" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN content_digest TEXT")
             previous = conn.execute("SELECT signature FROM metadata").fetchone()
             if previous is None or previous[0] != signature:
                 conn.execute("DELETE FROM photos")
@@ -96,11 +99,13 @@ class DinoV3JobCache:
                 metadata = [dict(box_index=c.box_index, bbox=list(c.bbox),
                                  detection_confidence=c.detection_confidence) for c in crops]
                 rows.append((key, json.dumps(stamp), item.model_dump_json(),
-                             json.dumps(metadata), buffer.getvalue()))
+                             json.dumps(metadata), buffer.getvalue(), collector.image_digest(item.path, stamp)))
             except (OSError, ValueError, TypeError):
                 logger.warning("Cannot checkpoint DINOv3 photo %s", item.path, exc_info=True)
         with closing(sqlite3.connect(self.path)) as conn, conn:
-            conn.executemany("INSERT OR REPLACE INTO photos VALUES(?,?,?,?,?)", rows)
+            conn.executemany(
+                "INSERT OR REPLACE INTO photos(path,stamp,result,crops,features,content_digest) VALUES(?,?,?,?,?,?)", rows,
+            )
 
     def restore(self, files, collector: DinoV3CropCollector, *, progress_fn=None):
         from system.backend.models import DetectionItem
@@ -113,7 +118,7 @@ class DinoV3JobCache:
                     progress_fn(index, len(files))
                 key = _path_key(path)
                 row = conn.execute(
-                    "SELECT stamp,result,crops,features FROM photos WHERE path=?", (key,),
+                    "SELECT stamp,result,crops,features,content_digest FROM photos WHERE path=?", (key,),
                 ).fetchone()
                 if row is None:
                     continue
@@ -136,6 +141,8 @@ class DinoV3JobCache:
                     logger.warning("Ignoring invalid DINOv3 photo checkpoint: %s", path)
                     continue
                 collector.record_crops(crops)
+                if row[4]:
+                    collector.record_image_digest(path, row[4], json.loads(row[0]))
                 restored.append(item)
             with conn:
                 conn.executemany("DELETE FROM photos WHERE path=?", invalid)

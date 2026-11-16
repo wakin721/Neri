@@ -63,7 +63,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in bundledModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (userModels.isNotEmpty) ...[
@@ -75,7 +75,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in userModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (cloudModels.isNotEmpty) ...[
@@ -87,7 +87,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in cloudModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
   ];
@@ -460,7 +460,9 @@ class _CreateJobCard extends StatelessWidget {
                   (settings?.missingYoloDependencies.isNotEmpty ?? false))) ...[
             const SizedBox(height: 8),
             Text(
-              '检测依赖不完整，当前使用 LiteRT 本地探测（动物 / 人 / 车辆，无物种分类）。',
+              classificationInfo?.encoderBackend == 'litert'
+                  ? '使用内置 LiteRT 模型在本机进行目标探测与物种分类。'
+                  : '当前使用 LiteRT 本地探测；选择内置分类模型可启用物种识别。',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

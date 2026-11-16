@@ -15,6 +15,7 @@ class DistributionConfig:
     daily_proxy_ip_bytes: int = 2 * 1024**3
     daily_proxy_total_bytes: int = 20 * 1024**3
     dinov3_root: Path | None = None
+    dinov3_cpu_root: Path | None = None
 
     @classmethod
     def from_env(cls):
@@ -28,4 +29,5 @@ class DistributionConfig:
             daily_proxy_ip_bytes=int(os.environ.get("NERI_MODEL_PROXY_IP_BYTES", str(2 * 1024**3))),
             daily_proxy_total_bytes=int(os.environ.get("NERI_MODEL_PROXY_TOTAL_BYTES", str(20 * 1024**3))),
             dinov3_root=(Path(os.environ["NERI_DINOV3_ROOT"]) if os.environ.get("NERI_DINOV3_ROOT") else None),
+            dinov3_cpu_root=(Path(os.environ["NERI_DINOV3_CPU_ROOT"]) if os.environ.get("NERI_DINOV3_CPU_ROOT") else None),
         )

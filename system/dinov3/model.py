@@ -656,6 +656,22 @@ class DinoV3RidgeWithinModel:
         b, el, ec = self.within_updater.bank()
         return score_cpu(whitened, b, el, ec, self.classes_)
 
+    def _prediction_evidence(self, raw_features, adapted_features=None):
+        """Share frozen geometry and reference bank across prediction heads.
+
+        Radial evidence uses the pre-normalization FP64 projection. Within and
+        Ridge retain the original float32 unit projection, and Ridge still
+        promotes it to float64 when applying its coefficients.
+        """
+        query = adapted_features if adapted_features is not None else raw_features
+        projected = (np.asarray(query, dtype=np.float64) - self.origin_) @ self.transform_
+        norm = np.linalg.norm(projected, axis=1)
+        whitened = unit(projected)
+        bank, labels, cameras = self.within_updater.bank()
+        within = score_cpu(whitened, bank, labels, cameras, self.classes_)
+        ridge = self.ridge_head.scores(whitened)
+        return within, ridge, norm, labels, cameras
+
     def calibrate(
         self,
         raw_features: np.ndarray,
@@ -866,13 +882,11 @@ class DinoV3RidgeWithinModel:
             from .experiment import predict
             return predict(self, raw, cameras_arr, sequences_arr, sites_arr, contents_arr, adapted_features)
 
-        within_mat = self._compute_within_scores(raw, adapted_features=adapted_features)
+        within_mat, ridge_mat, norm, _, _ = self._prediction_evidence(raw, adapted_features)
         raw_top = np.sort(within_mat, axis=1)[:, -2:]
         margin = 2 * raw_top[:, 1] - raw_top[:, 0]
 
         query_feat = adapted_features if adapted_features is not None else raw
-        z = (np.asarray(query_feat, dtype=np.float64) - self.origin_) @ self.transform_
-        norm = np.linalg.norm(z, axis=1)
 
         box_m_meta = self._calibration.get("box_margin", self._calibration["margin"])
         box_r_meta = self._calibration.get("box_radial", self._calibration["radial"])
@@ -891,7 +905,6 @@ class DinoV3RidgeWithinModel:
             query_feat, cameras_arr, sequences_arr, contents_arr, box_accepted=box_accepted
         )
 
-        ridge_mat = self.scores(raw, adapted_features=adapted_features)
         fused_scores = adaptive_sequence_fuse(
             ridge_mat,
             sites_arr,

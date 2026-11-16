@@ -17,6 +17,12 @@ class ValidationSelectionModifiers {
   bool get rangeSelection => _pressed.any(_rangeKeys.contains);
   bool get toggleSelection => _pressed.any(_toggleKeys.contains);
 
+  void synchronize(Iterable<LogicalKeyboardKey> pressedKeys) {
+    _pressed
+      ..clear()
+      ..addAll(pressedKeys.where(_isSelectionModifier));
+  }
+
   bool press(LogicalKeyboardKey key) {
     if (!_isSelectionModifier(key)) return false;
     _pressed.add(key);

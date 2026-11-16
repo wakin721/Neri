@@ -37,11 +37,25 @@ class _Superseded(RuntimeError):
 
 
 def _key(path) -> str:
+    if isinstance(path,str) and path.startswith('family:'):
+        return path
+    from system.dinov3.shared_learning import family_descriptor
+    descriptor=family_descriptor(path)
+    if descriptor:
+        return descriptor['key']
     return str(Path(path).expanduser().resolve()).replace("\\", "/").casefold()
 
 
+def _path_key(path):
+    return str(Path(path).expanduser().resolve()).replace('\\','/').casefold()
+
+
+def _state_root():
+    return getattr(_CONTEXT,'root',None) or default_state_root()
+
+
 def _connect():
-    root = getattr(_CONTEXT, "root", None) or default_state_root()
+    root = _state_root()
     root.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(root / "dinov3_learning.sqlite3"), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -56,11 +70,164 @@ def _connect():
         CREATE TABLE IF NOT EXISTS learning_runs(
           model TEXT PRIMARY KEY, state TEXT NOT NULL, message TEXT NOT NULL,
           last_update TEXT, last_error TEXT);
+        CREATE TABLE IF NOT EXISTS shared_learning_aliases(
+          alias TEXT PRIMARY KEY, family TEXT NOT NULL, checkpoint_sha256 TEXT NOT NULL,
+          imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS shared_learning_committed(
+          model TEXT NOT NULL, observation TEXT NOT NULL, data TEXT NOT NULL,
+          operation TEXT NOT NULL, feature BLOB, PRIMARY KEY(model,observation));
     """)
     if "feature" not in {row[1] for row in conn.execute("PRAGMA table_info(samples)")}:
         conn.execute("ALTER TABLE samples ADD COLUMN feature BLOB")
         conn.commit()
     return conn
+
+
+def _snapshot_row(row,key):
+    if row is None:
+        return None
+    snapshot=dict(row)
+    snapshot['model']=key
+    snapshot['feature']=bytes(snapshot['feature']).hex() if snapshot.get('feature') is not None else None
+    return json.dumps(snapshot,ensure_ascii=False)
+
+
+def _import_alias(conn,source,payload,target,current,descriptor):
+    """Copy legacy rows and undo chains; originals are retained as backups."""
+    from system.dinov3 import shared_learning as shared
+    from system.dinov3.runtime import resolve_manifest_asset
+    from system.dinov3.encoder import sha256
+    alias=_path_key(source)
+    key=descriptor['key']
+    receipt=conn.execute('SELECT family FROM shared_learning_aliases WHERE alias=?',(alias,)).fetchone()
+    if receipt:
+        if receipt['family']!=key:
+            raise ValueError('模型路径曾绑定另一套学习档案，未合并。')
+        return current
+    checkpoint=resolve_manifest_asset(source,payload['checkpoint'])
+    if sha256(checkpoint)!=payload['checkpoint_sha256']:
+        raise ValueError('旧模型校验失败，未迁移学习记录。')
+    calibration=resolve_manifest_asset(source,payload['calibration'])
+    if sha256(calibration)!=payload['calibration_sha256']:
+        raise ValueError('旧模型校准包校验失败，未迁移。')
+    if shared.calibration_identity(calibration)!=current['learning_base_calibration_id']:
+        raise ValueError('两版模型的校准数据不同，无法自动合并；原模型及记录已保留。')
+    rows=conn.execute('SELECT * FROM samples WHERE model=? ORDER BY observation',(alias,)).fetchall()
+    learned=shared.checkpoint_info(source,payload).get('metadata',{}).get('human_learning_samples',{})
+    recorded={json.loads(row['data']).get('sample_id') for row in rows}
+    if set(learned)-recorded:
+        raise ValueError('旧模型包含缺少补图记录的已学样本，无法安全合并；原模型已保留。')
+    current=shared.register_encoder(source,payload,target,current)
+    previous={}
+    for row in rows:
+        existing=conn.execute('SELECT * FROM samples WHERE model=? AND observation=?',(key,row['observation'])).fetchone()
+        if existing is not None:
+            left,right=json.loads(existing['data']),json.loads(row['data'])
+            fields=('file_path','bbox','species','size','mtime_ns')
+            if any(left.get(field)!=right.get(field) for field in fields):
+                raise ValueError('CPU/GPU 对同一检测框存在不同校验，未自动覆盖；请先统一标签。')
+            if existing['operation']==row['operation']:
+                continue
+            previous[row['observation']]=_snapshot_row(existing,key)
+        feature=row['feature'] if row['feature'] is not None else existing['feature'] if existing is not None else None
+        conn.execute('INSERT OR REPLACE INTO samples(model,observation,data,operation,applied,feature) VALUES(?,?,?,?,0,?)',
+                     (key,row['observation'],row['data'],row['operation'],feature))
+        # Keep the last published support separately from a pending correction.
+        # This also makes "discard pending" preserve existing learned species.
+        data=json.loads(row['data'])
+        committed=dict(row)
+        if data.get('sample_id') in learned:
+            for operation in conn.execute('SELECT previous FROM operations WHERE model=? AND observation=? AND previous IS NOT NULL ORDER BY rowid DESC',
+                                          (alias,row['observation'])).fetchall():
+                candidate=json.loads(operation['previous'])
+                old_data=json.loads(candidate['data'])
+                if old_data.get('sample_id') in learned and old_data.get('species')==learned[old_data['sample_id']]:
+                    committed=candidate
+                    committed['feature']=bytes.fromhex(candidate['feature']) if candidate.get('feature') else None
+                    data=old_data
+                    break
+            data['species']=learned[data['sample_id']]
+            conn.execute('INSERT OR REPLACE INTO shared_learning_committed VALUES(?,?,?,?,?)',
+                         (key,row['observation'],json.dumps(data,ensure_ascii=False),committed['operation'],committed['feature']))
+    for row in conn.execute('SELECT * FROM operations WHERE model=? ORDER BY rowid',(alias,)).fetchall():
+        old=row['previous']
+        if old is not None:
+            value=json.loads(old)
+            value['model']=key
+            old=json.dumps(value,ensure_ascii=False)
+        elif row['observation'] in previous:
+            old=previous[row['observation']]
+        conn.execute('INSERT OR IGNORE INTO operations VALUES(?,?,?,?)',(key,row['observation'],row['operation'],old))
+    conn.execute('INSERT INTO shared_learning_aliases VALUES(?,?,?,?)',
+                 (alias,key,payload['checkpoint_sha256'],datetime.now(timezone.utc).isoformat()))
+    return current
+
+
+def prepare_shared_learning(model_path,payload=None,*,connection=None):
+    """Return a family working manifest while preserving the selected encoder."""
+    from system.dinov3 import shared_learning as shared
+    from system.dinov3.runtime import read_manifest
+    source=Path(model_path).expanduser().resolve()
+    descriptor=shared.family_descriptor(source,payload)
+    if descriptor is None:
+        return source,payload
+    target=shared.family_manifest(_state_root(),descriptor['id'])
+    if source==target.resolve():
+        return source,payload if payload is not None else read_manifest(source)
+    payload=payload if payload is not None else read_manifest(source)
+    with (nullcontext(connection) if connection is not None else _write_lock()) as conn:
+        candidates=[(source,payload)]
+        registered=conn.execute('SELECT 1 FROM shared_learning_aliases WHERE family=? LIMIT 1',(descriptor['key'],)).fetchone()
+        if not target.is_file() or registered is None:
+            for peer in shared.peers(source,descriptor['id']):
+                candidates.append((peer,read_manifest(peer)))
+            # Upgrades may live in another folder. The durable feedback DB
+            # knows the previous installation paths even when the new catalog
+            # only lists the current installation's resources.
+            legacy_paths={row[0] for row in conn.execute(
+                'SELECT model FROM samples UNION SELECT model FROM operations UNION SELECT model FROM learning_runs')}
+            known={_path_key(alias) for alias,_ in candidates}
+            for legacy in sorted(legacy_paths):
+                if legacy.startswith('family:') or legacy in known:
+                    continue
+                candidate=Path(legacy)
+                if candidate.is_file() and shared.family_id(candidate)==descriptor['id']:
+                    candidates.append((candidate,read_manifest(candidate)))
+                    known.add(legacy)
+        primary=max(candidates,key=lambda pair:len(shared.checkpoint_info(*pair).get('metadata',{}).get('human_learning_samples',{})))
+        target,current,_created=shared.initialize(*primary,descriptor,_state_root())
+        # When duplicate confirmations agree, the explicitly selected legacy
+        # deployment becomes the current operation and its undo restores the
+        # previously imported confirmation rather than erasing both histories.
+        for alias,alias_payload in [*candidates[1:],candidates[0]]:
+            current=_import_alias(conn,alias,alias_payload,target,current,descriptor)
+        current=shared.register_encoder(source,payload,target,current)
+        if not target.is_file() or json.loads(target.read_text('utf8'))!=current:
+            shared.atomic_manifest(target,current)
+    return target,current
+
+
+def _same_publication(left,right):
+    if left.get('learning_family_id'):
+        # Choosing an encoder changes no learned evidence. UI polling and a
+        # CPU/GPU switch must not repeatedly supersede an otherwise valid fit.
+        keys=('learning_family_id','checkpoint_sha256','calibration_sha256','learning_base_sha256')
+        return all(left.get(key)==right.get(key) for key in keys)
+    return left==right
+
+
+def resolve_learning_snapshot(model_path,payload):
+    """Finish a one-time legacy merge before inference sees the shared head."""
+    manifest,current=prepare_shared_learning(model_path,payload)
+    if current is None or not current.get('learning_family_id'):
+        return manifest,current or payload
+    with closing(_connect()) as conn:
+        pending=conn.execute('SELECT 1 FROM samples WHERE model=? AND applied=0 LIMIT 1',(_key(manifest),)).fetchone()
+    if pending is not None:
+        update_model(model_path)
+    # Another model can select a backend during a coalesced update. Reapply the
+    # caller's choice; immutable generation files make this snapshot safe to use.
+    return prepare_shared_learning(model_path,payload)
 
 
 @contextmanager
@@ -83,6 +250,7 @@ def stage_feedback(model_path, input_path, file_path, box, action, operation_id,
 
     if not model_path:
         return
+    prepare_shared_learning(model_path,connection=connection)
     file_path = Path(file_path).resolve()
     bbox = _box_bbox(box)
     observation = str(box.get("observation_id") or "")
@@ -123,6 +291,8 @@ def stage_feedback(model_path, input_path, file_path, box, action, operation_id,
             if feature is not None and old_data.get("sample_id"):
                 data["sample_id"] = old_data["sample_id"]
                 data["encoder_sha256"] = old_data.get("encoder_sha256")
+                if old_data.get('encoder_litert_sha256'):
+                    data['encoder_litert_sha256']=old_data['encoder_litert_sha256']
             snapshot = dict(old)
             snapshot["feature"] = bytes(snapshot["feature"]).hex() if snapshot["feature"] is not None else None
             previous = json.dumps(snapshot, ensure_ascii=False)
@@ -141,6 +311,7 @@ def stage_feedback(model_path, input_path, file_path, box, action, operation_id,
 
 def revert_staged_feedback(model_path, operation_id):
     """Undo pending supplements alongside annotation undo; never pretend to untrain."""
+    prepare_shared_learning(model_path)
     with _write_lock() as conn:
         rows = conn.execute("SELECT * FROM operations WHERE model=? AND operation=?",
                             (_key(model_path), operation_id)).fetchall()
@@ -168,6 +339,7 @@ def revert_staged_feedback(model_path, operation_id):
 def reconcile_image_samples(model_path, input_path, file_path, observation_ids, operation_id, *, connection):
     """Withdraw this image's old crops if re-detection removed or replaced them."""
     source = str(Path(file_path).resolve())
+    prepare_shared_learning(model_path,connection=connection)
     rows = connection.execute(
         "SELECT observation,data FROM samples WHERE model=? AND json_extract(data,'$.file_path')=?",
         (_key(model_path), source),
@@ -191,6 +363,7 @@ def _load_model(path):
 
     manifest = Path(path).expanduser().resolve()
     payload = read_manifest(manifest)
+    manifest,payload=prepare_shared_learning(manifest,payload)
     checkpoint = resolve_manifest_asset(manifest, payload["checkpoint"])
     if sha256(checkpoint) != payload["checkpoint_sha256"]:
         raise ValueError("模型校验失败，未更新。")
@@ -253,6 +426,7 @@ def learning_status(model_path):
 
     manifest = Path(model_path).expanduser().resolve()
     payload = read_manifest(manifest)
+    manifest,payload=prepare_shared_learning(manifest,payload)
     with closing(_connect()) as conn:
         rows = conn.execute("SELECT data FROM samples WHERE model=? AND applied=0", (_key(manifest),)).fetchall()
         run = conn.execute("SELECT * FROM learning_runs WHERE model=?", (_key(manifest),)).fetchone()
@@ -303,6 +477,33 @@ def learning_status(model_path):
 
 def discard_pending(model_path):
     """Clear staged supports without changing ecological labels or learned data."""
+    prepare_shared_learning(model_path)
+    if _key(model_path).startswith('family:'):
+        key=_key(model_path)
+        with _write_lock() as conn:
+            pending=conn.execute('SELECT * FROM samples WHERE model=? AND applied=0',(key,)).fetchall()
+            for row in pending:
+                saved=conn.execute('SELECT * FROM shared_learning_committed WHERE model=? AND observation=?',
+                                   (key,row['observation'])).fetchone()
+                if saved is None:
+                    conn.execute('DELETE FROM operations WHERE model=? AND observation=?',(key,row['observation']))
+                    conn.execute('DELETE FROM samples WHERE model=? AND observation=?',(key,row['observation']))
+                    continue
+                keep=set()
+                operation_id=saved['operation']
+                while operation_id and operation_id not in keep:
+                    keep.add(operation_id)
+                    operation=conn.execute('SELECT previous FROM operations WHERE model=? AND observation=? AND operation=?',
+                                           (key,row['observation'],operation_id)).fetchone()
+                    operation_id=json.loads(operation['previous'])['operation'] if operation and operation['previous'] else None
+                for operation in conn.execute('SELECT operation FROM operations WHERE model=? AND observation=?',(key,row['observation'])).fetchall():
+                    if operation['operation'] not in keep:
+                        conn.execute('DELETE FROM operations WHERE model=? AND observation=? AND operation=?',
+                                     (key,row['observation'],operation['operation']))
+                conn.execute('INSERT OR IGNORE INTO operations VALUES(?,?,?,NULL)',(key,row['observation'],saved['operation']))
+                conn.execute('INSERT OR REPLACE INTO samples(model,observation,data,operation,applied,feature) VALUES(?,?,?,?,1,?)',
+                             (key,row['observation'],saved['data'],saved['operation'],saved['feature']))
+        return learning_status(model_path)
     with _write_lock() as conn:
         key = _key(model_path)
         conn.execute("DELETE FROM operations WHERE model=? AND observation IN "
@@ -314,10 +515,12 @@ def discard_pending(model_path):
 def import_calibration(model_path, calibration_path):
     from system.dinov3.deployment import publish_model
 
+    manifest, payload, model = _load_model(model_path)
+    data = _read_calibration(calibration_path, payload["encoder_sha256"])
+    _recalibrate(model, data)
     with _write_lock():
-        manifest, payload, model = _load_model(model_path)
-        data = _read_calibration(calibration_path, payload["encoder_sha256"])
-        _recalibrate(model, data)
+        if not _same_publication(json.loads(manifest.read_bytes()),payload):
+            raise ValueError('校准期间学习成果已更新，请重试导入；当前模型已保留。')
         publish_model(model, manifest, existing_manifest=payload,
                       display_name=model_display_name(payload), calibration_data=data)
     schedule_learning(model_path)
@@ -355,11 +558,13 @@ def _load_crop(data):
 
 def update_model(model_path):
     from system.dinov3.deployment import publish_model
-    from system.dinov3.encoder import DinoV3Encoder, sha256
-    from system.dinov3.runtime import resolve_manifest_asset
+    from system.dinov3.encoder import sha256
+    from system.dinov3.runtime import load_manifest_encoder, resolve_manifest_asset
+    from system.dinov3.shared_learning import encoder_compatible
     from threadpoolctl import threadpool_limits
 
     from system.dinov3.model import DinoV3RidgeWithinModel
+    requested_model_path=str(Path(model_path).expanduser().resolve())
 
     # Heavy encoding and calibration happen outside the annotation transaction.
     # Before publishing, compare the snapshot again so a correction can never
@@ -367,9 +572,12 @@ def update_model(model_path):
     with _UPDATE_LOCK, threadpool_limits(limits=4):
         manifest, payload, current_model = _load_model(model_path)
         manifest_snapshot = manifest.read_bytes()
-        if json.loads(manifest_snapshot) != payload:
+        if not _same_publication(json.loads(manifest_snapshot),payload):
             return dict(updated_count=0, superseded=True)
         with _write_lock() as conn:
+            if payload.get('learning_family_id'):
+                conn.execute('INSERT OR IGNORE INTO samples(model,observation,data,operation,applied,feature) '
+                    'SELECT model,observation,data,operation,1,feature FROM shared_learning_committed WHERE model=?',(_key(manifest),))
             rows = conn.execute("SELECT * FROM samples WHERE model=? ORDER BY observation", (_key(manifest),)).fetchall()
         pending = [row for row in rows if not row["applied"]]
         if not pending:
@@ -386,6 +594,13 @@ def update_model(model_path):
                 raise ValueError("学习基础模型校验失败。")
             model = DinoV3RidgeWithinModel.load(base_path)
         legacy_applied = dict(model.metadata.get("human_learning_samples", {}))
+        if payload.get('learning_family_id'):
+            recorded={json.loads(row['data']).get('sample_id') for row in rows}
+            with closing(_connect()) as conn:
+                recorded.update(json.loads(row['data']).get('sample_id') for row in conn.execute(
+                    'SELECT data FROM shared_learning_committed WHERE model=?',(_key(manifest),)))
+            if set(previous_samples)-recorded-set(legacy_applied):
+                raise ValueError('共享档案缺少已学样本记录，保留当前模型并停止更新，避免丢失学习成果。')
         unique = {}
         vectors = {}
         calibration_contents = {str(c).split(":")[0] for key in ("contents", "source_contents") for c in cal.get(key, [])}
@@ -395,7 +610,8 @@ def update_model(model_path):
             prepared[row["observation"]] = data
             if not data["species"]:
                 continue
-            if row["feature"] is not None and data.get("encoder_sha256") == payload["encoder_sha256"]:
+            reused=row['feature'] is not None and encoder_compatible(data,payload)
+            if reused:
                 sample_id = data["sample_id"]
                 feature = np.frombuffer(row["feature"], dtype=np.float32).copy()
                 if feature.shape != (768,) or not np.isfinite(feature).all():
@@ -407,7 +623,12 @@ def update_model(model_path):
                 data["sample_id"] = sample_id
                 if calibration_contents & {file_digest, sample_id}:
                     raise ValueError("补图与校准集内容重叠，请使用独立的人工确认训练样本。")
-            data["encoder_sha256"] = payload["encoder_sha256"]
+            if not reused:
+                data["encoder_sha256"] = payload["encoder_sha256"]
+                if "encoder_litert_sha256" in payload:
+                    data["encoder_litert_sha256"] = payload["encoder_litert_sha256"]
+                else:
+                    data.pop("encoder_litert_sha256", None)
             if sample_id in legacy_applied:
                 if legacy_applied[sample_id] != data["species"]:
                     raise ValueError("旧版学习记录存在标签冲突，请重新导出模型。")
@@ -417,11 +638,7 @@ def update_model(model_path):
             unique.setdefault(sample_id, data)
         missing = [sid for sid in unique if sid not in vectors]
         if missing:
-            encoder_path = resolve_manifest_asset(manifest, payload["encoder_weights"])
-            if sha256(encoder_path) != payload["encoder_sha256"]:
-                raise ValueError("编码器校验失败，未更新模型。")
-            encoder = DinoV3Encoder(encoder_path,
-                resolve_manifest_asset(manifest, payload["encoder_code"]), payload["encoder_sha256"])
+            encoder = load_manifest_encoder(manifest, payload)
             try:
                 for begin in range(0, len(missing), 32):
                     ids = missing[begin:begin+32]
@@ -444,7 +661,8 @@ def update_model(model_path):
         def commit_guard():
             with _write_lock() as conn:
                 latest = conn.execute("SELECT * FROM samples WHERE model=? ORDER BY observation", (_key(manifest),)).fetchall()
-                if manifest.read_bytes() != manifest_snapshot or [tuple(r) for r in latest] != [tuple(r) for r in rows]:
+                if (not _same_publication(json.loads(manifest.read_bytes()),json.loads(manifest_snapshot))
+                        or [tuple(r) for r in latest] != [tuple(r) for r in rows]):
                     raise _Superseded("有新的人工校验，合并后重新学习。")
                 yield
                 for row in rows:
@@ -456,6 +674,9 @@ def update_model(model_path):
                         encoded = row["feature"]
                     conn.execute("UPDATE samples SET applied=1,data=?,feature=? WHERE model=? AND observation=?",
                                  (json.dumps(data, ensure_ascii=False), encoded, row["model"], row["observation"]))
+                    if payload.get('learning_family_id'):
+                        conn.execute('INSERT OR REPLACE INTO shared_learning_committed VALUES(?,?,?,?,?)',
+                                     (row['model'],row['observation'],json.dumps(data,ensure_ascii=False),row['operation'],encoded))
                 conn.execute("INSERT OR REPLACE INTO learning_runs VALUES(?,?,?,?,NULL)",
                              (_key(manifest), "ready", "人工确认样本已自动学习，下次识别生效。", datetime.now(timezone.utc).isoformat()))
         try:
@@ -470,7 +691,7 @@ def update_model(model_path):
             return dict(updated_count=0, superseded=True, message="有新的人工校验，合并后重新学习。")
     counts = Counter(json.loads(row["data"])["species"] for row in pending if json.loads(row["data"])["species"])
     updated_count = sum(previous_samples.get(sid) != label for sid, label in new_samples.items()) + len(set(previous_samples)-set(new_samples))
-    return dict(updated_count=updated_count, species_counts=dict(counts), model_path=str(manifest),
+    return dict(updated_count=updated_count, species_counts=dict(counts), model_path=requested_model_path,
                 message="已自动学习并重新校准，下次识别生效。")
 
 
@@ -493,6 +714,7 @@ def _learning_worker(model, root, control):
             control["event"].clear()
             if control["stop"]:
                 return
+        model=control.get('model_path',model)
         try:
             _run_state(model, "running", "正在自动学习人工确认样本…")
             result = update_model(model)
@@ -512,7 +734,7 @@ def schedule_learning(model_path):
     if not model_path:
         return
     model = str(Path(model_path).expanduser().resolve())
-    root = default_state_root()
+    root = _state_root()
     key = (_key(model), str(root))
     with _WORKERS_LOCK:
         control = _WORKERS.get(key)
@@ -524,6 +746,7 @@ def schedule_learning(model_path):
             _WORKERS[key] = control
             thread.start()
         control["idle"].clear()
+        control['model_path']=model
         control["event"].set()
 
 
@@ -531,8 +754,26 @@ def resume_learning():
     """Resume committed pending confirmations after a backend restart."""
     with closing(_connect()) as conn:
         paths = [row[0] for row in conn.execute("SELECT DISTINCT model FROM samples WHERE applied=0")]
+        migrated={row[0] for row in conn.execute('SELECT alias FROM shared_learning_aliases')}
     for path in paths:
-        schedule_learning(path)
+        if path in migrated:
+            continue
+        if path.startswith('family:'):
+            import importlib.util
+            from system.dinov3.shared_learning import family_manifest,atomic_manifest
+            path=family_manifest(_state_root(),path.removeprefix('family:'))
+            if path.is_file():
+                with _write_lock():
+                    payload=json.loads(path.read_text('utf8'))
+                    if payload.get('encoder_backend')=='pytorch' and importlib.util.find_spec('torch') is None:
+                        cpu=next((value for value in payload.get('learning_encoder_variants',{}).values()
+                                  if value.get('encoder_backend')=='litert'),None)
+                        if cpu:
+                            payload.update(cpu)
+                            payload.pop('encoder_code',None)
+                            atomic_manifest(path,payload)
+        if Path(path).is_file():
+            schedule_learning(path)
 
 
 def stop_learning():

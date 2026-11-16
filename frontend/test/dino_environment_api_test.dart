@@ -26,6 +26,9 @@ void main() {
               'architecture': 'DINOv3 ViT-B/16',
               'component_version': 1,
               'display_name': 'Neri1.1',
+              'encoder_backend': 'litert',
+              'runtime_choice': 'auto',
+              'resolved_runtime_choice': 'cpu',
               'class_count': 51,
               'feature_dim': 768,
               'manifest': 'dinov3-ridge-within.neri.json',
@@ -45,21 +48,39 @@ void main() {
     expect(status.architecture, 'DINOv3 ViT-B/16');
     expect(status.componentVersion, 1);
     expect(status.displayName, 'Neri1.1');
+    expect(status.encoderBackend, 'litert');
+    expect(status.runtimeChoice, 'auto');
+    expect(status.resolvedRuntimeChoice, 'cpu');
     expect(status.classCount, 51);
     expect(status.featureDim, 768);
     expect(status.manifest, 'dinov3-ridge-within.neri.json');
     expect(status.message, 'Neri1.1 已安装。');
   });
 
+  test('normalizes blank optional DINOv3 runtime fields to null', () {
+    final status = DinoComponentStatus.fromJson({
+      'installed': true,
+      'healthy': true,
+      'encoder_backend': '  ',
+      'runtime_choice': '',
+      'resolved_runtime_choice': null,
+    });
+    expect(status.encoderBackend, isNull);
+    expect(status.runtimeChoice, isNull);
+    expect(status.resolvedRuntimeChoice, isNull);
+  });
+
   test('starts DINOv3 install with selected package source', () async {
+    final capturedBodies = <Map<String, dynamic>>[];
     final client = NeriApiClient(
       httpClient: MockClient((request) async {
         expect(request.method, 'POST');
         expect(request.url.path, '/api/environment/install-dinov3');
-        expect(jsonDecode(request.body), {
-          'env_choice': 'CPU Only',
-          'package_source': 'nju',
-        });
+        capturedBodies.add(
+          Map<String, dynamic>.from(
+            jsonDecode(request.body) as Map<String, dynamic>,
+          ),
+        );
         return http.Response(
           jsonEncode({
             'operation': 'install_dinov3',
@@ -78,6 +99,35 @@ void main() {
     );
 
     expect(response.operation, 'install_dinov3');
+
+    await client.installDinoV3(
+      envChoice: 'CPU Only',
+      packageSource: 'nju',
+      runtimeChoice: 'cpu',
+    );
+    await client.installDinoV3(
+      envChoice: 'CUDA 12.8',
+      packageSource: 'tuna',
+      runtimeChoice: 'gpu',
+    );
+
+    expect(capturedBodies, [
+      {
+        'env_choice': 'CPU Only',
+        'package_source': 'nju',
+        'runtime_choice': 'auto',
+      },
+      {
+        'env_choice': 'CPU Only',
+        'package_source': 'nju',
+        'runtime_choice': 'cpu',
+      },
+      {
+        'env_choice': 'CUDA 12.8',
+        'package_source': 'tuna',
+        'runtime_choice': 'gpu',
+      },
+    ]);
   });
 
   test('starts DINOv3 removal', () async {
