@@ -296,3 +296,105 @@ def test_native_transport_keeps_certificate_checks_and_validates_response(tmp_pa
     else:
         with pytest.raises(DinoV3DistributionError, match='range_mismatch'):
             client._native_proxy_segment('https://example.invalid/file', 10, 19, 100, tmp_path)
+
+
+def test_backup_cleanup_permission_error_keeps_healthy_install_and_records_deferred_cleanup(cloud, tmp_path, monkeypatch):
+    import system.dinov3.component as component
+
+    _, _, client, _ = cloud
+    root = tmp_path / 'DINOv3'
+    install_dinov3_component(root=root, distribution_client=client)
+    backup = root.with_name('DINOv3.old')
+    real_rmtree = component.shutil.rmtree
+
+    def locked_rmtree(path, *args, **kwargs):
+        if Path(path) == backup:
+            raise PermissionError(13, 'Access is denied', str(Path(path) / 'dinov3-vitb16'))
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(component.shutil, 'rmtree', locked_rmtree)
+    events = []
+    status = install_dinov3_component(root=root, distribution_client=client, on_event=events.append)
+    assert status['healthy'] and dinov3_component_status(root=root)['healthy']
+    assert backup.is_dir() and (backup / status['manifest']).is_file()
+    assert any(
+        event.get('phase') == 'cleanup'
+        and event.get('state') == 'deferred'
+        and 'deferred' in str(event.get('message', '')).lower()
+        and str(backup) in str(event.get('path', ''))
+        for event in events
+    )
+
+
+def test_reinstall_uses_unique_backup_suffix_when_existing_old_backup_is_locked(cloud, tmp_path, monkeypatch):
+    import system.dinov3.component as component
+
+    source, _, _, _ = cloud
+    root = tmp_path / 'DINOv3'
+    install_dinov3_component(root=root, seed_dir=source.parent)
+    old_backup = root.with_name('DINOv3.old')
+    (old_backup / 'dinov3-vitb16').mkdir(parents=True)
+    (old_backup / 'dinov3-vitb16' / 'user-backup.txt').write_bytes(b'keep-old')
+    second_backup = root.with_name('DINOv3.old.1')
+    second_backup.mkdir()
+    (second_backup / 'marker.txt').write_bytes(b'keep-1')
+    locked = {old_backup, second_backup}
+    real_rmtree = component.shutil.rmtree
+    replaced_targets = []
+    original_replace = Path.replace
+
+    def locked_rmtree(path, *args, **kwargs):
+        if Path(path) in locked:
+            raise PermissionError(13, 'Access is denied', str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    def record_replace(path, target):
+        if path == root:
+            replaced_targets.append(Path(target))
+        return original_replace(path, target)
+
+    monkeypatch.setattr(component.shutil, 'rmtree', locked_rmtree)
+    monkeypatch.setattr(Path, 'replace', record_replace)
+    events = []
+    status = install_dinov3_component(root=root, seed_dir=source.parent, on_event=events.append)
+    assert status['healthy'] and dinov3_component_status(root=root)['healthy']
+    assert replaced_targets == [root.with_name('DINOv3.old.2')]
+    assert (old_backup / 'dinov3-vitb16' / 'user-backup.txt').read_bytes() == b'keep-old'
+    assert (second_backup / 'marker.txt').read_bytes() == b'keep-1'
+    assert not root.with_name('DINOv3.old.2').exists()
+    assert any(event.get('phase') == 'cleanup' and event.get('state') == 'deferred' for event in events)
+
+
+def test_failed_activation_restores_component_and_preserves_locked_old_backup(cloud, tmp_path, monkeypatch):
+    import system.dinov3.component as component
+
+    source, _, _, _ = cloud
+    root = tmp_path / 'DINOv3'
+    install_dinov3_component(root=root, seed_dir=source.parent)
+    (root / 'learned-marker.txt').write_bytes(b'learned')
+    old_backup = root.with_name('DINOv3.old')
+    (old_backup / 'dinov3-vitb16').mkdir(parents=True)
+    (old_backup / 'dinov3-vitb16' / 'user-backup.txt').write_bytes(b'keep-old')
+    real_rmtree = component.shutil.rmtree
+    original_replace = Path.replace
+
+    def locked_rmtree(path, *args, **kwargs):
+        if Path(path) == old_backup:
+            raise PermissionError(13, 'Access is denied', str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    def fail_activation(path, target):
+        if path.name.startswith('.dinov3-stage-'):
+            raise OSError('activation failed')
+        return original_replace(path, target)
+
+    monkeypatch.setattr(component.shutil, 'rmtree', locked_rmtree)
+    monkeypatch.setattr(Path, 'replace', fail_activation)
+    events = []
+    with pytest.raises(OSError, match='activation failed'):
+        install_dinov3_component(root=root, seed_dir=source.parent, on_event=events.append)
+    assert (root / 'learned-marker.txt').read_bytes() == b'learned'
+    assert dinov3_component_status(root=root)['healthy']
+    assert (old_backup / 'dinov3-vitb16' / 'user-backup.txt').read_bytes() == b'keep-old'
+    assert not root.with_name('DINOv3.old.1').exists()
+    assert not list(root.parent.glob('.dinov3-stage-*'))

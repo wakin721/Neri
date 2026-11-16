@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import email.parser
 from email.utils import parsedate_to_datetime
 import hashlib
 import http.client
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -33,14 +35,135 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 PROXY_SEGMENT_BYTES = 1024 * 1024
 PROXY_SEGMENT_THRESHOLD = 8 * 1024 * 1024
 PROXY_SEGMENT_ATTEMPTS = 5
+DIRECT_DOWNLOAD_ATTEMPTS = 3
 JSON_REQUEST_ATTEMPTS = 5
 _JSON_LIMIT = 16 * 1024 * 1024
+_DIRECT_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+)$", re.IGNORECASE)
 
 
 class DinoV3DistributionError(RuntimeError):
     def __init__(self, message, *, details=None):
         super().__init__(message)
         self.details = details or {}
+
+
+class _SafeDirectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow redirects only while the direct URL stays on the OneDrive whitelist."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        if not valid_direct_url(newurl):
+            raise DinoV3DistributionError("unsafe_direct_redirect")
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
+def _header_get(headers: Any, name: str) -> str | None:
+    if not headers:
+        return None
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    target = name.lower()
+    for key in headers:
+        if str(key).lower() == target:
+            return str(headers[key])
+    return None
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    retry_after = _header_get(headers, "Retry-After")
+    if not retry_after:
+        return None
+    try:
+        wait = (
+            float(retry_after)
+            if retry_after.strip().isdigit()
+            else (
+                parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)
+            ).total_seconds()
+        )
+        return max(0.0, wait)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _wait_curl_exit(proc: subprocess.Popen, timeout: float) -> int:
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as timeout_exc:
+        raise OSError("Windows download process timed out") from timeout_exc
+
+
+class _NativeStreamResponse:
+    """Stream wrapper over a Windows curl.exe subprocess with exit-code checking."""
+
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        status: int,
+        headers: Any,
+        stderr_handle: Any,
+        stderr_path: Path,
+        scratch: tempfile.TemporaryDirectory,
+    ):
+        self._proc = proc
+        self.status = status
+        self.headers = headers
+        self._stderr_handle = stderr_handle
+        self._stderr_path = stderr_path
+        self._scratch = scratch
+        self._closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self._proc.stdout is None:
+            return b""
+        return self._proc.stdout.read(size)
+
+    def _cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._proc.stdout is not None:
+                self._proc.stdout.close()
+        except OSError:
+            pass
+        try:
+            self._stderr_handle.close()
+        except OSError:
+            pass
+        self._scratch.cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5)
+            self._cleanup()
+            return False
+        try:
+            try:
+                returncode = self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired as timeout_exc:
+                self._proc.kill()
+                self._proc.wait(timeout=5)
+                raise OSError("Windows download process timed out") from timeout_exc
+            if returncode != 0:
+                self._stderr_handle.flush()
+                err_text = self._stderr_path.read_text("utf-8", errors="replace")
+                raise OSError(
+                    f"Windows download failed ({returncode}): {redact(err_text).strip()[:200]}"
+                )
+        finally:
+            self._cleanup()
+        return False
 
 
 @dataclass(frozen=True)
@@ -105,12 +228,23 @@ class DinoV3DistributionClient:
         self.origin = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
         )
-        self.opener = opener or urllib.request.urlopen
+        self._default_opener = urllib.request.urlopen
+        self.opener = opener or self._default_opener
+        self._direct_opener = None
         self._native_fallback = opener is None and os.name == "nt"
         self._json_native = False
         self.cache_dir = Path(cache_dir).resolve() if cache_dir is not None else None
         self.on_event = on_event
         self.runtime = validate_resolved_runtime(runtime) if runtime is not None else None
+
+    def _open_direct_url(self, request: urllib.request.Request, timeout: int):
+        if self.opener is not self._default_opener:
+            return self.opener(request, timeout=timeout)
+        if self._direct_opener is None:
+            self._direct_opener = urllib.request.build_opener(
+                _SafeDirectRedirectHandler()
+            ).open
+        return self._direct_opener(request, timeout=timeout)
 
     def _event(self, **event):
         if self.on_event is not None:
@@ -209,19 +343,13 @@ class DinoV3DistributionClient:
                             detail['server_detail'] = code
                     except Exception:
                         pass
-                    retry_after = exc.headers.get('Retry-After') if exc.headers else None
-                    if retry_after:
-                        try:
-                            wait = (float(retry_after) if retry_after.strip().isdigit()
-                                    else (parsedate_to_datetime(retry_after) -
-                                          datetime.now(timezone.utc)).total_seconds())
-                            detail['retry_after_seconds'] = max(0, wait)
-                            if wait > 60:
-                                retryable = False
-                            else:
-                                delay = max(delay, max(0, wait))
-                        except (ValueError, TypeError, OverflowError):
-                            pass
+                    wait = _retry_after_seconds(exc.headers)
+                    if wait is not None:
+                        detail['retry_after_seconds'] = wait
+                        if wait > 60:
+                            retryable = False
+                        else:
+                            delay = max(delay, wait)
                     try:
                         exc.close()
                     except Exception:
@@ -355,29 +483,190 @@ class DinoV3DistributionClient:
         temp = target.with_name(target.name + ".download")
         temp.unlink(missing_ok=True)
         target.parent.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256()
-        received = 0
-        try:
-            with self.opener(request, timeout=90) as response, temp.open("wb") as output:
+        use_native = False
+        for attempt in range(2):
+            digest = hashlib.sha256()
+            received = 0
+            try:
+                stream_ctx = (
+                    self._open_native_stream(
+                        url,
+                        headers=headers,
+                        allow_direct_redirects=False,
+                        scratch_dir=target.parent,
+                    )
+                    if use_native
+                    else self.opener(request, timeout=90)
+                )
+                with stream_ctx as response, temp.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > expected_size:
+                            raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                        digest.update(chunk)
+                        output.write(chunk)
+                        if on_progress is not None:
+                            on_progress(received, expected_size)
+                if received != expected_size:
+                    raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                if digest.hexdigest() != expected_sha256:
+                    raise DinoV3DistributionError("dinov3_download_sha256_mismatch")
+                temp.replace(target)
+                return
+            except (OSError, http.client.HTTPException):
+                temp.unlink(missing_ok=True)
+                if (
+                    attempt == 0
+                    and not use_native
+                    and self._native_fallback
+                    and shutil.which("curl.exe")
+                ):
+                    use_native = True
+                    continue
+                raise
+            except Exception:
+                temp.unlink(missing_ok=True)
+                raise
+
+    def _open_native_stream(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        range_header: str | None = None,
+        allow_direct_redirects: bool = False,
+        scratch_dir: Path | None = None,
+    ) -> _NativeStreamResponse:
+        executable = shutil.which("curl.exe")
+        if executable is None:
+            raise OSError("Windows curl is unavailable")
+        current_url = url
+        for _hop in range(6):
+            scratch = tempfile.TemporaryDirectory(prefix=".neri-stream-", dir=scratch_dir)
+            stderr_path = Path(scratch.name) / "stderr"
+            stderr_handle = stderr_path.open("w+", encoding="utf-8", errors="replace")
+            proc: subprocess.Popen | None = None
+            try:
+                command = [
+                    executable, "--disable", "--silent", "--show-error", "--no-buffer",
+                    "--connect-timeout", "30", "--speed-time", "60", "--speed-limit", "1",
+                    "--include", "--request", "GET",
+                ]
+                if not any(str(key).lower() == "user-agent" for key in (headers or {})):
+                    command.extend(["--header", "User-Agent: Neri DINOv3 installer"])
+                for key, value in (headers or {}).items():
+                    key_str, value_str = str(key), str(value)
+                    if "\r" in key_str or "\n" in key_str or "\r" in value_str or "\n" in value_str:
+                        raise DinoV3DistributionError("invalid_direct_header")
+                    command.extend(["--header", f"{key_str}: {value_str}"])
+                if range_header is not None:
+                    if "\r" in range_header or "\n" in range_header:
+                        raise DinoV3DistributionError("invalid_direct_header")
+                    command.extend(["--header", f"Range: {range_header}"])
+                command.append(current_url)
+                proc = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_handle,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                assert proc.stdout is not None
                 while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    received += len(chunk)
-                    if received > expected_size:
-                        raise DinoV3DistributionError("dinov3_download_size_mismatch")
-                    digest.update(chunk)
-                    output.write(chunk)
-                    if on_progress is not None:
-                        on_progress(received, expected_size)
-            if received != expected_size:
-                raise DinoV3DistributionError("dinov3_download_size_mismatch")
-            if digest.hexdigest() != expected_sha256:
-                raise DinoV3DistributionError("dinov3_download_sha256_mismatch")
-            temp.replace(target)
-        except Exception:
-            temp.unlink(missing_ok=True)
-            raise
+                    status_line = proc.stdout.readline(65536)
+                    if not status_line:
+                        returncode = _wait_curl_exit(proc, 10)
+                        stderr_handle.flush()
+                        err_text = stderr_path.read_text("utf-8", errors="replace")
+                        raise OSError(
+                            f"Windows download failed ({returncode}): {redact(err_text).strip()[:200]}"
+                        )
+                    line_text = status_line.decode("iso-8859-1").rstrip("\r\n")
+                    if not line_text:
+                        continue
+                    parts = line_text.split(None, 2)
+                    if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+                        raise OSError("Malformed HTTP response from Windows curl")
+                    status = int(parts[1])
+                    reason = parts[2] if len(parts) > 2 else ""
+                    raw_headers: list[str] = []
+                    header_bytes = len(status_line)
+                    while True:
+                        hline = proc.stdout.readline(65536)
+                        if not hline:
+                            raise OSError("Truncated HTTP headers from Windows curl")
+                        header_bytes += len(hline)
+                        if header_bytes > 256 * 1024:
+                            raise OSError("HTTP headers too large from Windows curl")
+                        if hline in (b"\r\n", b"\n"):
+                            break
+                        raw_headers.append(hline.decode("iso-8859-1"))
+                    resp_headers = email.parser.Parser().parsestr("".join(raw_headers))
+                    if 100 <= status < 200 or (
+                        status == 200 and reason.lower().startswith("connection established")
+                    ):
+                        continue
+                    break
+                if allow_direct_redirects and status in _DIRECT_REDIRECT_STATUSES:
+                    location = _header_get(resp_headers, "Location")
+                    next_url = urllib.parse.urljoin(current_url, location) if location else ""
+                    if proc.poll() is None:
+                        proc.terminate()
+                        _wait_curl_exit(proc, 5)
+                    proc.stdout.close()
+                    stderr_handle.close()
+                    scratch.cleanup()
+                    if not next_url or not valid_direct_url(next_url):
+                        raise DinoV3DistributionError("unsafe_direct_redirect")
+                    current_url = next_url
+                    continue
+                if status >= 300:
+                    err_body = proc.stdout.read(4096)
+                    if proc.poll() is None:
+                        proc.terminate()
+                        _wait_curl_exit(proc, 5)
+                    proc.stdout.close()
+                    stderr_handle.close()
+                    scratch.cleanup()
+                    raise urllib.error.HTTPError(
+                        redact(current_url),
+                        status,
+                        reason or "HTTP error",
+                        resp_headers,
+                        io.BytesIO(err_body),
+                    )
+                return _NativeStreamResponse(
+                    proc, status, resp_headers, stderr_handle, stderr_path, scratch
+                )
+            except Exception:
+                try:
+                    if proc is not None:
+                        if proc.poll() is None:
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                try:
+                                    proc.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    pass
+                        if proc.stdout is not None:
+                            try:
+                                proc.stdout.close()
+                            except OSError:
+                                pass
+                finally:
+                    try:
+                        stderr_handle.close()
+                    except OSError:
+                        pass
+                    scratch.cleanup()
+                raise
+        raise DinoV3DistributionError("too_many_direct_redirects")
 
     def _native_proxy_segment(self, url, start, end, size, directory):
         """Use Windows' TLS transport after Python's TLS stream fails."""
@@ -422,8 +711,11 @@ class DinoV3DistributionClient:
         target.parent.mkdir(parents=True, exist_ok=True)
         persistent = self.cache_dir is not None
         if persistent:
-            temp, metadata, offset, digest = restore_partial(
-                target, entry.size, entry.sha256, PROXY_SEGMENT_BYTES)
+            completed, temp, metadata, offset, digest = self._restore_partial_state(
+                target, entry, on_progress
+            )
+            if completed:
+                return
         else:
             temp, metadata = partial_paths(target)
             discard_partial(target)
@@ -505,6 +797,219 @@ class DinoV3DistributionClient:
                 discard_partial(target)
             raise
 
+    def _restore_partial_state(
+        self,
+        target: Path,
+        entry: DinoV3DistributionEntry,
+        on_progress: Callable[[int, int | None], None] | None = None,
+    ) -> tuple[bool, Path, Path, int, Any]:
+        temp, metadata, offset, digest = restore_partial(
+            target, entry.size, entry.sha256, PROXY_SEGMENT_BYTES
+        )
+        if offset == entry.size and temp.is_file() and metadata.is_file():
+            if digest.hexdigest() == entry.sha256:
+                temp.replace(target)
+                metadata.unlink(missing_ok=True)
+                if on_progress is not None:
+                    on_progress(entry.size, entry.size)
+                return True, temp, metadata, offset, digest
+            discard_partial(target)
+            return False, temp, metadata, 0, hashlib.sha256()
+        return False, temp, metadata, offset, digest
+
+    def _download_direct(
+        self,
+        manifest: DinoV3DistributionManifest,
+        entry: DinoV3DistributionEntry,
+        target: Path,
+        capability: DinoV3DownloadCapability,
+        *,
+        persistent: bool,
+        on_progress: Callable[[int, int | None], None] | None = None,
+    ) -> tuple[bool, DinoV3DownloadCapability]:
+        use_native = False
+        just_switched_to_native = False
+        last_exc: Exception | None = None
+        last_direct_url: str | None = None
+        for attempt in range(DIRECT_DOWNLOAD_ATTEMPTS):
+            if persistent:
+                completed, temp, metadata, offset, digest = self._restore_partial_state(
+                    target, entry, on_progress
+                )
+                if completed:
+                    return True, capability
+            else:
+                temp, metadata = partial_paths(target)
+                discard_partial(target)
+                offset, digest = 0, hashlib.sha256()
+
+            if attempt > 0 and not just_switched_to_native:
+                capability = self._capability(manifest, entry)
+                if capability.direct_url is None:
+                    return False, capability
+                if (
+                    isinstance(last_exc, urllib.error.HTTPError)
+                    and last_exc.code in {401, 403}
+                    and capability.direct_url == last_direct_url
+                ):
+                    return False, capability
+            just_switched_to_native = False
+            assert capability.direct_url is not None
+            last_direct_url = capability.direct_url
+            range_header = f"bytes={offset}-{entry.size - 1}" if offset > 0 else None
+            self._event(
+                phase="direct",
+                file=entry.relative_path,
+                attempt=attempt + 1,
+                state="resuming" if offset else "downloading",
+                offset=offset,
+                total=entry.size,
+                transport="windows_curl" if use_native else "urllib",
+            )
+            if on_progress is not None and offset:
+                on_progress(offset, entry.size)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if use_native:
+                    stream_ctx = self._open_native_stream(
+                        capability.direct_url,
+                        headers=capability.direct_headers,
+                        range_header=range_header,
+                        allow_direct_redirects=True,
+                        scratch_dir=target.parent,
+                    )
+                else:
+                    request_headers = {"User-Agent": "Neri DINOv3 installer"}
+                    request_headers.update(capability.direct_headers)
+                    if range_header is not None:
+                        request_headers["Range"] = range_header
+                    request = urllib.request.Request(
+                        capability.direct_url, headers=request_headers, method="GET"
+                    )
+                    stream_ctx = self._open_direct_url(request, timeout=90)
+
+                with stream_ctx as response:
+                    status = getattr(response, "status", None)
+                    headers = getattr(response, "headers", None) or {}
+                    if offset > 0:
+                        content_range = _header_get(headers, "Content-Range") or ""
+                        match = _CONTENT_RANGE_RE.fullmatch(content_range.strip())
+                        if (
+                            status != 206
+                            or match is None
+                            or int(match.group(1)) != offset
+                            or int(match.group(2)) != entry.size - 1
+                            or int(match.group(3)) != entry.size
+                        ):
+                            raise DinoV3DistributionError("dinov3_download_range_mismatch")
+                    elif status not in (None, 200):
+                        raise DinoV3DistributionError("dinov3_download_status_mismatch")
+                    content_length = _header_get(headers, "Content-Length")
+                    if content_length is not None and content_length.strip().isdigit():
+                        if int(content_length.strip()) != entry.size - offset:
+                            raise DinoV3DistributionError("dinov3_download_size_mismatch")
+
+                    received = offset
+                    last_checkpoint = offset
+                    with temp.open("r+b" if offset else "wb") as output:
+                        output.seek(offset)
+                        while True:
+                            if received >= entry.size:
+                                if response.read(1):
+                                    raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                                break
+                            segment_room = PROXY_SEGMENT_BYTES - (received % PROXY_SEGMENT_BYTES)
+                            to_read = min(segment_room, entry.size - received, 256 * 1024)
+                            chunk = response.read(to_read)
+                            if not chunk:
+                                break
+                            if received + len(chunk) > entry.size:
+                                raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                            received += len(chunk)
+                            digest.update(chunk)
+                            output.write(chunk)
+                            if on_progress is not None:
+                                on_progress(received, entry.size)
+                            if (
+                                persistent
+                                and (received - last_checkpoint) == PROXY_SEGMENT_BYTES
+                            ):
+                                output.flush()
+                                os.fsync(output.fileno())
+                                checkpoint_partial(
+                                    metadata,
+                                    size=entry.size,
+                                    sha256=entry.sha256,
+                                    segment_size=PROXY_SEGMENT_BYTES,
+                                    offset=received,
+                                    digest=digest,
+                                )
+                                last_checkpoint = received
+                if received != entry.size:
+                    raise OSError(f"Incomplete direct stream ({received}/{entry.size})")
+                if temp.stat().st_size != entry.size:
+                    raise DinoV3DistributionError("dinov3_download_size_mismatch")
+                if digest.hexdigest() != entry.sha256:
+                    discard_partial(target)
+                    raise DinoV3DistributionError("dinov3_download_sha256_mismatch")
+                temp.replace(target)
+                metadata.unlink(missing_ok=True)
+                return True, capability
+            except Exception as exc:
+                if not persistent:
+                    discard_partial(target)
+                last_exc = exc
+                if isinstance(exc, DinoV3DistributionError):
+                    if exc.details.get("phase") == "capability":
+                        raise
+                    self._event(
+                        **exception_details(exc),
+                        phase="direct",
+                        file=entry.relative_path,
+                        offset=offset,
+                        state="fallback",
+                    )
+                    return False, capability
+                retryable = False
+                delay = min(4, 2 ** attempt)
+                if isinstance(exc, urllib.error.HTTPError):
+                    retryable = exc.code in {401, 403, 408, 425, 429, 500, 502, 503, 504}
+                    wait = _retry_after_seconds(exc.headers)
+                    if wait is not None:
+                        if wait > 60:
+                            retryable = False
+                        else:
+                            delay = max(delay, wait)
+                    try:
+                        exc.close()
+                    except Exception:
+                        pass
+                elif isinstance(exc, (OSError, http.client.HTTPException)):
+                    retryable = True
+                    if (
+                        not use_native
+                        and self._native_fallback
+                        and shutil.which("curl.exe")
+                    ):
+                        use_native = True
+                        just_switched_to_native = True
+                        delay = 0
+                retrying = retryable and attempt + 1 < DIRECT_DOWNLOAD_ATTEMPTS
+                self._event(
+                    **exception_details(exc),
+                    phase="direct",
+                    file=entry.relative_path,
+                    offset=offset,
+                    attempt=attempt + 1,
+                    max_attempts=DIRECT_DOWNLOAD_ATTEMPTS,
+                    state="retrying" if retrying else "fallback",
+                )
+                if not retrying:
+                    return False, capability
+                if delay:
+                    time.sleep(delay)
+        return False, capability
+
     def _download_entry(
         self,
         manifest: DinoV3DistributionManifest,
@@ -512,22 +1017,34 @@ class DinoV3DistributionClient:
         target: Path,
         on_progress=None,
     ) -> None:
-        capability = self._capability(manifest, entry)
-        if capability.direct_url is not None and not (
-                self.cache_dir is not None and partial_paths(target)[0].exists()):
-            try:
-                self._stream_to_file(
-                    capability.direct_url,
-                    target,
-                    expected_size=entry.size,
-                    expected_sha256=entry.sha256,
-                    headers=capability.direct_headers,
-                    on_progress=on_progress,
-                )
+        persistent = self.cache_dir is not None
+        if persistent and partial_paths(target)[1].exists():
+            completed, _, _, _, _ = self._restore_partial_state(
+                target, entry, on_progress
+            )
+            if completed:
                 return
-            except Exception:
-                target.unlink(missing_ok=True)
-        if entry.size >= PROXY_SEGMENT_THRESHOLD:
+        capability = self._capability(manifest, entry)
+        if capability.direct_url is not None:
+            done, capability = self._download_direct(
+                manifest,
+                entry,
+                target,
+                capability,
+                persistent=persistent,
+                on_progress=on_progress,
+            )
+            if done:
+                return
+        has_partial = False
+        if persistent and partial_paths(target)[1].exists():
+            completed, _, _, offset, _ = self._restore_partial_state(
+                target, entry, on_progress
+            )
+            if completed:
+                return
+            has_partial = offset > 0
+        if entry.size >= PROXY_SEGMENT_THRESHOLD or has_partial:
             self._stream_proxy_segments(manifest, entry, target, capability, on_progress)
             return
         self._stream_to_file(

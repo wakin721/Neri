@@ -15,6 +15,7 @@ from .config import DistributionConfig
 from .service import DistributionError, DistributionService
 from .storage import OpenListModelStore, StorageError
 from .local_component import LocalComponentOverlay
+from .component_mirrors import ComponentMirrorStore
 
 _RANGE_RE = re.compile(r"^bytes=\d+-\d*$")
 
@@ -106,11 +107,15 @@ def create_app(
     config = config or DistributionConfig.from_env()
     if service is None:
         store = OpenListModelStore(config)
+        drive = store
         if config.dinov3_root:
             store = LocalComponentOverlay(store, config.dinov3_root)
         if config.dinov3_cpu_root:
             store = LocalComponentOverlay(store, config.dinov3_cpu_root,
                                           prefix='/Neri_Data/Model/DINOv3/cpu')
+        if config.dinov3_gpu_drive_root or config.dinov3_cpu_drive_root:
+            store = ComponentMirrorStore(store, drive,
+                gpu_root=config.dinov3_gpu_drive_root, cpu_root=config.dinov3_cpu_drive_root)
         service = DistributionService(config.state_dir, store,
                                       ttl_seconds=config.capability_ttl_seconds)
     budget = budget or BudgetStore(

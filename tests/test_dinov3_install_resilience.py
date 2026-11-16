@@ -263,3 +263,646 @@ def test_failed_component_install_retains_verified_cache_and_old_component(cloud
     result = install_dinov3_component(root=root, distribution_client=client)
     assert result['healthy'] and result['class_count'] == 2
     assert not any(path.endswith('calibration.npz') for path in credentials)
+
+
+def _seed_partial(target: Path, data: bytes, offset: int, segment_size: int, *, sha256: str | None = None):
+    from system.dinov3.download_cache import checkpoint_partial, partial_paths
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part, metadata = partial_paths(target)
+    part.write_bytes(data[:offset])
+    prefix_digest = hashlib.sha256(data[:offset])
+    checkpoint_partial(
+        metadata,
+        size=len(data),
+        sha256=sha256 or hashlib.sha256(data).hexdigest(),
+        segment_size=segment_size,
+        offset=offset,
+        digest=prefix_digest,
+    )
+    return part, metadata
+
+
+@pytest.mark.parametrize('runtime', ['gpu', 'cpu'])
+def test_existing_valid_partial_resumes_via_onedrive_direct_for_cpu_and_gpu(tmp_path, monkeypatch, runtime):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'0123456789abcdef'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = 'b' * 64
+    entry_path = 'DINOv3/cpu/model.bin' if runtime == 'cpu' else 'DINOv3/model.bin'
+    cache = tmp_path / 'cache'
+    cached = cache / manifest_id / 'model.bin'
+    part, metadata = _seed_partial(cached, payload, offset=8, segment_size=4, sha256=expected_sha)
+    part.write_bytes(payload[:8] + b'UNCOMMITTED')
+
+    direct_url = 'https://tenant.sharepoint.com/files/model.bin?sig=SECRET_DIRECT_SIG'
+    proxy_token = 'P' * 43
+    direct_requests = []
+    proxy_requests = []
+    events = []
+
+    def opener(request, timeout):
+        if request.get_method() == 'POST':
+            return io.BytesIO(json.dumps({
+                'path': entry_path,
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': proxy_token,
+                'direct_url': direct_url,
+                'direct_headers': {'Referer': 'https://onedrive.live.com/', 'Authorization': 'DROP_ME'},
+            }).encode())
+        if '/proxy/' in request.full_url:
+            proxy_requests.append(request.full_url)
+            raise AssertionError('proxy should not be called when direct resume succeeds')
+        assert request.full_url == direct_url
+        assert request.get_header('Referer') == 'https://onedrive.live.com/'
+        assert request.get_header('Authorization') is None
+        rng = request.get_header('Range')
+        direct_requests.append(rng)
+        assert rng == 'bytes=8-15'
+        stream = io.BytesIO(payload[8:])
+        stream.status = 206
+        stream.headers = {'Content-Range': 'bytes 8-15/16', 'Content-Length': '8'}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache, on_event=events.append, runtime=runtime)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry(entry_path, 'model.bin', len(payload), expected_sha),)
+    )
+    target = tmp_path / f'out-{runtime}'
+    client.download_tree('', target)
+    assert (target / 'model.bin').read_bytes() == payload
+    assert direct_requests == ['bytes=8-15']
+    assert proxy_requests == []
+    assert not part.exists() and not metadata.exists()
+    serialized = json.dumps(events)
+    assert 'SECRET_DIRECT_SIG' not in serialized and proxy_token not in serialized
+
+
+def test_corrupt_partial_is_discarded_and_restarts_via_onedrive_direct(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'abcdefghijklmno!'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = 'c' * 64
+    cache = tmp_path / 'cache'
+    cached = cache / manifest_id / 'weights.bin'
+    part, _ = _seed_partial(cached, payload, offset=8, segment_size=4, sha256=expected_sha)
+    part.write_bytes(b'CORRUPTED')
+
+    direct_url = 'https://contoso.1drv.com/weights.bin?sig=SECRET_SIG'
+    seen_ranges = []
+
+    def opener(request, timeout):
+        if request.get_method() == 'POST':
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/weights.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'Q' * 43,
+                'direct_url': direct_url,
+                'direct_headers': {},
+            }).encode())
+        assert request.full_url == direct_url
+        seen_ranges.append(request.get_header('Range'))
+        stream = io.BytesIO(payload)
+        stream.status = 200
+        stream.headers = {'Content-Length': str(len(payload))}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/weights.bin', 'weights.bin', len(payload), expected_sha),)
+    )
+    target = tmp_path / 'out'
+    client.download_tree('', target)
+    assert seen_ranges == [None]
+    assert (target / 'weights.bin').read_bytes() == payload
+
+
+def test_fresh_large_file_direct_checkpoints_1mib_and_resumes_after_drop_or_proxy_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'0123456789abcdef'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = 'd' * 64
+    cache = tmp_path / 'cache'
+
+    class _DropStream:
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
+            self.status = 200
+            self.headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            if self._chunks:
+                item = self._chunks.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+            return b''
+
+    direct_calls = []
+    proxy_ranges = []
+    events = []
+
+    def opener(request, timeout):
+        if request.get_method() == 'POST':
+            idx = len(direct_calls) + 1
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/large.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'R' * 43,
+                'direct_url': f'https://cdn.microsoftpersonalcontent.com/large.bin?v={idx}&sig=SECRET_{idx}',
+                'direct_headers': {},
+            }).encode())
+        if '/proxy/' in request.full_url:
+            rng = request.get_header('Range')
+            proxy_ranges.append(rng)
+            start, end = map(int, rng[6:].split('-'))
+            stream = io.BytesIO(payload[start:end + 1])
+            stream.status = 206
+            stream.headers = {'Content-Range': f'bytes {start}-{end}/{len(payload)}'}
+            return stream
+        rng = request.get_header('Range')
+        direct_calls.append(rng)
+        if len(direct_calls) == 1:
+            # Send 9 bytes (checkpoints 8 bytes = 2 x 4-byte segments) then drop connection.
+            return _DropStream([payload[0:4], payload[4:8], payload[8:9], OSError('connection reset')])
+        # On direct retry, server ignores Range and returns 200 -> reject without losing 8-byte prefix!
+        stream = io.BytesIO(payload)
+        stream.status = 200
+        stream.headers = {'Content-Length': str(len(payload))}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache, on_event=events.append)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/large.bin', 'large.bin', len(payload), expected_sha),)
+    )
+    target = tmp_path / 'out'
+    client.download_tree('', target)
+    assert (target / 'large.bin').read_bytes() == payload
+    assert direct_calls == [None, 'bytes=8-15']
+    assert proxy_ranges == ['bytes=8-11', 'bytes=12-15']
+    serialized = json.dumps(events)
+    assert 'SECRET_1' not in serialized and 'SECRET_2' not in serialized and ('R' * 43) not in serialized
+
+
+def test_direct_url_403_renews_bounded_and_falls_back_preserving_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'AAAABBBBCCCCDDDD'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = 'e' * 64
+    cache = tmp_path / 'cache'
+    cached = cache / manifest_id / 'model.bin'
+    _seed_partial(cached, payload, offset=8, segment_size=4, sha256=expected_sha)
+
+    # Case 1: 403 on first direct URL, renewed direct URL succeeds with 206.
+    cap_calls = []
+    direct_urls = []
+
+    def opener_renew_ok(request, timeout):
+        if request.get_method() == 'POST':
+            cap_calls.append(len(cap_calls) + 1)
+            idx = len(cap_calls)
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'S' * 43,
+                'direct_url': f'https://tenant.sharepoint.com/model.bin?tok={idx}',
+                'direct_headers': {},
+            }).encode())
+        direct_urls.append(request.full_url)
+        if 'tok=1' in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 403, 'Forbidden', {}, io.BytesIO(b'expired'))
+        assert request.get_header('Range') == 'bytes=8-15'
+        stream = io.BytesIO(payload[8:])
+        stream.status = 206
+        stream.headers = {'Content-Range': 'bytes 8-15/16'}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener_renew_ok, cache_dir=cache)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+    )
+    out1 = tmp_path / 'out1'
+    client.download_tree('', out1)
+    assert (out1 / 'model.bin').read_bytes() == payload
+    assert len(cap_calls) == 2
+    assert len(direct_urls) == 2
+
+    # Case 2: Persistent 503 on direct retries stays bounded and falls back to proxy from offset 8.
+    cache2 = tmp_path / 'cache2'
+    _seed_partial(cache2 / manifest_id / 'model.bin', payload, offset=8, segment_size=4, sha256=expected_sha)
+    cap_calls2 = []
+    direct_attempts = []
+    proxy_ranges = []
+
+    def opener_always_503(request, timeout):
+        if request.get_method() == 'POST':
+            cap_calls2.append(1)
+            idx = len(cap_calls2)
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'T' * 43,
+                'direct_url': f'https://tenant.sharepoint.com/model.bin?tok={idx}',
+                'direct_headers': {},
+            }).encode())
+        if '/proxy/' in request.full_url:
+            rng = request.get_header('Range')
+            proxy_ranges.append(rng)
+            start, end = map(int, rng[6:].split('-'))
+            stream = io.BytesIO(payload[start:end + 1])
+            stream.status = 206
+            stream.headers = {'Content-Range': f'bytes {start}-{end}/{len(payload)}'}
+            return stream
+        direct_attempts.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 503, 'Unavailable', {}, io.BytesIO(b'busy'))
+
+    client2 = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener_always_503, cache_dir=cache2)
+    client2.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+    )
+    out2 = tmp_path / 'out2'
+    client2.download_tree('', out2)
+    assert (out2 / 'model.bin').read_bytes() == payload
+    assert 1 <= len(direct_attempts) <= distribution.DIRECT_DOWNLOAD_ATTEMPTS
+    assert len(cap_calls2) <= distribution.DIRECT_DOWNLOAD_ATTEMPTS
+    assert proxy_ranges == ['bytes=8-11', 'bytes=12-15']
+
+
+def test_local_http_direct_resume_with_native_curl_fallback_and_redirect_whitelist(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4096)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8192)
+    payload = (b'NERI-ONEDRIVE-DIRECT-' * 600)[:12288]
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = 'f' * 64
+    direct_ranges = []
+    events = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get('Content-Length') or '0')
+            self.rfile.read(length)
+            host, port = self.server.server_address
+            body = json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'U' * 43,
+                'direct_url': f'http://{host}:{port}/redirect-ok?sig=SECRET_LOCAL_SIG',
+                'direct_headers': {'Referer': 'https://onedrive.live.com/'},
+            }).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            host, port = self.server.server_address
+            if self.path.startswith('/redirect-ok'):
+                self.send_response(302)
+                self.send_header('Location', f'http://{host}:{port}/direct-blob?sig=SECRET_HOP_SIG')
+                self.end_headers()
+                return
+            if self.path.startswith('/redirect-evil'):
+                self.send_response(302)
+                self.send_header('Location', 'https://evil.example/payload.bin')
+                self.end_headers()
+                return
+            if self.path.startswith('/direct-blob'):
+                rng = self.headers.get('Range')
+                direct_ranges.append(rng)
+                assert rng == 'bytes=4096-12287'
+                chunk = payload[4096:]
+                self.send_response(206)
+                self.send_header('Content-Range', f'bytes 4096-12287/{len(payload)}')
+                self.send_header('Content-Length', str(len(chunk)))
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        allowed_prefix = f'http://{host}:{port}/'
+        monkeypatch.setattr(distribution, 'valid_direct_url', lambda u: u.startswith(allowed_prefix))
+        cache = tmp_path / 'cache'
+        _seed_partial(cache / manifest_id / 'model.bin', payload, offset=4096, segment_size=4096, sha256=expected_sha)
+
+        client = DinoV3DistributionClient(f'http://{host}:{port}', cache_dir=cache, on_event=events.append)
+        client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+            manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+        )
+        # Force Python urllib direct open to fail TLS once so native curl.exe handles the 302 + 206 resume.
+        def broken_direct(request, timeout):
+            raise ssl.SSLError('simulated windows tls failure')
+        monkeypatch.setattr(client, '_open_direct_url', broken_direct)
+        client._native_fallback = True
+        out = tmp_path / 'installed'
+        client.download_tree('', out)
+        assert (out / 'model.bin').read_bytes() == payload
+        assert direct_ranges == ['bytes=4096-12287']
+        serialized = json.dumps(events)
+        assert 'SECRET_LOCAL_SIG' not in serialized and 'SECRET_HOP_SIG' not in serialized
+
+        # Also verify native curl redirect whitelist rejects non-allowed Location targets.
+        with pytest.raises(DinoV3DistributionError, match='unsafe_direct_redirect'):
+            with client._open_native_stream(
+                f'http://{host}:{port}/redirect-evil', headers={}, allow_direct_redirects=True
+            ):
+                pass
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_local_http_urllib_direct_resume_and_safe_redirect_handler(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4096)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8192)
+    payload = (b'URLLIB-DIRECT-RESUME-' * 500)[:8192]
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = '1' * 64
+    seen_ranges = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get('Content-Length') or '0')
+            self.rfile.read(length)
+            host, port = self.server.server_address
+            body = json.dumps({
+                'path': 'DINOv3/cpu/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'V' * 43,
+                'direct_url': f'http://{host}:{port}/blob',
+                'direct_headers': {},
+            }).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == '/blob':
+                rng = self.headers.get('Range')
+                seen_ranges.append(rng)
+                chunk = payload[4096:]
+                self.send_response(206)
+                self.send_header('Content-Range', f'bytes 4096-8191/{len(payload)}')
+                self.send_header('Content-Length', str(len(chunk)))
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+            if self.path == '/evil-hop':
+                self.send_response(302)
+                self.send_header('Location', 'https://evil.example/model.bin')
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        allowed_prefix = f'http://{host}:{port}/'
+        monkeypatch.setattr(distribution, 'valid_direct_url', lambda u: u.startswith(allowed_prefix))
+        cache = tmp_path / 'cache'
+        _seed_partial(cache / manifest_id / 'model.bin', payload, offset=4096, segment_size=4096, sha256=expected_sha)
+        client = DinoV3DistributionClient(f'http://{host}:{port}', cache_dir=cache, runtime='cpu')
+        client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+            manifest_id, (DinoV3DistributionEntry('DINOv3/cpu/model.bin', 'model.bin', len(payload), expected_sha),)
+        )
+        out = tmp_path / 'out'
+        client.download_tree('', out)
+        assert (out / 'model.bin').read_bytes() == payload
+        assert seen_ranges == ['bytes=4096-8191']
+
+        req = distribution.urllib.request.Request(f'http://{host}:{port}/evil-hop', method='GET')
+        with pytest.raises(DinoV3DistributionError, match='unsafe_direct_redirect'):
+            client._open_direct_url(req, timeout=10)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_non_onedrive_direct_url_is_ignored_and_falls_back_preserving_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'0123456789abcdef'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = '2' * 64
+    cache = tmp_path / 'cache'
+    _seed_partial(cache / manifest_id / 'model.bin', payload, offset=8, segment_size=4, sha256=expected_sha)
+    requested_urls = []
+
+    def opener(request, timeout):
+        requested_urls.append(request.full_url)
+        if request.get_method() == 'POST':
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'W' * 43,
+                'direct_url': 'https://untrusted.example.com/model.bin?sig=SECRET',
+                'direct_headers': {},
+            }).encode())
+        rng = request.get_header('Range')
+        start, end = map(int, rng[6:].split('-'))
+        stream = io.BytesIO(payload[start:end + 1])
+        stream.status = 206
+        stream.headers = {'Content-Range': f'bytes {start}-{end}/{len(payload)}'}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+    )
+    out = tmp_path / 'out'
+    client.download_tree('', out)
+    assert (out / 'model.bin').read_bytes() == payload
+    assert not any('untrusted.example.com' in url for url in requested_urls)
+    assert len(requested_urls) == 3  # 1 capability + 2 proxy segments (8-11, 12-15)
+
+
+def test_direct_stream_exit_failure_does_not_promote_target_or_redownload_from_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'0123456789abcdef'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = '3' * 64
+    cache = tmp_path / 'cache'
+    cached = cache / manifest_id / 'model.bin'
+    direct_requests = []
+    proxy_requests = []
+    target_existed_during_exit = []
+
+    class _FailingExitStream:
+        def __init__(self, data: bytes):
+            self._buf = io.BytesIO(data)
+            self.status = 200
+            self.headers = {'Content-Length': str(len(data))}
+
+        def __enter__(self):
+            return self
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+        def __exit__(self, exc_type, exc, tb):
+            target_existed_during_exit.append(cached.exists())
+            raise OSError('simulated curl exit code 18 after body')
+
+    def opener(request, timeout):
+        if request.get_method() == 'POST':
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'X' * 43,
+                'direct_url': 'https://tenant.sharepoint.com/model.bin?sig=SECRET',
+                'direct_headers': {},
+            }).encode())
+        if '/proxy/' in request.full_url:
+            proxy_requests.append(request.get_header('Range'))
+            raise AssertionError('proxy should not be called when verified partial already completed')
+        direct_requests.append(request.get_header('Range'))
+        return _FailingExitStream(payload)
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+    )
+    out = tmp_path / 'out'
+    client.download_tree('', out)
+    assert target_existed_during_exit == [False]
+    assert direct_requests == [None]
+    assert proxy_requests == []
+    assert (out / 'model.bin').read_bytes() == payload
+
+
+def test_corrupt_completed_direct_partial_falls_back_to_proxy_from_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_BYTES', 4)
+    monkeypatch.setattr(distribution, 'PROXY_SEGMENT_THRESHOLD', 8)
+    payload = b'0123456789abcdef'
+    bad_payload = b'XXXXXXXXXXXXXXXX'
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    manifest_id = '4' * 64
+    cache = tmp_path / 'cache'
+    proxy_ranges = []
+
+    def opener(request, timeout):
+        if request.get_method() == 'POST':
+            return io.BytesIO(json.dumps({
+                'path': 'DINOv3/model.bin',
+                'size': len(payload),
+                'sha256': expected_sha,
+                'proxy_token': 'Y' * 43,
+                'direct_url': 'https://tenant.sharepoint.com/model.bin?sig=SECRET',
+                'direct_headers': {},
+            }).encode())
+        if '/proxy/' in request.full_url:
+            rng = request.get_header('Range')
+            proxy_ranges.append(rng)
+            start, end = map(int, rng[6:].split('-'))
+            stream = io.BytesIO(payload[start:end + 1])
+            stream.status = 206
+            stream.headers = {'Content-Range': f'bytes {start}-{end}/{len(payload)}'}
+            return stream
+        # Write full-size corrupt bytes (checkpoints offset==16), then extra byte triggers size_mismatch fallback.
+        stream = io.BytesIO(bad_payload + b'EXTRA')
+        stream.status = 200
+        stream.headers = {}
+        return stream
+
+    client = DinoV3DistributionClient('http://127.0.0.1/v1', opener=opener, cache_dir=cache)
+    client.fetch_manifest = lambda runtime=None: DinoV3DistributionManifest(
+        manifest_id, (DinoV3DistributionEntry('DINOv3/model.bin', 'model.bin', len(payload), expected_sha),)
+    )
+    out = tmp_path / 'out'
+    client.download_tree('', out)
+    assert (out / 'model.bin').read_bytes() == payload
+    assert proxy_ranges == ['bytes=0-3', 'bytes=4-7', 'bytes=8-11', 'bytes=12-15']
+
+
+def test_open_native_stream_default_user_agent_and_wait_timeout_error(tmp_path, monkeypatch):
+    import subprocess
+
+    commands = []
+
+    class _FakeStdout:
+        def readline(self, _n=-1):
+            return b''
+
+        def close(self):
+            pass
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+            self._terminated = False
+
+        def poll(self):
+            return None if not self._terminated else 1
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(['curl.exe'], timeout or 10)
+
+        def terminate(self):
+            self._terminated = True
+
+        def kill(self):
+            self._terminated = True
+
+    def fake_popen(command, **_kwargs):
+        commands.append(command)
+        return _FakeProc()
+
+    monkeypatch.setattr(distribution.shutil, 'which', lambda name: 'C:/Windows/System32/curl.exe')
+    monkeypatch.setattr(distribution.subprocess, 'Popen', fake_popen)
+    client = DinoV3DistributionClient('http://127.0.0.1/v1')
+    with pytest.raises(OSError, match='timed out'):
+        with client._open_native_stream('https://tenant.sharepoint.com/model.bin', scratch_dir=tmp_path):
+            pass
+    assert 'User-Agent: Neri DINOv3 installer' in commands[0]
+    with pytest.raises(OSError, match='timed out'):
+        with client._open_native_stream(
+            'https://tenant.sharepoint.com/model.bin',
+            headers={'user-agent': 'CustomUA/1.0'},
+            scratch_dir=tmp_path,
+        ):
+            pass
+    assert 'User-Agent: Neri DINOv3 installer' not in commands[1]
+    assert 'user-agent: CustomUA/1.0' in commands[1]

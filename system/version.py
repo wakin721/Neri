@@ -3,7 +3,7 @@ import re
 import subprocess
 from pathlib import Path
 
-BASE_VERSION = "3.1.1-alpha3"
+BASE_VERSION = "3.1.1-alpha4"
 DEFAULT_BUILD_CODE = "ced18f"
 DEFAULT_BUILD_NUMBER = 1481
 

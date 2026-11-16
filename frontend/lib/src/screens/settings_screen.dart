@@ -2009,6 +2009,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 final installedRuntimeLabel = _dinoInstalledRuntimeLabel(
                   status,
                 );
+                final debugModeEnabled = _bool(_debugModeKey);
                 final canSwitchHealthyVersion =
                     status.healthy &&
                     _shouldOfferDinoVersionSwitch(status, runtimeChoice);
@@ -2082,21 +2083,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ],
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    if (installedRuntimeLabel != null || debugModeEnabled)
+                      const SizedBox(height: 6),
                     if (installedRuntimeLabel != null)
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
+                        padding: EdgeInsets.only(
+                          bottom: debugModeEnabled ? 4 : 0,
+                        ),
                         child: Text(
                           '当前已安装：$installedRuntimeLabel',
                           textAlign: TextAlign.end,
                           style: hintStyle,
                         ),
                       ),
-                    Text(
-                      _dinoRuntimeChoiceHint(runtimeChoice),
-                      textAlign: TextAlign.end,
-                      style: hintStyle,
-                    ),
+                    if (debugModeEnabled)
+                      Text(
+                        _dinoRuntimeChoiceHint(runtimeChoice),
+                        textAlign: TextAlign.end,
+                        style: hintStyle,
+                      ),
                   ],
                 );
               },

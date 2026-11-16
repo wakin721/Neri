@@ -237,6 +237,49 @@ def remove_dinov3_component(*, root: Path | None = None) -> dict:
     return dinov3_component_status(root=component_root)
 
 
+def _emit_event(on_event, **event) -> None:
+    """Forward a lifecycle event without letting diagnostics fail an install."""
+    if on_event is not None:
+        try:
+            on_event(event)
+        except Exception:
+            pass
+
+
+def _cleanup_backup(backup: Path, *, on_event=None) -> bool:
+    """Delete a backup tree or defer cleanup without force-removing locked files."""
+    try:
+        shutil.rmtree(backup)
+        return True
+    except OSError as exc:
+        _emit_event(
+            on_event,
+            phase="cleanup",
+            state="deferred",
+            action="deferred_cleanup",
+            message=f"deferred cleanup: {backup.name}",
+            path=str(backup),
+            exception_type=type(exc).__name__,
+            reason=str(exc),
+        )
+        return False
+
+
+def _prepare_backup_path(component_root: Path, *, on_event=None) -> Path:
+    """Return a free backup sibling path without overwriting locked backups."""
+    default_backup = component_root.with_name(component_root.name + ".old")
+    if not default_backup.exists() and not default_backup.is_symlink():
+        return default_backup
+    if _cleanup_backup(default_backup, on_event=on_event):
+        return default_backup
+    index = 1
+    while True:
+        candidate = component_root.with_name(f"{component_root.name}.old.{index}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        index += 1
+
+
 def install_dinov3_component(
     *,
     root: Path | None = None,
@@ -306,19 +349,18 @@ def install_dinov3_component(
             if actual_resolved is not None:
                 _write_runtime_metadata(staging, validated_choice, actual_resolved)
 
-        backup = component_root.with_name(component_root.name + ".old")
-        if backup.exists():
-            shutil.rmtree(backup)
+        backup: Path | None = None
         if component_root.exists():
+            backup = _prepare_backup_path(component_root, on_event=on_event)
             component_root.replace(backup)
         try:
             staging.replace(component_root)
         except Exception:
-            if backup.exists() and not component_root.exists():
+            if backup is not None and backup.exists() and not component_root.exists():
                 backup.replace(component_root)
             raise
-        if backup.exists():
-            shutil.rmtree(backup)
+        if backup is not None and backup.exists():
+            _cleanup_backup(backup, on_event=on_event)
         return dinov3_component_status(root=component_root)
     finally:
         if staging.exists():

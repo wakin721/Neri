@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -1596,28 +1597,57 @@ def _normalize_hardware_name(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _start_backend() -> None:
+def _backend_is_ready() -> bool:
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f'http://{BACKEND_HOST}:{BACKEND_PORT}/api/health', timeout=1) as response:
+            payload = json.loads(response.read(4096))
+            return (response.status == 200 and isinstance(payload, dict)
+                    and payload.get('app') == 'Neri API' and payload.get('status') == 'ok')
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+
+
+def _start_backend(*, timeout_seconds: float = 45) -> None:
     python_exe = toolkit_python()
-    command = [
-        str(python_exe),
-        *PYTHON_ISOLATION_ARGS,
-        "-m",
+    root = project_root()
+    command = python_module_command(
+        python_exe, root,
         "uvicorn",
         BACKEND_APP,
         "--app-dir",
-        ".",
+        str(root),
         "--host",
         BACKEND_HOST,
         "--port",
         BACKEND_PORT,
-    ]
-    subprocess.Popen(
-        command,
-        cwd=str(project_root()),
-        env=python_environment(),
-        creationflags=_creation_flags(),
-        close_fds=True,
     )
+    log_path = logs_dir() / 'backend_restart.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open('ab') as log:
+        log.write(f'\n[{_utc_now()}] Starting backend after maintenance\n'.encode('utf8'))
+        log.flush()
+        process = subprocess.Popen(
+            command, cwd=str(root), env=python_environment(),
+            creationflags=_creation_flags(), close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if _backend_is_ready():
+                return
+            code = process.poll()
+            if code is not None:
+                raise RuntimeError(f'Python 后端启动失败（退出码 {code}），日志：{log_path}')
+            if time.monotonic() >= deadline:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                raise RuntimeError(f'Python 后端未在指定时间内就绪，日志：{log_path}')
+            time.sleep(0.25)
 
 
 def _wait_for_process_exit(pid: int, timeout_seconds: float = 30) -> None:

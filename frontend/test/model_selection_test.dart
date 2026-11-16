@@ -1221,6 +1221,7 @@ void main() {
 
     expect(find.text('下载版本'), findsOneWidget);
     expect(find.text('自动检测（默认）'), findsOneWidget);
+    expect(find.textContaining('仅 GPU 模式要求 PyTorch'), findsNothing);
 
     Finder runtimeChoiceTrigger() => find.descendant(
       of: find.byKey(const Key('dino-runtime-choice')),
@@ -1256,7 +1257,7 @@ void main() {
     await tester.pump();
 
     expect(savedDrafts.last['dino_runtime_choice'], 'cpu');
-    expect(find.textContaining('不要求安装 PyTorch'), findsOneWidget);
+    expect(find.textContaining('不要求安装 PyTorch'), findsNothing);
 
     await tester.pumpWidget(buildScreen(savedSettings: const <String, dynamic>{}));
     await tester.pump();
@@ -1293,7 +1294,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('GPU（PyTorch）'), findsOneWidget);
-    expect(find.textContaining('需要 PyTorch 环境'), findsOneWidget);
+    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
+    expect(find.textContaining('需要 PyTorch 环境'), findsNothing);
     expect(find.widgetWithText(OutlinedButton, '删除'), findsOneWidget);
     expect(find.byKey(const Key('dino-component-switch')), findsOneWidget);
 
@@ -1318,7 +1320,22 @@ void main() {
     await tester.ensureVisible(autoChoiceItem);
     await tester.pumpAndSettle();
     await tester.tap(autoChoiceItem);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
     await tester.pumpAndSettle();
+    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
+    expect(find.textContaining('仅 GPU 模式要求 PyTorch'), findsNothing);
+    await tester.pumpWidget(
+      buildScreen(
+        savedSettings: const <String, dynamic>{
+          'dino_runtime_choice': 'auto',
+          'debug_mode': true,
+        },
+        backendGeneration: 3,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
     expect(
       find.textContaining('仅 GPU 模式要求 PyTorch'),
       findsOneWidget,
@@ -1332,7 +1349,7 @@ void main() {
     await tester.pumpWidget(
       buildScreen(
         savedSettings: const <String, dynamic>{'dino_runtime_choice': 'auto'},
-        backendGeneration: 3,
+        backendGeneration: 4,
       ),
     );
     await tester.pumpAndSettle();

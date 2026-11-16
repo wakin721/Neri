@@ -38,7 +38,7 @@ def test_pollution_probe_detects_missing_isolation(incomplete_flags):
         verify(root, python_executable=sys.executable, isolation_args=incomplete_flags)
 
 
-def test_backend_restart_and_workers_propagate_clean_environment(monkeypatch):
+def test_backend_restart_and_workers_propagate_clean_environment(monkeypatch, tmp_path):
     from system.backend import maintenance
     from system.backend import dinov3_maintenance
 
@@ -57,6 +57,8 @@ def test_backend_restart_and_workers_propagate_clean_environment(monkeypatch):
     monkeypatch.setattr(maintenance, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(maintenance, "toolkit_python", lambda: Path(sys.executable))
     monkeypatch.setattr(maintenance, "resolve_package_source", lambda _: ("official", "official", "https://pypi.org/simple"))
+    monkeypatch.setattr(maintenance, "logs_dir", lambda: tmp_path)
+    monkeypatch.setattr(maintenance, "_backend_is_ready", lambda: True, raising=False)
     maintenance._start_backend()
     maintenance._start_maintenance("reinstall_package", [], "test")
     dinov3_maintenance._start("remove_dinov3")
@@ -67,3 +69,52 @@ def test_backend_restart_and_workers_propagate_clean_environment(monkeypatch):
         assert "PYTHONHOME" not in environment
         assert "PYTHONPATH" not in environment
         assert environment["PYTHONNOUSERSITE"] == "1"
+
+
+def test_backend_restart_waits_for_health_and_captures_logs(monkeypatch, tmp_path):
+    from system.backend import maintenance
+    from types import SimpleNamespace
+
+    checks, launches = [], []
+    def ready():
+        checks.append(True)
+        return len(checks) == 3
+    def start(command, **options):
+        launches.append((command, options))
+        return SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(maintenance, 'logs_dir', lambda: tmp_path)
+    monkeypatch.setattr(maintenance.subprocess, 'Popen', start)
+    monkeypatch.setattr(maintenance, '_backend_is_ready', ready, raising=False)
+    monkeypatch.setattr(maintenance.time, 'sleep', lambda _: None)
+    maintenance._start_backend()
+    assert len(checks) == 3
+    command, options = launches[0]
+    assert '-c' in command and 'uvicorn' in command
+    assert options['stdin'] == maintenance.subprocess.DEVNULL
+    assert options['stderr'] == maintenance.subprocess.STDOUT
+    assert options['stdout'].name == str(tmp_path/'backend_restart.log')
+
+
+def test_backend_restart_detects_child_exit(monkeypatch, tmp_path):
+    from system.backend import maintenance
+    from types import SimpleNamespace
+    monkeypatch.setattr(maintenance, 'logs_dir', lambda: tmp_path)
+    monkeypatch.setattr(maintenance, '_backend_is_ready', lambda: False, raising=False)
+    monkeypatch.setattr(maintenance.subprocess, 'Popen', lambda *a, **kw:
+                        SimpleNamespace(poll=lambda: 61))
+    with pytest.raises(RuntimeError, match='61'):
+        maintenance._start_backend()
+
+
+def test_backend_restart_terminates_unready_child(monkeypatch, tmp_path):
+    from system.backend import maintenance
+    from types import SimpleNamespace
+    stopped = []
+    child = SimpleNamespace(poll=lambda: None,
+        terminate=lambda: stopped.append(True), wait=lambda **kw: None)
+    monkeypatch.setattr(maintenance, 'logs_dir', lambda: tmp_path)
+    monkeypatch.setattr(maintenance, '_backend_is_ready', lambda: False, raising=False)
+    monkeypatch.setattr(maintenance.subprocess, 'Popen', lambda *a, **kw: child)
+    with pytest.raises(RuntimeError, match='就绪'):
+        maintenance._start_backend(timeout_seconds=0)
+    assert stopped == [True]

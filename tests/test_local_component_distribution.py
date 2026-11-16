@@ -194,3 +194,102 @@ def test_cpu_cloud_staging_checks_all_assets_before_publishing(tmp_path):
     (release / 'unexpected.bin').write_bytes(b'not in receipt')
     with pytest.raises(ValueError, match='inventory'):
         verify_release(release)
+
+
+def test_cpu_and_gpu_mirrors_offer_onedrive_but_proxy_keeps_local_release(tmp_path):
+    from fastapi.testclient import TestClient
+
+    gpu, cpu = tmp_path / 'gpu', tmp_path / 'cpu'
+    gpu.mkdir()
+    cpu.mkdir()
+    (gpu / 'encoder.pth').write_bytes(b'gpu-local')
+    (cpu / 'encoder.tflite').write_bytes(b'cpu-local')
+    resolved = []
+
+    class Drive:
+        unavailable = False
+
+        def resolve_link(self, path):
+            resolved.append(path)
+            if self.unavailable:
+                raise StorageError('drive_unavailable')
+            return UpstreamLink('https://models.1drv.com/download', {})
+
+    drive = Drive()
+    config = DistributionConfig(tmp_path / 'state', openlist_token='test',
+        dinov3_root=gpu, dinov3_cpu_root=cpu,
+        dinov3_gpu_drive_root='/Neri_Data/Model/DINOv3/releases/gpu-pinned',
+        dinov3_cpu_drive_root='/Neri_Data/Model/DINOv3/releases/cpu-pinned')
+    with patch('server.model_distribution.app.OpenListModelStore', return_value=drive):
+        app = create_app(config)
+    with TestClient(app) as client:
+        for suffix, expected, cloud in (
+            ('', b'gpu-local', '/Neri_Data/Model/DINOv3/releases/gpu-pinned/encoder.pth'),
+            ('?runtime=cpu', b'cpu-local', '/Neri_Data/Model/DINOv3/releases/cpu-pinned/encoder.tflite'),
+        ):
+            snapshot = client.get('/v1/dinov3/manifest'+suffix).json()
+            entry = snapshot['files'][0]
+            request = dict(manifest_id=snapshot['manifest_id'], path=entry['path'], sha256=entry['sha256'])
+            capability = client.post('/v1/dinov3/direct', json=request).json()
+            assert capability['direct_url'] == 'https://models.1drv.com/download'
+            assert resolved[-1] == cloud
+            # Even when OneDrive is unavailable, proxy reads the verified local file.
+            drive.unavailable = True
+            fallback = client.post('/v1/dinov3/direct', json=request).json()
+            assert fallback['direct_url'] is None
+            assert client.get('/v1/proxy/'+fallback['proxy_token']).content == expected
+            drive.unavailable = False
+
+
+def test_onedrive_publisher_reuses_identical_cpu_gpu_assets(tmp_path, monkeypatch):
+    from scripts import publish_dinov3_onedrive as publisher
+
+    sources = {}
+    for runtime in ('gpu', 'cpu'):
+        source = tmp_path / runtime
+        source.mkdir()
+        (source / 'shared.bin').write_bytes(b'shared frozen asset')
+        prefix = 'DINOv3/cpu/' if runtime == 'cpu' else 'DINOv3/'
+        sources[runtime] = dict(manifest_id=('a' if runtime=='gpu' else 'b')*64,
+            files=[dict(path=prefix+'shared.bin', size=19,
+                        sha256=hashlib.sha256(b'shared frozen asset').hexdigest())])
+    plans = {r: publisher.release_plan(sources[r], tmp_path/r, r) for r in sources}
+    uploaded, copied, files = [], [], {}
+
+    class Drive:
+        def mkdir(self, path): pass
+        def listing(self, parent, *, refresh=False):
+            return {Path(p).name: dict(size=len(data), is_dir=False)
+                    for p,data in files.items() if p.rsplit('/',1)[0] == parent}
+        def matches(self, path, row):
+            return path in files and hashlib.sha256(files[path]).hexdigest() == row['sha256']
+        def upload(self, source, path):
+            uploaded.append(path)
+            files[path] = Path(source).read_bytes()
+        def copy(self, source, path):
+            copied.append((source,path))
+            files[path] = files[source]
+
+    monkeypatch.setattr(publisher, 'Drive', Drive)
+    roots = publisher.publish(plans, sources, lambda **kw: None)
+    assert len(uploaded) == 1 and len(copied) == 1
+    assert roots['gpu'] != roots['cpu']
+    assert copied[0][0].startswith(roots['gpu'])
+    assert copied[0][1].startswith(roots['cpu'])
+    (tmp_path/'gpu/shared.bin').write_bytes(b'corrupt')
+    with pytest.raises(ValueError, match='checksum'):
+        publisher.release_plan(sources['gpu'], tmp_path/'gpu', 'gpu')
+
+
+def test_onedrive_activation_tolerates_service_cold_start(monkeypatch):
+    from scripts import publish_dinov3_onedrive as publisher
+    calls = []
+    def request(path):
+        calls.append(path)
+        if len(calls) < 3:
+            raise ConnectionRefusedError()
+        return {'manifest_id': 'ready'}
+    monkeypatch.setattr(publisher, 'request', request)
+    monkeypatch.setattr(publisher.time, 'sleep', lambda _: None)
+    assert publisher.wait_snapshot('?runtime=cpu') == {'manifest_id': 'ready'}
+    assert calls == ['/v1/dinov3/manifest?runtime=cpu']*3

@@ -13,6 +13,7 @@ import 'package:neri_flutter/src/frontend_version.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/privacy/privacy_status.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
+import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/utils/preview_snapshot_cache.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -42,9 +43,19 @@ class StartupBackend {
   int previewRequests = 0;
   bool consent = true;
   bool stopped = false;
+  bool offline = false;
   bool failDetails = false;
   bool advanceDuringDetail = false;
   int processed = 1;
+  bool pytorchAvailable = false;
+  List<Map<String, dynamic>> availableModels = const <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> availableClassificationModels =
+      const <Map<String, dynamic>>[];
+  Map<String, dynamic> dinoStatusPayload = <String, dynamic>{
+    'installed': false,
+    'healthy': false,
+    'message': 'Neri1.1 未安装。',
+  };
 
   Map<String, dynamic> job(String id) => {
     'id': id,
@@ -78,18 +89,16 @@ class StartupBackend {
         );
       }
       if (path == '/api/environment/dinov3-status') {
+        if (offline) throw http.ClientException('Backend offline');
         dinoStatusRequests++;
         return http.Response(
-          jsonEncode({
-            'installed': false,
-            'healthy': false,
-            'message': 'Neri1.1 未安装。',
-          }),
+          jsonEncode(dinoStatusPayload),
           200,
           headers: {'content-type': 'application/json; charset=utf-8'},
         );
       }
       if (path == '/api/settings') {
+        if (offline) throw http.ClientException('Backend offline');
         settingsRequests++;
         if (request.method == 'PUT') {
           savedSettings.addAll(
@@ -98,12 +107,18 @@ class StartupBackend {
           );
         }
         return http.Response(
-          jsonEncode({'settings': savedSettings}),
+          jsonEncode({
+            'settings': savedSettings,
+            'pytorch_available': pytorchAvailable,
+            'available_models': availableModels,
+            'available_classification_models': availableClassificationModels,
+          }),
           200,
           headers: {'content-type': 'application/json; charset=utf-8'},
         );
       }
       if (path == '/api/jobs') {
+        if (offline) throw http.ClientException('Backend offline');
         summaryRequests++;
         expectSync(request.url.queryParameters['include_results'], 'false');
         return http.Response(jsonEncode([job('history'), job('running')]), 200);
@@ -417,4 +432,106 @@ void main() {
     expect(backend.previewRequests, 0);
     await cleanup(tester, backend);
   });
+
+  testWidgets(
+    'silent poll after backend disconnect refreshes settings and component status even when jobs are unchanged',
+    (tester) async {
+      final backend = StartupBackend()
+        ..dinoStatusPayload = <String, dynamic>{
+          'installed': false,
+          'healthy': false,
+          'display_name': 'Neri1.2preview',
+          'message': 'Neri1.2preview 未安装。',
+        };
+      await mount(tester, backend);
+      backend.preview.complete(http.Response('[]', 200));
+      await settleStartup(tester);
+
+      await tester.tap(find.text('设置').first);
+      await settleStartup(tester);
+      await tester.tap(find.text('环境维护').first);
+      await settleStartup(tester);
+      expect(find.text('Neri1.2preview 未安装。'), findsOneWidget);
+
+      final summariesBefore = backend.summaryRequests;
+      final settingsBefore = backend.settingsRequests;
+      final dinoBefore = backend.dinoStatusRequests;
+
+      // Normal online silent poll must not reload settings or re-check DINO status.
+      await tester.pump(const Duration(seconds: 2));
+      await settleStartup(tester);
+      expect(backend.summaryRequests, greaterThan(summariesBefore));
+      expect(backend.settingsRequests, settingsBefore);
+      expect(backend.dinoStatusRequests, dinoBefore);
+
+      // Backend goes offline during silent poll -> UI marks backend not ready.
+      backend.offline = true;
+      await tester.pump(const Duration(seconds: 2));
+      await settleStartup(tester);
+      expect(find.text('等待后端就绪...'), findsOneWidget);
+
+      final settingsOffline = backend.settingsRequests;
+      final dinoOffline = backend.dinoStatusRequests;
+
+      // Backend returns with identical jobs, updated torch/models, and installed DINOv3.
+      backend.offline = false;
+      backend.pytorchAvailable = true;
+      backend.availableModels = <Map<String, dynamic>>[
+        {
+          'name': 'MDV6-yolov10-c',
+          'path': 'res/model/detect/sync/MDV6-yolov10-c.pt',
+          'source': 'sync',
+          'kind': 'detect',
+          'backend': 'yolo',
+        },
+      ];
+      backend.availableClassificationModels = <Map<String, dynamic>>[
+        {
+          'name': 'Neri1.2preview',
+          'path': 'res/model/DINOv3/Neri1.2preview.neri.json',
+          'source': 'user',
+          'kind': 'cls',
+          'backend': 'dinov3',
+          'encoder_backend': 'pytorch',
+        },
+      ];
+      backend.dinoStatusPayload = <String, dynamic>{
+        'installed': true,
+        'healthy': true,
+        'display_name': 'Neri1.2preview',
+        'encoder_backend': 'pytorch',
+        'runtime_choice': 'gpu',
+        'resolved_runtime_choice': 'gpu',
+        'message': 'Neri1.2preview 已安装。',
+      };
+
+      await tester.pump(const Duration(seconds: 2));
+      await settleStartup(tester);
+
+      expect(find.text('等待后端就绪...'), findsNothing);
+      expect(find.text('Neri1.2preview 已安装。'), findsOneWidget);
+      expect(backend.settingsRequests, settingsOffline + 1);
+      expect(backend.dinoStatusRequests, dinoOffline + 1);
+
+      final settingsScreen = tester.widget<SettingsScreen>(
+        find.byType(SettingsScreen),
+      );
+      expect(settingsScreen.backendReady, isTrue);
+      expect(settingsScreen.settings?.pytorchAvailable, isTrue);
+      expect(
+        settingsScreen.settings?.availableClassificationModels.any(
+          (model) => model.path == 'res/model/DINOv3/Neri1.2preview.neri.json',
+        ),
+        isTrue,
+      );
+
+      // Subsequent normal poll while online remains quiet on settings & DINO status.
+      await tester.pump(const Duration(seconds: 2));
+      await settleStartup(tester);
+      expect(backend.settingsRequests, settingsOffline + 1);
+      expect(backend.dinoStatusRequests, dinoOffline + 1);
+
+      await cleanup(tester, backend);
+    },
+  );
 }

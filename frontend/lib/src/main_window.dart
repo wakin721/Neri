@@ -2389,7 +2389,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     var backendResponded = false;
     try {
       final shouldFetchSettings =
-          reloadSettings || !silent || _settings == null;
+          reloadSettings || !silent || _settings == null || !_backendReady;
       final settings = shouldFetchSettings
           ? await widget.apiClient.fetchSettings().timeout(
               const Duration(seconds: 15),
@@ -2405,7 +2405,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           .timeout(const Duration(seconds: 15));
       if (!mounted || _closeFlowBlocksBackendStartup) return;
       backendResponded = true;
+      final becameReady = !_backendReady;
       _backendReady = true;
+      if (becameReady) {
+        _backendStartupGeneration += 1;
+      }
       final previousById = {for (final job in _jobs) job.id: job};
       final changedJobs = summaries.where((job) {
         final complete = _completeJobsById[job.id];
@@ -2500,7 +2504,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       _expandedJobIds.removeWhere((id) => !currentIds.contains(id));
       _failedJobDetailIds.removeAll(fetchedById.keys);
 
-      if (settingsChanged || jobsChanged) {
+      if (settingsChanged || jobsChanged || becameReady) {
         setState(() {
           if (settingsChanged) {
             _settings = settings;
@@ -2576,7 +2580,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
           }
         });
       }
-      if (settingsChanged || jobsChanged) {
+      if (settingsChanged || jobsChanged || becameReady) {
         unawaited(_updateWindowsShellStatus());
       }
       if (settingsChanged) {

@@ -89,7 +89,8 @@ class DistributionService:
         direct_url = None
         direct_headers: dict[str, str] = {}
         try:
-            link = self.store.resolve_link(self._remote_path(entry.path))
+            resolver = getattr(self.store, 'resolve_direct_link', self.store.resolve_link)
+            link = resolver(self._remote_path(entry.path))
             if valid_direct_download_url(link.url):
                 direct_url = link.url
                 direct_headers = safe_direct_headers(link.headers)
