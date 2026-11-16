@@ -1,7 +1,7 @@
 """Active backend facade for the versioned DINOv3 joint model.
 
 The large legacy service module remains a temporary implementation detail for
-non-DINO media/job behavior. Its DINO hooks select the validated Neri1.1
+non-DINO media/job behavior. Its DINO hooks select the validated joint-model
 runtime; legacy classification checkpoint formats are not supported.
 """
 from __future__ import annotations
@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+
+from system.dinov3.display import model_display_name
 
 from . import services_legacy as _legacy
 
@@ -199,9 +201,9 @@ def _validate_dino_job_options(
     if payload is None:
         return
     if not model_path:
-        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
+        raise ValueError(f"{model_display_name(payload)} 分类模型必须同时选择探测模型。")
     if video_mode == "all":
-        raise ValueError("Neri1.1 暂不支持视频识别，请选择跳过视频。")
+        raise ValueError(f"{model_display_name(payload)} 暂不支持视频识别，请选择跳过视频。")
 
 
 def _persist_dino_observations(*args, **kwargs):
@@ -223,7 +225,8 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
         raise ValueError("探测模型和分类模型至少需要选择一个。")
 
     suffix = resolved_model_path.suffix.lower() if resolved_model_path is not None else ""
-    if suffix in {".tflite", ".litert"}:
+    payload = _dino_manifest_payload(resolved_classification_path)
+    if suffix in {".tflite", ".litert"} and payload is None:
         if resolved_classification_path is not None:
             raise ValueError(
                 "LiteRT 探测暂不支持搭配分类模型；请取消分类模型或安装 PyTorch。"
@@ -249,14 +252,15 @@ def _load_detector(model_path: str | None, classification_model_path: str | None
     if (
         resolved_classification_path is not None
         and importlib.util.find_spec("torch") is None
+        and (payload is None or payload.get("encoder_backend", "pytorch") != "litert")
     ):
         raise RuntimeError("分类模型需要 PyTorch；请安装 PyTorch 或取消分类模型。")
 
-    payload = _dino_manifest_payload(resolved_classification_path)
     if payload is not None and resolved_model_path is None:
-        raise ValueError("Neri1.1 分类模型必须同时选择探测模型。")
-    if payload is not None and importlib.util.find_spec("torch") is None:
-        raise RuntimeError("Neri1.1 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
+        raise ValueError(f"{model_display_name(payload)} 分类模型必须同时选择探测模型。")
+    if (payload is not None and payload.get("encoder_backend", "pytorch") != "litert"
+            and importlib.util.find_spec("torch") is None):
+        raise RuntimeError(f"{model_display_name(payload)} 分类需要 PyTorch；请先安装 PyTorch 或取消分类模型。")
 
     detector = ImageProcessor(
         str(resolved_model_path) if resolved_model_path is not None else None

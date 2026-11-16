@@ -83,13 +83,20 @@ class NeriApiClient extends core.NeriApiClient {
   Future<core.MaintenanceStartResponse> installDinoV3({
     required String envChoice,
     String packageSource = 'auto',
+    String runtimeChoice = 'auto',
   }) async {
+    final normalizedRuntimeChoice = switch (runtimeChoice.trim().toLowerCase()) {
+      'cpu' => 'cpu',
+      'gpu' => 'gpu',
+      _ => 'auto',
+    };
     final response = await _http.post(
       _dinoUri('/api/environment/install-dinov3'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({
         'env_choice': envChoice,
         'package_source': packageSource,
+        'runtime_choice': normalizedRuntimeChoice,
       }),
     );
     _ensureSuccess(response);
@@ -239,6 +246,9 @@ class DinoComponentStatus {
     this.classCount,
     this.featureDim,
     this.manifest,
+    this.encoderBackend,
+    this.runtimeChoice,
+    this.resolvedRuntimeChoice,
   });
 
   factory DinoComponentStatus.fromJson(Map<String, dynamic> json) {
@@ -247,10 +257,15 @@ class DinoComponentStatus {
       healthy: json['healthy'] as bool? ?? false,
       architecture: json['architecture'] as String? ?? 'DINOv3 ViT-B/16',
       componentVersion: (json['component_version'] as num?)?.toInt() ?? 1,
-      displayName: json['display_name'] as String? ?? 'Neri1.2preview',
+      displayName: json['display_name'] as String? ?? '联合模型',
       classCount: (json['class_count'] as num?)?.toInt(),
       featureDim: (json['feature_dim'] as num?)?.toInt(),
       manifest: json['manifest'] as String?,
+      encoderBackend: _normalizedOptionalStatusText(json['encoder_backend']),
+      runtimeChoice: _normalizedOptionalStatusText(json['runtime_choice']),
+      resolvedRuntimeChoice: _normalizedOptionalStatusText(
+        json['resolved_runtime_choice'],
+      ),
       message: json['message'] as String? ?? '',
     );
   }
@@ -263,5 +278,14 @@ class DinoComponentStatus {
   final int? classCount;
   final int? featureDim;
   final String? manifest;
+  final String? encoderBackend;
+  final String? runtimeChoice;
+  final String? resolvedRuntimeChoice;
   final String message;
+}
+
+String? _normalizedOptionalStatusText(dynamic value) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  return trimmed.isEmpty ? null : trimmed;
 }

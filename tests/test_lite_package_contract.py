@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -22,16 +23,22 @@ class LitePackageContractTests(unittest.TestCase):
             copy_resources(Path(__file__).resolve().parents[1]/'res', output)
             report = verify_resources(output, require_bundled_detector=True)
             self.assertTrue(any(row['path'] == BUILTIN_DETECTOR for row in report['models']))
+            self.assertNotIn('classifier_assets', report)
+            self.assertFalse((output / 'bundled-models').exists())
+            self.assertTrue((output / 'model/cls/bundled').is_dir())
+            self.assertEqual(list((output / 'model/cls/bundled').rglob('*')), [])
             layout = get_model_layout(output)
             status = ModelSyncManager(layout, FakeClient(ModelManifest('a'*64, ()))).sync_once_for_test()
             self.assertEqual(status.state, 'completed')
             model = next(row for row in discover_models(layout, 'detect')
-                         if row.name == 'MDV6-yolov10-c.tflite')
+                         if row.name == 'MDV6-yolov10-c·LiteRT')
             self.assertEqual(model.source, 'bundled')
             self.assertEqual(model.backend, 'litert')
+            self.assertEqual(Path(model.path).name, 'MDV6-yolov10-c.tflite')
             self.assertTrue(Path(model.path).is_file())
             self.assertEqual(Path(model.path).read_bytes(),
                 (Path(__file__).resolve().parents[1]/'res'/BUILTIN_DETECTOR).read_bytes())
+            self.assertEqual([row for row in discover_models(layout, 'cls') if row.source == 'bundled'], [])
 
     def test_distribution_verifier_requires_the_builtin_detector(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +233,98 @@ class LitePackageContractTests(unittest.TestCase):
         )
         self.assertIn('package_litert_resources.py', package_script)
         self.assertNotIn('Copy-Item "res" $package -Recurse -Force', package_script)
+
+    def test_package_windows_and_ci_require_mdv6_only_without_bundled_classifier_or_shards(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        package_script = (repository_root / "scripts" / "package_windows.ps1").read_text(encoding="utf-8")
+        build_workflow = (repository_root / ".github" / "workflows" / "build-windows-x64.yml").read_text(encoding="utf-8")
+        for content in (package_script, build_workflow):
+            self.assertNotIn("prepare_bundled_classifier.py", content)
+            self.assertNotIn("--require-bundled-classifier", content)
+            self.assertIn("--require-bundled-detector", content)
+            self.assertIn("verify_bundled_litert.py", content)
+        for workflow_name in ("model-sync-pr.yml", "validation-performance.yml"):
+            workflow = (repository_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertNotIn("prepare_bundled_classifier.py", workflow)
+            self.assertNotIn("bundled-models", workflow)
+
+        gitignore = (repository_root / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/res/bundled-models/", gitignore)
+        self.assertIn("/res/model/cls/bundled/Neri1.2preview-litert*", gitignore)
+
+    def test_clean_checkout_packages_mdv6_without_repo_shards(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        from scripts.package_litert_resources import BUILTIN_DETECTOR
+        detector_source = repository_root / "res" / BUILTIN_DETECTOR
+        with tempfile.TemporaryDirectory() as tmp:
+            clean_res = Path(tmp) / "res"
+            output = Path(tmp) / "packaged-res"
+            (clean_res / "model" / "detect" / "bundled").mkdir(parents=True)
+            shutil.copy2(detector_source, clean_res / BUILTIN_DETECTOR)
+            for suffix in (".labels.txt", ".LICENSE.md", ".SOURCE.md"):
+                sidecar = detector_source.with_name(detector_source.stem + suffix)
+                if sidecar.is_file():
+                    shutil.copy2(sidecar, clean_res / "model" / "detect" / "bundled" / sidecar.name)
+            report = copy_resources(clean_res, output)
+            self.assertEqual([row["path"] for row in report["models"]], [BUILTIN_DETECTOR])
+            self.assertEqual(verify_resources(output, require_bundled_detector=True), report)
+            self.assertEqual(list((output / "model" / "cls" / "bundled").rglob("*")), [])
+
+    def test_verify_bundled_litert_requires_mdv6_and_rejects_bundled_classifier(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp) / "Neri"
+            shutil.copytree(
+                repository_root / "system",
+                app_root / "system",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            for relative in CANONICAL_DIRECTORIES:
+                (app_root / "res" / "model" / relative).mkdir(parents=True, exist_ok=True)
+            detector = app_root / "res" / "model" / "detect" / "bundled" / "MDV6-yolov10-c.tflite"
+            detector.write_bytes(b"fake tflite detector")
+            verify_script = repository_root / "scripts" / "verify_bundled_litert.py"
+            runner = textwrap.dedent(f"""
+                import json, sys, types
+                import numpy as np
+                fake_mod = types.ModuleType("ai_edge_litert")
+                fake_interp_mod = types.ModuleType("ai_edge_litert.interpreter")
+                class FakeInterpreter:
+                    def __init__(self, model_path, num_threads=2):
+                        self.model_path = model_path
+                    def allocate_tensors(self):
+                        pass
+                    def get_input_details(self):
+                        return [{{"index": 0, "shape": (1, 640, 640, 3), "dtype": np.float32}}]
+                    def set_tensor(self, index, value):
+                        pass
+                    def invoke(self):
+                        pass
+                    def get_output_details(self):
+                        return [{{"index": 0}}]
+                    def get_tensor(self, index):
+                        return np.zeros((1, 300, 6), dtype=np.float32)
+                fake_interp_mod.Interpreter = FakeInterpreter
+                fake_mod.interpreter = fake_interp_mod
+                sys.modules["ai_edge_litert"] = fake_mod
+                sys.modules["ai_edge_litert.interpreter"] = fake_interp_mod
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("verify_bundled_litert", {str(verify_script)!r})
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                report = mod.verify({str(app_root)!r})
+                assert report["passed"] is True, report
+                assert report.get("bundled_classifier_present") is False, report
+                assert "classifier_smoke" not in report, report
+            """)
+            ok = subprocess.run([sys.executable, "-c", runner], capture_output=True, text=True, timeout=30)
+            self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+            cls_manifest = app_root / "res" / "model" / "cls" / "bundled" / "Neri1.2preview-litert.neri.json"
+            cls_manifest.write_text("{}", encoding="utf-8")
+            bad = subprocess.run([sys.executable, "-c", runner], capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(bad.returncode, 0, "verify_bundled_litert must reject bundled classifier assets")
+            self.assertIn("ValueError", bad.stderr)
 
 
 if __name__ == "__main__":

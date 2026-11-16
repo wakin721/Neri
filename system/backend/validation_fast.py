@@ -1,4 +1,4 @@
-"""Indexed and batched validation helpers for Neri1.1."""
+"""Indexed and batched validation helpers for DINOv3 joint models."""
 from __future__ import annotations
 
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_joint_model(classification_model_path) -> bool:
-    """Identify the joint Neri1.1 deployment for explicit reviewed supplements."""
+    """Identify a joint-model deployment for explicit reviewed supplements."""
     try:
         path = Path(classification_model_path)
         if not path.name.endswith(".neri.json"):

@@ -239,6 +239,7 @@ def test_finalize_photo_job_sequence_aggregation(tmp_path):
     detector = MagicMock()
     detector.dinov3_classifier = MagicMock()
     detector.dinov3_classifier.backend = "dinov3"
+    detector.dinov3_classifier.display_name = "Neri1.2preview"
     detector._dinov3_collector = collector
 
     # Setup two mock photos in tmp_path
@@ -280,9 +281,12 @@ def test_finalize_photo_job_sequence_aggregation(tmp_path):
     def mock_save(batch, root):
         saved_batches.append(batch)
 
+    summary_updates = []
     final_results = finalize_photo_job(
         detector, items, tmp_path, save_batch_fn=mock_save,
+        mutate_job=lambda **kw: summary_updates.append(kw),
     )
+    assert summary_updates[-1]["message"].startswith("Neri1.2preview序列聚合完成")
 
     assert len(final_results) == 2
     # Item 1: accepted

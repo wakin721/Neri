@@ -12,7 +12,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
-from heapq import heapify, heappop
+from heapq import heapify, heappop, heappush
 import math
 import os
 from pathlib import Path
@@ -58,7 +58,7 @@ class HistoryBatch:
 def _first(record: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         value = record.get(key)
-        if value is not None and str(value).strip():
+        if value is not None and (not isinstance(value, str) or value.strip()):
             return value
     return None
 
@@ -112,6 +112,55 @@ def camera_id_for_path(path: str | Path, root: str | Path | None = None) -> str:
             pass
     normalized = os.path.normcase(str(camera_directory)).replace("\\", "/")
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+class _HistorySequence:
+    """Time-sorted rows with a range-minimum tree for frozen random ranks."""
+
+    def __init__(self, rows, times, ranks, identities):
+        self.rows = rows
+        self.times = [times[i] for i in rows]
+        self.ranks = ranks
+        self.identities = identities
+        self.size = 1 << (len(rows) - 1).bit_length()
+        self.tree = [-1] * (2 * self.size)
+        self.tree[self.size:self.size + len(rows)] = rows
+        for node in range(self.size - 1, 0, -1):
+            children = [i for i in self.tree[2 * node:2 * node + 2] if i >= 0]
+            self.tree[node] = min(children, key=lambda i: (ranks[i], i)) if children else -1
+
+    def best(self, start, stop, seen):
+        """Return the lowest-ranked eligible row without scanning the window."""
+        left, right = start + self.size, stop + self.size
+        nodes = []
+        while left < right:
+            if left & 1:
+                nodes.append(left)
+                left += 1
+            if right & 1:
+                right -= 1
+                nodes.append(right)
+            left //= 2
+            right //= 2
+        if not nodes:
+            return None
+        row = min((self.tree[n] for n in nodes), key=lambda i: (self.ranks[i], i))
+        if seen.isdisjoint(self.identities[row]):
+            return row
+        # Only descend into additional tree nodes when content aliases exclude
+        # a range's winner. The heap preserves the exact (rank, row) ordering.
+        pending = [(self.ranks[self.tree[n]], self.tree[n], n) for n in nodes]
+        heapify(pending)
+        while pending:
+            _, row, node = heappop(pending)
+            if seen.isdisjoint(self.identities[row]):
+                return row
+            if node < self.size:
+                for child in (2 * node, 2 * node + 1):
+                    candidate = self.tree[child]
+                    if candidate >= 0:
+                        heappush(pending, (self.ranks[candidate], candidate, child))
+        return None
 
 
 class FastCausalHistoryIndex:
@@ -181,11 +230,18 @@ class FastCausalHistoryIndex:
         ]
 
         self._sequence_ranks: dict[tuple[str, str], bytes] = {}
+        self._camera_sequences: dict[str, dict[str, _HistorySequence]] = {}
         for camera, indices in self._by_camera.items():
+            rows_by_sequence: dict[str, list[int]] = {}
             for index in indices:
                 key = (camera, self.sequences[index])
+                rows_by_sequence.setdefault(key[1], []).append(index)
                 if key not in self._sequence_ranks:
                     self._sequence_ranks[key] = self._rank(*key)
+            self._camera_sequences[camera] = {
+                seq: _HistorySequence(rows, self.times, self._ranks, self.identities)
+                for seq, rows in rows_by_sequence.items()
+            }
 
     def _rank(self, *parts: Any) -> bytes:
         return hashlib.sha256(repr((self.config.seed, parts)).encode("utf-8")).digest()
@@ -197,22 +253,20 @@ class FastCausalHistoryIndex:
         if config.max_history == 0 or self.times[query] is None:
             return []
         camera, query_sequence = self.cameras[query], self.sequences[query]
-        indices = self._by_camera.get(camera, [])
-        times = self._camera_times.get(camera, [])
         query_time = self.times[query]
-        start = bisect_left(times, query_time - config.days * 86400)
-        stop = bisect_left(times, query_time)  # Equal timestamps strictly excluded
-        visible = indices[start:stop]
+        earliest = query_time - config.days * 86400
+        sequences = self._camera_sequences.get(camera, {})
         seen = set(self.identities[query])
         selected: list[int] = []
 
         short_limit = min(config.short_term, config.max_history)
-        if short_limit:
-            for index in reversed(visible):
-                if (
-                    self.sequences[index] == query_sequence
-                    and not seen.intersection(self.identities[index])
-                ):
+        short_sequence = sequences.get(query_sequence)
+        if short_limit and short_sequence is not None:
+            start = bisect_left(short_sequence.times, earliest)
+            stop = bisect_left(short_sequence.times, query_time)
+            for position in range(stop - 1, start - 1, -1):
+                index = short_sequence.rows[position]
+                if seen.isdisjoint(self.identities[index]):
                     selected.append(index)
                     seen.update(self.identities[index])
                     if len(selected) == short_limit:
@@ -220,33 +274,30 @@ class FastCausalHistoryIndex:
         if len(selected) == config.max_history:
             return selected
 
-        long_sequences: dict[str, list[int]] = {}
-        for index in visible:
-            seq = self.sequences[index]
-            if (
-                seq != query_sequence
-                and not self.identities[query].intersection(self.identities[index])
+        ordered = []
+        for seq, sequence in sequences.items():
+            if seq == query_sequence:
+                continue
+            start = bisect_left(sequence.times, earliest)
+            stop = bisect_left(sequence.times, query_time)
+            if start == stop:
+                continue
+            # Preserve chronological insertion order even in the unlikely case
+            # of equal sequence ranks. Only aliases of the query affect it.
+            first = start
+            while first < stop and not self.identities[query].isdisjoint(
+                self.identities[sequence.rows[first]]
             ):
-                long_sequences.setdefault(seq, []).append(index)
-
-        ordered = [
-            (
-                self._sequence_ranks.setdefault((camera, seq), self._rank(camera, seq)),
-                order,
-                seq,
-            )
-            for order, seq in enumerate(long_sequences)
-        ]
+                first += 1
+            if first < stop:
+                row = sequence.rows[first]
+                ordered.append((self._sequence_ranks[camera, seq], self.times[row], row, seq, start, stop))
         heapify(ordered)
         while ordered and len(selected) < config.max_history:
-            _, _, seq = heappop(ordered)
-            candidates = [
-                i for i in long_sequences[seq]
-                if not seen.intersection(self.identities[i])
-            ]
-            if not candidates:
+            _, _, _, seq, start, stop = heappop(ordered)
+            index = sequences[seq].best(start, stop, seen)
+            if index is None:
                 continue
-            index = min(candidates, key=lambda i: (self._ranks[i], i))
             selected.append(index)
             seen.update(self.identities[index])
 
@@ -308,6 +359,7 @@ def adapt_with_history(
     if len(queries) == 0:
         return output
 
+    normalized = unit(raw)
     for begin in range(0, len(queries), chunk_size):
         end = min(begin + chunk_size, len(queries))
         hh = history_arr[begin:end]
@@ -320,11 +372,13 @@ def adapt_with_history(
 
         q = raw[queries[begin:end]][active]
         h_indices = hh[active].clip(min=0)
-        h = raw[h_indices].copy()
+        h = raw[h_indices]
         mask = valid[active]
         h[~mask] = 0.0
 
-        logits = np.einsum("bd,bmd->bm", unit(q), unit(h)) / temperature
+        logits = np.einsum(
+            "bd,bmd->bm", normalized[queries[begin:end]][active], normalized[h_indices]
+        ) / temperature
         logits[~mask] = -np.inf
         max_logits = np.max(logits, axis=1, keepdims=True)
         max_logits = np.where(np.isfinite(max_logits), max_logits, 0.0)
@@ -454,6 +508,9 @@ def _assign_cluster_tracks(
         frames[f_idx][s_idx].append(idx)
 
     has_multi_box_frame = any(len(f_slots) > 1 for f_slots in frames)
+    embeddings = [_extract_unit_embedding(item) for item in cluster]
+    bboxes = [_first(item, ("bbox",)) for item in cluster]
+    box_indices = [_first(item, ("box_index", "crop_index")) for item in cluster]
     tracks: list[list[int]] = []
     track_last_rep: list[int] = []
 
@@ -466,16 +523,15 @@ def _assign_cluster_tracks(
 
         candidates: list[tuple[float, int, int]] = []
         for t_idx, last_row in enumerate(track_last_rep):
-            last_rec = cluster[last_row]
-            emb_a = _extract_unit_embedding(last_rec)
-            box_a = _first(last_rec, ("bbox",))
-            box_idx_a = _first(last_rec, ("box_index", "crop_index"))
+            emb_a = embeddings[last_row]
+            box_a = bboxes[last_row]
+            box_idx_a = box_indices[last_row]
 
             for s_idx, slot_rows in enumerate(f_slots):
-                cur_rec = cluster[slot_rows[0]]
-                emb_b = _extract_unit_embedding(cur_rec)
-                box_b = _first(cur_rec, ("bbox",))
-                box_idx_b = _first(cur_rec, ("box_index", "crop_index"))
+                current_row = slot_rows[0]
+                emb_b = embeddings[current_row]
+                box_b = bboxes[current_row]
+                box_idx_b = box_indices[current_row]
 
                 emb_sim: float | None = None
                 if emb_a is not None and emb_b is not None and emb_a.shape == emb_b.shape:
@@ -544,12 +600,14 @@ def group_job_events(
     by_camera: dict[str, list[dict[str, Any]]] = {}
     for r in records:
         cam = str(_first(r, ("camera_id", "camera_component", "location")) or "single")
-        by_camera.setdefault(cam, []).append(dict(r))
+        item = dict(r)
+        item["datetime"] = parse_capture_time(_first(r, ("datetime", "date_taken", "captured_at")))
+        by_camera.setdefault(cam, []).append(item)
 
     output: list[dict[str, Any]] = []
     for camera_id, items in sorted(by_camera.items()):
-        missing = [x for x in items if parse_capture_time(_first(x, ("datetime", "date_taken", "captured_at"))) is None]
-        timed = [x for x in items if parse_capture_time(_first(x, ("datetime", "date_taken", "captured_at"))) is not None]
+        missing = [x for x in items if x["datetime"] is None]
+        timed = [x for x in items if x["datetime"] is not None]
 
         missing_sorted = sorted(
             missing,
@@ -585,7 +643,7 @@ def group_job_events(
 
         timed.sort(
             key=lambda x: (
-                parse_capture_time(_first(x, ("datetime", "date_taken", "captured_at"))),
+                x["datetime"],
                 str(_first(x, ("path", "image_id", "content_id")) or ""),
                 int(_first(x, ("box_index", "crop_index")) or 0),
             )
@@ -594,16 +652,15 @@ def group_job_events(
         cluster_start: datetime | None = None
 
         for item in timed:
-            dt = parse_capture_time(_first(item, ("datetime", "date_taken", "captured_at")))
+            dt = item["datetime"]
             if current_cluster:
-                prev_dt = parse_capture_time(_first(current_cluster[-1], ("datetime", "date_taken", "captured_at")))
+                prev_dt = current_cluster[-1]["datetime"]
                 if (dt - prev_dt).total_seconds() >= gap_seconds:
                     seq_key = f"event:{camera_id}:{cluster_start.isoformat()}"
                     _assign_cluster_tracks(current_cluster, seq_key)
                     for it in current_cluster:
                         it["camera_id"] = camera_id
                         it["timestamp_missing"] = False
-                        it["datetime"] = parse_capture_time(_first(it, ("datetime", "date_taken", "captured_at")))
                         output.append(it)
                     current_cluster = []
                     cluster_start = None
@@ -618,7 +675,6 @@ def group_job_events(
             for it in current_cluster:
                 it["camera_id"] = camera_id
                 it["timestamp_missing"] = False
-                it["datetime"] = parse_capture_time(_first(it, ("datetime", "date_taken", "captured_at")))
                 output.append(it)
 
     return output

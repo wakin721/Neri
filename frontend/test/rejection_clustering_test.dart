@@ -202,6 +202,7 @@ void main() {
     List<DetectionItem> items, {
     bool autoGroup = false,
     int refresh = 0,
+    String videoMode = 'fast',
   }) async {
     tester.view.physicalSize = const Size(1600, 1200);
     tester.view.devicePixelRatio = 1;
@@ -211,6 +212,7 @@ void main() {
           body: SpeciesValidationScreen(
             apiClient: api,
             classificationModelPath: 'model.neri.json',
+            videoMode: videoMode,
             inputPath: directory.path,
             rootInputPath: directory.path,
             rootItems: items,
@@ -492,9 +494,41 @@ void main() {
         await photo('pending', [box('pending', -1)], pending: true),
         await photo('old', [box('old', -1)]),
       ]);
-      for (final label in ['拒识（未成簇）', '拒识（聚类失败）', '拒识（待聚类）', '拒识（未聚类）']) {
+      for (final label in ['噪声', '拒识（聚类失败）', '拒识（待聚类）', '拒识（未聚类）']) {
         expect(find.text(label), findsOneWidget);
       }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'skipped video does not add an undetected label to noise groups',
+    (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final noise = await photo('noise-group', [
+        box('noise-group', 0, status: 'noise'),
+      ]);
+      final video = DetectionItem(
+        filename: 'skipped.mp4',
+        path: '${directory.path}/skipped.mp4',
+        fileType: 'mp4',
+        dateTaken: '2026-11-14T12:00:01Z',
+      );
+      await show(tester, [noise, video], autoGroup: true, videoMode: 'skip');
+      final list = find.byKey(const ValueKey('validation-species-list'));
+      expect(
+        find.descendant(of: list, matching: find.text('噪声')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: list, matching: find.textContaining('未检测')),
+        findsNothing,
+      );
+      expect(find.text('1 组 / 2 个文件'), findsOneWidget);
+      expect(video.species, isEmpty);
+      expect(video.detectionData, isEmpty);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -528,7 +562,7 @@ void main() {
             )
             .map((tile) => (tile.title! as Text).data)
             .toList(),
-        ['拒识（簇2）', '拒识（簇10）', '拒识（未成簇）', '空', '豹猫'],
+        ['拒识（簇2）', '拒识（簇10）', '噪声', '空', '豹猫'],
       );
       await show(tester, [
         await photo('a', [box('a', 3)]),

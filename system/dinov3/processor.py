@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -19,12 +20,13 @@ import numpy as np
 from .context import (
     FastCausalHistoryIndex,
     HistoryConfig,
-    adapt_with_history,
     camera_id_for_path,
     group_job_events,
     parse_capture_time,
 )
 from .observation_support import make_dinov3_observation_id
+from .history_acceleration import adapt_history_for_job
+from .display import model_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,22 @@ def _image_file_digest(path: str | Path) -> str:
             return hashlib.sha256(os.path.normcase(os.path.abspath(str(path))).encode("utf-8")).hexdigest()
 
 
+def read_image_with_digest(path: str | Path, collector: DinoV3CropCollector):
+    """Decode and fingerprint the same file bytes during the initial read."""
+    import cv2
+
+    with open(path, "rb") as source:
+        before = os.fstat(source.fileno())
+        encoded = source.read()
+        after = os.fstat(source.fileno())
+    image = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is not None and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
+        collector.record_image_digest(
+            path, hashlib.sha256(encoded).hexdigest(), (after.st_size, after.st_mtime_ns),
+        )
+    return image
+
+
 class DinoV3CropCollector:
     """Deduplicating collector for crop embeddings during batch detection."""
 
@@ -77,6 +95,24 @@ class DinoV3CropCollector:
         # Index by photo as well as box to keep checkpointing/restore linear
         # in job size, while deduplicating OOM retries.
         self._records_by_path: dict[str, dict[int, DinoV3CropRecord]] = {}
+        self._image_digests: dict[str, tuple[tuple[int, int], str]] = {}
+
+    def record_image_digest(self, path, digest, stamp) -> None:
+        key = os.path.normcase(os.path.abspath(str(path)))
+        self._image_digests[key] = (tuple(stamp), digest)
+
+    def image_digest(self, path, stamp=None) -> str | None:
+        key = os.path.normcase(os.path.abspath(str(path)))
+        cached = self._image_digests.get(key)
+        if cached is None:
+            return None
+        if stamp is None:
+            try:
+                stat = os.stat(path)
+                stamp = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                return None
+        return cached[1] if cached[0] == tuple(stamp) else None
 
     def record_crop(self, record: DinoV3CropRecord) -> None:
         path = os.path.normcase(os.path.abspath(record.image_path))
@@ -105,6 +141,7 @@ class DinoV3CropCollector:
 
     def clear(self) -> None:
         self._records_by_path.clear()
+        self._image_digests.clear()
 
 
 def _annotate_sequence_state(
@@ -295,6 +332,7 @@ def _mark_completed_without_crops(
     apply_data_fn: Callable[[Any, dict[str, Any]], Any] | None,
     mutate_job: Callable[..., None] | None,
     progress_fn=None,
+    model_name="联合模型",
 ) -> list[Any]:
     status = SEQUENCE_STATUS_COMPLETE if complete_sequence else SEQUENCE_STATUS_PARTIAL
     updated_results: list[Any] = []
@@ -317,14 +355,40 @@ def _mark_completed_without_crops(
         mutate_job(
             results=updated_results,
             message=(
-                f"Neri1.1序列聚合完成: {len(updated_results)} 张空照片已确认"
+                f"{model_name}序列聚合完成: {len(updated_results)} 张空照片已确认"
                 if complete_sequence
-                else f"Neri1.1序列部分聚合: {len(updated_results)} 张空照片，任务仍需继续"
+                else f"{model_name}序列部分聚合: {len(updated_results)} 张空照片，任务仍需继续"
             ),
         )
     if complete_sequence:
         ensure_dinov3_sequences_completed(updated_results)
     return updated_results
+
+
+def _rejection_event_groups(grouped_events):
+    """Reuse trajectories when full directories induce the same camera partition."""
+    directories = {}
+    forward, reverse = {}, {}
+    reusable = True
+    for record in grouped_events:
+        parent = Path(record["path"]).parent
+        if parent not in directories:
+            directories[parent] = camera_id_for_path(record["path"])
+        old, new = record["camera_id"], directories[parent]
+        if forward.setdefault(old, new) != new or reverse.setdefault(new, old) != old:
+            reusable = False
+    records = []
+    for record in grouped_events:
+        new = directories[Path(record["path"]).parent]
+        item = {**record, "camera_id": new}
+        if reusable:
+            prefix = f"event:{record['camera_id']}:"
+            for key in ("event_id", "track_id", "sequence_id"):
+                value = record[key]
+                if value.startswith(prefix):
+                    item[key] = f"event:{new}:" + value[len(prefix):]
+        records.append(item)
+    return records if reusable else group_job_events(records)
 
 
 def finalize_photo_job(
@@ -358,6 +422,7 @@ def finalize_photo_job(
     classifier = getattr(detector, "dinov3_classifier", None)
     if classifier is None:
         classifier = getattr(detector, "dino_classifier", None)
+    model_name = model_display_name({"display_name": getattr(classifier, "display_name", None)})
     if classifier is None or getattr(classifier, "backend", None) != "dinov3":
         if complete_sequence:
             raise DinoV3SequenceFinalizationError("DINOv3 classifier is unavailable")
@@ -385,7 +450,20 @@ def finalize_photo_job(
             apply_data_fn=apply_data_fn,
         )
 
+    summary_started = time.perf_counter()
+    stage_started = summary_started
+    current_stage = None
+
+    def log_stage():
+        if current_stage is not None:
+            logger.info("DINOv3 sequence timing: job=%s stage=%s elapsed=%.3fs",
+                        job_id or "", current_stage, time.perf_counter() - stage_started)
+
     def report(stage, done=0, total=0):
+        nonlocal current_stage, stage_started
+        if stage != current_stage:
+            log_stage()
+            current_stage, stage_started = stage, time.perf_counter()
         if complete_sequence and is_cancelled is not None and is_cancelled():
             raise _SequenceCancelled()
         if progress_fn is not None:
@@ -491,6 +569,7 @@ def finalize_photo_job(
                 apply_data_fn=apply_data_fn,
                 mutate_job=mutate_job,
                 progress_fn=lambda done, total: report("写入序列结果", done, total),
+                model_name=model_name,
             )
             report("写入序列结果", len(results), len(results))
             return updated
@@ -504,15 +583,22 @@ def finalize_photo_job(
         for item, _ in crop_items:
             p = str(item.path)
             if p not in image_digests:
-                image_digests[p] = _image_file_digest(p)
+                image_digests[p] = collector.image_digest(p) or _image_file_digest(p)
                 report("计算照片指纹", len(image_digests), digest_total)
 
         # Prepare metadata for event grouping
         event_input_records: list[dict[str, Any]] = []
+        photo_context: dict[str, tuple[str, Any]] = {}
         for crop_idx, (item, crop) in enumerate(crop_items):
             path_str = str(item.path)
-            cam_id = camera_id_for_path(path_str, root=input_path)
-            date_taken = getattr(item, "date_taken", None)
+            if path_str not in photo_context:
+                # Resolve each source once: file symlinks in a shared parent
+                # can still resolve into different camera directories.
+                photo_context[path_str] = (
+                    camera_id_for_path(path_str, root=input_path),
+                    parse_capture_time(getattr(item, "date_taken", None)),
+                )
+            cam_id, date_taken = photo_context[path_str]
             content_hash = f"{image_digests[path_str]}:{crop.box_index}"
             event_input_records.append(
                 {
@@ -565,8 +651,10 @@ def finalize_photo_job(
         # Stack raw embeddings preserving source precision
         raw_features = np.stack([crop.raw_embedding for _, crop in crop_items], axis=0)
         report("整合历史特征", 0, len(raw_features))
-        adapted_features = adapt_with_history(
+        encoder_device = getattr(getattr(classifier, "encoder", None), "device", None)
+        adapted_features = adapt_history_for_job(
             raw_features, history, temperature=0.1, alpha=0.1,
+            device=encoder_device if isinstance(encoder_device, str) else None,
             progress_fn=lambda done, total: report("整合历史特征", done, total),
         )
 
@@ -625,10 +713,7 @@ def finalize_photo_job(
                 # selected input root happened to be listed first. Keep the
                 # original classifier context/gates unchanged; regroup target
                 # tracks using full source directories for this browsing step.
-                cluster_groups = group_job_events([
-                    {**record, "camera_id": camera_id_for_path(record["path"])}
-                    for record in event_input_records
-                ]) if rejected else []
+                cluster_groups = _rejection_event_groups(grouped_events) if rejected else []
                 cluster_by_crop = {g["crop_idx"]: g for g in cluster_groups}
                 rejection_clusters = cluster_rejections(
                     raw_features[rejected], rejected_ids,
@@ -914,9 +999,9 @@ def finalize_photo_job(
             mutate_job(
                 results=updated_results,
                 message=(
-                    f"Neri1.1序列聚合完成: {len(updated_results)} 张照片已确认"
+                    f"{model_name}序列聚合完成: {len(updated_results)} 张照片已确认"
                     if complete_sequence
-                    else f"Neri1.1序列部分聚合: {len(updated_results)} 张照片，任务仍需继续"
+                    else f"{model_name}序列部分聚合: {len(updated_results)} 张照片，任务仍需继续"
                 ),
             )
 
@@ -931,4 +1016,7 @@ def finalize_photo_job(
     except _SequenceCancelled:
         return results
     finally:
+        log_stage()
+        logger.info("DINOv3 sequence timing: job=%s total=%.3fs",
+                    job_id or "", time.perf_counter() - summary_started)
         collector.clear()

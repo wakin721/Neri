@@ -262,6 +262,8 @@ def settings() -> SettingsResponse:
     available_models = list_available_models()
     available_classification_models = list_available_classification_models()
     has_saved_model = "selected_model" in stored_settings
+    has_saved_classification = any(key in stored_settings for key in (
+        "selected_classification_model", "selected_cls_model"))
     saved_model = stored_settings.get("selected_model")
     if "selected_classification_model" in stored_settings:
         saved_classification_model = stored_settings.get(
@@ -270,24 +272,15 @@ def settings() -> SettingsResponse:
     else:
         saved_classification_model = stored_settings.get("selected_cls_model")
     selected_model = None
+    from system.model_sync.catalog import resolve_saved_model_path
     if isinstance(saved_model, str) and saved_model:
-        selected_model = next(
-            (model.path for model in available_models if model.name == saved_model or model.path == saved_model),
-            None,
-        )
+        selected_model = resolve_saved_model_path(saved_model,available_models)
     if not has_saved_model:
         selected_model = available_models[0].path if available_models else None
 
     selected_classification_model = None
     if isinstance(saved_classification_model, str) and saved_classification_model:
-        selected_classification_model = next(
-            (
-                model.path
-                for model in available_classification_models
-                if model.name == saved_classification_model or model.path == saved_classification_model
-            ),
-            None,
-        )
+        selected_classification_model = resolve_saved_model_path(saved_classification_model,available_classification_models)
 
     pytorch_available = importlib.util.find_spec("torch") is not None
     litert_available = all(
@@ -301,8 +294,19 @@ def settings() -> SettingsResponse:
     detection_ready = not missing_yolo or (
         litert_available and bool(litert_models)
     )
+    lite_classifiers = [model for model in available_classification_models
+                        if getattr(model, "encoder_backend", None) == "litert"]
+    if not has_saved_classification and litert_available and lite_classifiers:
+        selected_classification_model = lite_classifiers[0].path
     if missing_yolo:
-        selected_classification_model = None
+        runnable_classifiers={model.path for model in available_classification_models
+            if (getattr(model,'encoder_backend',None)=='litert' and litert_available)
+            or (model.backend=='dinov3' and getattr(model,'encoder_backend',None) in {None,'pytorch'}
+                and pytorch_available)}
+        if selected_classification_model not in runnable_classifiers:
+            selected_classification_model = None
+            if saved_classification_model and litert_available and lite_classifiers:
+                selected_classification_model = lite_classifiers[0].path
         if litert_models:
             selected_model = litert_models[0].path
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from system.config import XPU_ENABLED
+from system.python_runtime import PYTHON_ISOLATION_ARGS, python_environment, python_module_command
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = "721"
@@ -400,19 +401,20 @@ def _start_maintenance(operation: str, extra_args: list[str], message: str) -> d
     }
     _write_status(status, replace=True)
 
-    command = [
-        str(python_exe),
-        "-m",
+    command = python_module_command(
+        python_exe,
+        project_root(),
         "system.backend.maintenance",
         "--operation",
         operation,
         "--backend-pid",
         str(os.getpid()),
         *extra_args,
-    ]
+    )
     process = subprocess.Popen(
         command,
         cwd=str(project_root()),
+        env=python_environment(),
         creationflags=_creation_flags(),
         close_fds=True,
     )
@@ -674,6 +676,7 @@ def _run_pytorch_install(
 
     install_command = [
         str(python_exe),
+        *PYTHON_ISOLATION_ARGS,
         "-m",
         "pip",
         "install",
@@ -693,7 +696,7 @@ def _run_pytorch_install(
         source_url,
     ]
     commands = [
-        [str(python_exe), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"],
+        [str(python_exe), *PYTHON_ISOLATION_ARGS, "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"],
         install_command,
     ]
     _write_status(
@@ -810,6 +813,7 @@ def _run_package_reinstall(package_spec: str, package_source: str = "auto") -> N
     commands = [
         [
             str(python_exe),
+            *PYTHON_ISOLATION_ARGS,
             "-m",
             "pip",
             "install",
@@ -869,6 +873,7 @@ def _run_ultralytics_install(
     _, source_label, _ = resolve_package_source(package_source)
     command = [
         str(python_exe),
+        *PYTHON_ISOLATION_ARGS,
         "-m",
         "pip",
         "install",
@@ -944,6 +949,7 @@ def _run_commands(
             process = subprocess.Popen(
                 command,
                 cwd=str(project_root()),
+                env=python_environment(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1594,6 +1600,7 @@ def _start_backend() -> None:
     python_exe = toolkit_python()
     command = [
         str(python_exe),
+        *PYTHON_ISOLATION_ARGS,
         "-m",
         "uvicorn",
         BACKEND_APP,
@@ -1607,6 +1614,7 @@ def _start_backend() -> None:
     subprocess.Popen(
         command,
         cwd=str(project_root()),
+        env=python_environment(),
         creationflags=_creation_flags(),
         close_fds=True,
     )

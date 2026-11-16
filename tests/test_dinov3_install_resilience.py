@@ -184,6 +184,8 @@ def test_maintenance_failure_keeps_progress_and_writes_redacted_traceback(tmp_pa
     monkeypatch.setattr(maintenance, '_wait_for_port_release', lambda: None)
     monkeypatch.setattr(maintenance, '_start_backend', lambda: None)
     monkeypatch.setattr(worker.importlib.util, 'find_spec', lambda _: object())
+    # This tests download diagnostics, independently of host GPU hardware or pip.
+    monkeypatch.setattr(worker, 'resolve_runtime_choice', lambda _: 'cpu')
     monkeypatch.setattr(worker, '_install_dino_python_dependencies', lambda *a, **k: None)
     def install(**kwargs):
         kwargs['on_event']({'phase':'capability', 'file':'assets/encoder.pth', 'attempt':5})

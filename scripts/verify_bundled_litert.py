@@ -1,9 +1,26 @@
-"""Verify that a portable application's built-in LiteRT detector really runs."""
+"""Verify that a portable application's built-in LiteRT detector runs and no classifier is bundled."""
 from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
 import sys
+
+
+def _assert_torch_not_imported() -> None:
+    if 'torch' in sys.modules or any(name.startswith('torch.') for name in sys.modules):
+        raise ValueError('torch must not be imported during bundled LiteRT verification')
+
+
+def _assert_no_bundled_classifier(root: Path, layout, discover_models) -> None:
+    discovered_cls = discover_models(layout, 'cls')
+    bundled_cls = [row for row in discovered_cls if row.source == 'bundled']
+    if bundled_cls:
+        raise ValueError(f'Bundled classifier must not be present in lite package: {bundled_cls[0].path}')
+    cls_bundled_dir = root / 'res/model/cls/bundled'
+    if cls_bundled_dir.exists() and any(path.is_file() for path in cls_bundled_dir.rglob('*')):
+        raise ValueError('Bundled classifier files must not be present in res/model/cls/bundled')
+    if (root / 'res/bundled-models').exists():
+        raise ValueError('Bundled model shard directory must not be present in lite package')
 
 
 def verify(application_root):
@@ -17,8 +34,9 @@ def verify(application_root):
     from system.model_sync.layout import get_model_layout
     from system.model_sync.catalog import discover_models
     from system.backend.model_services import _to_model_info
+    layout = get_model_layout(root/'res')
     expected = root/'res/model/detect/bundled/MDV6-yolov10-c.tflite'
-    discovered = discover_models(get_model_layout(root/'res'), 'detect')
+    discovered = discover_models(layout, 'detect')
     model = next((row for row in discovered if Path(row.path) == expected), None)
     if model is None or model.source != 'bundled' or model.backend != 'litert':
         raise ValueError('Bundled detector is absent from the application catalog')
@@ -32,8 +50,18 @@ def verify(application_root):
     outputs = [interpreter.get_tensor(row['index']) for row in interpreter.get_output_details()]
     if not outputs or not all(np.isfinite(output).all() for output in outputs):
         raise ValueError('Bundled detector returned invalid outputs')
-    report = dict(passed=True, model=model.name, source=model.source, backend=model.backend,
-                  smoke_inference=True, outputs=[list(output.shape) for output in outputs])
+    _assert_no_bundled_classifier(root, layout, discover_models)
+    _assert_torch_not_imported()
+    report = dict(
+        passed=True,
+        model=model.name,
+        source=model.source,
+        backend=model.backend,
+        smoke_inference=True,
+        outputs=[list(output.shape) for output in outputs],
+        bundled_classifier_present=False,
+        torch_imported=False,
+    )
     print(json.dumps(report, indent=2))
     return report
 

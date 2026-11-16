@@ -1,4 +1,4 @@
-"""FastAPI routes for DINOv3 (Neri1.1) human feedback."""
+"""FastAPI routes for DINOv3 joint-model human feedback."""
 from __future__ import annotations
 
 import sqlite3
@@ -87,7 +87,7 @@ def dino_feedback_router() -> APIRouter:
     def cluster(_request: DinoClusterFeedbackRequest):
         raise HTTPException(
             status_code=400,
-            detail="Neri1.1 不支持按簇确认，请逐框人工校验。",
+            detail="联合模型不支持按簇确认，请逐框人工校验。",
         )
 
     @router.post("/feedback/rejection-clusters")

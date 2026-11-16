@@ -31,6 +31,8 @@ def _to_model_info(item) -> ModelInfo:
         supports_video_fast=item.supports_video_fast,
         supports_video_all=item.supports_video_all,
         checkpoint_path=item.checkpoint_path,
+        encoder_backend=item.encoder_backend,
+        learning_family_id=item.learning_family_id,
     )
 
 
@@ -72,6 +74,11 @@ def _load_dinov3_model_classes(
     from system.dinov3.runtime import resolve_manifest_asset
     from system.dinov3.model import DinoV3RidgeWithinModel
     from system.dinov3.encoder import sha256
+
+    from system.dinov3.shared_learning import family_descriptor
+    if family_descriptor(manifest_path,manifest) is not None:
+        from .dinov3_learning import resolve_learning_snapshot
+        manifest_path,manifest=resolve_learning_snapshot(manifest_path,manifest)
 
     checkpoint = resolve_manifest_asset(manifest_path, manifest["checkpoint"])
     if sha256(checkpoint) != manifest["checkpoint_sha256"]:

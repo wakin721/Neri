@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .capabilities import CapabilityStore, safe_direct_headers, valid_direct_download_url
-from .manifest import DinoV2ManifestBuilder, DinoV3ManifestBuilder, ManifestBuilder, ManifestEntry, ManifestSnapshot
+from .manifest import DinoV2ManifestBuilder, DinoV3ManifestBuilder, DinoV3CpuManifestBuilder, ManifestBuilder, ManifestEntry, ManifestSnapshot
 
 
 class DistributionError(RuntimeError):
@@ -16,17 +16,24 @@ class DistributionService:
         state_dir = Path(state_dir)
         self.builder = ManifestBuilder(state_dir, store)
         self.dinov3_builder = DinoV3ManifestBuilder(state_dir, store)
+        self.dinov3_cpu_builder = DinoV3CpuManifestBuilder(state_dir, store)
         self.dinov2_builder = DinoV2ManifestBuilder(state_dir, store)
         self.capabilities = CapabilityStore(state_dir, ttl_seconds=ttl_seconds)
         self._snapshot: ManifestSnapshot | None = None
         self._dinov3_snapshot: ManifestSnapshot | None = None
+        self._dinov3_cpu_snapshot: ManifestSnapshot | None = None
         self._dinov2_snapshot: ManifestSnapshot | None = None
 
     def manifest(self) -> ManifestSnapshot:
         self._snapshot = self.builder.build()
         return self._snapshot
 
-    def dinov3_manifest(self) -> ManifestSnapshot:
+    def dinov3_manifest(self, runtime: str = 'gpu') -> ManifestSnapshot:
+        if runtime == 'cpu':
+            self._dinov3_cpu_snapshot = self.dinov3_cpu_builder.build()
+            return self._dinov3_cpu_snapshot
+        if runtime != 'gpu':
+            raise DistributionError('invalid_runtime')
         self._dinov3_snapshot = self.dinov3_builder.build()
         return self._dinov3_snapshot
 
@@ -61,6 +68,11 @@ class DistributionService:
         path: str,
         sha256: str,
     ) -> ManifestEntry:
+        if path.startswith('DINOv3/cpu/'):
+            return self._entry_from_snapshot(
+                self._dinov3_cpu_snapshot or self.dinov3_manifest('cpu'),
+                manifest_id, path, sha256,
+            )
         return self._entry_from_snapshot(
             self._dinov3_snapshot or self.dinov3_manifest(),
             manifest_id,

@@ -52,7 +52,7 @@ def explain_feedback_observation(
     )
 
     if not is_dinov3_observation_id(observation_id):
-        raise ValueError("该检测框不属于 Neri1.1 模型")
+        raise ValueError("该检测框不属于联合模型")
     return explain_dinov3_observation(classification_model_path, observation_id)
 
 
@@ -66,7 +66,7 @@ def render_feedback_observation_example(
     )
 
     if not is_dinov3_observation_id(observation_id):
-        raise ValueError("该检测框不属于 Neri1.1 模型")
+        raise ValueError("该检测框不属于联合模型")
     return render_dinov3_observation_example(observation_id)
 
 

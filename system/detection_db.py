@@ -58,23 +58,52 @@ def _get_conn(db_path: str):
         conn.close()
 
 
-def init_db(db_path: str):
-    """初始化表结构（幂等）"""
-    with _get_conn(db_path) as conn:
-        conn.executescript("""
+def _init_schema(conn):
+    for statement in (
+        """
             CREATE TABLE IF NOT EXISTS detections (
                 base_name      TEXT PRIMARY KEY,
                 image_filename TEXT NOT NULL,
                 detection_json TEXT NOT NULL,
                 updated_at     INTEGER DEFAULT (strftime('%s','now'))
-            );
+            )""", """
             CREATE TABLE IF NOT EXISTS validation (
                 image_filename TEXT PRIMARY KEY,
                 is_validated   INTEGER NOT NULL   -- 1=True / 0=False
-            );
+            )""", """
             CREATE INDEX IF NOT EXISTS idx_det_imgfile
-                ON detections(image_filename);
-        """)
+                ON detections(image_filename)""",
+    ):
+        conn.execute(statement)
+
+
+def init_db(db_path: str):
+    """初始化表结构（幂等）"""
+    with _get_conn(db_path) as conn:
+        _init_schema(conn)
+
+
+def upsert_media_batch(db_path: str, payloads, validations):
+    """Commit detection data and validation together using one connection."""
+    rows = [(str(base), str(name), json.dumps(data or {}, ensure_ascii=False))
+            for base, name, data in payloads if base and name]
+    validation_rows = [(str(name), int(bool(validated))) for name, validated in validations if name]
+    if not rows and not validation_rows:
+        return
+    with _get_conn(db_path) as conn:
+        _init_schema(conn)
+        conn.executemany("""
+            INSERT INTO detections (base_name, image_filename, detection_json, updated_at)
+            VALUES (?, ?, ?, strftime('%s','now'))
+            ON CONFLICT(base_name) DO UPDATE SET
+                image_filename=excluded.image_filename,
+                detection_json=excluded.detection_json,
+                updated_at=excluded.updated_at
+        """, rows)
+        conn.executemany("""
+            INSERT INTO validation (image_filename, is_validated) VALUES (?, ?)
+            ON CONFLICT(image_filename) DO UPDATE SET is_validated=excluded.is_validated
+        """, validation_rows)
 
 
 # ──────────────────────────────────────────────

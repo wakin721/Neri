@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
@@ -17,6 +18,7 @@ import 'package:neri_flutter/src/screens/settings_screen.dart';
 import 'package:neri_flutter/src/screens/start_screen.dart';
 import 'package:neri_flutter/src/utils/detection_species.dart';
 import 'package:neri_flutter/src/utils/local_detection_items.dart';
+import 'package:neri_flutter/src/utils/classification_runtime_mode.dart';
 import 'package:neri_flutter/src/utils/validation_selection_modifiers.dart';
 import 'package:neri_flutter/src/widgets/detection_media_viewer.dart';
 import 'package:neri_flutter/src/widgets/app_menu_style.dart';
@@ -24,16 +26,72 @@ import 'package:neri_flutter/src/widgets/input_folder_field.dart';
 import 'package:neri_flutter/src/widgets/selectable_list_card.dart';
 
 void main() {
+  test('bundled LiteRT species classifier keeps the DINO event contract', () {
+    final model = ModelInfo.fromJson({
+      'name': 'Neri1.2preview·LiteRT',
+      'path': 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      'source': 'bundled',
+      'kind': 'cls',
+      'backend': 'dinov3',
+      'encoder_backend': 'litert',
+      'requires_detector': true,
+      'supports_video_fast': false,
+      'supports_video_all': false,
+    });
+    expect(model.isLiteRt, isTrue);
+    expect(model.isDinoClassifier, isTrue);
+    expect(model.sourceLabel, '内置模型');
+    expect(model.displayName, '内置模型 / Neri1.2preview·LiteRT');
+    expect(model.selectorLabel, 'Neri1.2preview·LiteRT');
+    expect(model.supportsVideoFast, isFalse);
+    expect(model.supportsVideoAll, isFalse);
+  });
   test('bundled LiteRT detector has a separate model source', () {
     final model = ModelInfo.fromJson({
-      'name': 'MDV6-yolov10-c.tflite',
+      'name': 'MDV6-yolov10-c·LiteRT',
       'path': 'res/model/detect/bundled/MDV6-yolov10-c.tflite',
       'source': 'bundled',
       'backend': 'litert',
     });
     expect(model.isLiteRt, isTrue);
     expect(model.sourceLabel, '内置模型');
-    expect(model.displayName, '内置模型 / MDV6-yolov10-c.tflite');
+    expect(model.displayName, '内置模型 / MDV6-yolov10-c·LiteRT');
+    expect(model.selectorLabel, 'MDV6-yolov10-c·LiteRT');
+  });
+  test('ModelInfo.selectorLabel 统一格式化且不重复拼接 LiteRT', () {
+    const bundledDetector = ModelInfo(
+      name: 'MDV6-yolov10-c·LiteRT',
+      path: 'res/model/detect/bundled/MDV6-yolov10-c.tflite',
+      source: 'bundled',
+      backend: 'litert',
+    );
+    const bundledClassifier = ModelInfo(
+      name: 'Neri1.2preview·LiteRT',
+      path: 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      source: 'bundled',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'litert',
+    );
+    const userLiteRt = ModelInfo(
+      name: 'camera.tflite',
+      path: 'res/model/detect/user/camera.tflite',
+      source: 'user',
+      backend: 'litert',
+    );
+    const pytorchClassifier = ModelInfo(
+      name: 'Neri1.2preview',
+      path: 'res/model/cls/sync/Neri1.2preview.neri.json',
+      source: 'sync',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+    );
+
+    expect(bundledDetector.selectorLabel, 'MDV6-yolov10-c·LiteRT');
+    expect(bundledClassifier.selectorLabel, 'Neri1.2preview·LiteRT');
+    expect(userLiteRt.selectorLabel, 'camera.tflite·LiteRT');
+    expect(pytorchClassifier.selectorLabel, 'Neri1.2preview');
   });
   test('视频处理模式保留跳过视频并兼容旧值', () {
     expect(defaultVideoProcessingMode, videoProcessingModeFast);
@@ -702,5 +760,732 @@ void main() {
 
     expect(longPressCount, 1);
     expect(selectionCount, 1);
+  });
+
+  test('ModelInfo 解析 learning_family_id 并过滤空白值', () {
+    final withFamily = ModelInfo.fromJson({
+      'name': 'Neri1.2preview',
+      'path': 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      'encoder_backend': 'litert',
+      'learning_family_id': 'neri-1.2-preview',
+    });
+    final withBlankFamily = ModelInfo.fromJson({
+      'name': 'Legacy',
+      'path': 'res/model/cls/user/legacy.pt',
+      'learning_family_id': '   ',
+    });
+    final withoutFamily = ModelInfo.fromJson({
+      'name': 'Plain',
+      'path': 'res/model/cls/user/plain.pt',
+      'learning_family_id': null,
+    });
+
+    expect(withFamily.learningFamilyId, 'neri-1.2-preview');
+    expect(withBlankFamily.learningFamilyId, isNull);
+    expect(withoutFamily.learningFamilyId, isNull);
+  });
+
+  test('运行方式解析严格按同 family_id 匹配且不跨 family 选模型', () {
+    const cpuModel = ModelInfo(
+      name: 'Neri1.2preview CPU',
+      path: 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      source: 'bundled',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'litert',
+      learningFamilyId: 'neri-1.2-preview',
+    );
+    const otherFamilyGpu = ModelInfo(
+      name: 'Other GPU',
+      path: 'res/model/cls/user/other-pytorch.neri.json',
+      source: 'user',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+      learningFamilyId: 'other-family',
+    );
+    const sameFamilyGpu = ModelInfo(
+      name: 'Neri1.2preview GPU',
+      path: 'res/model/cls/sync/Neri1.2preview-pytorch.neri.json',
+      source: 'sync',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+      learningFamilyId: 'neri-1.2-preview',
+    );
+    const nonFamilyModel = ModelInfo(
+      name: 'Standalone',
+      path: 'res/model/cls/user/standalone.pt',
+    );
+
+    const settingsMissingPeer = NeriSettings(
+      appTitle: 'Neri',
+      appVersion: 'test',
+      supportedImageExtensions: <String>['.jpg'],
+      supportedVideoExtensions: <String>['.mp4'],
+      modelDirectory: 'res/model/detect',
+      classificationModelDirectory: 'res/model/cls',
+      availableModels: <ModelInfo>[],
+      availableClassificationModels: <ModelInfo>[
+        cpuModel,
+        otherFamilyGpu,
+        nonFamilyModel,
+      ],
+      speciesTypes: <String, String>{},
+      settings: <String, dynamic>{},
+      gpuAvailable: true,
+      pytorchAvailable: true,
+      litertAvailable: true,
+      missingYoloDependencies: <String>[],
+    );
+
+    expect(resolveClassificationRuntimeMode(settingsMissingPeer, ''), isNull);
+    expect(
+      resolveClassificationRuntimeMode(
+        settingsMissingPeer,
+        nonFamilyModel.path,
+      ),
+      isNull,
+    );
+
+    final missingPeerResolution = resolveClassificationRuntimeMode(
+      settingsMissingPeer,
+      cpuModel.path,
+    )!;
+    expect(missingPeerResolution.activeMode, ClassificationRuntimeMode.cpu);
+    expect(missingPeerResolution.cpuModel?.path, cpuModel.path);
+    expect(missingPeerResolution.gpuModel, isNull);
+    expect(missingPeerResolution.gpuAvailable, isFalse);
+
+    final settingsReady = settingsMissingPeer.copyWith(
+      availableClassificationModels: const <ModelInfo>[
+        cpuModel,
+        otherFamilyGpu,
+        sameFamilyGpu,
+      ],
+    );
+    final readyResolution = resolveClassificationRuntimeMode(
+      settingsReady,
+      cpuModel.path,
+    )!;
+    expect(readyResolution.gpuModel?.path, sameFamilyGpu.path);
+    expect(readyResolution.gpuAvailable, isTrue);
+
+    final noPytorch = resolveClassificationRuntimeMode(
+      settingsReady.copyWith(pytorchAvailable: false),
+      cpuModel.path,
+    )!;
+    expect(noPytorch.gpuAvailable, isFalse);
+
+    final noGpuHardware = resolveClassificationRuntimeMode(
+      settingsReady.copyWith(gpuAvailable: false),
+      cpuModel.path,
+    )!;
+    expect(noGpuHardware.gpuAvailable, isFalse);
+  });
+
+  testWidgets('开始页分类模型区域不再展示运行方式切换 UI', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final inputController = TextEditingController();
+    addTearDown(inputController.dispose);
+
+    const cpuModel = ModelInfo(
+      name: 'Neri1.2preview·LiteRT',
+      path: 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      source: 'bundled',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'litert',
+      learningFamilyId: 'neri-1.2-preview',
+      requiresDetector: true,
+    );
+    const gpuModel = ModelInfo(
+      name: 'Neri1.2preview（PyTorch GPU）',
+      path: 'res/model/cls/DINOv3/Neri1.2preview.neri.json',
+      source: 'sync',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+      learningFamilyId: 'neri-1.2-preview',
+      requiresDetector: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StartScreen(
+            settings: NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: const <String>['.jpg'],
+              supportedVideoExtensions: const <String>['.mp4'],
+              modelDirectory: 'res/model/detect',
+              classificationModelDirectory: 'res/model/cls',
+              availableModels: const <ModelInfo>[],
+              availableClassificationModels: const <ModelInfo>[
+                cpuModel,
+                gpuModel,
+              ],
+              selectedClassificationModel: cpuModel.path,
+              speciesTypes: const <String, String>{},
+              settings: const <String, dynamic>{},
+              gpuAvailable: true,
+              pytorchAvailable: true,
+              litertAvailable: true,
+              detectionReady: true,
+              missingYoloDependencies: const <String>[],
+            ),
+            inputController: inputController,
+            selectedModelPath: '',
+            onModelChanged: (_) {},
+            selectedClassificationModelPath: cpuModel.path,
+            onClassificationModelChanged: (_) {},
+            videoMode: videoProcessingModeSkip,
+            onVideoModeChanged: (_) {},
+            vidStride: 1,
+            onVidStrideChanged: (_) {},
+            useFp16: false,
+            onUseFp16Changed: (_) {},
+            confidence: 0.25,
+            onConfidenceChanged: (_) {},
+            iou: 0.30,
+            onIouChanged: (_) {},
+            submitting: false,
+            onCreateJob: () {},
+            onCancelJob: (_) {},
+            onResumeJob: (_) {},
+            onDeleteJob: (_) {},
+            onClearJobs: () {},
+            pendingStartJobIds: const <String>{},
+            pendingStopJobIds: const <String>{},
+            jobs: const [],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('运行方式'), findsNothing);
+    expect(find.byKey(const Key('classification-runtime-cpu')), findsNothing);
+    expect(find.byKey(const Key('classification-runtime-gpu')), findsNothing);
+  });
+
+  testWidgets('设置页检测设置不再展示运行方式切换但保留同 family 物种选择', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/models/classes') {
+          return http.Response('[]', 200);
+        }
+        if (request.url.path == '/api/maintenance/status') {
+          return http.Response('{"running": false}', 200);
+        }
+        if (request.url.path == '/api/maintenance/package-source') {
+          return http.Response(
+            '{"source": "tuna", "label": "清华源", "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple"}',
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      }),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+
+    const cpuModel = ModelInfo(
+      name: 'Neri1.2preview·LiteRT',
+      path: 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      source: 'bundled',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'litert',
+      learningFamilyId: 'neri-1.2-preview',
+      requiresDetector: true,
+      supportsVideoAll: false,
+      supportsVideoFast: false,
+    );
+    const gpuModel = ModelInfo(
+      name: 'Neri1.2preview（PyTorch GPU）',
+      path: 'res/model/cls/DINOv3/Neri1.2preview.neri.json',
+      source: 'sync',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+      learningFamilyId: 'neri-1.2-preview',
+      requiresDetector: true,
+      supportsVideoAll: false,
+      supportsVideoFast: true,
+    );
+    const otherModel = ModelInfo(
+      name: 'OtherClassifier',
+      path: 'res/model/cls/user/other.neri.json',
+      source: 'user',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'pytorch',
+      learningFamilyId: 'other-family',
+      requiresDetector: true,
+    );
+
+    final savedDrafts = <Map<String, dynamic>>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: const <String>['.jpg'],
+              supportedVideoExtensions: const <String>['.mp4'],
+              modelDirectory: 'res/model/detect',
+              classificationModelDirectory: 'res/model/cls',
+              availableModels: const <ModelInfo>[],
+              availableClassificationModels: const <ModelInfo>[
+                cpuModel,
+                gpuModel,
+                otherModel,
+              ],
+              selectedClassificationModel: cpuModel.path,
+              speciesTypes: const <String, String>{},
+              settings: <String, dynamic>{
+                'selected_classification_model': cpuModel.path,
+                'selected_species_names': <String>['岩羊'],
+              },
+              gpuAvailable: true,
+              pytorchAvailable: true,
+              litertAvailable: true,
+              detectionReady: true,
+              missingYoloDependencies: const <String>[],
+            ),
+            autoGroupInferredBurstSize: null,
+            apiClient: apiClient,
+            themeNotifier: themeNotifier,
+            onUpdateTheme: (_) {},
+            closeBehavior: 'ask',
+            onCloseBehaviorChanged: (_) {},
+            onSaveSettings: (draft) async {
+              savedDrafts.add(Map<String, dynamic>.from(draft));
+            },
+            onCheckForUpdates:
+                ({required channel, required downloadSource}) async {},
+            onShowMessage: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('运行方式'), findsNothing);
+    expect(find.byKey(const Key('classification-runtime-cpu')), findsNothing);
+    expect(find.byKey(const Key('classification-runtime-gpu')), findsNothing);
+
+    final clsTrigger = find.widgetWithText(TextButton, cpuModel.rawName);
+    await tester.ensureVisible(clsTrigger);
+    await tester.pumpAndSettle();
+    await tester.tap(clsTrigger);
+    await tester.pumpAndSettle();
+    final gpuMenuItem = find.widgetWithText(MenuItemButton, gpuModel.rawName);
+    await tester.ensureVisible(gpuMenuItem);
+    await tester.pumpAndSettle();
+    await tester.tap(gpuMenuItem);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
+    await tester.pump();
+
+    expect(savedDrafts.last['selected_classification_model'], gpuModel.path);
+    expect(savedDrafts.last['selected_species_names'], <String>['岩羊']);
+
+    final gpuTrigger = find.widgetWithText(TextButton, gpuModel.rawName);
+    await tester.ensureVisible(gpuTrigger);
+    await tester.pumpAndSettle();
+    await tester.tap(gpuTrigger);
+    await tester.pumpAndSettle();
+    final otherMenuItem = find.widgetWithText(
+      MenuItemButton,
+      otherModel.rawName,
+    );
+    await tester.ensureVisible(otherMenuItem);
+    await tester.pumpAndSettle();
+    await tester.tap(otherMenuItem);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
+    await tester.pump();
+
+    expect(savedDrafts.last['selected_classification_model'], otherModel.path);
+    expect(savedDrafts.last['selected_species_names'], isEmpty);
+  });
+
+  testWidgets('环境维护 Neri1.2preview 卡片支持下载版本选择、提示与 runtime_choice 请求', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 1100));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final installRequests = <Map<String, dynamic>>[];
+    var statusPayload = <String, dynamic>{
+      'installed': false,
+      'healthy': false,
+      'display_name': 'Neri1.2preview',
+      'message': 'Neri1.2preview 未安装。',
+    };
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/environment/dinov3-status') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode(statusPayload)),
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }
+        if (request.url.path == '/api/environment/install-dinov3') {
+          installRequests.add(
+            Map<String, dynamic>.from(
+              jsonDecode(request.body) as Map<String, dynamic>,
+            ),
+          );
+          return http.Response(
+            jsonEncode({
+              'operation': 'install_dinov3',
+              'state': 'starting',
+              'message': '已启动安装',
+              'progress': 0,
+            }),
+            202,
+          );
+        }
+        if (request.url.path == '/api/maintenance/status') {
+          return http.Response('{"running": false}', 200);
+        }
+        if (request.url.path == '/api/maintenance/package-source') {
+          return http.Response(
+            '{"source": "tuna", "label": "清华源", "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple"}',
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      }),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+
+    final savedDrafts = <Map<String, dynamic>>[];
+    Widget buildScreen({
+      Map<String, dynamic>? savedSettings,
+      int backendGeneration = 1,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: NeriSettings(
+              appTitle: 'Neri',
+              appVersion: 'test',
+              supportedImageExtensions: const <String>['.jpg'],
+              supportedVideoExtensions: const <String>['.mp4'],
+              modelDirectory: 'res/model/detect',
+              classificationModelDirectory: 'res/model/cls',
+              availableModels: const <ModelInfo>[],
+              availableClassificationModels: const <ModelInfo>[],
+              speciesTypes: const <String, String>{},
+              settings: savedSettings ?? const <String, dynamic>{},
+              gpuAvailable: false,
+              pytorchAvailable: false,
+              litertAvailable: true,
+              detectionReady: true,
+              missingYoloDependencies: const <String>[],
+            ),
+            backendGeneration: backendGeneration,
+            autoGroupInferredBurstSize: null,
+            apiClient: apiClient,
+            themeNotifier: themeNotifier,
+            onUpdateTheme: (_) {},
+            closeBehavior: 'ask',
+            onCloseBehaviorChanged: (_) {},
+            onSaveSettings: (draft) async {
+              savedDrafts.add(Map<String, dynamic>.from(draft));
+            },
+            onCheckForUpdates:
+                ({required channel, required downloadSource}) async {},
+            onShowMessage: (_) {},
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildScreen());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('环境维护').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('下载版本'), findsOneWidget);
+    expect(find.text('自动检测（默认）'), findsOneWidget);
+
+    Finder runtimeChoiceTrigger() => find.descendant(
+      of: find.byKey(const Key('dino-runtime-choice')),
+      matching: find.byType(TextButton),
+    );
+
+    await tester.ensureVisible(runtimeChoiceTrigger());
+    await tester.pumpAndSettle();
+    await tester.tap(runtimeChoiceTrigger());
+    await tester.pumpAndSettle();
+    expect(
+      find.widgetWithText(MenuItemButton, '自动检测（默认）'),
+      findsOneWidget,
+    );
+    expect(
+      find.widgetWithText(MenuItemButton, 'CPU（LiteRT FP32）'),
+      findsOneWidget,
+    );
+    expect(
+      find.widgetWithText(MenuItemButton, 'GPU（PyTorch）'),
+      findsOneWidget,
+    );
+
+    final cpuChoiceItem = find.widgetWithText(
+      MenuItemButton,
+      'CPU（LiteRT FP32）',
+    );
+    await tester.ensureVisible(cpuChoiceItem);
+    await tester.pumpAndSettle();
+    await tester.tap(cpuChoiceItem);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
+    await tester.pump();
+
+    expect(savedDrafts.last['dino_runtime_choice'], 'cpu');
+    expect(find.textContaining('不要求安装 PyTorch'), findsOneWidget);
+
+    await tester.pumpWidget(buildScreen(savedSettings: const <String, dynamic>{}));
+    await tester.pump();
+    expect(find.text('CPU（LiteRT FP32）'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('dino-component-action')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('无需安装 PyTorch'), findsOneWidget);
+    expect(find.textContaining('NeriCloud'), findsOneWidget);
+    expect(find.textContaining('共享学习记录会保留'), findsOneWidget);
+    expect(find.textContaining('后端会自动重启'), findsOneWidget);
+    expect(find.textContaining('res/model/DINOv3'), findsNothing);
+    expect(find.textContaining('SHA-256'), findsNothing);
+    expect(find.textContaining('Ridge'), findsNothing);
+    await tester.tap(find.text('开始安装'));
+    await tester.pumpAndSettle();
+    expect(installRequests.last['runtime_choice'], 'cpu');
+
+    statusPayload = <String, dynamic>{
+      'installed': true,
+      'healthy': true,
+      'display_name': 'Neri1.2preview',
+      'encoder_backend': 'litert',
+      'runtime_choice': 'cpu',
+      'resolved_runtime_choice': 'cpu',
+      'message': 'Neri1.2preview 已安装。',
+    };
+    await tester.pumpWidget(
+      buildScreen(
+        savedSettings: const <String, dynamic>{'dino_runtime_choice': 'gpu'},
+        backendGeneration: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('GPU（PyTorch）'), findsOneWidget);
+    expect(find.textContaining('需要 PyTorch 环境'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, '删除'), findsOneWidget);
+    expect(find.byKey(const Key('dino-component-switch')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('dino-component-switch')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('NeriCloud'), findsOneWidget);
+    expect(find.textContaining('自动补齐'), findsWidgets);
+    expect(find.textContaining('共享学习记录会保留'), findsOneWidget);
+    expect(find.textContaining('后端会自动重启'), findsOneWidget);
+    await tester.tap(find.text('开始安装'));
+    await tester.pumpAndSettle();
+    expect(installRequests.last['runtime_choice'], 'gpu');
+
+    await tester.ensureVisible(runtimeChoiceTrigger());
+    await tester.pumpAndSettle();
+    await tester.tap(runtimeChoiceTrigger());
+    await tester.pumpAndSettle();
+    final autoChoiceItem = find.widgetWithText(
+      MenuItemButton,
+      '自动检测（默认）',
+    );
+    await tester.ensureVisible(autoChoiceItem);
+    await tester.pumpAndSettle();
+    await tester.tap(autoChoiceItem);
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('仅 GPU 模式要求 PyTorch'),
+      findsOneWidget,
+    );
+    statusPayload = <String, dynamic>{
+      'installed': false,
+      'healthy': false,
+      'display_name': 'Neri1.2preview',
+      'message': 'Neri1.2preview 未安装。',
+    };
+    await tester.pumpWidget(
+      buildScreen(
+        savedSettings: const <String, dynamic>{'dino_runtime_choice': 'auto'},
+        backendGeneration: 3,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('dino-component-action')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('检测到支持 GPU 的硬件时'), findsOneWidget);
+    expect(find.textContaining('否则安装 CPU（LiteRT FP32）版本'), findsOneWidget);
+    expect(find.textContaining('共享学习记录会保留'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('开始页与设置页下拉菜单展示精确内置模型名且不重复拼 LiteRT', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final inputController = TextEditingController();
+    addTearDown(inputController.dispose);
+    final apiClient = NeriApiClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/api/models/classes') {
+          return http.Response('[]', 200);
+        }
+        if (request.url.path == '/api/maintenance/status') {
+          return http.Response('{"running": false}', 200);
+        }
+        if (request.url.path == '/api/maintenance/package-source') {
+          return http.Response(
+            '{"source": "tuna", "label": "清华源", "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple"}',
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      }),
+    );
+    final themeNotifier = ValueNotifier(const ThemeSettings());
+    addTearDown(apiClient.close);
+    addTearDown(themeNotifier.dispose);
+
+    const detector = ModelInfo(
+      name: 'MDV6-yolov10-c·LiteRT',
+      path: 'res/model/detect/bundled/MDV6-yolov10-c.tflite',
+      source: 'bundled',
+      kind: 'detect',
+      backend: 'litert',
+    );
+    const classifier = ModelInfo(
+      name: 'Neri1.2preview·LiteRT',
+      path: 'res/model/cls/bundled/Neri1.2preview-litert.neri.json',
+      source: 'bundled',
+      kind: 'cls',
+      backend: 'dinov3',
+      encoderBackend: 'litert',
+      requiresDetector: true,
+      supportsVideoFast: false,
+      supportsVideoAll: false,
+    );
+    final settings = NeriSettings(
+      appTitle: 'Neri',
+      appVersion: 'test',
+      supportedImageExtensions: const <String>['.jpg'],
+      supportedVideoExtensions: const <String>['.mp4'],
+      modelDirectory: 'res/model/detect',
+      classificationModelDirectory: 'res/model/cls',
+      availableModels: const <ModelInfo>[detector],
+      availableClassificationModels: const <ModelInfo>[classifier],
+      selectedModel: detector.path,
+      selectedClassificationModel: classifier.path,
+      speciesTypes: const <String, String>{},
+      settings: <String, dynamic>{
+        'selected_model': detector.path,
+        'selected_classification_model': classifier.path,
+      },
+      gpuAvailable: false,
+      pytorchAvailable: false,
+      litertAvailable: true,
+      detectionReady: true,
+      missingYoloDependencies: const <String>['torch'],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StartScreen(
+            settings: settings,
+            inputController: inputController,
+            selectedModelPath: detector.path,
+            onModelChanged: (_) {},
+            selectedClassificationModelPath: classifier.path,
+            onClassificationModelChanged: (_) {},
+            videoMode: videoProcessingModeSkip,
+            onVideoModeChanged: (_) {},
+            vidStride: 1,
+            onVidStrideChanged: (_) {},
+            useFp16: false,
+            onUseFp16Changed: (_) {},
+            confidence: 0.25,
+            onConfidenceChanged: (_) {},
+            iou: 0.30,
+            onIouChanged: (_) {},
+            submitting: false,
+            onCreateJob: () {},
+            onCancelJob: (_) {},
+            onResumeJob: (_) {},
+            onDeleteJob: (_) {},
+            onClearJobs: () {},
+            pendingStartJobIds: const <String>{},
+            pendingStopJobIds: const <String>{},
+            jobs: const [],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final startMenus = tester
+        .widgetList<AppFormMenu<String>>(find.byType(AppFormMenu<String>))
+        .toList();
+    expect(
+      startMenus[0].options.map((entry) => entry.label).toList(),
+      containsAllInOrder(<String>['不使用', '内置模型', 'MDV6-yolov10-c·LiteRT']),
+    );
+    expect(
+      startMenus[1].options.map((entry) => entry.label).toList(),
+      containsAllInOrder(<String>['不使用', '内置模型', 'Neri1.2preview·LiteRT']),
+    );
+    expect(find.text('MDV6-yolov10-c·LiteRT'), findsOneWidget);
+    expect(find.text('Neri1.2preview·LiteRT'), findsOneWidget);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: settings,
+            autoGroupInferredBurstSize: null,
+            apiClient: apiClient,
+            themeNotifier: themeNotifier,
+            onUpdateTheme: (_) {},
+            closeBehavior: 'ask',
+            onCloseBehaviorChanged: (_) {},
+            onSaveSettings: (_) async {},
+            onCheckForUpdates:
+                ({required channel, required downloadSource}) async {},
+            onShowMessage: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('MDV6-yolov10-c·LiteRT'), findsOneWidget);
+    expect(find.text('Neri1.2preview·LiteRT'), findsOneWidget);
   });
 }

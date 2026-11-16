@@ -1,6 +1,6 @@
 """Deterministic DINOv3 observations: explanation, examples, and feedback.
 
-The joint Neri1.1 model stores its training bank inside the checkpoint.  This
+The joint model stores its training bank inside the checkpoint.  This
 module reads that bank directly for the Species Validation feature-space view,
 so explaining an observation never has to construct the heavy PyTorch ViT
 encoder.
@@ -84,7 +84,7 @@ def is_dinov3_box_mapping(
     raw_box: Mapping[str, Any],
     detection_data: Mapping[str, Any] | None = None,
 ) -> bool:
-    """Recognize a detection box produced by the Neri1.1 Ridge/Within path."""
+    """Recognize a detection box produced by the joint Ridge/Within path."""
     if not isinstance(raw_box, Mapping):
         return False
     if any(key in raw_box for key in _BOX_METRIC_KEYS):
@@ -455,7 +455,7 @@ def explain_dinov3_observation(
     classification_model_path: str,
     observation_id: str,
 ) -> dict[str, Any]:
-    """Explain a Neri1.1 box without loading the DINOv3 ViT encoder."""
+    """Explain a joint-model box without loading the DINOv3 ViT encoder."""
     from system.backend import services
     from system.dinov3.runtime import read_manifest, resolve_manifest_asset
 
@@ -709,7 +709,7 @@ def _sync_empty_training_contribution(
 
 
 def apply_dinov3_box_feedback(request: Any) -> dict[str, Any]:
-    """Persist a Neri1.1 box label locally and journal it for undo."""
+    """Persist a joint-model box label locally and journal it for undo."""
     from system.backend import services
     from system.backend.dino_feedback_service import (
         _path_identity,

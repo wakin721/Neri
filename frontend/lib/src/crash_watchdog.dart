@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'crash_reporter.dart';
+import 'python_runtime.dart';
 
 class CrashWatchdog {
   CrashWatchdog._();
@@ -220,6 +221,7 @@ class CrashWatchdog {
       final process = await Process.start(
         pythonExe.path,
         <String>[
+          ...pythonIsolationArguments,
           watcherScript.path,
           '--main-pid',
           pid.toString(),
@@ -242,6 +244,8 @@ class CrashWatchdog {
           'Neri',
         ],
         workingDirectory: projectRoot.path,
+        environment: pythonProcessEnvironment(),
+        includeParentEnvironment: false,
         mode: ProcessStartMode.detached,
         runInShell: false,
       );

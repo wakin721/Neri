@@ -13,3 +13,5 @@ class ModelInfo(_legacy.ModelInfo):
     """A model discovered under the canonical local model directory."""
 
     backend: Literal["yolo", "dinov3", "litert"] = "yolo"
+    encoder_backend: Literal["pytorch", "litert"] | None = None
+    learning_family_id: str | None = None

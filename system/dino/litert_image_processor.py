@@ -60,9 +60,19 @@ class _Result:
 
 
 class _ModelHandle:
-    def __init__(self, names, path: str):
+    def __init__(self, names, path: str, detector=None):
         self.names = dict(names)
         self.path = path
+        self.detector = detector
+
+    def __call__(self, images, *, conf=.25, iou=.5, classes=None, **_kwargs):
+        """YOLO-shaped CPU detections for the shared DINOv3 photo adapter."""
+        results = []
+        for image in images:
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            detections = self.detector.predict(rgb, confidence=conf, iou=iou, classes=classes)
+            results.append(_Result(_Boxes(detections), self.names, ""))
+        return results
 
 
 class LiteRtImageProcessor:
@@ -79,7 +89,7 @@ class LiteRtImageProcessor:
             Path(model_path), interpreter_factory=interpreter_factory
         )
         self.names = dict(self.detector.names)
-        self.model = _ModelHandle(self.names, self.model_path)
+        self.model = _ModelHandle(self.names, self.model_path, self.detector)
         self.cls_model = None
         self.dino_classifier = None
         self.dinov3_classifier = None
@@ -99,7 +109,7 @@ class LiteRtImageProcessor:
         original_rgb = []
         valid_indices = []
         for index, path in enumerate(img_paths):
-            image = cv2.imread(str(path))
+            image = (getattr(self, "_image_reader", None) or cv2.imread)(str(path))
             prepared = self._preprocess_image(image)
             if prepared is None:
                 continue
@@ -190,6 +200,17 @@ class LiteRtImageProcessor:
 
     def load_dino_classifier(self, _classifier) -> None:
         self.load_cls_model("")
+
+    @staticmethod
+    def _determine_device(_use_fp16):
+        return "cpu", False
+
+    @staticmethod
+    def _sync_device(_device):
+        return None
+
+    def release_batch_images(self):
+        return None
 
     def cleanup_runtime_cache(self, *_args, **_kwargs) -> None:
         return None

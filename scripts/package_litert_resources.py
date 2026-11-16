@@ -15,7 +15,8 @@ EXCLUDED_EXTENSIONS = {
 }
 MODEL_ROOTS = {"model", "model_cls", "dinov2", "dinov3"}
 SIDECARS = (".labels.txt", ".labels.json", ".LICENSE.md", ".SOURCE.md")
-CANONICAL_DIRECTORIES = ("detect/bundled", "detect/user", "detect/sync", "cls/user", "cls/sync")
+CANONICAL_DIRECTORIES = ("detect/bundled", "detect/user", "detect/sync", "cls/bundled", "cls/user", "cls/sync")
+DETECTOR_DIRECTORIES = ("detect/bundled", "detect/user", "detect/sync")
 BUILTIN_DETECTOR = 'model/detect/bundled/MDV6-yolov10-c.tflite'
 INVENTORY = "packaged-models.json"
 
@@ -52,14 +53,14 @@ def copy_resources(source, destination):
             if path.is_symlink():
                 raise ValueError(f"Resource symlinks are not allowed: {path}")
             if path.is_dir():
-                if path.name.lower() not in MODEL_ROOTS and path.name != "__pycache__":
+                if path.name.lower() not in MODEL_ROOTS | {'bundled-models'} and path.name != "__pycache__":
                     copy_non_models(path)
             elif not is_excluded(path) and path.name != INVENTORY:
                 copy_file(path, path.relative_to(source))
 
     copy_non_models(source)
     model_root = source / "model"
-    for relative in CANONICAL_DIRECTORIES:
+    for relative in DETECTOR_DIRECTORIES:
         directory = model_root / relative
         if not directory.is_dir():
             continue
@@ -92,10 +93,14 @@ def verify_resources(resources, *, require_bundled_detector=False):
     inventory = json.loads((resources / INVENTORY).read_text("utf-8"))
     if inventory.get("policy") != "litert-only" or not inventory.get("models"):
         raise ValueError("Missing LiteRT-only model inventory")
+    if inventory.get("classifier_assets"):
+        raise ValueError("Bundled classifier assets are not allowed in lite package")
     expected = {}
     for item in inventory["models"]:
         path = resources / item["path"]
         path.resolve().relative_to(resources)
+        if tuple(part.lower() for part in Path(item["path"]).parts[:2]) == ("model", "cls"):
+            raise ValueError(f"Classifier models are not allowed in lite package: {item['path']}")
         if path.suffix.lower() not in MODEL_EXTENSIONS or not path.is_file():
             raise ValueError(f"Invalid packaged model: {path}")
         if sha(path) != item["sha256"] or path.stat().st_size != item["size"]:
@@ -107,9 +112,16 @@ def verify_resources(resources, *, require_bundled_detector=False):
     for path in resources.rglob("*"):
         if not path.is_file():
             continue
+        if path.is_symlink():
+            raise ValueError(f"Resource symlinks are not allowed: {path}")
         relative = path.relative_to(resources)
+        parts_lower = tuple(part.lower() for part in relative.parts)
+        if parts_lower and parts_lower[0] == "bundled-models":
+            raise ValueError(f"Bundled model shard directory is not allowed in package: {relative}")
         if is_excluded(path):
             raise ValueError(f"Non-LiteRT model/archive in package: {relative}")
+        if len(parts_lower) >= 2 and parts_lower[:2] == ("model", "cls"):
+            raise ValueError(f"Classifier assets are not allowed in lite package: {relative}")
         if path.suffix.lower() in MODEL_EXTENSIONS:
             actual.add(relative.as_posix())
         elif relative.parts[0].lower() in MODEL_ROOTS:
@@ -139,7 +151,7 @@ if __name__ == "__main__":
     elif args.source and args.destination:
         report = copy_resources(args.source, args.destination)
         if args.require_bundled_detector:
-            report = verify_resources(args.destination, require_bundled_detector=True)
+            report = verify_resources(args.destination, require_bundled_detector=args.require_bundled_detector)
     else:
         parser.error("Use --source/--destination or --verify")
     print(json.dumps(report, ensure_ascii=False, indent=2))

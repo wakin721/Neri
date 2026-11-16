@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Iterable, Literal
 
 import numpy as np
 from PIL import Image, ImageOps
-import torch
+
+if TYPE_CHECKING:
+    import torch
 
 IMAGE_SIZE = 224
 LETTERBOX_RGB = (124, 116, 104)
@@ -64,10 +66,33 @@ def preprocess_image(
     value: ImageInput,
     *,
     array_color: Literal["rgb", "bgr"] = "rgb",
-) -> torch.Tensor:
+) -> "torch.Tensor":
+    import torch
+
+    array = preprocess_image_nhwc(value, array_color=array_color)
+    return torch.from_numpy(array.transpose(2, 0, 1).copy())
+
+
+def preprocess_image_nhwc(
+    value: ImageInput,
+    *,
+    array_color: Literal["rgb", "bgr"] = "rgb",
+) -> np.ndarray:
     image = letterbox_image(_as_rgb_image(value, array_color=array_color))
-    array = np.asarray(image, dtype=np.float32) / 255.0
-    tensor = torch.from_numpy(array.copy()).permute(2, 0, 1)
-    mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32)[:, None, None]
-    std = torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
-    return (tensor - mean) / std
+    array = np.asarray(image, dtype=np.float32) / np.float32(255.0)
+    mean = np.asarray(IMAGENET_MEAN, dtype=np.float32)[None, None, :]
+    std = np.asarray(IMAGENET_STD, dtype=np.float32)[None, None, :]
+    return np.ascontiguousarray((array - mean) / std, dtype=np.float32)
+
+
+def preprocess_batch_nhwc(
+    values: Iterable[ImageInput],
+    *,
+    array_color: Literal["rgb", "bgr"] = "rgb",
+) -> np.ndarray:
+    if array_color not in {"rgb", "bgr"}:
+        raise ValueError(f"Unsupported array color order: {array_color}")
+    rows = [preprocess_image_nhwc(value, array_color=array_color) for value in values]
+    if not rows:
+        raise ValueError("At least one crop is required")
+    return np.ascontiguousarray(np.stack(rows, axis=0), dtype=np.float32)

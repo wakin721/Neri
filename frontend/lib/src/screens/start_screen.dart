@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/job.dart';
 import '../models/settings.dart';
@@ -61,7 +63,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in bundledModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (userModels.isNotEmpty) ...[
@@ -73,7 +75,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in userModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
     if (cloudModels.isNotEmpty) ...[
@@ -85,7 +87,7 @@ List<DropdownMenuEntry<String>> _modelDropdownEntries(List<ModelInfo> models) {
       for (final model in cloudModels)
         DropdownMenuEntry<String>(
           value: model.path,
-          label: model.isLiteRt ? '${model.rawName} · LiteRT' : model.rawName,
+          label: model.selectorLabel,
         ),
     ],
   ];
@@ -184,23 +186,143 @@ class StartScreen extends StatelessWidget {
           onIouChanged: onIouChanged,
           submitting: submitting,
           onCreateJob: onCreateJob,
-        ),
-        _JobsCard(
-          jobs: jobs,
-          onCancelJob: onCancelJob,
-          onResumeJob: onResumeJob,
-          onDeleteJob: onDeleteJob,
-          onClearJobs: onClearJobs,
-          pendingStartJobIds: pendingStartJobIds,
-          pendingStopJobIds: pendingStopJobIds,
-          onJobExpansionChanged: onJobExpansionChanged,
-          onRetryJobDetails: onRetryJobDetails,
-          loadingJobDetailIds: loadingJobDetailIds,
-          failedJobDetailIds: failedJobDetailIds,
+          historyButton: _TaskHistoryButton(source: this),
         ),
       ],
     );
   }
+}
+
+class _TaskHistoryButton extends StatefulWidget {
+  const _TaskHistoryButton({required this.source});
+
+  final StartScreen source;
+
+  @override
+  State<_TaskHistoryButton> createState() => _TaskHistoryButtonState();
+}
+
+class _TaskHistoryButtonState extends State<_TaskHistoryButton> {
+  late final _snapshot = ValueNotifier<StartScreen>(widget.source);
+  final _expandedJobs = <String>{};
+  DialogRoute<void>? _dialogRoute;
+
+  @override
+  void didUpdateWidget(covariant _TaskHistoryButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The dialog is a separate route. Publish the existing parent's polling
+    // updates after build so open progress and detail panels stay live.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _snapshot.value = widget.source;
+    });
+  }
+
+  @override
+  void dispose() {
+    final route = _dialogRoute;
+    if (route != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (route.isActive) route.navigator?.removeRoute(route);
+      });
+      // A route may still be listening during its closing animation.
+      unawaited(route.completed.whenComplete(_snapshot.dispose));
+    } else {
+      _snapshot.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _showHistory() async {
+    if (_dialogRoute != null) return;
+    _snapshot.value = widget.source;
+    final route = DialogRoute<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: SizedBox(
+          width: 960,
+          height: MediaQuery.sizeOf(dialogContext).height * 0.85,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 12, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '任务历史',
+                        style: Theme.of(dialogContext).textTheme.titleLarge,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭任务历史',
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ValueListenableBuilder<StartScreen>(
+                  valueListenable: _snapshot,
+                  builder: (context, source, _) => SingleChildScrollView(
+                    key: const PageStorageKey('task-history-scroll'),
+                    padding: const EdgeInsets.all(12),
+                    child: _JobsCard(
+                      jobs: source.jobs,
+                      onCancelJob: source.onCancelJob,
+                      onResumeJob: source.onResumeJob,
+                      onDeleteJob: source.onDeleteJob,
+                      onClearJobs: source.onClearJobs,
+                      pendingStartJobIds: source.pendingStartJobIds,
+                      pendingStopJobIds: source.pendingStopJobIds,
+                      onJobExpansionChanged: (job, expanded) {
+                        if (expanded) {
+                          _expandedJobs.add(job.id);
+                        } else {
+                          _expandedJobs.remove(job.id);
+                        }
+                        source.onJobExpansionChanged?.call(job, expanded);
+                      },
+                      onRetryJobDetails: source.onRetryJobDetails,
+                      loadingJobDetailIds: source.loadingJobDetailIds,
+                      failedJobDetailIds: source.failedJobDetailIds,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    _dialogRoute = route;
+    try {
+      await Navigator.of(context, rootNavigator: true).push(route);
+    } finally {
+      if (mounted) {
+        for (final job in widget.source.jobs) {
+          if (_expandedJobs.contains(job.id)) {
+            widget.source.onJobExpansionChanged?.call(job, false);
+          }
+        }
+        _expandedJobs.clear();
+        _dialogRoute = null;
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => IconButton.filledTonal(
+    tooltip: '任务历史',
+    onPressed: _showHistory,
+    style: IconButton.styleFrom(
+      fixedSize: const Size.square(48),
+      shape: const CircleBorder(),
+    ),
+    icon: const Icon(Icons.history_rounded),
+  );
 }
 
 class _HeroPanel extends StatelessWidget {
@@ -277,6 +399,7 @@ class _CreateJobCard extends StatelessWidget {
     required this.onIouChanged,
     required this.submitting,
     required this.onCreateJob,
+    required this.historyButton,
   });
 
   final NeriSettings? settings;
@@ -298,6 +421,7 @@ class _CreateJobCard extends StatelessWidget {
   final ValueChanged<double> onIouChanged;
   final bool submitting;
   final VoidCallback onCreateJob;
+  final Widget historyButton;
 
   @override
   Widget build(BuildContext context) {
@@ -336,7 +460,9 @@ class _CreateJobCard extends StatelessWidget {
                   (settings?.missingYoloDependencies.isNotEmpty ?? false))) ...[
             const SizedBox(height: 8),
             Text(
-              '检测依赖不完整，当前使用 LiteRT 本地探测（动物 / 人 / 车辆，无物种分类）。',
+              classificationInfo?.encoderBackend == 'litert'
+                  ? '使用内置 LiteRT 模型在本机进行目标探测与物种分类。'
+                  : '当前使用 LiteRT 本地探测；选择内置分类模型可启用物种识别。',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
@@ -345,7 +471,7 @@ class _CreateJobCard extends StatelessWidget {
           if (dinoNeedsDetector) ...[
             const SizedBox(height: 8),
             Text(
-              'Neri1.1 必须同时选择探测模型后才能开始处理。',
+              '${classificationInfo?.rawName ?? '联合分类模型'} 必须同时选择探测模型后才能开始处理。',
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
@@ -371,19 +497,30 @@ class _CreateJobCard extends StatelessWidget {
             onChanged: detectionSettingsEnabled ? onIouChanged : null,
           ),
           const SizedBox(height: 8),
-          ExpressiveActionButton(
-            onPressed:
-                submitting || dinoNeedsDetector || !detectionSettingsEnabled
-                ? null
-                : onCreateJob,
-            icon: submitting
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.play_arrow_rounded),
-            label: Text(submitting ? '提交中...' : '开始处理'),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: ExpressiveActionButton(
+                  onPressed:
+                      submitting ||
+                          dinoNeedsDetector ||
+                          !detectionSettingsEnabled
+                      ? null
+                      : onCreateJob,
+                  icon: submitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.play_arrow_rounded),
+                  label: Text(submitting ? '提交中...' : '开始处理'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              historyButton,
+            ],
           ),
         ],
       ),
@@ -598,7 +735,7 @@ class _VideoModeSelector extends StatelessWidget {
     final helperText = !supportsVideoFast && !supportsVideoAll
         ? '所选分类模型处理完整照片序列，任务中跳过视频'
         : isDino
-        ? 'Neri1.1 当前仅支持抽帧快速识别或跳过视频'
+        ? '当前联合模型仅支持抽帧快速识别或跳过视频'
         : switch (selectedValue) {
             videoProcessingModeFast => '抽帧批量识别',
             videoProcessingModeSkip => '任务中忽略视频文件',

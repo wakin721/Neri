@@ -45,11 +45,11 @@ void main() {
         ),
       ),
     );
-    await tester.scrollUntilVisible(
-      find.text(r'C:\photos'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    final history = find.byTooltip('任务历史');
+    await tester.ensureVisible(history);
+    await tester.pump();
+    await tester.tap(history);
+    await tester.pump(const Duration(milliseconds: 300));
   }
 
   ProcessingJob job(String stage, int done, int total) =>

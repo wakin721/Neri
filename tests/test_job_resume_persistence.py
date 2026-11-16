@@ -248,15 +248,15 @@ def test_failed_state_checkpoint_does_not_corrupt_previous_resume_state(
 
     manager._save_state_unlocked()
     manager._jobs[job_id] = manager._jobs[job_id].model_copy(update={"processed": 1})
-    original_dumps = json.dumps
+    original_dump = DetectionItem.model_dump_json
 
-    def fail_dumps(payload, *args, **kwargs):
-        if isinstance(payload, dict) and payload.get("filename") == "fail.jpg":
+    def fail_dump(item, *args, **kwargs):
+        if item.filename == "fail.jpg":
             raise OSError("simulated interrupted checkpoint")
-        return original_dumps(payload, *args, **kwargs)
+        return original_dump(item, *args, **kwargs)
 
     manager._jobs[job_id].results.append(DetectionItem(filename="fail.jpg", path="fail.jpg", file_type="image"))
-    monkeypatch.setattr(json, "dumps", fail_dumps)
+    monkeypatch.setattr(DetectionItem, "model_dump_json", fail_dump)
 
     try:
         manager._save_state_unlocked()
@@ -306,7 +306,7 @@ def test_progress_serializes_only_new_results(monkeypatch, tmp_path):
     manager._job_requests["active"] = _request(tmp_path)
     manager._save_state_unlocked()
     old = manager._jobs["history"].results[0]
-    original_dump = DetectionItem.model_dump
+    original_dump = DetectionItem.model_dump_json
     calls = []
 
     def record_dump(item, *args, **kwargs):
@@ -314,7 +314,7 @@ def test_progress_serializes_only_new_results(monkeypatch, tmp_path):
         calls.append(item.filename)
         return original_dump(item, *args, **kwargs)
 
-    monkeypatch.setattr(DetectionItem, "model_dump", record_dump)
+    monkeypatch.setattr(DetectionItem, "model_dump_json", record_dump)
     try:
         first = DetectionItem(filename="first.jpg", path="first.jpg", file_type="image")
         second = DetectionItem(filename="second.jpg", path="second.jpg", file_type="image")

@@ -19,6 +19,9 @@ _DETECT_EXTENSIONS = frozenset({".pt", ".tflite", ".litert"})
 _CLS_EXTENSIONS = frozenset({".pt", ".onnx", ".engine"})
 _MANIFEST_SUFFIX = ".neri.json"
 _SOURCE_ORDER: dict[ModelSource, int] = {"bundled": 0, "user": 1, "sync": 2}
+_LEGACY_BUNDLED_NAMES: dict[str, str] = {
+    "Neri1.2preview（LiteRT FP32 CPU）": "Neri1.2preview·LiteRT",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ class DiscoveredModel:
     supports_video_fast: bool = True
     supports_video_all: bool = True
     checkpoint_path: str | None = None
+    encoder_backend: str | None = None
+    learning_family_id: str | None = None
 
 
 def _size(path: Path) -> int | None:
@@ -42,6 +47,17 @@ def _size(path: Path) -> int | None:
         return path.stat().st_size
     except OSError:
         return None
+
+
+def _discovered_model_name(
+    path: Path,
+    source: ModelSource,
+    kind: ModelKind,
+    backend: ModelBackend,
+) -> str:
+    if source == "bundled" and kind == "detect" and backend == "litert":
+        return f"{path.stem}·LiteRT"
+    return path.name
 
 
 def _read_manifest(path: Path) -> dict | None:
@@ -77,6 +93,11 @@ def _manifest_model(path: Path, source: ModelSource):
         dim = valid_payload.get("feature_dim")
         dim = dim if isinstance(dim, int) else 768
         name = str(valid_payload.get("display_name") or path.name)
+        from system.dinov3.shared_learning import family_id
+        try:
+            identifier=family_id(path,valid_payload)
+        except (OSError,ValueError):
+            return None
         model = DiscoveredModel(
             name,
             str(path.resolve()),
@@ -90,6 +111,8 @@ def _manifest_model(path: Path, source: ModelSource):
             bool(valid_payload.get("supports_video_fast", False)),
             bool(valid_payload.get("supports_video_all", False)),
             str(checkpoint),
+            str(valid_payload.get("encoder_backend", "pytorch")),
+            identifier,
         )
         return model, checkpoint
     return None
@@ -138,7 +161,7 @@ def _scan(
             )
             items.append(
                 DiscoveredModel(
-                    path.name,
+                    _discovered_model_name(path, source, kind, backend),
                     str(path.resolve()),
                     _size(path),
                     source,
@@ -163,6 +186,7 @@ def discover_models(layout: ModelLayout, kind: ModelKind) -> list[DiscoveredMode
         )
     elif kind == "cls":
         directories = (
+            (layout.cls_bundled, "bundled"),
             (layout.cls_user, "user"),
             (layout.cls_sync, "sync"),
         )
@@ -229,7 +253,12 @@ def resolve_saved_model_path(
     named = [
         model
         for model in models
-        if model.name == value or Path(model.path).name == value
+        if model.name == value
+        or Path(model.path).name == value
+        or (
+            model.source == "bundled"
+            and _LEGACY_BUNDLED_NAMES.get(value) == model.name
+        )
     ]
     if not named:
         return None
