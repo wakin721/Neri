@@ -4,8 +4,9 @@
 
 import os
 import logging
+import re
 from typing import Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 from system.config import DATE_FORMATS
@@ -80,7 +81,18 @@ class ImageMetadataExtractor:
         # 尝试不同的日期格式
         for fmt in DATE_FORMATS:
             try:
-                return datetime.strptime(date_str, fmt)
+                captured = datetime.strptime(date_str, fmt)
+                # EXIF stores its UTC offset separately from DateTimeOriginal.
+                offset = exif.get(36881 if exif.get(36867) else 36880)
+                if isinstance(offset, bytes):
+                    offset = offset.decode("ascii", errors="ignore")
+                if isinstance(offset, str) and re.fullmatch(r"[+-]\d{2}:\d{2}", offset.strip()):
+                    offset = offset.strip()
+                    hours, minutes = map(int, offset[1:].split(":"))
+                    if hours < 24 and minutes < 60:
+                        delta = timedelta(hours=hours, minutes=minutes)
+                        captured = captured.replace(tzinfo=timezone(delta if offset[0] == "+" else -delta))
+                return captured
             except ValueError:
                 continue
 

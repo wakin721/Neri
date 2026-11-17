@@ -54,6 +54,7 @@ class DinoV3CropRecord:
     raw_embedding: np.ndarray
     initial_prediction: Any = None
     initial_candidate: dict[str, Any] = field(default_factory=dict)
+    detector_category: str | None = None
 
 
 def _image_file_digest(path: str | Path) -> str:
@@ -388,7 +389,13 @@ def _rejection_event_groups(grouped_events):
                 if value.startswith(prefix):
                     item[key] = f"event:{new}:" + value[len(prefix):]
         records.append(item)
-    return records if reusable else group_job_events(records)
+    if reusable:
+        return records
+    # Browsing by physical subdirectory must not dissolve a video's own
+    # trajectories into missing-time frames or merge distinct clips.
+    videos = [record for record in records if str(record.get("event_id", "")).startswith("video:")]
+    photos = [record for record in records if not str(record.get("event_id", "")).startswith("video:")]
+    return [*group_job_events(photos), *videos]
 
 
 def finalize_photo_job(
@@ -405,6 +412,7 @@ def finalize_photo_job(
     incomplete_reason: str = "incomplete_job",
     total_photos: int | None = None,
     progress_fn: Callable[[str, int, int], None] | None = None,
+    media_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> list[Any]:
     """Hook called when all photo batches have finished inference.
 
@@ -461,6 +469,8 @@ def finalize_photo_job(
 
     def report(stage, done=0, total=0):
         nonlocal current_stage, stage_started
+        if media_metadata:
+            stage = stage.replace("照片", "媒体")
         if stage != current_stage:
             log_stage()
             current_stage, stage_started = stage, time.perf_counter()
@@ -486,6 +496,7 @@ def finalize_photo_job(
                     complete_sequence=complete_sequence,
                     incomplete_reason=incomplete_reason, total_photos=total_photos,
                     progress_fn=progress_fn,
+                    media_metadata=media_metadata,
                 )
                 if valid_items else []
             )
@@ -583,7 +594,8 @@ def finalize_photo_job(
         for item, _ in crop_items:
             p = str(item.path)
             if p not in image_digests:
-                image_digests[p] = collector.image_digest(p) or _image_file_digest(p)
+                context = (media_metadata or {}).get(p, {})
+                image_digests[p] = context.get("content_digest") or collector.image_digest(p) or _image_file_digest(p)
                 report("计算照片指纹", len(image_digests), digest_total)
 
         # Prepare metadata for event grouping
@@ -594,8 +606,9 @@ def finalize_photo_job(
             if path_str not in photo_context:
                 # Resolve each source once: file symlinks in a shared parent
                 # can still resolve into different camera directories.
+                source_path = (media_metadata or {}).get(path_str, {}).get("source_path", path_str)
                 photo_context[path_str] = (
-                    camera_id_for_path(path_str, root=input_path),
+                    camera_id_for_path(source_path, root=input_path),
                     parse_capture_time(getattr(item, "date_taken", None)),
                 )
             cam_id, date_taken = photo_context[path_str]
@@ -606,6 +619,7 @@ def finalize_photo_job(
                     "box_index": int(crop.box_index),
                     "bbox": list(crop.bbox),
                     "raw_embedding": crop.raw_embedding,
+                    "detector_category": crop.detector_category,
                     "path": path_str,
                     "camera_id": cam_id,
                     "date_taken": date_taken,
@@ -615,8 +629,29 @@ def finalize_photo_job(
             )
 
         report("划分事件与目标轨迹")
-        grouped_events = group_job_events(event_input_records, gap_seconds=1800)
+        if media_metadata:
+            from .video import group_video_trajectories
+            grouped_events = group_job_events([
+                record for record in event_input_records if record["path"] not in media_metadata
+            ], gap_seconds=1800)
+            video_records = {}
+            for record in event_input_records:
+                context = media_metadata.get(record["path"])
+                if context is not None:
+                    video_records.setdefault(context["source_path"], []).append({
+                        **record, "frame_seconds": context["timestamp"],
+                    })
+            for source, records in video_records.items():
+                grouped_events.extend(group_video_trajectories(records, source))
+        else:
+            grouped_events = group_job_events(event_input_records, gap_seconds=1800)
         by_crop_idx = {g["crop_idx"]: g for g in grouped_events}
+
+        def observation_id(item, crop):
+            context = (media_metadata or {}).get(str(item.path), {})
+            source = context.get("source_path", item.path)
+            index = context.get("observation_indices", {}).get(crop.box_index, crop.box_index)
+            return make_dinov3_observation_id(source, index, crop.bbox)
 
         history_records: list[dict[str, Any]] = []
         track_sequence_ids: list[str] = []
@@ -631,7 +666,11 @@ def finalize_photo_job(
                     "seq_id": event_id,
                     "datetime": g.get("datetime"),
                     "content_hash": g["content_hash"],
-                    "content_id": g["content_hash"],
+                    "content_id": (
+                        f"video-track:{media_metadata[str(crop_items[crop_idx][0].path)]['source_path']}:{track_id}"
+                        if media_metadata and str(crop_items[crop_idx][0].path) in media_metadata
+                        else g["content_hash"]
+                    ),
                 }
             )
 
@@ -641,7 +680,16 @@ def finalize_photo_job(
         # Build causal history index
         config = HistoryConfig(days=7.0, max_history=64, short_term=0, seed=20261105)
         report("构建因果历史", 0, len(history_records))
-        history_index = FastCausalHistoryIndex(history_records, config=config)
+        eligible_history = [i for i, (item, _) in enumerate(crop_items)
+                            if (media_metadata or {}).get(str(item.path), {}).get("reference_source") != "burst_group"]
+        history_partition = [{**record, "camera_id": (
+            f"{record['camera_id']}#detector:{crop_items[i][1].detector_category}"
+            if crop_items[i][1].detector_category is not None else record["camera_id"]
+        )} for i, record in enumerate(history_records)]
+        history_index = FastCausalHistoryIndex(
+            history_partition, config=config,
+            **({"candidate_indices": eligible_history} if media_metadata else {}),
+        )
         history = np.full((len(history_records), config.max_history), -1, dtype=np.int64)
         for start in range(0, len(history_records), 256):
             end = min(start + 256, len(history_records))
@@ -660,8 +708,6 @@ def finalize_photo_job(
 
         camera_ids = [r["camera_id"] for r in history_records]
         sequence_ids = track_sequence_ids
-        if getattr(getattr(classifier, "model", None), "inference_recipe", None) == "experiment_full":
-            sequence_ids = [r["seq_id"] for r in history_records]
         content_ids = [r["content_hash"] for r in history_records]
 
         if complete_sequence and is_cancelled is not None and is_cancelled():
@@ -676,12 +722,8 @@ def finalize_photo_job(
         report("全序列分类")
         with t_ctx:
             predictions = classifier.classify_features(
-                raw_features,
-                camera_ids=camera_ids,
-                sequence_ids=sequence_ids,
-                content_ids=content_ids,
-                site_ids=camera_ids,
-                adapted_features=adapted_features,
+                raw_features, camera_ids=camera_ids, sequence_ids=sequence_ids,
+                content_ids=content_ids, site_ids=camera_ids, adapted_features=adapted_features,
             )
 
         # Check cancellation immediately after classification before writing DB
@@ -702,9 +744,9 @@ def finalize_photo_job(
             from .rejection_clustering import (
                 ClusteringCancelled, cluster_rejections, failed_rejections,
             )
-            rejected = [i for i, pred in enumerate(predictions) if not bool(pred.accepted)]
-            rejected_ids = [make_dinov3_observation_id(crop_items[i][0].path,
-                            crop_items[i][1].box_index, crop_items[i][1].bbox) for i in rejected]
+            rejected = [i for i, pred in enumerate(predictions) if not bool(pred.accepted)
+                        and crop_items[i][1].detector_category not in {"person", "vehicle"}]
+            rejected_ids = [observation_id(*crop_items[i]) for i in rejected]
             fingerprint = getattr(classifier, "model_fingerprint", None)
             if not isinstance(fingerprint, str):
                 fingerprint = "unversioned"
@@ -775,6 +817,17 @@ def finalize_photo_job(
 
             for box_index in sorted(item_preds.keys()):
                 crop, pred, group_meta = item_preds[box_index]
+                if crop.detector_category in {"person", "vehicle"}:
+                    from .detection_categories import detector_category_box
+                    box_dict = detector_category_box(
+                        crop.detector_category, crop.detection_confidence, crop.bbox,
+                        observation_id=observation_id(item, crop), track_id=group_meta["track_id"],
+                        event_id=group_meta["event_id"], complete=complete_sequence,
+                    )
+                    new_boxes.append(box_dict)
+                    species_counts[box_dict["物种"]] = species_counts.get(box_dict["物种"], 0) + 1
+                    confidences.append(crop.detection_confidence)
+                    continue
                 accepted = bool(pred.accepted)
                 best_known = str(pred.best_known_species)
                 box_name = best_known if accepted else "Unknown"
@@ -849,7 +902,7 @@ def finalize_photo_job(
                     or group_meta.get("sequence_id")
                     or ""
                 )
-                obs_id = make_dinov3_observation_id(item.path, box_index, crop.bbox)
+                obs_id = observation_id(item, crop)
 
                 candidate = pred.as_candidate(detection_confidence=crop.detection_confidence)
                 candidate["observation_id"] = obs_id

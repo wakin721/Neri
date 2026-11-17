@@ -150,7 +150,15 @@ class DinoRejectionScores extends StatelessWidget {
             ),
             const SizedBox(width: 10),
           ],
-          if (info.isExperimentSingleGate)
+          if (info.isDetectorCategory)
+            Tooltip(
+              message: '保留探测器识别出的人员／车辆类别，不参与动物序列的物种投票。',
+              child: Text(
+                '探测证据 ${info.rawDetConf?.toStringAsFixed(3) ?? '—'}',
+                style: theme.textTheme.bodySmall,
+              ),
+            )
+          else if (info.isExperimentSingleGate)
             _gate(
               context,
               '实验事件',

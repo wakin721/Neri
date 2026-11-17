@@ -97,6 +97,22 @@ def _setup_dinov3_job_env(monkeypatch, tmp_path, files):
     return legacy, state_path, model_path, manifest_path, exported
 
 
+def _signed_video_item(item, request):
+    """A completed standalone result produced under this fixture's current model/settings."""
+    from system.dinov3.job_cache import file_stamp
+    from system.dinov3.mixed_media import MEDIA_SEQUENCE_VERSION, video_result_signature
+    legacy = services._legacy
+    model = legacy._resolve_model_path(request.options.model_path)
+    signature = dict(options=request.options.model_dump(mode="json"),
+        manifest=legacy._dino_manifest_payload(Path(request.options.classification_model_path)),
+        detector_path=str(model), detector_stamp=file_stamp(model),
+        media_sequence_version=MEDIA_SEQUENCE_VERSION, camera_clock_policy="recorded_wall_time")
+    item = item.model_copy(deep=True)
+    item.detection_data.update(video_source_stamp=file_stamp(item.path),
+                               video_inference_signature=video_result_signature(signature))
+    return item
+
+
 def test_dinov3_job_allows_fast_video_and_still_guards_all_mode(monkeypatch, tmp_path):
     video = tmp_path / "clip.avi"
     video.write_bytes(b"video")
@@ -357,7 +373,7 @@ def test_resume_after_video_cancel_restores_photo_cache_and_preserves_completed_
         for index, path in enumerate(paths):
             if cancelled and cancelled():
                 raise RuntimeError("用户取消任务")
-            item = _completed_video_item(path, "fox")
+            item = _signed_video_item(_completed_video_item(path, "fox"), req)
             out.append(item)
             if on_item_ready is not None:
                 on_item_ready(index, item)
@@ -405,8 +421,10 @@ def test_resume_after_video_cancel_restores_photo_cache_and_preserves_completed_
         finished = restarted.get_job("job")
         assert finished.state == JobState.COMPLETED, finished.error
         assert detected_photos == [p1, p2]
-        assert detected_videos == [[str(v1), str(v2)], [str(v2)]]
-        assert finalized_inputs == [[str(p1), str(p2)], [str(p1), str(p2)]]
+        # Serialized old decisions have no raw video features for the new track/context policy.
+        assert detected_videos == [[str(v1), str(v2)], [str(v1), str(v2)]]
+        # A mixed task now finalizes only after all video observations arrive.
+        assert finalized_inputs == [[str(p1), str(p2)]]
         assert [item.path for item in finished.results] == [str(p) for p in files]
         assert [item.species for item in finished.results] == [["deer"], ["fox"], ["deer"], ["fox"]]
         assert all(item.detection_data.get("sequence_completed") is True for item in finished.results)
@@ -417,8 +435,9 @@ def test_resume_after_video_cancel_restores_photo_cache_and_preserves_completed_
             restarted._executor.shutdown()
 
 
-def test_resume_retries_failed_or_incomplete_videos_while_preserving_completed_ones(
-    monkeypatch, tmp_path,
+@pytest.mark.parametrize("invalidation", [None, "source", "options", "detector", "null_capture"])
+def test_resume_reencodes_legacy_completed_videos_when_raw_features_are_missing(
+    monkeypatch, tmp_path, invalidation,
 ):
     v_done = tmp_path / "01.avi"
     v_err = tmp_path / "02.avi"
@@ -476,17 +495,26 @@ def test_resume_retries_failed_or_incomplete_videos_while_preserving_completed_o
             created_at=now, updated_at=now,
         )
         manager._job_requests["job"] = request
+        initial_results[0] = _signed_video_item(initial_results[0], request)
+        if invalidation == "source":
+            v_done.write_bytes(b"replacement video with changed capture time")
+        elif invalidation == "options":
+            request.options.confidence = 0.4
+        elif invalidation == "detector":
+            model_path.write_bytes(b"new detector")
+        elif invalidation == "null_capture":
+            initial_results[0].detection_data["capture_time"] = None
         manager._run_job("job", request, initial_results)
         finished = manager.get_job("job")
         assert finished.state == JobState.COMPLETED, finished.error
-        assert rerun_paths == [[str(v_err), str(v_incomplete)]]
+        assert rerun_paths == [[str(p) for p in files]]
         assert [item.path for item in finished.results] == [str(p) for p in files]
-        assert [item.species for item in finished.results] == [["fox"], ["badger"], ["badger"]]
+        assert [item.species for item in finished.results] == [["badger"], ["badger"], ["badger"]]
     finally:
         manager._executor.shutdown()
 
 
-def test_photo_cancellation_checkpoint_does_not_corrupt_completed_videos(
+def test_photo_cancellation_does_not_restore_legacy_video_without_raw_features(
     monkeypatch, tmp_path,
 ):
     p1 = tmp_path / "01.jpg"
@@ -539,18 +567,16 @@ def test_photo_cancellation_checkpoint_does_not_corrupt_completed_videos(
             created_at=now, updated_at=now,
         )
         manager._job_requests["job"] = request
-        completed_v1 = _completed_video_item(v1, "fox")
+        completed_v1 = _signed_video_item(_completed_video_item(v1, "fox"), request)
         manager._run_job("job", request, [completed_v1])
         cancelled = manager.get_job("job")
         assert cancelled.state == JobState.CANCELLED
-        assert checkpoint_inputs == [[str(p1)]]
+        # Cancellation marks pending mixed observations without classifying an incomplete event.
+        assert checkpoint_inputs == []
         by_path = {item.path: item for item in cancelled.results}
         assert by_path[str(p1)].detection_data["sequence_status"] == "partial"
         assert by_path[str(p1)].detection_data["sequence_completed"] is False
-        assert by_path[str(v1)].detection_data["sequence_completed"] is True
-        assert by_path[str(v1)].detection_data["sequence_pending"] is False
-        assert by_path[str(v1)].detection_data["sequence_status"] == "complete"
-        assert by_path[str(v1)].species == ["fox"]
+        assert str(v1) not in by_path
     finally:
         manager._executor.shutdown()
 

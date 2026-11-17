@@ -264,3 +264,56 @@ def test_litert_detector_fast_video_needs_no_torch_import(video, monkeypatch):
     assert len(results[0].detection_boxes) == 3
     assert len(classifier.calls) == 1 and len(saved) == 1
     assert results[0].detection_data["sequence_completed"] is True
+
+
+def test_joint_feature_callback_defers_video_head_and_retains_frame_digests(video, monkeypatch):
+    classifier = Classifier()
+    detector = make_detector(classifier)
+    captured, saved = [], []
+    monkeypatch.setattr(services._legacy, "_save_detection_data_batch", lambda pairs, root: saved.extend(pairs))
+    request = CreateJobRequest(input_dir=str(video.parent), options=ProcessingOptions(batch_size=2, vid_stride=3))
+    def collect(index, item, frames, info):
+        captured.append((frames, info))
+        return item.model_copy(update={"detection_data": {"sequence_pending": True, "sequence_completed": False}})
+    output = services._legacy._detect_video_fast_batch(
+        detector, [video], [services._build_fast_metadata_item(video)], request, video.parent,
+        on_video_features=collect,
+    )
+    assert output[0].error is None
+    assert output[0].detection_data["sequence_pending"] is True
+    assert classifier.calls == [] and sum(classifier.encoder.batch_sizes) == 3
+    assert len(captured) == 1 and len(saved) == 1
+    frames, info = captured[0]
+    assert [frame[1] for frame in frames] == [25, 50, 75]
+    assert len({frame[2]["_frame_digest"] for frame in frames}) == 3
+    assert all(len(frame[2]["_frame_digest"]) == 64 for frame in frames)
+    assert sum(len(frame[3]) for frame in frames) == 3
+    assert detector._dinov3_collector.get_all_crops() == []
+
+
+def test_video_modified_during_decoding_is_not_reported_as_complete(video):
+    import os
+    from system.backend.video_frames import sample_video_frames
+    changed = False
+    def modify(frame, index, order, fps):
+        nonlocal changed
+        if not changed:
+            stamp = video.stat()
+            os.utime(video, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1_000_000))
+            changed = True
+    with pytest.raises(RuntimeError, match="源文件.*变化"):
+        sample_video_frames(video, 3, modify)
+
+
+def test_standalone_video_records_resume_signature_and_source_identity(video, monkeypatch):
+    from system.dinov3.mixed_media import completed_video_is_current
+    detector = make_detector(Classifier())
+    monkeypatch.setattr(services._legacy, "_save_detection_data_batch", lambda *args: None)
+    request = CreateJobRequest(input_dir=str(video.parent), options=ProcessingOptions(batch_size=2, vid_stride=3))
+    item = services._legacy._detect_video_fast_batch(
+        detector, [video], [services._build_fast_metadata_item(video)], request, video.parent,
+        result_signature="tested-settings-and-model",
+    )[0]
+    assert item.error is None
+    assert completed_video_is_current(item, "tested-settings-and-model")
+    assert not completed_video_is_current(item, "different-model")

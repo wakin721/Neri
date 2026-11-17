@@ -141,7 +141,7 @@ def test_automatic_feedback_recalibrates_and_republishes_experiment(ready,tmp_pa
     assert rejection["gate_mode"]=="sequence" and rejection["box_threshold"] is None
 
 
-def test_photo_finalization_passes_events_and_saves_only_experimental_gate(experiment,tmp_path):
+def test_photo_finalization_passes_target_tracks_and_saves_experimental_gate(experiment,tmp_path):
     from unittest.mock import MagicMock
     from system.backend.models_legacy import DetectionItem
     from system.dinov3.processor import DinoV3CropCollector,DinoV3CropRecord,finalize_photo_job
@@ -159,8 +159,11 @@ def test_photo_finalization_passes_events_and_saves_only_experimental_gate(exper
         result=finalize_photo_job(detector,[item],tmp_path)
     boxes=result[0].detection_boxes
     assert len(boxes)==2
-    assert boxes[0]["track_id"]==boxes[1]["track_id"]==boxes[0]["event_id"]
-    assert boxes[0]["sequence_known_score"]==boxes[1]["sequence_known_score"]
+    assert boxes[0]["event_id"] == boxes[1]["event_id"]
+    assert boxes[0]["track_id"] != boxes[1]["track_id"]
+    for index, raw_index in enumerate((0, 8)):
+        independent = DinoV3Classifier(model).classify_features(raw[[raw_index]])[0]
+        assert boxes[index]["sequence_known_score"] == pytest.approx(independent.sequence_known_score, abs=1e-4)
     for box in boxes:
         assert box["inference_recipe"]==EXPERIMENT_RECIPE and box["gate_mode"]=="sequence"
         assert box["box_known_score"] is None and box["box_accepted"] is None

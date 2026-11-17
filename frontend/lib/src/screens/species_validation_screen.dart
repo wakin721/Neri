@@ -479,6 +479,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     '未知鸟',
   ];
   // 使用静态变量持久化保存跨界面的状态
+  static String? _savedInputPath;
   static String? _savedSelectedPath;
   static String? _savedSelectedBucketKey;
   static String _savedSelectedQuantity = '1';
@@ -543,6 +544,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       ValidationSelectionModifiers();
   String? _selectionAnchorPath;
   String? _selectedGroupSignature;
+  List<Set<String>> _preservedExpandedGroupPaths = const <Set<String>>[];
+  Set<String>? _preservedSelectedGroupPaths;
+  String? _previousBucketKeyContext;
+  String? _previousBucketSpeciesContext;
+  bool? _previousBucketValidatedContext;
+  int? _previousBucketIndexContext;
+  int? _previousBucketClusterNumberContext;
   bool? _bucketCacheAutoGroup;
   String? _bucketCacheVideoMode;
   bool? _bucketCacheAutoGroupDetectBurst;
@@ -805,9 +813,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         signatures.add(
           [
             item.path,
-            item.dateTaken ?? '',
-            item.detectionData['拍摄时间']?.toString() ?? '',
-            item.modifiedAt ?? '',
+            item.groupingTime.dateTaken ?? '',
+            item.groupingTime.timeTaken ?? '',
+            item.groupingTime.modifiedAt ?? '',
             item.fileType,
             _primarySpeciesAfterConfidenceFilter(item),
             _isItemValidated(item),
@@ -846,15 +854,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       await budget.checkpoint(force: true);
       // Everything above is private working data. Publish one complete cache
       // only after confirming that its source/configuration is still current.
-      final expanded = [
-        for (final signature in _expandedGroupSignatures)
-          if (_bucketCacheGroupBySignature[signature] case final group?)
-            group.items.map((item) => item.path).toSet(),
-      ];
-      final selectedPaths =
-          _bucketCacheGroupBySignature[_selectedGroupSignature]?.items
-              .map((item) => item.path)
-              .toSet();
+      _captureSelectionContextSnapshot();
+      final expanded = _snapshotExpandedGroupPaths();
+      final selectedPaths = _snapshotSelectedGroupPaths();
+      final previousSelectedPath = _selectedPath;
       _bucketCacheAutoGroup = widget.autoGroup;
       _bucketCacheVideoMode = normalizeVideoProcessingMode(widget.videoMode);
       _bucketCacheAutoGroupDetectBurst = widget.autoGroupDetectBurst;
@@ -883,14 +886,11 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         expandedGroupPaths: expanded,
         selectedGroupPaths: selectedPaths,
       );
-      _selectedPaths.removeWhere((path) => !itemByPath.containsKey(path));
-      if (!itemByPath.containsKey(_selectedPath)) {
-        _selectedPath = items.isEmpty ? null : items.first.path;
-        _selectedPaths.clear();
-        if (_selectedPath != null) _selectedPaths.add(_selectedPath!);
-      }
-      if (!itemByPath.containsKey(_selectionAnchorPath)) {
-        _selectionAnchorPath = _selectedPath;
+      if (_selectedPath != null && _selectedPath != previousSelectedPath) {
+        final nextSelected = itemByPath[_selectedPath!];
+        if (nextSelected != null) {
+          unawaited(widget.onLoadMetadata(nextSelected));
+        }
       }
       _discardMarkHistoryForPaths(
         _markHistory
@@ -919,6 +919,12 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    final normalizedInput = widget.inputPath.trim();
+    if (normalizedInput.isNotEmpty && _savedInputPath != widget.inputPath) {
+      _savedInputPath = widget.inputPath;
+      _savedSelectedPath = null;
+      _savedSelectedBucketKey = null;
+    }
     if (_requiresPreparation) _startPreparation();
   }
 
@@ -1009,21 +1015,30 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _preparationError = null;
     }
     if (oldWidget.inputPath != widget.inputPath) {
+      _savedInputPath = widget.inputPath;
       _selectionModifiers.clear();
       _selectedPaths.clear();
       _selectedPath = null;
+      _selectedBucketKey = null;
+      _selectedObservationId = null;
       _selectionAnchorPath = null;
       _selectedGroupSignature = null;
       _expandedGroupSignatures.clear();
       _markHistory.clear();
       _pendingValidationEchoPaths.clear();
+      _clearPreservedSelectionSnapshots();
     }
     if (oldWidget.autoGroup != widget.autoGroup ||
         oldWidget.collapseGroups != widget.collapseGroups ||
         oldWidget.autoGroupDetectBurst != widget.autoGroupDetectBurst ||
         oldWidget.autoGroupBurstSize != widget.autoGroupBurstSize ||
         oldWidget.autoGroupGapSeconds != widget.autoGroupGapSeconds) {
-      _expandedGroupSignatures.clear();
+      _captureSelectionContextSnapshot();
+      if (oldWidget.autoGroup != widget.autoGroup ||
+          oldWidget.collapseGroups != widget.collapseGroups) {
+        _expandedGroupSignatures.clear();
+        _preservedExpandedGroupPaths = const <Set<String>>[];
+      }
       _selectedGroupSignature = null;
       _pendingValidationEchoPaths.clear();
     }
@@ -1032,12 +1047,22 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     }
     if (widget.items.isEmpty) {
       _notifyAutoGroupInferredBurstSize(null);
-      _selectedPath = null;
-      _selectedBucketKey = null;
-      _selectedPaths.clear();
-      _markHistory.clear();
-      _selectionAnchorPath = null;
-      _selectedGroupSignature = null;
+      final keepSelectionAcrossTransientLoad =
+          oldWidget.inputPath == widget.inputPath &&
+          widget.inputPath.trim().isNotEmpty;
+      if (keepSelectionAcrossTransientLoad) {
+        _captureSelectionContextSnapshot();
+      } else {
+        _selectedPath = null;
+        _selectedBucketKey = null;
+        _selectedObservationId = null;
+        _selectedPaths.clear();
+        _markHistory.clear();
+        _selectionAnchorPath = null;
+        _selectedGroupSignature = null;
+        _expandedGroupSignatures.clear();
+        _clearPreservedSelectionSnapshots();
+      }
       _bucketCacheAutoGroup = null;
       _bucketCacheAutoGroupDetectBurst = null;
       _bucketCacheBurstSize = null;
@@ -1060,7 +1085,6 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       _mediaTimestampCache.clear();
       _groupSpeciesLabelCache.clear();
       _deferredRegroupGroupSignatures.clear();
-      _expandedGroupSignatures.clear();
       return;
     }
     if (_preparing) return;
@@ -1069,6 +1093,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _selectedPath != null)
       return;
     final validPaths = widget.items.map((item) => item.path).toSet();
+    if (_selectedPath != null && !validPaths.contains(_selectedPath)) {
+      _captureSelectionContextSnapshot();
+    }
     _selectedPaths.removeWhere((path) => !validPaths.contains(path));
     _discardMarkHistoryForPaths(
       _markHistory
@@ -1081,19 +1108,11 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         !validPaths.contains(_selectionAnchorPath)) {
       _selectionAnchorPath = null;
     }
-    if (_selectedPath == null ||
-        !widget.items.any((item) => item.path == _selectedPath)) {
-      _selectedPath = widget.items.first.path;
-      _selectedPaths
-        ..clear()
-        ..add(widget.items.first.path);
-      _selectionAnchorPath = widget.items.first.path;
-      _setSelectedGroupFromPath(widget.items.first.path);
-      _resetPendingMark();
-      unawaited(widget.onLoadMetadata(widget.items.first));
-    } else if (_selectedPaths.isEmpty && _selectedPath != null) {
+    if (_selectedPaths.isEmpty &&
+        _selectedPath != null &&
+        validPaths.contains(_selectedPath)) {
       _selectedPaths.add(_selectedPath!);
-      _selectionAnchorPath = _selectedPath;
+      _selectionAnchorPath ??= _selectedPath;
       _setSelectedGroupFromPath(_selectedPath);
     }
   }
@@ -1175,9 +1194,27 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     final buckets = _currentBuckets();
     if (buckets.isEmpty) {
       _selectedBucketKey = null;
-    } else if (_selectedBucketKey == null ||
-        !buckets.any((bucket) => bucket.key == _selectedBucketKey)) {
-      _selectedBucketKey = buckets.first.key;
+    } else {
+      final currentBucketIndex = _selectedBucketKey == null
+          ? -1
+          : buckets.indexWhere((bucket) => bucket.key == _selectedBucketKey);
+      final bucketMissing = currentBucketIndex < 0;
+      final selectedPathMissingFromBucket =
+          _selectedPath == null ||
+          !buckets[currentBucketIndex].items.any(
+            (item) => item.path == _selectedPath,
+          );
+      if (bucketMissing || selectedPathMissingFromBucket) {
+        final previousSelectedPath = _selectedPath;
+        _reconcileBucketAndSelection(buckets: buckets);
+        if (_selectedPath != null && _selectedPath != previousSelectedPath) {
+          final nextSelected = _itemByPath(_selectedPath!);
+          if (nextSelected != null) {
+            _resetPendingMark();
+            unawaited(widget.onLoadMetadata(nextSelected));
+          }
+        }
+      }
     }
     final visibleRows = _visibleRows(buckets);
     if (visibleRows.isNotEmpty && !_hasVisibleSelection(visibleRows)) {
@@ -1643,6 +1680,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
           final classificationModelPath =
               widget.classificationModelPath?.trim() ?? '';
           final observationId = box.observationId?.trim() ?? '';
+          final isDetectorCategory = _isDetectorCategoryBox(box);
+          final detectorConfidence =
+              dinoRejectionInfo(box).rawDetConf ?? box.confidence;
 
           Future<void> runAction(Future<void> Function() action) async {
             if (busy || _marking) return;
@@ -1677,7 +1717,13 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
                       ),
                     ),
                     const SizedBox(height: 16),
-                    if (classificationModelPath.isNotEmpty &&
+                    if (isDetectorCategory)
+                      Text(
+                        detectorConfidence != null
+                            ? '该检测框由探测器类别直接保留（探测置信度 ${detectorConfidence.toStringAsFixed(3)}），跳过联合分类特征空间解释。'
+                            : '该检测框由探测器类别直接保留，跳过联合分类特征空间解释。',
+                      )
+                    else if (classificationModelPath.isNotEmpty &&
                         observationId.isNotEmpty)
                       DinoFeatureExplanationPanel(
                         apiClient: widget.apiClient,
@@ -1818,6 +1864,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   void _mergeClusterFeedbackItems(List<DetectionItem> updates) {
     _currentBuckets();
+    _captureSelectionContextSnapshot();
+    final selectedGroupPaths = _snapshotSelectedGroupPaths();
     final authoritative = <String, DetectionItem>{..._bucketCacheItemByPath};
     for (final update in updates) {
       authoritative[update.path] =
@@ -1841,10 +1889,18 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _bucketCacheItemByPath = authoritative;
     _bucketCacheGroupingSignature = null;
     _pendingValidationEchoPaths.addAll(updates.map((item) => item.path));
-    final selected = _bucketCache.where(
-      (bucket) => bucket.items.any((item) => item.path == _selectedPath),
-    );
-    if (selected.isNotEmpty) _selectedBucketKey = selected.first.key;
+    _reconcileBucketAndSelection(selectedGroupPaths: selectedGroupPaths);
+  }
+
+  bool _isDetectorCategoryBox(DetectionBox box) {
+    final primary = primaryDinoCandidate(box);
+    if (primary == null) return false;
+    final source = (primary['classification_source'] ?? primary['source'])
+        ?.toString()
+        .trim();
+    return source == 'detector_category' ||
+        primary['gate_mode'] == 'detector' ||
+        primary['confidence_kind'] == 'detector_confidence';
   }
 
   DetectionItem _mergeDinoFeedbackItem(DetectionItem authoritative) {
@@ -2996,7 +3052,16 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       for (final item in group.items) {
         if (_isSkippedUnrecognizedVideo(item)) continue;
         for (final label in _dinoItemBucketLabels(item)) {
-          labels[label.$1] = label;
+          if (widget.autoGroup && !label.$1.startsWith('hdbscan::')) {
+            // A photo can contribute "人员" while another contributes
+            // "人员、家羊". Canonicalize individual names before building
+            // both the bucket identity and title.
+            for (final name in _splitGroupSpeciesNames(label.$2)) {
+              labels[name] = (name, name, null);
+            }
+          } else {
+            labels[label.$1] = label;
+          }
         }
       }
       if (widget.autoGroup) {
@@ -3175,18 +3240,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     String pathSignature,
     String groupingSignature,
   ) {
-    final expandedGroupPaths = <Set<String>>[];
-    for (final signature in _expandedGroupSignatures) {
-      final group = _bucketCacheGroupBySignature[signature];
-      if (group == null) continue;
-      expandedGroupPaths.add(group.items.map((item) => item.path).toSet());
-    }
-    final selectedGroup = _selectedGroupSignature == null
-        ? null
-        : _bucketCacheGroupBySignature[_selectedGroupSignature!];
-    final selectedGroupPaths = selectedGroup?.items
-        .map((item) => item.path)
-        .toSet();
+    _captureSelectionContextSnapshot();
+    final expandedGroupPaths = _snapshotExpandedGroupPaths();
+    final selectedGroupPaths = _snapshotSelectedGroupPaths();
 
     _bucketCacheAutoGroup = widget.autoGroup;
     _bucketCacheVideoMode = normalizeVideoProcessingMode(widget.videoMode);
@@ -3230,36 +3286,23 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     required List<Set<String>> expandedGroupPaths,
     required Set<String>? selectedGroupPaths,
   }) {
-    if (expandedGroupPaths.isEmpty && selectedGroupPaths == null) {
-      _expandedGroupSignatures.clear();
-      _selectedGroupSignature = null;
-      return;
-    }
+    final effectiveExpanded = expandedGroupPaths.isNotEmpty
+        ? expandedGroupPaths
+        : _preservedExpandedGroupPaths;
+    final effectiveSelectedGroupPaths =
+        selectedGroupPaths ?? _preservedSelectedGroupPaths;
     final nextExpandedSignatures = <String>{};
-    final selectedPath = _selectedPath;
-    String? selectedPathGroupSignature;
-    String? selectedOverlapGroupSignature;
-
-    for (final bucket in _bucketCache) {
-      for (final group in bucket.groups) {
-        final signature = _groupSignature(group);
-        final overlapsExpandedGroup = expandedGroupPaths.any(
-          (previousPaths) =>
-              group.items.any((item) => previousPaths.contains(item.path)),
-        );
-        if (overlapsExpandedGroup) {
-          nextExpandedSignatures.add(signature);
-        }
-
-        if (selectedGroupPaths == null) continue;
-        if (selectedPathGroupSignature == null &&
-            selectedPath != null &&
-            group.items.any((item) => item.path == selectedPath)) {
-          selectedPathGroupSignature = signature;
-        }
-        if (selectedOverlapGroupSignature == null &&
-            group.items.any((item) => selectedGroupPaths.contains(item.path))) {
-          selectedOverlapGroupSignature = signature;
+    if (effectiveExpanded.isNotEmpty) {
+      for (final bucket in _bucketCache) {
+        for (final group in bucket.groups) {
+          final signature = _groupSignature(group);
+          final overlapsExpandedGroup = effectiveExpanded.any(
+            (previousPaths) =>
+                group.items.any((item) => previousPaths.contains(item.path)),
+          );
+          if (overlapsExpandedGroup) {
+            nextExpandedSignatures.add(signature);
+          }
         }
       }
     }
@@ -3267,8 +3310,378 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _expandedGroupSignatures
       ..clear()
       ..addAll(nextExpandedSignatures);
-    _selectedGroupSignature =
-        selectedPathGroupSignature ?? selectedOverlapGroupSignature;
+    _reconcileBucketAndSelection(
+      buckets: _bucketCache,
+      selectedGroupPaths: effectiveSelectedGroupPaths,
+    );
+    _preservedExpandedGroupPaths = const <Set<String>>[];
+    _preservedSelectedGroupPaths = null;
+  }
+
+  List<Set<String>> _snapshotExpandedGroupPaths() {
+    if (_bucketCacheGroupBySignature.isEmpty) {
+      return _preservedExpandedGroupPaths;
+    }
+    return [
+      for (final signature in _expandedGroupSignatures)
+        if (_bucketCacheGroupBySignature[signature] case final group?)
+          group.items.map((item) => item.path).toSet(),
+    ];
+  }
+
+  Set<String>? _snapshotSelectedGroupPaths() {
+    if (_bucketCacheGroupBySignature.isEmpty &&
+        _bucketCacheGroupByPath.isEmpty) {
+      return _preservedSelectedGroupPaths;
+    }
+    final selectedGroup = _selectedGroupSignature == null
+        ? null
+        : _bucketCacheGroupBySignature[_selectedGroupSignature!];
+    if (selectedGroup != null) {
+      return selectedGroup.items.map((item) => item.path).toSet();
+    }
+    if (_selectedPath != null) {
+      final entry = _bucketCacheGroupByPath[_selectedPath!];
+      if (entry != null) {
+        return entry.group.items.map((item) => item.path).toSet();
+      }
+    }
+    return _preservedSelectedGroupPaths;
+  }
+
+  void _captureSelectionContextSnapshot() {
+    if (_bucketCache.isNotEmpty && _selectedBucketKey != null) {
+      final index = _bucketCache.indexWhere(
+        (bucket) => bucket.key == _selectedBucketKey,
+      );
+      if (index >= 0) {
+        final bucket = _bucketCache[index];
+        _previousBucketKeyContext = bucket.key;
+        _previousBucketSpeciesContext = bucket.species;
+        _previousBucketValidatedContext = bucket.isValidated;
+        _previousBucketIndexContext = index;
+        _previousBucketClusterNumberContext = bucket.clusterNumber;
+      }
+    }
+    if (_bucketCacheGroupBySignature.isNotEmpty) {
+      _preservedExpandedGroupPaths = _snapshotExpandedGroupPaths();
+    }
+    final selectedGroupPaths = _snapshotSelectedGroupPaths();
+    if (selectedGroupPaths != null && selectedGroupPaths.isNotEmpty) {
+      _preservedSelectedGroupPaths = selectedGroupPaths;
+    }
+  }
+
+  void _clearPreservedSelectionSnapshots() {
+    _preservedExpandedGroupPaths = const <Set<String>>[];
+    _preservedSelectedGroupPaths = null;
+    _previousBucketKeyContext = null;
+    _previousBucketSpeciesContext = null;
+    _previousBucketValidatedContext = null;
+    _previousBucketIndexContext = null;
+    _previousBucketClusterNumberContext = null;
+  }
+
+  Set<String> _bucketSpeciesTokens(String species) {
+    return species
+        .split(RegExp('[,，、]'))
+        .map((part) => part.trim())
+        .where(
+          (part) =>
+              part.isNotEmpty &&
+              part != '空' &&
+              part.toLowerCase() != 'empty' &&
+              !_isFallbackSpecies(part),
+        )
+        .toSet();
+  }
+
+  _SpeciesBucket _chooseBestBucketForPath(
+    List<_SpeciesBucket> buckets,
+    String path, {
+    String? preferredKey,
+    String? previousSpecies,
+    bool? previousValidated,
+    int? previousIndex,
+    int? previousClusterNumber,
+  }) {
+    final candidates = <(int, _SpeciesBucket)>[];
+    for (var index = 0; index < buckets.length; index++) {
+      if (buckets[index].items.any((item) => item.path == path)) {
+        candidates.add((index, buckets[index]));
+      }
+    }
+    if (candidates.isEmpty) return buckets.first;
+    if (candidates.length == 1) return candidates.first.$2;
+
+    final prevTokens = previousSpecies == null
+        ? const <String>{}
+        : _bucketSpeciesTokens(previousSpecies);
+
+    int scoreFor((int, _SpeciesBucket) entry) {
+      final bucket = entry.$2;
+      var score = 0;
+      if (preferredKey != null && bucket.key == preferredKey) score += 10000;
+      if (previousClusterNumber != null &&
+          bucket.clusterNumber == previousClusterNumber) {
+        score += 1000;
+      }
+      if (previousSpecies != null && bucket.species == previousSpecies) {
+        score += 500;
+      } else if (prevTokens.isNotEmpty &&
+          _bucketSpeciesTokens(bucket.species).any(prevTokens.contains)) {
+        score += 200;
+      }
+      if (previousValidated != null &&
+          bucket.isValidated == previousValidated) {
+        score += 100;
+      }
+      return score;
+    }
+
+    candidates.sort((a, b) {
+      final scoreDiff = scoreFor(b).compareTo(scoreFor(a));
+      if (scoreDiff != 0) return scoreDiff;
+      if (previousIndex != null) {
+        final distDiff = (a.$1 - previousIndex).abs().compareTo(
+          (b.$1 - previousIndex).abs(),
+        );
+        if (distDiff != 0) return distDiff;
+      }
+      return a.$1.compareTo(b.$1);
+    });
+    return candidates.first.$2;
+  }
+
+  _SpeciesBucket _chooseNearestFallbackBucket(
+    List<_SpeciesBucket> buckets, {
+    String? previousSpecies,
+    bool? previousValidated,
+    int? previousIndex,
+    int? previousClusterNumber,
+  }) {
+    if (previousSpecies != null && previousSpecies.isNotEmpty) {
+      final exactMatches = <(int, _SpeciesBucket)>[];
+      final tokenMatches = <(int, _SpeciesBucket)>[];
+      final prevTokens = _bucketSpeciesTokens(previousSpecies);
+      for (var index = 0; index < buckets.length; index++) {
+        final bucket = buckets[index];
+        if (bucket.species == previousSpecies) {
+          exactMatches.add((index, bucket));
+        } else if (previousClusterNumber != null &&
+            bucket.clusterNumber == previousClusterNumber) {
+          exactMatches.add((index, bucket));
+        } else if (prevTokens.isNotEmpty &&
+            _bucketSpeciesTokens(bucket.species).any(prevTokens.contains)) {
+          tokenMatches.add((index, bucket));
+        }
+      }
+      final pool = exactMatches.isNotEmpty ? exactMatches : tokenMatches;
+      if (pool.isNotEmpty) {
+        pool.sort((a, b) {
+          if (a.$2.isValidated != b.$2.isValidated) {
+            return a.$2.isValidated ? 1 : -1;
+          }
+          if (previousIndex != null) {
+            final dist = (a.$1 - previousIndex).abs().compareTo(
+              (b.$1 - previousIndex).abs(),
+            );
+            if (dist != 0) return dist;
+          }
+          return a.$1.compareTo(b.$1);
+        });
+        return pool.first.$2;
+      }
+    }
+    if (previousIndex != null) {
+      if (previousValidated != null) {
+        final sameState = <(int, _SpeciesBucket)>[
+          for (var index = 0; index < buckets.length; index++)
+            if (buckets[index].isValidated == previousValidated)
+              (index, buckets[index]),
+        ];
+        if (sameState.isNotEmpty) {
+          sameState.sort((a, b) {
+            final distA = (a.$1 - previousIndex).abs();
+            final distB = (b.$1 - previousIndex).abs();
+            if (distA != distB) return distA.compareTo(distB);
+            final forwardA = a.$1 >= previousIndex ? 0 : 1;
+            final forwardB = b.$1 >= previousIndex ? 0 : 1;
+            if (forwardA != forwardB) return forwardA.compareTo(forwardB);
+            return a.$1.compareTo(b.$1);
+          });
+          return sameState.first.$2;
+        }
+      }
+      return buckets[previousIndex.clamp(0, buckets.length - 1).toInt()];
+    }
+    return buckets.first;
+  }
+
+  String? _groupSignatureForPathInBucket(String path, _SpeciesBucket bucket) {
+    if (!_useCollapsedGroups) return null;
+    for (final group in bucket.groups) {
+      if (group.items.any((item) => item.path == path)) {
+        return _groupSignature(group);
+      }
+    }
+    return _groupSignatureForPath(path, buckets: _bucketCache);
+  }
+
+  void _reconcileBucketAndSelection({
+    List<_SpeciesBucket>? buckets,
+    Set<String>? selectedGroupPaths,
+  }) {
+    final activeBuckets = buckets ?? _bucketCache;
+    if (activeBuckets.isEmpty) {
+      _selectedBucketKey = null;
+      _selectedGroupSignature = null;
+      return;
+    }
+
+    final prevKey = _selectedBucketKey ?? _previousBucketKeyContext;
+    final prevSpecies = _previousBucketSpeciesContext;
+    final prevValidated = _previousBucketValidatedContext;
+    final prevIndex = _previousBucketIndexContext;
+    final prevClusterNumber = _previousBucketClusterNumberContext;
+    final overlapPaths = selectedGroupPaths ?? _preservedSelectedGroupPaths;
+
+    bool hasPath(String path) {
+      if (_bucketCacheItemByPath.isNotEmpty) {
+        return _bucketCacheItemByPath.containsKey(path);
+      }
+      return activeBuckets.any(
+        (bucket) => bucket.items.any((item) => item.path == path),
+      );
+    }
+
+    _selectedPaths.removeWhere((path) => !hasPath(path));
+    var targetPath = _selectedPath;
+    if (targetPath != null && !hasPath(targetPath)) {
+      targetPath = null;
+    }
+
+    final currentBucketIndex = prevKey == null
+        ? -1
+        : activeBuckets.indexWhere((bucket) => bucket.key == prevKey);
+    if (currentBucketIndex >= 0 && targetPath != null) {
+      final currentBucket = activeBuckets[currentBucketIndex];
+      if (currentBucket.items.any((item) => item.path == targetPath)) {
+        _selectedBucketKey = currentBucket.key;
+        if (_selectedPaths.isEmpty) _selectedPaths.add(targetPath);
+        if (_selectionAnchorPath == null ||
+            !currentBucket.items.any(
+              (item) => item.path == _selectionAnchorPath,
+            )) {
+          _selectionAnchorPath = targetPath;
+        }
+        _selectedGroupSignature = _groupSignatureForPathInBucket(
+          targetPath,
+          currentBucket,
+        );
+        return;
+      }
+    }
+
+    if (targetPath == null) {
+      final searchBuckets = currentBucketIndex >= 0
+          ? <_SpeciesBucket>[
+              activeBuckets[currentBucketIndex],
+              ...activeBuckets,
+            ]
+          : activeBuckets;
+      for (final candidate in _selectedPaths) {
+        if (searchBuckets.any(
+          (bucket) => bucket.items.any((item) => item.path == candidate),
+        )) {
+          targetPath = candidate;
+          break;
+        }
+      }
+      if (targetPath == null &&
+          overlapPaths != null &&
+          overlapPaths.isNotEmpty) {
+        for (final bucket in searchBuckets) {
+          for (final group in bucket.groups) {
+            if (!group.items.any((item) => overlapPaths.contains(item.path))) {
+              continue;
+            }
+            final preferred = _preferredGroupItem(group);
+            if (bucket.items.any((item) => item.path == preferred.path)) {
+              targetPath = preferred.path;
+            } else {
+              targetPath = group.items.first.path;
+            }
+            break;
+          }
+          if (targetPath != null) break;
+        }
+      }
+    }
+
+    _SpeciesBucket chosenBucket;
+    if (targetPath != null) {
+      final containsTarget = activeBuckets.any(
+        (bucket) => bucket.items.any((item) => item.path == targetPath),
+      );
+      if (containsTarget) {
+        chosenBucket = _chooseBestBucketForPath(
+          activeBuckets,
+          targetPath,
+          preferredKey: prevKey,
+          previousSpecies: prevSpecies,
+          previousValidated: prevValidated,
+          previousIndex: prevIndex,
+          previousClusterNumber: prevClusterNumber,
+        );
+      } else if (currentBucketIndex >= 0) {
+        chosenBucket = activeBuckets[currentBucketIndex];
+        targetPath = null;
+      } else {
+        chosenBucket = _chooseNearestFallbackBucket(
+          activeBuckets,
+          previousSpecies: prevSpecies,
+          previousValidated: prevValidated,
+          previousIndex: prevIndex,
+          previousClusterNumber: prevClusterNumber,
+        );
+        targetPath = null;
+      }
+    } else if (currentBucketIndex >= 0) {
+      chosenBucket = activeBuckets[currentBucketIndex];
+    } else if (prevKey != null || prevSpecies != null || prevIndex != null) {
+      chosenBucket = _chooseNearestFallbackBucket(
+        activeBuckets,
+        previousSpecies: prevSpecies,
+        previousValidated: prevValidated,
+        previousIndex: prevIndex,
+        previousClusterNumber: prevClusterNumber,
+      );
+    } else {
+      chosenBucket = activeBuckets.first;
+    }
+
+    _selectedBucketKey = chosenBucket.key;
+    _selectedPath = targetPath;
+    if (targetPath != null) {
+      final bucketPaths = chosenBucket.items.map((item) => item.path).toSet();
+      _selectedPaths.retainAll(bucketPaths);
+      if (_selectedPaths.isEmpty) {
+        _selectedPaths.add(targetPath);
+      }
+      if (_selectionAnchorPath == null ||
+          !bucketPaths.contains(_selectionAnchorPath)) {
+        _selectionAnchorPath = targetPath;
+      }
+      _selectedGroupSignature = _groupSignatureForPathInBucket(
+        targetPath,
+        chosenBucket,
+      );
+    } else {
+      _selectedPaths.clear();
+      _selectionAnchorPath = null;
+      _selectedGroupSignature = null;
+    }
   }
 
   String _itemsPathSignature(List<DetectionItem> items) {
@@ -3280,9 +3693,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         .map(
           (item) => [
             item.path,
-            item.dateTaken ?? '',
-            item.detectionData['拍摄时间']?.toString() ?? '',
-            item.modifiedAt ?? '',
+            item.groupingTime.dateTaken ?? '',
+            item.groupingTime.timeTaken ?? '',
+            item.groupingTime.modifiedAt ?? '',
             item.fileType,
             _primarySpeciesAfterConfidenceFilter(item),
             _isItemValidated(item),
@@ -3476,6 +3889,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
     // All validation above used private working data. Publish item references
     // and only the affected group memberships, never recompute other groups.
+    _captureSelectionContextSnapshot();
+    final selectedGroupPaths = _snapshotSelectedGroupPaths();
     for (final entry in affectedGroups.entries) {
       final group = entry.value;
       for (var index = 0; index < group.items.length; index++) {
@@ -3535,6 +3950,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
     _pendingValidationEchoPaths.removeAll(replacements.keys);
     _bucketCacheItemsIdentity = widget.items;
     _bucketCacheGroupingSignature = null;
+    _reconcileBucketAndSelection(selectedGroupPaths: selectedGroupPaths);
     timing.mark(
       'incremental_update items=${widget.items.length} changed=${replacements.length} groups=${affectedGroups.length}',
     );
@@ -3900,29 +4316,16 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
       sortMediaItemsForDisplay(items);
 
   DateTime? _mediaSortTimestamp(DetectionItem item) {
-    final dateText = item.dateTaken?.trim() ?? '';
-    final timeText = item.detectionData['拍摄时间']?.toString().trim() ?? '';
-    final modifiedAt = item.modifiedAt?.trim() ?? '';
+    final dateText = item.groupingTime.dateTaken?.trim() ?? '';
+    final timeText = item.groupingTime.timeTaken?.trim() ?? '';
+    final modifiedAt = item.groupingTime.modifiedAt?.trim() ?? '';
     final cacheKey = '$dateText\u001d$timeText\u001d$modifiedAt';
     final cached = _mediaTimestampCache[item.path];
     if (cached != null && cached.cacheKey == cacheKey) {
       return cached.timestamp;
     }
 
-    DateTime? timestamp;
-    if (dateText.isNotEmpty) {
-      if (dateText.contains(':') || dateText.contains('T')) {
-        final dateTime = DateTime.tryParse(dateText);
-        if (dateTime != null) timestamp = dateTime;
-      }
-      if (timestamp == null && timeText.isNotEmpty) {
-        final dateTime = DateTime.tryParse('$dateText $timeText');
-        if (dateTime != null) timestamp = dateTime;
-      }
-    }
-    if (timestamp == null && modifiedAt.isNotEmpty) {
-      timestamp = DateTime.tryParse(modifiedAt);
-    }
+    final timestamp = mediaSortTimestamp(item);
     _mediaTimestampCache[item.path] = _MediaTimestampCacheEntry(
       cacheKey: cacheKey,
       timestamp: timestamp,
@@ -5147,6 +5550,10 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }) {
     if (currentIndex < 0) return null;
     for (var index = currentIndex + 1; index < visibleItems.length; index++) {
+      final candidate = visibleItems[index];
+      if (!photosOnly || _isImage(candidate)) return candidate.path;
+    }
+    for (var index = currentIndex - 1; index >= 0; index--) {
       final candidate = visibleItems[index];
       if (!photosOnly || _isImage(candidate)) return candidate.path;
     }

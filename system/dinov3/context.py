@@ -532,6 +532,10 @@ def _assign_cluster_tracks(
                 emb_b = embeddings[current_row]
                 box_b = bboxes[current_row]
                 box_idx_b = box_indices[current_row]
+                category_a = cluster[last_row].get("detector_category")
+                category_b = cluster[current_row].get("detector_category")
+                if category_a != category_b:
+                    continue
 
                 emb_sim: float | None = None
                 if emb_a is not None and emb_b is not None and emb_a.shape == emb_b.shape:

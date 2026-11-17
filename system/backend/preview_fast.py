@@ -190,14 +190,10 @@ def make_preview_media_items(services_module: Any):
                 services_module._raise_if_cancelled(cancelled)
             item = services_module._build_fast_metadata_item(path)
             if include_cached:
+                item = services_module._apply_validation_state(item, str(path), validation_index)
                 data = detection_index.get(str(path))
                 if data:
                     item = services_module._apply_detection_data(item, data)
-                item = services_module._apply_validation_state(
-                    item,
-                    str(path),
-                    validation_index,
-                )
             items.append(item)
         return items
 
@@ -232,6 +228,7 @@ def make_preview_media_item(services_module: Any):
             db_paths,
             {path.name},
         )
+        item = services_module._apply_validation_state(item, path.name, validation_index)
         data = services_module._load_detection_data_for_path(
             path,
             roots,
@@ -239,11 +236,7 @@ def make_preview_media_item(services_module: Any):
         )
         if data:
             item = services_module._apply_detection_data(item, data)
-        return services_module._apply_validation_state(
-            item,
-            path.name,
-            validation_index,
-        )
+        return item
 
     setattr(preview_media_item, '_neri_filtered_single_preview_sql', True)
     return preview_media_item
@@ -256,8 +249,6 @@ def make_reload_validation_item(services_module: Any):
         roots = [path.parent]
         item = services_module._build_metadata_item(path)
         data = services_module._load_detection_data_for_path(path, roots, recursive=False)
-        if data:
-            item = services_module._apply_detection_data(item, data)
         db_paths = services_module._candidate_detection_dbs_for_roots(
             roots,
             recursive=False,
@@ -266,11 +257,12 @@ def make_reload_validation_item(services_module: Any):
             db_paths,
             {path.name},
         )
-        return services_module._apply_validation_state(
+        item = services_module._apply_validation_state(
             item,
             path.name,
             validation_index,
         )
+        return services_module._apply_detection_data(item, data) if data else item
 
     setattr(
         reload_validation_item,

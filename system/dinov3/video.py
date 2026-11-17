@@ -18,6 +18,31 @@ def video_frame_key(path, frame_index):
     return f"{path}.neri-frame-{frame_index:012d}"
 
 
+def group_video_trajectories(records, path):
+    """Associate targets using relative clip time, keeping real history time separate."""
+    if not records:
+        return []
+    identity = hashlib.sha256(os.path.normcase(os.path.abspath(str(path))).encode("utf-8")).hexdigest()
+    event_id = f"video:{identity}"
+    epoch = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    relative = [{**record, "camera_id": event_id,
+                 "date_taken": epoch + timedelta(seconds=record["frame_seconds"])} for record in records]
+    span = max(record["frame_seconds"] for record in records) - min(record["frame_seconds"] for record in records)
+    grouped = group_job_events(relative, gap_seconds=max(1800, int(span) + 1))
+    original = {record["crop_idx"]: record for record in records}
+    tracks = {}
+    output = []
+    from .context import parse_capture_time
+    for group in grouped:
+        track = tracks.setdefault(group["track_id"], f"{event_id}:track_{len(tracks):02d}")
+        record = original[group["crop_idx"]]
+        output.append({**group, "camera_id": record["camera_id"],
+                       "datetime": parse_capture_time(record.get("date_taken")),
+                       "date_taken": record.get("date_taken"),
+                       "event_id": event_id, "track_id": track, "sequence_id": track})
+    return output
+
+
 def finalize_video_frames(classifier, path, frames, *, fps, input_path, check_cancelled):
     """Return finalized (order, frame index, data) records for one whole clip.
 
@@ -29,10 +54,7 @@ def finalize_video_frames(classifier, path, frames, *, fps, input_path, check_ca
     ordered = sorted(frames, key=lambda frame: frame[0])
     crops = []
     records = []
-    video_id = hashlib.sha256(os.path.normcase(os.path.abspath(str(path))).encode("utf-8")).hexdigest()
-    # Relative frame time orders tracks within this clip even without a camera
-    # capture timestamp. It is never used as cross-video historical context.
-    epoch = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    camera = camera_id_for_path(path, root=input_path)
     for order, frame_index, data, frame_crops in ordered:
         check_cancelled()
         expected = data.get("detection_box_indices")
@@ -42,10 +64,11 @@ def finalize_video_frames(classifier, path, frames, *, fps, input_path, check_ca
             raise RuntimeError(f"视频帧特征不完整: frame={frame_index}")
         for crop in frame_crops:
             records.append(dict(
-                crop_idx=len(crops), camera_id=f"video:{video_id}",
+                crop_idx=len(crops), camera_id=camera,
                 path=video_frame_key(path, frame_index), box_index=crop.box_index,
                 bbox=crop.bbox, raw_embedding=crop.raw_embedding,
-                date_taken=epoch + timedelta(seconds=frame_index / fps),
+                detector_category=crop.detector_category,
+                date_taken=None, frame_seconds=frame_index / fps,
             ))
             crops.append(crop)
 
@@ -54,13 +77,10 @@ def finalize_video_frames(classifier, path, frames, *, fps, input_path, check_ca
     if crops:
         # Force a single clip event even for long clips, while retaining the
         # existing same-frame exclusion and visual/spatial target association.
-        span = (ordered[-1][1] - ordered[0][1]) / fps
-        grouped = group_job_events(records, gap_seconds=max(1800, int(span) + 1))
+        grouped = group_video_trajectories(records, path)
         groups = {record["crop_idx"]: record for record in grouped}
         features = np.stack([crop.raw_embedding for crop in crops])
-        camera = camera_id_for_path(path, root=input_path)
-        experiment = getattr(getattr(classifier, "model", None), "inference_recipe", None) == "experiment_full"
-        sequences = [groups[i]["event_id" if experiment else "track_id"] for i in range(len(crops))]
+        sequences = [groups[i]["track_id"] for i in range(len(crops))]
         content_ids = [f"{record['path']}:{record['box_index']}" for record in records]
         check_cancelled()
         try:
@@ -93,6 +113,14 @@ def finalize_video_frames(classifier, path, frames, *, fps, input_path, check_ca
             # Offset is global within this video's persisted box array.
             observation_id = make_dinov3_observation_id(path, offset, crop.bbox)
             offset += 1
+            if crop.detector_category in {"person", "vehicle"}:
+                from .detection_categories import detector_category_box
+                box = detector_category_box(crop.detector_category, crop.detection_confidence, crop.bbox,
+                    observation_id=observation_id, track_id=group["track_id"], event_id=group["event_id"])
+                boxes.append(box)
+                counts[box["物种"]] += 1
+                confidences.append(crop.detection_confidence)
+                continue
             name = prediction.best_known_species if prediction.accepted else "Unknown"
             candidate = prediction.as_candidate(detection_confidence=crop.detection_confidence)
             candidate.update(name=name, observation_id=observation_id,

@@ -113,6 +113,11 @@ def sample_video_frames(
 ) -> dict[str, Any]:
     """Emit decoded BGR frames without creating intermediate image files."""
     check_cancelled()
+    try:
+        stat = path.stat()
+        source_stamp = [stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        source_stamp = None
     capture = _open_video(path, decoder_threads)
     points_read: list[int] = []
     try:
@@ -228,8 +233,16 @@ def sample_video_frames(
                     accept(frame, point)
         if not points_read:
             raise RuntimeError("无法从视频中提取有效帧")
+        if source_stamp is not None:
+            try:
+                current = path.stat()
+                unchanged = source_stamp == [current.st_size, current.st_mtime_ns]
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                raise RuntimeError("视频源文件在解码期间已变化，请重新处理")
         return dict(frame_points=points_read, width=width, height=height,
-                    fps=fps, total_frames=total_frames)
+                    fps=fps, total_frames=total_frames, source_stamp=source_stamp)
     finally:
         capture.release()
 

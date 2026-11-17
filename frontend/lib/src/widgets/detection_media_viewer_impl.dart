@@ -10,7 +10,10 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../models/job.dart';
 import '../utils/detection_box_label.dart';
 import '../utils/preview_decode_size.dart';
+import '../utils/validation_video_session.dart';
 import '../utils/video_detection_index.dart';
+
+typedef ValidationVideoBackendFactory = ValidationVideoBackend Function();
 
 const _viewerImageTypes = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'webp'};
 const _viewerVideoTypes = {
@@ -35,6 +38,8 @@ class DetectionMediaViewer extends StatelessWidget {
     this.onToggleFavorite,
     this.selectedObservationId,
     this.onDetectionBoxSelected,
+    @visibleForTesting this.videoBackendFactory,
+    @visibleForTesting this.videoLogger,
     super.key,
   });
 
@@ -46,6 +51,8 @@ class DetectionMediaViewer extends StatelessWidget {
   final VoidCallback? onToggleFavorite;
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
+  final ValidationVideoBackendFactory? videoBackendFactory;
+  final ValidationVideoLogger? videoLogger;
 
   bool get _isImage {
     return _viewerImageTypes.contains(item.fileType.toLowerCase());
@@ -72,6 +79,8 @@ class DetectionMediaViewer extends StatelessWidget {
                 onOpenExternal: onOpenExternal,
                 selectedObservationId: selectedObservationId,
                 onDetectionBoxSelected: onDetectionBoxSelected,
+                videoBackendFactory: videoBackendFactory,
+                videoLogger: videoLogger,
               ),
               Positioned(
                 top: 12,
@@ -123,6 +132,8 @@ class _MediaContent extends StatelessWidget {
     required this.onOpenExternal,
     this.selectedObservationId,
     this.onDetectionBoxSelected,
+    this.videoBackendFactory,
+    this.videoLogger,
   });
 
   final DetectionItem item;
@@ -131,6 +142,8 @@ class _MediaContent extends StatelessWidget {
   final VoidCallback onOpenExternal;
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
+  final ValidationVideoBackendFactory? videoBackendFactory;
+  final ValidationVideoLogger? videoLogger;
 
   bool get isVideo {
     return _viewerVideoTypes.contains(item.fileType.toLowerCase());
@@ -139,7 +152,7 @@ class _MediaContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (isVideo) {
-      return _ValidationVideoPlayer(
+      return ValidationVideoPlayer(
         path: item.path,
         visibleBoxes: visibleBoxes,
         showDetections: showDetections,
@@ -147,6 +160,8 @@ class _MediaContent extends StatelessWidget {
         onOpenExternal: onOpenExternal,
         selectedObservationId: selectedObservationId,
         onDetectionBoxSelected: onDetectionBoxSelected,
+        backendFactory: videoBackendFactory,
+        logger: videoLogger,
       );
     } else {
       return _ImageMediaViewer(
@@ -551,8 +566,99 @@ class DinoVideoDetectionOverlay extends StatelessWidget {
   }
 }
 
-class _ValidationVideoPlayer extends StatefulWidget {
-  const _ValidationVideoPlayer({
+class _MediaKitVideoBackend implements ValidationVideoBackend {
+  _MediaKitVideoBackend() {
+    _player = Player();
+    _controller = VideoController(_player);
+  }
+
+  late final Player _player;
+  late final VideoController _controller;
+
+  @override
+  bool get isPlaying => _player.state.playing;
+
+  @override
+  bool get isCompleted => _player.state.completed;
+
+  @override
+  Duration get position => _player.state.position;
+
+  @override
+  Duration get duration => _player.state.duration;
+
+  @override
+  Size? get videoSize {
+    final vp = _player.state.videoParams;
+    final w = vp.w;
+    final h = vp.h;
+    if (w == null || h == null || w <= 0 || h <= 0) return null;
+    return Size(w.toDouble(), h.toDouble());
+  }
+
+  @override
+  String? get currentMediaId {
+    final playlist = _player.state.playlist;
+    if (playlist.medias.isEmpty) return null;
+    final index = playlist.index;
+    if (index < 0 || index >= playlist.medias.length) return null;
+    return playlist.medias[index].uri;
+  }
+
+  @override
+  Stream<bool> get playingStream => _player.stream.playing;
+
+  @override
+  Stream<Duration> get positionStream => _player.stream.position;
+
+  @override
+  Stream<Duration> get durationStream => _player.stream.duration;
+
+  @override
+  Stream<Size?> get videoSizeStream => _player.stream.videoParams.map((vp) {
+    final w = vp.w;
+    final h = vp.h;
+    if (w == null || h == null || w <= 0 || h <= 0) return null;
+    return Size(w.toDouble(), h.toDouble());
+  });
+
+  @override
+  Stream<bool> get completedStream => _player.stream.completed;
+
+  @override
+  Stream<String> get errorStream => _player.stream.error;
+
+  @override
+  String normalizeMediaId(String path) => Media.normalizeURI(path);
+
+  @override
+  Future<void> open(String path) async {
+    await _player.open(Media(path), play: false);
+    await _player.setPlaylistMode(PlaylistMode.none);
+  }
+
+  @override
+  Future<void> play() => _player.play();
+
+  @override
+  Future<void> pause() => _player.pause();
+
+  @override
+  Future<void> seek(Duration position) => _player.seek(position);
+
+  @override
+  Future<void> dispose() => _player.dispose();
+
+  @override
+  Widget buildVideoSurface(BuildContext context) {
+    return ExcludeSemantics(
+      child: Video(controller: _controller, controls: NoVideoControls),
+    );
+  }
+}
+
+class ValidationVideoPlayer extends StatefulWidget {
+  const ValidationVideoPlayer({
     required this.path,
     required this.visibleBoxes,
     required this.showDetections,
@@ -560,7 +666,16 @@ class _ValidationVideoPlayer extends StatefulWidget {
     required this.onOpenExternal,
     this.selectedObservationId,
     this.onDetectionBoxSelected,
+    @visibleForTesting this.backendFactory,
+    @visibleForTesting this.logger,
+    super.key,
   });
+
+  /// Test-only default backend factory used when widget tests mount
+  /// [DetectionMediaViewer] through higher-level screens without native
+  /// media_kit initialization.
+  @visibleForTesting
+  static ValidationVideoBackendFactory? debugBackendFactoryOverride;
 
   final String path;
   final List<DetectionBox> visibleBoxes;
@@ -569,25 +684,16 @@ class _ValidationVideoPlayer extends StatefulWidget {
   final VoidCallback onOpenExternal;
   final String? selectedObservationId;
   final ValueChanged<DetectionBox?>? onDetectionBoxSelected;
+  final ValidationVideoBackendFactory? backendFactory;
+  final ValidationVideoLogger? logger;
 
   @override
-  State<_ValidationVideoPlayer> createState() => _ValidationVideoPlayerState();
+  State<ValidationVideoPlayer> createState() => _ValidationVideoPlayerState();
 }
 
-class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
-  late final Player _player;
-  late final VideoController _controller;
-  late final List<StreamSubscription> _subs;
-
-  bool _isError = false;
-  bool _isPlaying = false;
-  bool _showControls = true;
-  bool _isDragging = false;
-  bool _playbackVisible = true;
-  bool _resumeWhenVisible = true;
-  bool _playerOpened = false;
-  int _openRequestId = 0;
-  Future<void>? _openTask;
+class _ValidationVideoPlayerState extends State<ValidationVideoPlayer> {
+  late final ValidationVideoSessionController _session;
+  bool _didInitSession = false;
   VideoDetectionIndex? _boxIndex;
 
   VideoDetectionIndex get _videoBoxIndex {
@@ -598,193 +704,49 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
     return _boxIndex!;
   }
 
-  Timer? _hideTimer;
-  Timer? _positionTimer;
-  Duration _duration = Duration.zero;
-  Size? _videoSize;
-
-  // 使用 Notifier 代替原先的 _position 进行局部刷新，彻底避免全局频繁 setState
-  final ValueNotifier<Duration> _positionNotifier = ValueNotifier(
-    Duration.zero,
-  );
-
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _controller = VideoController(_player);
-
-    _subs = [
-      _player.stream.playing.listen((p) {
-        if (mounted) {
-          if (!_playbackVisible) {
-            if (p) unawaited(_player.pause());
-            return;
-          }
-          setState(() => _isPlaying = p);
-          if (p) {
-            _startPositionTimer();
-            _startHideTimer();
-          } else {
-            _syncPlayerState();
-            _positionTimer?.cancel();
-            _positionTimer = null;
-            _hideTimer?.cancel();
-            setState(() => _showControls = true);
-          }
-        }
-      }),
-      _player.stream.position.listen((p) {
-        if (!mounted || !_playbackVisible || _positionTimer != null) return;
-        final deltaMs = (p - _positionNotifier.value).inMilliseconds.abs();
-        if (deltaMs < 200) return;
-        // 直接更新 Notifier 的值，不会触发整个 Video 树的重绘
-        _positionNotifier.value = p;
-      }),
-      _player.stream.duration.listen((d) {
-        if (mounted) setState(() => _duration = d);
-      }),
-      _player.stream.videoParams.listen((vp) {
-        if (mounted && vp.w != null && vp.h != null) {
-          setState(() {
-            _videoSize = Size(vp.w!.toDouble(), vp.h!.toDouble());
-          });
-        }
-      }),
-      _player.stream.completed.listen((completed) {
-        if (mounted && completed) {
-          _resumeWhenVisible = false;
-          setState(() {
-            _isPlaying = false;
-            _showControls = true;
-          });
-          _positionTimer?.cancel();
-          _positionTimer = null;
-          _player.pause();
-          _hideTimer?.cancel();
-        }
-      }),
-    ];
-
-    _initPlayer(widget.path);
+    final backend =
+        widget.backendFactory?.call() ??
+        ValidationVideoPlayer.debugBackendFactoryOverride?.call() ??
+        _MediaKitVideoBackend();
+    _session = ValidationVideoSessionController(
+      backend: backend,
+      logger: widget.logger,
+    )..addListener(_onSessionChanged);
   }
 
-  Future<void> _initPlayer(String path) async {
-    final requestId = ++_openRequestId;
-    _resumeWhenVisible = true;
-    final previous = _openTask;
-    if (previous != null) await previous;
-    if (!mounted || requestId != _openRequestId) return;
-    final task = _openMedia(path, requestId);
-    _openTask = task;
-    await task;
-  }
-
-  Future<void> _openMedia(String path, int requestId) async {
-    setState(() => _isError = false);
-    _playerOpened = false;
-    try {
-      await _player.open(Media(path), play: false);
-      if (!mounted || requestId != _openRequestId) return;
-      await _player.setPlaylistMode(PlaylistMode.none);
-      if (!mounted || requestId != _openRequestId) return;
-      _playerOpened = true;
-      if (_playbackVisible && _resumeWhenVisible) await _player.play();
-    } catch (_) {
-      if (mounted && requestId == _openRequestId)
-        setState(() => _isError = true);
-    }
+  void _onSessionChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final visible = TickerMode.valuesOf(context).enabled;
-    if (visible == _playbackVisible) return;
-    _playbackVisible = visible;
-    if (!visible) {
-      if (_playerOpened) _resumeWhenVisible = _player.state.playing;
-      _isPlaying = false;
-      _positionTimer?.cancel();
-      _positionTimer = null;
-      _hideTimer?.cancel();
-      unawaited(_player.pause());
-    } else if (_playerOpened && _resumeWhenVisible) {
-      unawaited(_player.play());
-    }
-  }
-
-  void _startHideTimer() {
-    _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted && _isPlaying && !_isDragging) {
-        setState(() => _showControls = false);
-      }
-    });
-  }
-
-  void _startPositionTimer() {
-    if (!_playbackVisible) return;
-    _positionTimer ??= Timer.periodic(
-      const Duration(milliseconds: 250),
-      (_) => _syncPlayerState(),
-    );
-  }
-
-  void _syncPlayerState() {
-    if (!mounted || !_playbackVisible) return;
-    final state = _player.state;
-    final position = state.position;
-    final duration = state.duration;
-
-    if (position != _positionNotifier.value) {
-      _positionNotifier.value = position;
-    }
-    if (duration != _duration) {
-      setState(() => _duration = duration);
-    }
-  }
-
-  void _wakeUpControls() {
-    if (mounted && !_showControls) {
-      setState(() => _showControls = true);
-    }
-    _startHideTimer();
-  }
-
-  void _togglePlayPause() {
-    if (!_playbackVisible) return;
-    if (_isPlaying) {
-      _resumeWhenVisible = false;
-      _player.pause();
+    if (!_didInitSession) {
+      _didInitSession = true;
+      _session.setVisible(visible);
+      unawaited(_session.open(widget.path));
     } else {
-      _resumeWhenVisible = true;
-      if (_positionNotifier.value >= _duration && _duration > Duration.zero) {
-        _player.seek(Duration.zero);
-      }
-      _player.play();
+      _session.setVisible(visible);
     }
-    _wakeUpControls();
   }
 
   @override
-  void didUpdateWidget(_ValidationVideoPlayer oldWidget) {
+  void didUpdateWidget(ValidationVideoPlayer oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.path != widget.path) {
-      _initPlayer(widget.path);
+      unawaited(_session.open(widget.path));
     }
   }
 
   @override
   void dispose() {
-    _openRequestId++;
-    for (final s in _subs) {
-      s.cancel();
-    }
-    _positionTimer?.cancel();
-    _hideTimer?.cancel();
-    _positionNotifier.dispose();
-    _player.dispose();
+    _session.removeListener(_onSessionChanged);
+    _session.dispose();
     super.dispose();
   }
 
@@ -797,7 +759,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isError) {
+    if (_session.isError) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -806,23 +768,36 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
             const SizedBox(height: 12),
             const Text('媒体加载失败', textAlign: TextAlign.center),
             const SizedBox(height: 16),
-            FilledButton.tonalIcon(
-              onPressed: widget.onOpenExternal,
-              icon: const Icon(Icons.open_in_new_rounded),
-              label: const Text('使用系统应用打开'),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                FilledButton.icon(
+                  key: const ValueKey('validation-video-retry-button'),
+                  onPressed: () => unawaited(_session.retry()),
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('重试'),
+                ),
+                FilledButton.tonalIcon(
+                  onPressed: widget.onOpenExternal,
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: const Text('使用系统应用打开'),
+                ),
+              ],
             ),
           ],
         ),
       );
     }
 
+    final videoSize = _session.videoSize;
     return MouseRegion(
-      onHover: (_) => _wakeUpControls(),
-      onEnter: (_) => _wakeUpControls(),
+      onHover: (_) => _session.wakeUpControls(),
+      onEnter: (_) => _session.wakeUpControls(),
       onExit: (_) {
-        if (_isPlaying && !_isDragging) {
-          _hideTimer?.cancel();
-          setState(() => _showControls = false);
+        if (_session.isPlaying && !_session.isDragging) {
+          _session.hideControlsImmediately();
         }
       },
       child: Stack(
@@ -830,29 +805,37 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
         children: [
           // 1. 底层静态视频播放器，避免频繁重绘
           GestureDetector(
-            onTap: _togglePlayPause,
+            onTap: () => unawaited(_session.togglePlayPause()),
             behavior: HitTestBehavior.opaque,
-            child: ExcludeSemantics(
-              child: Video(controller: _controller, controls: NoVideoControls),
-            ),
+            child: _session.backend.buildVideoSurface(context),
           ),
 
+          if (_session.isOpening)
+            const IgnorePointer(
+              child: Center(
+                child: CircularProgressIndicator(
+                  key: ValueKey('validation-video-loading'),
+                ),
+              ),
+            ),
+
           // 2. 随时间进度局部刷新检测框绘制层，通过 RepaintBoundary 隔绝重绘污染
-          if (widget.showDetections && _videoSize != null)
+          if (widget.showDetections && videoSize != null && !_session.isOpening)
             ValueListenableBuilder<Duration>(
-              valueListenable: _positionNotifier,
+              valueListenable: _session.positionNotifier,
               builder: (context, position, child) {
                 return RepaintBoundary(
                   child: DinoVideoDetectionOverlay(
                     boxes: widget.visibleBoxes,
-                    mediaSize: _videoSize!,
+                    mediaSize: videoSize,
                     position: position,
-                    duration: _duration,
+                    duration: _session.duration,
                     detectionData: widget.detectionData,
                     index: _videoBoxIndex,
                     selectedObservationId: widget.selectedObservationId,
                     onDetectionBoxSelected: widget.onDetectionBoxSelected,
-                    onBackgroundTap: _togglePlayPause,
+                    onBackgroundTap: () =>
+                        unawaited(_session.togglePlayPause()),
                   ),
                 );
               },
@@ -862,7 +845,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
           Align(
             alignment: Alignment.bottomCenter,
             child: ValueListenableBuilder<Duration>(
-              valueListenable: _positionNotifier,
+              valueListenable: _session.positionNotifier,
               builder: (context, position, child) {
                 return RepaintBoundary(child: _buildControls(position));
               },
@@ -875,16 +858,18 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
 
   Widget _buildControls(Duration position) {
     final colorScheme = Theme.of(context).colorScheme;
-    final progress = _duration.inMilliseconds == 0
+    final duration = _session.duration;
+    final showControls = _session.showControls;
+    final progress = duration.inMilliseconds == 0
         ? 0.0
-        : (position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0);
+        : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      height: _showControls ? 72 : 4,
+      height: showControls ? 72 : 4,
       decoration: BoxDecoration(
-        gradient: _showControls
+        gradient: showControls
             ? const LinearGradient(
                 begin: Alignment.bottomCenter,
                 end: Alignment.topCenter,
@@ -897,7 +882,7 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
         children: [
           AnimatedOpacity(
             duration: const Duration(milliseconds: 300),
-            opacity: _showControls ? 0.0 : 1.0,
+            opacity: showControls ? 0.0 : 1.0,
             child: Container(
               height: 4,
               width: double.infinity,
@@ -919,23 +904,24 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
 
           AnimatedOpacity(
             duration: const Duration(milliseconds: 300),
-            opacity: _showControls ? 1.0 : 0.0,
+            opacity: showControls ? 1.0 : 0.0,
             child: IgnorePointer(
-              ignoring: !_showControls,
+              ignoring: !showControls,
               child: Padding(
                 padding: const EdgeInsets.only(bottom: 8, left: 8, right: 16),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     IconButton(
+                      key: const ValueKey('validation-video-play-pause'),
                       icon: Icon(
-                        _isPlaying
+                        _session.displayPlaying
                             ? Icons.pause_rounded
                             : Icons.play_arrow_rounded,
                         color: Colors.white,
                         size: 32,
                       ),
-                      onPressed: _togglePlayPause,
+                      onPressed: () => unawaited(_session.togglePlayPause()),
                     ),
                     Expanded(
                       child: SliderTheme(
@@ -958,26 +944,26 @@ class _ValidationVideoPlayerState extends State<_ValidationVideoPlayer> {
                         child: Slider(
                           value: position.inMilliseconds.toDouble().clamp(
                             0,
-                            math.max(0, _duration.inMilliseconds.toDouble()),
+                            math.max(0, duration.inMilliseconds.toDouble()),
                           ),
-                          max: math.max(1, _duration.inMilliseconds.toDouble()),
+                          max: math.max(1, duration.inMilliseconds.toDouble()),
                           onChangeStart: (_) {
-                            _isDragging = true;
-                            _hideTimer?.cancel();
+                            _session.setDragging(true);
                           },
                           onChanged: (v) {
-                            _player.seek(Duration(milliseconds: v.toInt()));
+                            unawaited(
+                              _session.seek(Duration(milliseconds: v.toInt())),
+                            );
                           },
                           onChangeEnd: (_) {
-                            _isDragging = false;
-                            _startHideTimer();
+                            _session.setDragging(false);
                           },
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      '${_formatDuration(position)} / ${_formatDuration(_duration)}',
+                      '${_formatDuration(position)} / ${_formatDuration(duration)}',
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 13,

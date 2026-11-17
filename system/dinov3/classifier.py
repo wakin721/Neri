@@ -6,6 +6,8 @@ import math
 
 import numpy as np
 
+from .evidence import validate_evidence_weights
+
 
 @dataclass(frozen=True)
 class DinoV3Prediction:
@@ -125,21 +127,32 @@ class DinoV3Classifier:
                     sequence_aggregation="complete_sequence", calibrated=self.model.calibration is not None)
 
     def classify_features(self, features, *, camera_ids=None, sequence_ids=None,
-                          content_ids=None, site_ids=None, adapted_features=None):
+                          content_ids=None, site_ids=None, adapted_features=None,
+                          evidence_weights=None):
         raw = np.asarray(features, dtype=np.float32)
         if raw.ndim != 2 or raw.shape[1] != 768 or not len(raw) or not np.isfinite(raw).all():
             raise ValueError("DINOv3 features must be finite [N, 768]")
         norms = np.linalg.norm(raw, axis=1, keepdims=True)
         if np.any(norms <= 1e-12):
             raise ValueError("DINOv3 features must be nonzero")
+        weights = (
+            validate_evidence_weights(evidence_weights, len(raw))
+            if evidence_weights is not None
+            else None
+        )
         # Encoder output and cached supports already use the frozen float32
         # normalization. A second projection would perturb radial calibration.
         if (camera_ids is None) != (sequence_ids is None):
             raise ValueError("Supply both camera_ids and sequence_ids")
         cameras = camera_ids if camera_ids is not None else ["single"] * len(raw)
         sequences = sequence_ids if sequence_ids is not None else [f"single:{i}" for i in range(len(raw))]
-        result = self.model.predict(raw, cameras, sequences, contents=content_ids,
-                                    sites=site_ids, adapted_features=adapted_features)
+        if weights is None:
+            result = self.model.predict(raw, cameras, sequences, contents=content_ids,
+                                        sites=site_ids, adapted_features=adapted_features)
+        else:
+            result = self.model.predict(raw, cameras, sequences, contents=content_ids,
+                                        sites=site_ids, adapted_features=adapted_features,
+                                        evidence_weights=weights)
         classes = np.asarray(self.model.classes)
         box_scores = result.get("box_known_score", result["known_score"])
         box_thresh = float(result.get("box_threshold", result["threshold"]))

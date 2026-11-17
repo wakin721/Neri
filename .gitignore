@@ -124,6 +124,11 @@ frontend/test/*
 !frontend/test/dinov3_video_mode_test.dart
 !frontend/test/dino_learning_status_test.dart
 !frontend/test/dino_rejection_test.dart
+!frontend/test/detector_category_display_test.dart
+!frontend/test/species_validation_selection_regression_test.dart
+!frontend/test/validation_video_player_test.dart
+!frontend/test/support/
+!frontend/test/support/fake_validation_video_backend.dart
 !frontend/test/rejection_clustering_test.dart
 !frontend/test/sequence_pending_notice_test.dart
 !frontend/pubspec.yaml

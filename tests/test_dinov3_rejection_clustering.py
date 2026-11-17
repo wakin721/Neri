@@ -794,10 +794,10 @@ def test_finalize_photo_job_clustering_invariant_to_root_and_experiment_full_tra
         it.detection_boxes[0]["rejection_cluster"] for it in south_items
     ]
 
-    # Under experiment_full, classifier receives whole-event sequence_ids for the burst,
-    # while clustering still receives separate per-target track IDs so pop_a keeps 5 independent units.
+    # Both inference recipes keep distinct targets in separate classification
+    # sequences; clustering also keeps pop_a's 5 independent target units.
     exp_items, exp_cls, exp_cluster_in = run_for_root(tmp_path, recipe="experiment_full")
-    assert exp_cls["sequence_ids"][0] == exp_cls["sequence_ids"][1]
+    assert exp_cls["sequence_ids"][0] != exp_cls["sequence_ids"][1]
     assert exp_cls["sequence_ids"][0].startswith("event:")
     assert exp_cluster_in["tracks"][0] != exp_cluster_in["tracks"][1]
 

@@ -89,6 +89,12 @@ class DetectionBox {
   }
 }
 
+typedef MediaGroupingTime = ({
+  String? dateTaken,
+  String? timeTaken,
+  String? modifiedAt,
+});
+
 class DetectionItem {
   const DetectionItem({
     required this.filename,
@@ -105,6 +111,7 @@ class DetectionItem {
     this.detectionData = const <String, dynamic>{},
     this.error,
     this.validated,
+    this.previewGroupingTime,
   });
 
   factory DetectionItem.fromJson(Map<String, dynamic> json) {
@@ -148,6 +155,47 @@ class DetectionItem {
   final Map<String, dynamic> detectionData;
   final String? error;
   final bool? validated;
+
+  /// Lazy detail loading must not change the current scan's sequence. This
+  /// snapshot is session-local; a fresh scan can adopt new capture metadata.
+  final MediaGroupingTime? previewGroupingTime;
+
+  MediaGroupingTime get groupingTime =>
+      previewGroupingTime ??
+      (
+        dateTaken: dateTaken,
+        timeTaken: detectionData['拍摄时间']?.toString(),
+        modifiedAt: modifiedAt,
+      );
+
+  /// Hydrate descriptive metadata without replacing recognition/annotation
+  /// state or the ordering used to build the currently displayed groups.
+  DetectionItem mergePreviewMetadata(DetectionItem metadata) {
+    if (metadata.path != path) {
+      throw ArgumentError('Metadata must belong to the same media file');
+    }
+    return DetectionItem(
+      filename: filename,
+      path: path,
+      fileType: fileType,
+      dateTaken: metadata.dateTaken ?? dateTaken,
+      modifiedAt: metadata.modifiedAt ?? modifiedAt,
+      width: metadata.width ?? width,
+      height: metadata.height ?? height,
+      sizeBytes: metadata.sizeBytes ?? sizeBytes,
+      species: species,
+      confidence: confidence,
+      detectionBoxes: detectionBoxes,
+      detectionData: {
+        ...detectionData,
+        if (metadata.detectionData['capture_time'] != null)
+          'capture_time': metadata.detectionData['capture_time'],
+      },
+      error: error,
+      validated: validated,
+      previewGroupingTime: groupingTime,
+    );
+  }
 
   /// Legacy interrupted DINOv3 jobs may keep the pending marker only on
   /// accepted candidates; rejected boxes instead retain their backend source.
@@ -203,6 +251,7 @@ class DetectionItem {
       detectionData: update.detectionData,
       error: update.error,
       validated: update.validated,
+      previewGroupingTime: previewGroupingTime,
     );
   }
 }

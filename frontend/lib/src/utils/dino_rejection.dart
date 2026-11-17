@@ -68,6 +68,9 @@ class DinoBoxRejectionInfo {
   final double? ridgeScore;
   final double? rawRidgeScore;
   final double? rawDetConf;
+
+  bool get isDetectorCategory =>
+      primaryDinoCandidate(finalBox)?['source'] == 'detector_category';
 }
 
 Map<String, dynamic>? primaryDinoCandidate(DetectionBox box) {
@@ -92,6 +95,7 @@ Map<String, dynamic>? primaryDinoCandidate(DetectionBox box) {
 
 String dinoConfidenceLabel(DetectionBox box) {
   final candidate = primaryDinoCandidate(box);
+  if (candidate?['source'] == 'detector_category') return '探测证据';
   if (candidate?['confidence_kind'] == 'sigmoid_frame_class_margin') {
     return '分类证据';
   }
@@ -349,6 +353,8 @@ DinoBoxRejectionInfo dinoRejectionInfo(
         '整图标注 · ${displaySpecies.isEmpty ? 'Unknown' : displaySpecies}';
   } else if (finalRejected) {
     finalLabel = '最终拒识 · Unknown';
+  } else if (primary?['source'] == 'detector_category') {
+    finalLabel = '探测保留 · $displaySpecies';
   } else if (modelAccepted == true) {
     finalLabel =
         '最终接纳 · ${displaySpecies.isEmpty ? 'Unknown' : displaySpecies}';

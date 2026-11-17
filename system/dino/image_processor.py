@@ -168,6 +168,8 @@ class ImageProcessor:
 
         for prediction, embedding, (result_index, box_index) in zip(predictions, embeddings, crop_map):
             box = det_results[result_index].boxes[box_index]
+            from system.dinov3.detection_categories import category_for_box, detector_category_candidate
+            detector_category = category_for_box(det_results[result_index], box)
             detection_confidence = float(box.conf.item())
             bbox = tuple(float(value) for value in box.xyxy.tolist()[0])
             candidate = {}
@@ -180,6 +182,10 @@ class ImageProcessor:
                 selected_maps[result_index][box_index] = (
                     candidate if prediction.accepted else None
                 )
+                if detector_category in {"person", "vehicle"}:
+                    candidate = detector_category_candidate(detector_category, detection_confidence, complete=False)
+                    candidate_maps[result_index][box_index] = [candidate]
+                    selected_maps[result_index][box_index] = candidate
             source_index = (
                 source_indices[result_index]
                 if source_indices is not None
@@ -205,6 +211,7 @@ class ImageProcessor:
                     raw_embedding=embedding.copy(),
                     initial_prediction=prediction,
                     initial_candidate=dict(candidate),
+                    detector_category=detector_category,
                 )
             )
         return candidate_maps, selected_maps

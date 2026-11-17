@@ -76,6 +76,8 @@ String detectionBoxLabel(DetectionBox box, int index) {
   final kind = dinoConfidenceLabel(box);
   final prefix = kind == '分类证据'
       ? '分类'
+      : kind == '探测证据'
+      ? '探测'
       : kind == '事件接纳'
       ? '事件'
       : '';

@@ -102,10 +102,12 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
 
     def _remove_photo_features(self, job_ids) -> None:
         from system.dinov3.job_cache import DinoV3JobCache
+        from system.dinov3.media_cache import DinoV3VideoCache
 
         for job_id in job_ids:
             try:
                 DinoV3JobCache.remove(job_state_path(), job_id)
+                DinoV3VideoCache.remove(job_state_path(), job_id)
             except OSError:
                 logger.warning("Cannot remove DINOv3 features: %s", job_id, exc_info=True)
 

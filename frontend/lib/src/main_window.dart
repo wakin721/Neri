@@ -2238,28 +2238,16 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       );
       if (index < 0) return;
       final previous = _previewItems[index];
-      final selectedPath = _directoryScope.items.isEmpty
-          ? null
-          : _directoryScope
-                .items[_safePreviewIndex(_directoryScope.items)]
-                .path;
+      // A click loads details, not a new recognition snapshot. Keep the
+      // sequence key and the latest annotations even if this request began
+      // before a validation edit completed.
+      final hydrated = previous.mergePreviewMetadata(fullItem);
       final updated = List<DetectionItem>.from(_previewItems);
-      updated[index] = fullItem;
-      final orderingChanged =
-          _mediaSortTimestamp(previous) != _mediaSortTimestamp(fullItem) ||
-          previous.filename != fullItem.filename;
+      updated[index] = hydrated;
       setState(() {
-        _previewMetadataCache[item.path] = fullItem;
-        _previewItems = orderingChanged
-            ? replaceSortedMediaItem(_previewItems, index, fullItem)
-            : updated;
+        _previewMetadataCache[item.path] = hydrated;
+        _previewItems = updated;
         _directoryScope.update(_previewItems, _inputController.text.trim());
-        if (orderingChanged && selectedPath != null) {
-          final selected = _directoryScope.items.indexWhere(
-            (entry) => entry.path == selectedPath,
-          );
-          if (selected >= 0) _selectedPreviewIndex = selected;
-        }
       });
     } catch (_) {
       // Fast preview data is still usable if per-file metadata is unavailable.
@@ -2310,8 +2298,6 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   List<DetectionItem> _sortMediaItemsForDisplay(List<DetectionItem> items) =>
       sortMediaItemsForDisplay(items);
-
-  DateTime? _mediaSortTimestamp(DetectionItem item) => mediaSortTimestamp(item);
 
   List<DetectionItem> _jobResultsForInputPath(
     List<ProcessingJob> jobs,

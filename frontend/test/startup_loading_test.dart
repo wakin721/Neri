@@ -145,7 +145,11 @@ class StartupBackend {
         return http.Response(jsonEncode(directories), 200);
       }
       if (path == '/api/preview/item' && previewMetadata != null) {
-        return http.Response(jsonEncode(previewMetadata), 200);
+        return http.Response(
+          jsonEncode(previewMetadata),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
       }
       // Optional component checks and update-source lookup fail safely.
       return http.Response('{}', 503);

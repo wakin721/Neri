@@ -1,0 +1,11 @@
+# Independent video trajectories and three-level reference time
+
+This supersedes mixed media voting for video. Each video's own spatial/visual trajectory is its classification sequence under both DINOv3 recipes; no photo, second video or different target shares its classification/rejection vote. Photo grouping stays unchanged. Same-camera strictly past raw features may provide historical context only.
+
+Reference-time priority: trustworthy embedded video time; otherwise a reliably associated capture burst's valid photo-time interval; otherwise no absolute-time context. User-confirmed naive camera times are UTC+8. Burst fallback uses the group's earliest valid capture time as a conservative history cutoff and records approximate provenance; it never fabricates a real video start time or absolute per-frame capture timestamps. Own-time frames may use genuine start plus frame offsets. Missing times still retain within-video relative frame ordering for target association.
+
+Burst association must not use modification/creation timestamps or arbitrary nearby files. Explicit persisted burst IDs must be same-camera and unambiguous. Automatic fallback requires conservative contiguous camera-counter evidence, a completed photo burst, compatible camera/prefix, and internally consistent photo capture times; ambiguous membership falls back to track-only. Snapshot grouping settings into the job cache signature. Cache all video crops so fallback changes can re-finalize without decoding, but invalidate previous policy's final decisions by incrementing media sequence version.
+
+Keep full-precision encoders, existing model weights/thresholds, source/frame observation IDs, cancellation checkpoints, source validation and per-file persistence. No-absolute-time clips must not act as historical candidates. A video trajectory contributes at most one historical candidate; its own earlier frames are not external history. Retain original unweighted within-track statistics because photos no longer share its vote.
+
+Validate both model recipes, multi-target/multi-video isolation, all three time levels, past-only cutoffs and missing/ambiguous groups, cache/resume, and installed CPU/GPU execution. Update the existing local installation with checksum-verified backup/rollback, preserving user data and settings.

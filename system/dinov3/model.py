@@ -29,6 +29,12 @@ import numpy as np
 from .balanced_unknown_calibration import fit_unknown_threshold
 from .hierarchical_ridge_head import _metadata_vector, _portable_classes, _sorted_classes, hierarchical_weights
 from .species_feature_cache_ridge_head import SpeciesFeatureCacheRidgeHead
+from .evidence import (
+    validate_evidence_weights,
+    weighted_fuse_group,
+    weighted_sequence_mean,
+    weighted_top75,
+)
 from .experiment import PRODUCTION_RECIPE, EXPERIMENT_RECIPE, INFERENCE_RECIPES, head_type
 
 
@@ -133,8 +139,11 @@ def top75(
     values: np.ndarray,
     cameras: np.ndarray,
     sequences: Sequence[Any],
+    weights: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Compute top-75% mean margin grouped by (camera, sequence)."""
+    if weights is not None:
+        return weighted_top75(values, cameras, sequences, weights)
     values = np.asarray(values, dtype=np.float64)
     if len(values) == 0:
         return np.empty(0, dtype=np.float64)
@@ -156,8 +165,11 @@ def sequence_mean(
     values: np.ndarray,
     cameras: np.ndarray,
     sequences: Sequence[Any],
+    weights: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Compute event mean values grouped by (camera, sequence)."""
+    if weights is not None:
+        return weighted_sequence_mean(values, cameras, sequences, weights)
     values = np.asarray(values, dtype=np.float64)
     if len(values) == 0:
         return np.empty(0, dtype=np.float64)
@@ -211,6 +223,7 @@ def resolve_target_tracks(
     contents: Sequence[Any],
     box_accepted: Optional[np.ndarray] = None,
     sim_threshold: float = 0.55,
+    weights: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Resolve per-target trajectories within each (camera, sequence) group.
 
@@ -223,8 +236,14 @@ def resolve_target_tracks(
     """
     feat_unit = unit(np.asarray(features, dtype=np.float32))
     length = len(feat_unit)
+    w_arr = validate_evidence_weights(weights, length) if weights is not None else None
     if length == 0:
         return np.empty(0, dtype=str)
+
+    def _slot_unit_mean(row_indices: Sequence[int]) -> np.ndarray:
+        if w_arr is None:
+            return unit(feat_unit[row_indices].mean(axis=0, keepdims=True))[0]
+        return unit(np.average(feat_unit[row_indices], axis=0, weights=w_arr[row_indices])[None, :])[0]
 
     cameras_arr = np.asarray(cameras, dtype=str)
     sequences_arr = np.asarray(sequences, dtype=str)
@@ -279,7 +298,7 @@ def resolve_target_tracks(
         track_vecs: List[np.ndarray] = []
         for f_slots in frames:
             slot_vecs = [
-                unit(feat_unit[s_rows].mean(axis=0, keepdims=True))[0]
+                _slot_unit_mean(s_rows)
                 for s_rows in f_slots
             ]
             if not tracks:
@@ -303,9 +322,7 @@ def resolve_target_tracks(
                 used_t.add(t_idx)
                 used_s.add(s_idx)
                 tracks[t_idx].extend(f_slots[s_idx])
-                track_vecs[t_idx] = unit(
-                    feat_unit[tracks[t_idx]].mean(axis=0, keepdims=True)
-                )[0]
+                track_vecs[t_idx] = _slot_unit_mean(tracks[t_idx])
             for s_idx, s_rows in enumerate(f_slots):
                 if s_idx not in used_s:
                     tracks.append(list(s_rows))
@@ -330,9 +347,11 @@ def adaptive_sequence_fuse(
     contents: np.ndarray,
     tau: float = 1.0,
     consensus_boost: bool = True,
+    weights: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Posterior classification sequence fusion with repeat-content collapsing."""
     values = np.asarray(scores, dtype=np.float64)
+    w_arr = validate_evidence_weights(weights, len(values)) if weights is not None else None
     if len(values) == 0:
         return np.empty((0, values.shape[1] if values.ndim == 2 else 0), dtype=np.float64)
     output = values.copy()
@@ -359,15 +378,20 @@ def adaptive_sequence_fuse(
 
     for by_content in groups.values():
         rows = list(by_content.values())
-        content_scores = np.stack([values[ii].mean(0) for ii in rows])
-        n_content = len(rows)
-        w_seq = n_content / (n_content + tau)
-        if consensus_boost and n_content >= 2:
-            votes = content_scores.argmax(axis=1)
-            mode_count = int(np.max(np.bincount(votes)))
-            if mode_count * 3 >= n_content * 2:
-                w_seq = max(w_seq, 0.80)
-        group_score = content_scores.mean(0)
+        if w_arr is None:
+            content_scores = np.stack([values[ii].mean(0) for ii in rows])
+            n_content = len(rows)
+            w_seq = n_content / (n_content + tau)
+            if consensus_boost and n_content >= 2:
+                votes = content_scores.argmax(axis=1)
+                mode_count = int(np.max(np.bincount(votes)))
+                if mode_count * 3 >= n_content * 2:
+                    w_seq = max(w_seq, 0.80)
+            group_score = content_scores.mean(0)
+        else:
+            w_seq, group_score = weighted_fuse_group(
+                values, rows, w_arr, tau=tau, consensus_boost=consensus_boost
+            )
         for ii in rows:
             output[ii] = (1.0 - w_seq) * values[ii] + w_seq * group_score
     return output
@@ -815,6 +839,7 @@ class DinoV3RidgeWithinModel:
         sites: Optional[Sequence[Any]] = None,
         contents: Optional[Sequence[Any]] = None,
         adapted_features: Optional[np.ndarray] = None,
+        evidence_weights: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """Perform joint prediction, adaptive sequence fusion, and unknown gating.
 
@@ -841,6 +866,7 @@ class DinoV3RidgeWithinModel:
         if adapted_features is not None and (np.shape(adapted_features) != raw.shape or not np.isfinite(adapted_features).all()):
             raise ValueError("adapted_features must be finite and align with raw_features")
         length = raw.shape[0]
+        weights = validate_evidence_weights(evidence_weights, length) if evidence_weights is not None else None
         if length == 0:
             box_thresh = float(
                 self._box_threshold if self._box_threshold is not None else self._threshold
@@ -880,6 +906,11 @@ class DinoV3RidgeWithinModel:
 
         if self.inference_recipe == EXPERIMENT_RECIPE:
             from .experiment import predict
+            if weights is not None:
+                return predict(
+                    self, raw, cameras_arr, sequences_arr, sites_arr, contents_arr, adapted_features,
+                    evidence_weights=weights,
+                )
             return predict(self, raw, cameras_arr, sequences_arr, sites_arr, contents_arr, adapted_features)
 
         within_mat, ridge_mat, norm, _, _ = self._prediction_evidence(raw, adapted_features)
@@ -902,22 +933,35 @@ class DinoV3RidgeWithinModel:
         box_accepted = box_known_score >= box_threshold
 
         resolved_tracks = resolve_target_tracks(
-            query_feat, cameras_arr, sequences_arr, contents_arr, box_accepted=box_accepted
+            query_feat, cameras_arr, sequences_arr, contents_arr, box_accepted=box_accepted,
+            **(dict(weights=weights) if weights is not None else {}),
         )
 
-        fused_scores = adaptive_sequence_fuse(
-            ridge_mat,
-            sites_arr,
-            resolved_tracks,
-            contents_arr,
-            tau=self.tau,
-            consensus_boost=self.consensus_boost,
-        )
+        if weights is None:
+            fused_scores = adaptive_sequence_fuse(
+                ridge_mat,
+                sites_arr,
+                resolved_tracks,
+                contents_arr,
+                tau=self.tau,
+                consensus_boost=self.consensus_boost,
+            )
+            pooled_margin = top75(margin, cameras_arr, resolved_tracks)
+            radial = sequence_mean(norm, cameras_arr, resolved_tracks)
+        else:
+            fused_scores = adaptive_sequence_fuse(
+                ridge_mat,
+                sites_arr,
+                resolved_tracks,
+                contents_arr,
+                tau=self.tau,
+                consensus_boost=self.consensus_boost,
+                weights=weights,
+            )
+            pooled_margin = top75(margin, cameras_arr, resolved_tracks, weights=weights)
+            radial = sequence_mean(norm, cameras_arr, resolved_tracks, weights=weights)
         pred_indices = fused_scores.argmax(axis=1)
         predictions = self.classes_[pred_indices]
-
-        pooled_margin = top75(margin, cameras_arr, resolved_tracks)
-        radial = sequence_mean(norm, cameras_arr, resolved_tracks)
 
         m_meta = self._calibration["margin"]
         r_meta = self._calibration["radial"]

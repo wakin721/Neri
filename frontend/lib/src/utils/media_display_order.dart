@@ -30,6 +30,7 @@ Future<List<int>> mediaDisplayIndicesAsync(
         fileType: item.fileType,
         dateTaken: item.dateTaken,
         modifiedAt: item.modifiedAt,
+        previewGroupingTime: item.previewGroupingTime,
         detectionData: {'拍摄时间': item.detectionData['拍摄时间']?.toString()},
       ),
     );
@@ -127,22 +128,47 @@ List<DetectionItem> replaceSortedMediaItems(
 }
 
 DateTime? mediaSortTimestamp(DetectionItem item) {
-  final date = item.dateTaken?.trim();
+  final grouping = item.groupingTime;
+  final date = grouping.dateTaken?.trim();
   if (date != null && date.isNotEmpty) {
-    final time = item.detectionData['拍摄时间']?.toString().trim();
+    final time = grouping.timeTaken?.trim();
     if (date.contains(':') || date.contains('T')) {
-      final timestamp = DateTime.tryParse(date);
+      final timestamp = cameraClockTimestamp(date);
       if (timestamp != null) return timestamp;
     }
     if (time != null && time.isNotEmpty) {
-      final timestamp = DateTime.tryParse('$date $time');
+      final timestamp = cameraClockTimestamp('$date $time');
       if (timestamp != null) return timestamp;
     }
   }
-  final modified = item.modifiedAt?.trim();
+  final modified = grouping.modifiedAt?.trim();
   return modified == null || modified.isEmpty
       ? null
-      : DateTime.tryParse(modified);
+      : cameraClockTimestamp(modified);
+}
+
+/// Photo EXIF and video container tags share the camera's recorded clock.
+/// Keep their literal calendar fields; the UTC carrier only makes arithmetic
+/// independent of the computer's timezone and daylight-saving rules.
+DateTime? cameraClockTimestamp(String value) {
+  final clock = value.trim().replaceFirst(
+    RegExp(r'(?:[zZ]|[+-]\d{2}:?\d{2})$'),
+    '',
+  );
+  final parsed = DateTime.tryParse(
+    clock.contains(':') || clock.contains('T') ? '${clock}Z' : clock,
+  );
+  if (parsed == null) return null;
+  return DateTime.utc(
+    parsed.year,
+    parsed.month,
+    parsed.day,
+    parsed.hour,
+    parsed.minute,
+    parsed.second,
+    parsed.millisecond,
+    parsed.microsecond,
+  );
 }
 
 class _MediaSortEntry {

@@ -10,12 +10,15 @@ import 'package:neri_flutter/src/api_client.dart';
 import 'package:neri_flutter/src/models/job.dart';
 import 'package:neri_flutter/src/screens/species_validation_screen.dart';
 
+import 'support/fake_validation_video_backend.dart';
+
 void main() {
   late Directory tempDir;
   late NeriApiClient apiClient;
   late List<DetectionItem> items;
 
   setUp(() async {
+    installFakeValidationVideoBackend();
     tempDir = await Directory.systemTemp.createTemp('neri_group_expansion_');
     final pngBytes = base64Decode(
       'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFUlEQVR4nGP8//8/A27AhEduBEsDAKXjAxF9kqZqAAAAAElFTkSuQmCC',

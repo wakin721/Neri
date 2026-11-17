@@ -143,7 +143,7 @@ void main() {
   );
 
   testWidgets(
-    'loading one timestamp in a large root does not sort the whole root',
+    'loading one timestamp in a large root preserves snapshot order and recognition',
     (tester) async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
@@ -167,9 +167,11 @@ void main() {
                 'path': '$input/camera-$i/same.jpg',
                 'file_type': 'jpg',
                 'modified_at': '2026-10-10T12:00:00',
+                if (i == 9999) 'species': ['人员'],
               },
           ]),
           200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
         ),
       );
       await startup.settleStartup(tester);
@@ -199,13 +201,20 @@ void main() {
         'file_type': 'jpg',
         'date_taken': '2020-01-01T12:00:00',
         'modified_at': photo.modifiedAt,
+        'species': ['家羊'],
       };
       final watch = Stopwatch()..start();
       await tester.runAsync(() => screen.onLoadMetadata(photo));
       watch.stop();
       await tester.pump();
       final updated = tester.widget<PreviewScreen>(find.byType(PreviewScreen));
-      expect(updated.items.first.path, photo.path);
+      expect(
+        updated.items.map((item) => item.path),
+        screen.items.map((item) => item.path),
+      );
+      expect(updated.items.last.path, photo.path);
+      expect(updated.items.last.dateTaken, '2020-01-01T12:00:00');
+      expect(updated.items.last.species, ['人员']);
       expect(
         watch.elapsedMilliseconds,
         lessThan(700),

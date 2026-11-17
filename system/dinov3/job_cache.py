@@ -30,7 +30,7 @@ def file_stamp(path):
 
 
 class DinoV3JobCache:
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     def path_for(state_path: Path, job_id: str) -> Path:
@@ -75,6 +75,7 @@ class DinoV3JobCache:
             and np.isfinite(c.detection_confidence)
             and c.raw_embedding.ndim == 1 and c.raw_embedding.size > 0
             and c.raw_embedding.dtype.kind == "f" and np.isfinite(c.raw_embedding).all()
+            and c.detector_category in {None, "animal", "person", "vehicle"}
             for c in crops
         )
 
@@ -97,7 +98,8 @@ class DinoV3JobCache:
                 buffer = io.BytesIO()
                 np.save(buffer, features, allow_pickle=False)
                 metadata = [dict(box_index=c.box_index, bbox=list(c.bbox),
-                                 detection_confidence=c.detection_confidence) for c in crops]
+                                 detection_confidence=c.detection_confidence,
+                                 detector_category=c.detector_category) for c in crops]
                 rows.append((key, json.dumps(stamp), item.model_dump_json(),
                              json.dumps(metadata), buffer.getvalue(), collector.image_digest(item.path, stamp)))
             except (OSError, ValueError, TypeError):
@@ -133,6 +135,7 @@ class DinoV3JobCache:
                     crops = [DinoV3CropRecord(
                         image_path=str(path), box_index=m["box_index"], bbox=tuple(m["bbox"]),
                         detection_confidence=m["detection_confidence"], raw_embedding=f.copy(),
+                        detector_category=m.get("detector_category"),
                     ) for m, f in zip(metadata, features)]
                     if _path_key(item.path) != key or not self._validate(item, crops):
                         raise ValueError("Incomplete cached detection")
