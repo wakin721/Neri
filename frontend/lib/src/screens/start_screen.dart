@@ -204,7 +204,6 @@ class _TaskHistoryButton extends StatefulWidget {
 
 class _TaskHistoryButtonState extends State<_TaskHistoryButton> {
   late final _snapshot = ValueNotifier<StartScreen>(widget.source);
-  final _expandedJobs = <String>{};
   DialogRoute<void>? _dialogRoute;
 
   @override
@@ -235,10 +234,13 @@ class _TaskHistoryButtonState extends State<_TaskHistoryButton> {
   Future<void> _showHistory() async {
     if (_dialogRoute != null) return;
     _snapshot.value = widget.source;
+    final scrollController = ScrollController();
+    final expandedJobIds = <String>{};
     final route = DialogRoute<void>(
       context: context,
       builder: (dialogContext) => Dialog(
         insetPadding: const EdgeInsets.all(16),
+        clipBehavior: Clip.antiAlias,
         child: SizedBox(
           width: 960,
           height: MediaQuery.sizeOf(dialogContext).height * 0.85,
@@ -264,30 +266,38 @@ class _TaskHistoryButtonState extends State<_TaskHistoryButton> {
               ),
               const Divider(height: 1),
               Expanded(
-                child: ValueListenableBuilder<StartScreen>(
-                  valueListenable: _snapshot,
-                  builder: (context, source, _) => SingleChildScrollView(
-                    key: const PageStorageKey('task-history-scroll'),
-                    padding: const EdgeInsets.all(12),
-                    child: _JobsCard(
-                      jobs: source.jobs,
-                      onCancelJob: source.onCancelJob,
-                      onResumeJob: source.onResumeJob,
-                      onDeleteJob: source.onDeleteJob,
-                      onClearJobs: source.onClearJobs,
-                      pendingStartJobIds: source.pendingStartJobIds,
-                      pendingStopJobIds: source.pendingStopJobIds,
-                      onJobExpansionChanged: (job, expanded) {
-                        if (expanded) {
-                          _expandedJobs.add(job.id);
-                        } else {
-                          _expandedJobs.remove(job.id);
-                        }
-                        source.onJobExpansionChanged?.call(job, expanded);
-                      },
-                      onRetryJobDetails: source.onRetryJobDetails,
-                      loadingJobDetailIds: source.loadingJobDetailIds,
-                      failedJobDetailIds: source.failedJobDetailIds,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Scrollbar(
+                    controller: scrollController,
+                    thumbVisibility: true,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ValueListenableBuilder<StartScreen>(
+                        valueListenable: _snapshot,
+                        builder: (context, source, _) => _JobsCard(
+                          scrollController: scrollController,
+                          jobs: source.jobs,
+                          expandedJobIds: expandedJobIds,
+                          onCancelJob: source.onCancelJob,
+                          onResumeJob: source.onResumeJob,
+                          onDeleteJob: source.onDeleteJob,
+                          onClearJobs: source.onClearJobs,
+                          pendingStartJobIds: source.pendingStartJobIds,
+                          pendingStopJobIds: source.pendingStopJobIds,
+                          onJobExpansionChanged: (job, expanded) {
+                            if (expanded) {
+                              expandedJobIds.add(job.id);
+                            } else {
+                              expandedJobIds.remove(job.id);
+                            }
+                            source.onJobExpansionChanged?.call(job, expanded);
+                          },
+                          onRetryJobDetails: source.onRetryJobDetails,
+                          loadingJobDetailIds: source.loadingJobDetailIds,
+                          failedJobDetailIds: source.failedJobDetailIds,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -301,13 +311,13 @@ class _TaskHistoryButtonState extends State<_TaskHistoryButton> {
     try {
       await Navigator.of(context, rootNavigator: true).push(route);
     } finally {
+      unawaited(route.completed.whenComplete(scrollController.dispose));
       if (mounted) {
         for (final job in widget.source.jobs) {
-          if (_expandedJobs.contains(job.id)) {
+          if (expandedJobIds.contains(job.id)) {
             widget.source.onJobExpansionChanged?.call(job, false);
           }
         }
-        _expandedJobs.clear();
         _dialogRoute = null;
       }
     }
@@ -837,7 +847,9 @@ class _ProcessingSlider extends StatelessWidget {
 
 class _JobsCard extends StatelessWidget {
   const _JobsCard({
+    required this.scrollController,
     required this.jobs,
+    required this.expandedJobIds,
     required this.onCancelJob,
     required this.onResumeJob,
     required this.onDeleteJob,
@@ -850,7 +862,9 @@ class _JobsCard extends StatelessWidget {
     required this.failedJobDetailIds,
   });
 
+  final ScrollController scrollController;
   final List<ProcessingJob> jobs;
+  final Set<String> expandedJobIds;
   final void Function(ProcessingJob, bool)? onJobExpansionChanged;
   final ValueChanged<ProcessingJob>? onRetryJobDetails;
   final Set<String> loadingJobDetailIds;
@@ -864,45 +878,99 @@ class _JobsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SectionCard(
-      title: '任务进度',
-      subtitle: jobs.isEmpty ? '暂无任务' : '自动每 2 秒刷新一次',
-      icon: Icons.insights_rounded,
-      child: jobs.isEmpty
-          ? const Text('创建任务后，处理进度和识别结果会显示在这里。')
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+    final scheme = Theme.of(context).colorScheme;
+    final jobIndices = {
+      for (var i = 0; i < jobs.length; i++) jobs[i].id: i + 1,
+    };
+    return Card.filled(
+      color: scheme.surfaceContainerLow,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(28)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+        child: CustomScrollView(
+          key: const PageStorageKey('task-history-scroll'),
+          controller: scrollController,
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.all(20),
+              sliver: SliverList.builder(
+                itemCount: jobs.length + 2,
+                findChildIndexCallback: (key) => key is PageStorageKey<String>
+                    ? jobIndices[key.value]
+                    : null,
+                itemBuilder: (context, index) {
+                  if (index == 0) return _buildHeader(context);
+                  if (index <= jobs.length) {
+                    return _buildJobTile(context, jobs[index - 1]);
+                  }
+                  return jobs.isEmpty
+                      ? const Text('创建任务后，处理进度和识别结果会显示在这里。')
+                      : Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: OutlinedButton.icon(
+                            onPressed: () => _confirmClearJobs(context),
+                            icon: const Icon(Icons.delete_sweep_outlined),
+                            label: const Text('清除所有任务'),
+                          ),
+                        );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: scheme.primaryContainer,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(
+              Icons.insights_rounded,
+              color: scheme.onPrimaryContainer,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ...jobs.map((job) => _buildJobTile(context, job)),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: () => _confirmClearJobs(context),
-                  icon: const Icon(Icons.delete_sweep_outlined),
-                  label: const Text('清除所有任务'),
+                Text('任务进度', style: theme.textTheme.titleLarge),
+                const SizedBox(height: 4),
+                Text(
+                  jobs.isEmpty ? '暂无任务' : '自动每 2 秒刷新一次',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildJobTile(BuildContext context, ProcessingJob job) {
     final runtimeText = _jobRuntimeText(job);
-    bool hasError(DetectionItem item) {
-      final error = item.error?.trim();
-      return error != null && error.isNotEmpty;
-    }
-
-    final failedResults = job.results.where(hasError).toList();
-    final successfulResults = job.results.where((item) => !hasError(item));
-    final visibleResults = [
-      ...failedResults,
-      ...successfulResults,
-    ].take(12).toList();
-    final visibleFailureCount = visibleResults.where(hasError).length;
-    final hiddenResultCount = job.results.length - visibleResults.length;
-    final hiddenFailureCount = failedResults.length - visibleFailureCount;
     return ExpansionTile(
-      key: ValueKey(job.id),
+      key: PageStorageKey<String>(job.id),
+      // Restore expansion before the tile attaches its change listener.
+      initiallyExpanded: expandedJobIds.contains(job.id),
       onExpansionChanged: (expanded) =>
           onJobExpansionChanged?.call(job, expanded),
       leading: Icon(_jobIcon(job.state)),
@@ -953,6 +1021,33 @@ class _JobsCard extends StatelessWidget {
           ),
         ],
       ),
+      children: [Builder(builder: (_) => _buildJobDetails(job))],
+    );
+  }
+
+  Widget _buildJobDetails(ProcessingJob job) {
+    const previewLimit = 12;
+    final failedResults = <DetectionItem>[];
+    final successfulResults = <DetectionItem>[];
+    var failedResultCount = 0;
+    for (final item in job.results) {
+      if (item.error?.trim().isNotEmpty ?? false) {
+        failedResultCount++;
+        if (failedResults.length < previewLimit) failedResults.add(item);
+      } else if (successfulResults.length < previewLimit) {
+        successfulResults.add(item);
+      }
+    }
+    final visibleResults = [
+      ...failedResults,
+      ...successfulResults.take(previewLimit - failedResults.length),
+    ];
+    final hiddenResultCount = job.results.length - visibleResults.length;
+    final hiddenFailureCount = failedResultCount - failedResults.length;
+    final knownFailureCount = job.failedCount > failedResultCount
+        ? job.failedCount
+        : failedResultCount;
+    return Column(
       children: [
         if (loadingJobDetailIds.contains(job.id))
           const ListTile(
@@ -975,15 +1070,17 @@ class _JobsCard extends StatelessWidget {
             leading: const Icon(Icons.error_outline_rounded),
             title: Text(job.error!),
           ),
-        if (job.state == 'completed' && job.hasFailedItems)
+        if (job.state == 'completed' && knownFailureCount > 0)
           ListTile(
             leading: const Icon(Icons.warning_amber_rounded),
-            title: Text('${job.failedCount} 个文件处理失败'),
-            subtitle: const Text('可仅重新处理这些失败文件'),
-            trailing: TextButton(
-              onPressed: () => onResumeJob(job),
-              child: const Text('重试失败文件'),
-            ),
+            title: Text('$knownFailureCount 个文件处理失败'),
+            subtitle: job.canRetryFailed ? const Text('可仅重新处理这些失败文件') : null,
+            trailing: job.canRetryFailed
+                ? TextButton(
+                    onPressed: () => onResumeJob(job),
+                    child: const Text('重试失败文件'),
+                  )
+                : null,
           ),
         ...visibleResults.map((item) {
           final error = item.error?.trim();
@@ -1007,7 +1104,9 @@ class _JobsCard extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.error_outline_rounded),
             title: Text('还有 $hiddenFailureCount 个失败文件未展开显示'),
-            subtitle: Text('“重试失败文件”会一次处理全部 ${failedResults.length} 个失败项。'),
+            subtitle: job.canRetryFailed
+                ? Text('“重试失败文件”会一次处理全部 $knownFailureCount 个失败项。')
+                : null,
           )
         else if (hiddenResultCount > 0)
           ListTile(title: Text('还有 $hiddenResultCount 条结果未在此处展开显示。')),

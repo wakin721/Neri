@@ -83,7 +83,9 @@ void main() {
   ) async {
     var activations = 0;
     await tester.pumpWidget(_actionHost(() => activations++));
-    final gesture = await tester.startGesture(tester.getCenter(find.text('Run')));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('Run')),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
     expect(_actionScale(tester), lessThan(0.99));
@@ -101,7 +103,9 @@ void main() {
     await tester.pumpWidget(
       _actionHost(() => activations++, disableAnimations: true),
     );
-    final gesture = await tester.startGesture(tester.getCenter(find.text('Run')));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('Run')),
+    );
     await tester.pump(const Duration(milliseconds: 250));
     expect(_actionScale(tester), 1);
     await gesture.up();
@@ -196,4 +200,51 @@ void main() {
     expect(selectedRow.bottom, lessThanOrEqualTo(viewport.bottom));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'distant selections remain visible without building intervening rows',
+    (tester) async {
+      final items = List.generate(10000, (index) => index);
+      var built = 0;
+      Future<void> show(int selected) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MediaQuery(
+                data: MediaQueryData(textScaler: TextScaler.linear(1.8)),
+                child: SizedBox(
+                  width: 360,
+                  height: 260,
+                  child: SelectableListCard<int>(
+                    items: items,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    selectedIndex: selected,
+                    titleBuilder: (item) {
+                      built++;
+                      return 'Photo $item';
+                    },
+                    subtitleBuilder: (_) => '物种',
+                    onSelected: (_, _) {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      for (final index in [9000, 9999, 160, 0]) {
+        built = 0;
+        await show(index);
+        final viewport = tester.getRect(find.byType(ListView));
+        final tile = tester.getRect(
+          find.widgetWithText(ListTile, 'Photo $index'),
+        );
+        expect(tile.top, greaterThanOrEqualTo(viewport.top - 0.01));
+        expect(tile.bottom, lessThanOrEqualTo(viewport.bottom + 0.01));
+        expect(built, lessThan(80));
+      }
+    },
+  );
 }

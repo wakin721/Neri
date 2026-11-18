@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
+import '../widgets/settings_progress_indicator.dart';
 import 'privacy_status.dart';
 import 'training_upload_diagnostics.dart';
 
@@ -98,7 +99,7 @@ class _TrainingUploadDebugDialogState extends State<TrainingUploadDebugDialog> {
             if (details == null && _error == null)
               const Padding(
                 padding: EdgeInsets.all(24),
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(child: SettingsProgressIndicator()),
               ),
             if (details != null)
               for (final entry in details.facts.entries)

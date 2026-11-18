@@ -4339,8 +4339,8 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         0.25;
   }
 
-  String _speciesFilterFor(DetectionItem item) {
-    if (isDinoItem(item) ||
+  String _speciesFilterFor(DetectionItem item, {required bool dino}) {
+    if (dino ||
         widget.classificationModelPath?.endsWith('.neri.json') == true) {
       return _globalSpecies;
     }
@@ -4354,7 +4354,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
 
   DetectionBox? _boxAfterConfidenceFilter(
     DetectionBox box, {
-    bool dino = false,
+    required bool dino,
   }) {
     if (dino || isDinoDecision(box)) {
       final finalBox = dinoFinalBox(box);
@@ -4422,8 +4422,9 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         _visibleBoxesSettings == settings) {
       return _visibleBoxes;
     }
+    final dino = isDinoItem(item);
     final trackFrameCounts = _trackFrameCountsForFilter(item);
-    final selectedSpeciesFilter = _speciesFilterFor(item);
+    final selectedSpeciesFilter = _speciesFilterFor(item, dino: dino);
     final filtered = <DetectionBox>[];
     final boxes = item.detectionBoxes;
     for (var index = 0; index < boxes.length; index++) {
@@ -4432,10 +4433,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         boxes[index],
         index,
       );
-      final box = _boxAfterConfidenceFilter(
-        originalBox,
-        dino: isDinoItem(item),
-      );
+      final box = _boxAfterConfidenceFilter(originalBox, dino: dino);
       if (box == null) continue;
       final matchesSpecies =
           selectedSpeciesFilter == _globalSpecies ||
@@ -4453,6 +4451,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
   }
 
   List<DetectionBox> _confidenceFilteredBoxes(DetectionItem item) {
+    final dino = isDinoItem(item);
     final trackFrameCounts = _trackFrameCountsForFilter(item);
     final filtered = <DetectionBox>[];
     final boxes = item.detectionBoxes;
@@ -4462,10 +4461,7 @@ class SpeciesValidationScreenState extends State<SpeciesValidationScreen>
         boxes[index],
         index,
       );
-      final box = _boxAfterConfidenceFilter(
-        originalBox,
-        dino: isDinoItem(item),
-      );
+      final box = _boxAfterConfidenceFilter(originalBox, dino: dino);
       if (box != null &&
           _passesMinFrameRatioFilter(item, box, trackFrameCounts) &&
           box.bbox.length >= 4) {

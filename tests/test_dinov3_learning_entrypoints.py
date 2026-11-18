@@ -76,6 +76,9 @@ def test_learning_http_old_model_can_save_labels_but_update_requires_calibration
     assert "校准" in error.value.detail
     assert manifest.read_bytes() == before
     assert routes["/api/dino/learning/status"](model)["pending_count"] == 1
+    details = routes["/api/dino/learning/status"](model.model_copy(update={"include_species": True}))
+    assert "new_species" not in details["original_species"]
+    assert details["species_counts"] == {"new_species": 1}
     assert routes["/api/dino/learning/discard"](model)["pending_count"] == 0
 
 

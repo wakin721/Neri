@@ -43,6 +43,104 @@ def _patch_state_path(monkeypatch, state_path: Path) -> None:
     monkeypatch.setattr(services._legacy, "job_state_path", resolver)
 
 
+def test_restart_and_summary_poll_never_read_historical_results(monkeypatch, tmp_path):
+    import sqlite3
+    from system.backend.job_state_store import JobStateStore
+
+    state_path = tmp_path / "job_state.json"
+    _patch_state_path(monkeypatch, state_path)
+    history = _job("history", tmp_path)
+    history.state = JobState.COMPLETED
+    history.results = [DetectionItem(filename="old.jpg", path="old.jpg", file_type="image")]
+    store = JobStateStore(state_path)
+    store.save({history.id: history}, {})
+    # Even an unreadable detail must not affect startup or summary polling.
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE results SET payload='invalid json'")
+    manager = services.ProcessingJobManager()
+    try:
+        assert manager._unloaded_job_ids == {history.id}
+        assert manager.list_jobs(include_results=False)[0].results == []
+        with pytest.raises(json.JSONDecodeError):
+            manager.get_job(history.id)
+        assert manager._unloaded_job_ids == {history.id}
+        manager._save_state_unlocked()
+        with sqlite3.connect(store.path) as conn:
+            assert conn.execute("SELECT payload FROM results").fetchone()[0] == 'invalid json'
+    finally:
+        manager._executor.shutdown()
+
+
+def test_unloaded_results_survive_startup_cancellation_and_other_checkpoints(monkeypatch, tmp_path):
+    from system.backend.job_state_store import JobStateStore
+
+    state_path = tmp_path / "job_state.json"
+    _patch_state_path(monkeypatch, state_path)
+    history = _job("history", tmp_path)
+    history.state = JobState.RUNNING
+    history.processed = 1
+    history.results = [DetectionItem(filename="old.jpg", path="old.jpg", file_type="image")]
+    store = JobStateStore(state_path)
+    store.save({history.id: history}, {history.id: _request(tmp_path)})
+    manager = services.ProcessingJobManager()
+    try:
+        assert manager.list_jobs(include_results=False)[0].state == JobState.CANCELLED
+        manager._jobs["new"] = _job("new", tmp_path)
+        manager._mutate_job("new", processed=1, results=[
+            DetectionItem(filename="new.jpg", path="new.jpg", file_type="image")
+        ])
+        assert len(store.load()["jobs"][history.id]["results"]) == 1
+        assert history.id in manager._unloaded_job_ids
+        calls = []
+        load_results = manager._state_store.load_results
+        def record(job_id):
+            calls.append(job_id)
+            return load_results(job_id)
+        monkeypatch.setattr(manager._state_store, "load_results", record)
+        assert manager.get_job(history.id).results[0].filename == "old.jpg"
+        manager.get_job(history.id)
+        assert calls == [history.id]
+        manager._mutate_job(history.id, results=[])
+        assert store.load()["jobs"][history.id]["results"] == []
+        # Deleting a still-unloaded task must not hydrate unrelated records.
+        restarted = services.ProcessingJobManager()
+        try:
+            monkeypatch.setattr(restarted._state_store, "load_results",
+                                lambda _: pytest.fail("delete must not load results"))
+            restarted.delete_job("new")
+            assert set(store.load()["jobs"]) == {history.id}
+            restarted.clear_jobs()
+            assert store.load() == {"jobs": {}, "requests": {}}
+        finally:
+            restarted._executor.shutdown()
+    finally:
+        manager._executor.shutdown()
+
+
+def test_failed_file_retry_hydrates_only_its_source_task(monkeypatch, tmp_path):
+    from system.backend.job_state_store import JobStateStore
+
+    state_path = tmp_path / "job_state.json"
+    _patch_state_path(monkeypatch, state_path)
+    history = _job("failed", tmp_path)
+    history.state = JobState.COMPLETED
+    history.failed_count = 1
+    history.results = [
+        DetectionItem(filename="ok.jpg", path="ok.jpg", file_type="image"),
+        DetectionItem(filename="bad.jpg", path="bad.jpg", file_type="image", error="failed"),
+    ]
+    JobStateStore(state_path).save({history.id: history}, {history.id: _request(tmp_path)})
+    manager = services.ProcessingJobManager()
+    try:
+        requests = []
+        monkeypatch.setattr(manager, "create_job", lambda request: requests.append(request))
+        manager.retry_failed_job(history.id)
+        assert requests[0].input_paths == ["bad.jpg"]
+        assert len(manager.get_job(history.id).results) == 2
+    finally:
+        manager._executor.shutdown()
+
+
 def test_resume_reuses_first_scan_after_restart_and_skips_deleted_pending_files(monkeypatch, tmp_path):
     _patch_state_path(monkeypatch, tmp_path / "job_state.json")
     root = tmp_path / "media"
@@ -328,6 +426,135 @@ def test_progress_serializes_only_new_results(monkeypatch, tmp_path):
         saved_results = manager._state_store.load()["jobs"]["active"]["results"]
         assert len(saved_results) == 2
         assert saved_results[0]["species"] == ["corrected"]
+    finally:
+        manager._executor.shutdown()
+
+
+def test_progress_appends_without_reading_history_or_changing_snapshots(monkeypatch, tmp_path):
+    error_reads = []
+    result_reads = []
+    result_scans = []
+
+    class TrackedItem(DetectionItem):
+        def __getattribute__(self, name):
+            if name == "error":
+                error_reads.append(self.filename)
+            return super().__getattribute__(name)
+
+    class TrackedResults(list):
+        def __iter__(self):
+            result_scans.append(len(self))
+            return super().__iter__()
+
+        def __getitem__(self, index):
+            result_reads.append(index)
+            return super().__getitem__(index)
+
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    manager = services.ProcessingJobManager()
+    job_id = "active"
+    first = TrackedItem(filename="first.jpg", path="first.jpg", file_type="image", error="bad image")
+    manager._jobs[job_id] = _job(job_id, tmp_path).model_copy(update={
+        "processed": 1, "failed_count": 1, "results": TrackedResults([first]),
+    })
+
+    try:
+        manager._save_state_unlocked()
+        snapshot = manager.get_job(job_id)
+        result_scans.clear()
+        result_reads.clear()
+        error_reads.clear()
+        next_items = [
+            TrackedItem(filename=f"{index}.jpg", path=f"{index}.jpg", file_type="image",
+                        error="bad image" if index % 2 == 0 else None)
+            for index in range(12)
+        ]
+        for start in range(0, len(next_items), 3):
+            end = start + 3
+            manager._mutate_job(job_id, processed=1 + end, appended_results=next_items[start:end])
+
+        assert error_reads == [item.filename for item in next_items]
+        assert result_reads == list(range(1, 1 + len(next_items)))
+        assert result_scans == []
+        assert [item.filename for item in snapshot.results] == [first.filename]
+        assert (snapshot.processed, snapshot.failed_count) == (1, 1)
+        saved = manager._state_store.load()["jobs"][job_id]
+        assert [item["filename"] for item in saved["results"]] == [first.filename, *error_reads]
+        assert (saved["processed"], saved["failed_count"]) == (13, 7)
+    finally:
+        manager._executor.shutdown()
+
+
+@pytest.mark.parametrize("cancel_after", [None, 3])
+def test_parallel_video_progress_appends_or_inserts_in_input_order(monkeypatch, tmp_path, cancel_after):
+    _patch_state_path(monkeypatch, tmp_path / "job_state.json")
+    paths = [tmp_path / f"{index}.mp4" for index in range(4)]
+    for path in paths:
+        path.touch()
+
+    def detect(_detector, path, item, *_args, **_kwargs):
+        if path == paths[0]:
+            raise ValueError("video inference failed")
+        return item
+
+    completion_order = [2, 0, 3, 1]
+
+    def ordered_futures(futures):
+        by_index = {index: future for future, index in futures.items()}
+        return (by_index[index] for index in completion_order)
+
+    legacy = services._legacy
+    monkeypatch.setattr(legacy, "as_completed", ordered_futures)
+    monkeypatch.setattr(legacy, "_tracked_video_worker_count", lambda _: 2)
+    monkeypatch.setattr(legacy, "_start_batch_log_session", lambda _: None)
+    monkeypatch.setattr(legacy, "_resolve_job_inputs", lambda *_args, **_kwargs: (tmp_path, paths))
+    monkeypatch.setattr(legacy, "load_media_indexes", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(legacy, "_load_detector", lambda *_: object())
+    monkeypatch.setattr(legacy, "_build_metadata_item", lambda path: DetectionItem(
+        filename=path.name, path=str(path), file_type="video",
+    ))
+    monkeypatch.setattr(legacy, "_detect_video", detect)
+    monkeypatch.setattr(legacy, "_clear_torch_runtime_cache", lambda: None)
+    monkeypatch.setattr(legacy, "_export_results", lambda *_: None)
+
+    manager = services.ProcessingJobManager()
+    original_mutate = manager._mutate_job
+    snapshots = []
+    replacements = []
+
+    def record_progress(job_id, **changes):
+        original_mutate(job_id, **changes)
+        if changes.get("message", "").startswith("正在并发处理视频"):
+            snapshots.append(manager.get_job(job_id))
+            replacements.append("results" in changes)
+            if len(snapshots) == cancel_after:
+                manager.cancel_job(job_id)
+
+    monkeypatch.setattr(manager, "_mutate_job", record_progress)
+    request = CreateJobRequest(input_dir=str(tmp_path), options=ProcessingOptions(
+        enable_detection=True, model_path="fake.pt", batch_size=1, video_mode="all",
+    ))
+    try:
+        queued = manager.create_job(request)
+        manager._executor.shutdown()
+        final = manager.get_job(queued.id)
+        assert final.state == (JobState.CANCELLED if cancel_after else JobState.COMPLETED), final.error
+        assert replacements == [False, True, False, True][:cancel_after]
+        for count, snapshot in enumerate(snapshots, 1):
+            completed = sorted(completion_order[:count])
+            assert [item.filename for item in snapshot.results] == [paths[index].name for index in completed]
+            assert snapshot.processed == count
+            assert snapshot.failed_count == int(0 in completed)
+
+        restarted = services.ProcessingJobManager()
+        try:
+            restored = restarted.get_job(queued.id)
+            assert restored.state == final.state
+            assert restored.results == snapshots[-1].results
+            assert restored.processed == len(snapshots)
+            assert restored.failed_count == 1
+        finally:
+            restarted._executor.shutdown()
     finally:
         manager._executor.shutdown()
 

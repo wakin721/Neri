@@ -31,12 +31,14 @@ class NeriApiClient extends core.NeriApiClient {
     String action,
     String modelPath, {
     String? calibrationPath,
+    bool includeSpecies = false,
   }) async {
     final response = await _http.post(
       _dinoUri('/api/dino/learning/$action'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({
         'classification_model_path': modelPath,
+        if (includeSpecies) 'include_species': true,
         if (calibrationPath != null) 'calibration_path': calibrationPath,
       }),
     );

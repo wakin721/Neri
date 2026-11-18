@@ -22,7 +22,9 @@ import '../utils/quick_mark_sort.dart';
 import '../utils/preview_snapshot_cache.dart';
 import '../widgets/app_menu_style.dart';
 import '../widgets/section_card.dart';
+import '../widgets/settings_progress_indicator.dart';
 import '../widgets/dino_learning_status.dart';
+import '../widgets/summary_dialog_button.dart';
 import '../widgets/workspace_split_metrics.dart';
 import 'model_sync_settings_host.dart';
 
@@ -77,7 +79,7 @@ const _defaultQuantityButtons = <String>[
 ];
 
 const _releaseNotesUrl =
-    'https://github.com/wakin721/Neri/blob/main/CHANGELOG.md';
+    'https://github.com/wakin721/Neri/blob/nightly/res/demo/README_Update.md';
 const _officialWebsiteUrl = 'https://myneri.top/';
 const _feedbackUrl = 'https://github.com/wakin721/Neri/issues';
 const _sourceCodeUrl = 'https://github.com/wakin721/Neri';
@@ -1457,7 +1459,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               selectedClassificationModel != null)
             _SettingsPanel(
               title: '当前模型学习状态',
-              subtitle: '人工校验后自动学习，查看进度、已学习物种和失败原因',
+              subtitle: '查看学习进度、物种补样和新物种记录',
               icon: Icons.psychology_rounded,
               child: DinoLearningStatus(
                 key: ValueKey(selectedClassificationModel),
@@ -1597,38 +1599,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildSpeciesSelector({bool enabled = true}) {
+    if (_loadingModelClasses) {
+      return const SizedBox.square(
+        dimension: 44,
+        child: Center(
+          child: SettingsProgressIndicator(semanticsLabel: '正在读取识别物种'),
+        ),
+      );
+    }
     final speciesNames = _modelSpeciesNames();
     final selected = _stringList('selected_species_names');
-    final summary = _loadingModelClasses
-        ? '读取中...'
-        : _speciesSelectionSummary(selected, speciesNames);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        if (_loadingModelClasses)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                SizedBox(width: 8),
-              ],
-            ),
-          ),
-        if (!_loadingModelClasses)
-          _SummaryDialogButton(
-            summary: summary,
-            onPressed: enabled
-                ? () => _showSpeciesSelectionDialog(speciesNames)
-                : null,
-          ),
-      ],
+    return SummaryDialogButton(
+      summary: _speciesSelectionSummary(selected, speciesNames),
+      onPressed: enabled ? () => _showSpeciesSelectionDialog(speciesNames) : null,
     );
   }
 
@@ -1847,15 +1830,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       padding: const EdgeInsets.fromLTRB(0, 4, 0, 12),
       child: Row(
         children: [
-          SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(
-              value: _maintenanceProgress,
-              strokeWidth: 2.6,
-              color: scheme.primary,
-              backgroundColor: scheme.surfaceContainerHighest,
-            ),
+          SettingsProgressIndicator(
+            value: _maintenanceProgress,
+            backgroundColor: scheme.surfaceContainerHighest,
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1956,11 +1933,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child:
                       _maintenancePreparationOperation == 'install_pytorch' ||
                           _installingPytorch
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                      ? const SettingsProgressIndicator()
                       : const Text('安装'),
                 ),
               ],
@@ -1987,12 +1960,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: const SizedBox.square(
                       dimension: 44,
                       key: Key('dino-component-loading'),
-                      child: Center(
-                        child: SizedBox.square(
-                          dimension: 28,
-                          child: CircularProgressIndicator(strokeWidth: 3),
-                        ),
-                      ),
+                      child: Center(child: SettingsProgressIndicator()),
                     ),
                   );
                 }
@@ -2006,102 +1974,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   );
                 }
                 final runtimeChoice = _dinoRuntimeChoice();
-                final installedRuntimeLabel = _dinoInstalledRuntimeLabel(
-                  status,
-                );
-                final debugModeEnabled = _bool(_debugModeKey);
                 final canSwitchHealthyVersion =
                     status.healthy &&
                     _shouldOfferDinoVersionSwitch(status, runtimeChoice);
-                final hintStyle = Theme.of(context).textTheme.bodySmall
-                    ?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    );
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                return Row(
                   children: [
-                    Row(
-                      children: [
-                        Text('下载版本', style: hintStyle),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _SettingsMenuButton<String>(
-                            key: const Key('dino-runtime-choice'),
-                            value: runtimeChoice,
-                            enabled: !_maintenanceBusy,
-                            options: const [
-                              _SettingsOption<String>(
-                                value: 'auto',
-                                label: '自动检测（默认）',
-                              ),
-                              _SettingsOption<String>(
-                                value: 'cpu',
-                                label: 'CPU（LiteRT FP32）',
-                              ),
-                              _SettingsOption<String>(
-                                value: 'gpu',
-                                label: 'GPU（PyTorch）',
-                              ),
-                            ],
-                            onChanged: _selectDinoRuntimeChoice,
+                    Expanded(
+                      child: _SettingsMenuButton<String>(
+                        key: const Key('dino-runtime-choice'),
+                        value: runtimeChoice,
+                        enabled: !_maintenanceBusy,
+                        options: const [
+                          _SettingsOption<String>(
+                            value: 'auto',
+                            label: '自动检测',
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        if (status.healthy) ...[
-                          if (canSwitchHealthyVersion) ...[
-                            FilledButton(
-                              key: const Key('dino-component-switch'),
-                              onPressed: _maintenanceBusy
-                                  ? null
-                                  : _installDinoV3,
-                              child: const Text('安装/切换'),
-                            ),
-                            const SizedBox(width: 8),
-                          ],
-                          OutlinedButton(
-                            key: const Key('dino-component-action'),
-                            onPressed: _maintenanceBusy ? null : _removeDinoV3,
-                            child: const Text('删除'),
+                          _SettingsOption<String>(
+                            value: 'cpu',
+                            label: 'CPU（LiteRT FP32）',
                           ),
-                        ] else ...[
-                          FilledButton(
-                            key: const Key('dino-component-action'),
-                            onPressed: _maintenanceBusy ? null : _installDinoV3,
-                            child: Text(status.installed ? '安装/修复' : '安装'),
+                          _SettingsOption<String>(
+                            value: 'gpu',
+                            label: 'GPU（PyTorch）',
                           ),
-                          if (status.installed) ...[
-                            const SizedBox(width: 8),
-                            OutlinedButton(
-                              key: const Key('dino-component-remove'),
-                              onPressed: _maintenanceBusy
-                                  ? null
-                                  : _removeDinoV3,
-                              child: const Text('删除'),
-                            ),
-                          ],
                         ],
-                      ],
+                        onChanged: _selectDinoRuntimeChoice,
+                      ),
                     ),
-                    if (installedRuntimeLabel != null || debugModeEnabled)
-                      const SizedBox(height: 6),
-                    if (installedRuntimeLabel != null)
-                      Padding(
-                        padding: EdgeInsets.only(
-                          bottom: debugModeEnabled ? 4 : 0,
+                    const SizedBox(width: 10),
+                    if (status.healthy) ...[
+                      if (canSwitchHealthyVersion) ...[
+                        FilledButton(
+                          key: const Key('dino-component-switch'),
+                          onPressed: _maintenanceBusy
+                              ? null
+                              : _installDinoV3,
+                          child: const Text('安装/切换'),
                         ),
-                        child: Text(
-                          '当前已安装：$installedRuntimeLabel',
-                          textAlign: TextAlign.end,
-                          style: hintStyle,
+                        const SizedBox(width: 8),
+                      ],
+                      OutlinedButton(
+                        key: const Key('dino-component-action'),
+                        onPressed: _maintenanceBusy ? null : _removeDinoV3,
+                        child: const Text('删除'),
+                      ),
+                    ] else ...[
+                      FilledButton(
+                        key: const Key('dino-component-action'),
+                        onPressed: _maintenanceBusy ? null : _installDinoV3,
+                        child: Text(status.installed ? '安装/修复' : '安装'),
+                      ),
+                      if (status.installed) ...[
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          key: const Key('dino-component-remove'),
+                          onPressed: _maintenanceBusy
+                              ? null
+                              : _removeDinoV3,
+                          child: const Text('删除'),
                         ),
-                      ),
-                    if (debugModeEnabled)
-                      Text(
-                        _dinoRuntimeChoiceHint(runtimeChoice),
-                        textAlign: TextAlign.end,
-                        style: hintStyle,
-                      ),
+                      ],
+                    ],
                   ],
                 );
               },
@@ -2131,11 +2064,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child:
                       _maintenancePreparationOperation == 'reinstall_package' ||
                           _reinstallingPackage
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                      ? const SettingsProgressIndicator()
                       : const Text('重新安装'),
                 ),
               ],
@@ -2184,7 +2113,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: '自动分组规则',
               subtitle: '综合拍摄时间和连拍照片张数判断事件边界；下一项是配套视频时会优先并入当前组。',
               icon: Icons.timelapse_rounded,
-              child: _SummaryDialogButton(
+              child: SummaryDialogButton(
                 summary: _autoGroupRuleSummary(),
                 onPressed: _showAutoGroupRulesDialog,
               ),
@@ -2394,10 +2323,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: FilledButton.tonalIcon(
               onPressed: _clearingCache ? null : _showClearCacheDialog,
               icon: _clearingCache
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const SettingsProgressIndicator()
                   : const Icon(Icons.delete_sweep_rounded),
               label: Text(_clearingCache ? '清理中' : '选择清理'),
             ),
@@ -2528,6 +2454,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildDebugSettings() {
+    final status = _dinoStatus;
+    final installed = status != null && status.installed
+        ? _dinoInstalledRuntimeLabel(status)
+        : null;
     return SectionCard(
       title: '调试模式',
       subtitle: '当前环境、依赖、上传设置、已安装库和软件日志',
@@ -2535,6 +2465,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: _DebugInfoPanel(
         settings: widget.settings,
         apiClient: widget.apiClient,
+        dinoRuntimeDetails: status == null ? null : [
+          if (installed != null) '当前已安装：$installed',
+          _dinoRuntimeChoiceHint(_dinoRuntimeChoice()),
+        ].join('\n'),
         debugModeSaving: _debugModeSaving,
         onDebugModeChanged: _setDebugMode,
         onShowMessage: widget.onShowMessage,
@@ -2571,7 +2505,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: '物种按钮',
           subtitle: '设置校验界面右侧快速标记列显示的物种按钮',
           icon: Icons.bookmarks_rounded,
-          child: _SummaryDialogButton(
+          child: SummaryDialogButton(
             summary: _quickMarksSummary(displayedMarks),
             onPressed: _showQuickMarkButtonsDialog,
           ),
@@ -2581,7 +2515,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           subtitle: '选择校验界面右侧数量列显示哪些数字快捷按钮',
           icon: Icons.format_list_numbered_rounded,
           showDivider: false,
-          child: _SummaryDialogButton(
+          child: SummaryDialogButton(
             summary: _quantityButtonsSummary(quantityButtons),
             onPressed: _showQuantityButtonsDialog,
           ),
@@ -3108,7 +3042,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       subtitle: '选择校验数据导出时包含的字段',
       icon: Icons.view_column_rounded,
       showDivider: showDivider,
-      child: _SummaryDialogButton(
+      child: SummaryDialogButton(
         summary: summary,
         onPressed: _showExportColumnsDialog,
       ),
@@ -3324,10 +3258,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: FilledButton(
               onPressed: _checkingForUpdates ? null : _checkForUpdates,
               child: _checkingForUpdates
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const SettingsProgressIndicator()
                   : const Text('检查更新'),
             ),
           ),
@@ -3800,41 +3731,6 @@ class _SettingsMenuButton<T> extends StatelessWidget {
   }
 }
 
-class _SummaryDialogButton extends StatelessWidget {
-  const _SummaryDialogButton({required this.summary, required this.onPressed});
-
-  final String summary;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
-    return TextButton(
-      onPressed: onPressed,
-      style: TextButton.styleFrom(
-        foregroundColor: scheme.primary,
-        disabledForegroundColor: scheme.onSurfaceVariant,
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
-        alignment: Alignment.centerRight,
-        textStyle: Theme.of(
-          context,
-        ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 320),
-        child: Text(
-          summary,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.end,
-        ),
-      ),
-    );
-  }
-}
 
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
@@ -4172,6 +4068,7 @@ class _DebugInfoPanel extends StatefulWidget {
   const _DebugInfoPanel({
     required this.settings,
     required this.apiClient,
+    required this.dinoRuntimeDetails,
     required this.debugModeSaving,
     required this.onDebugModeChanged,
     required this.onShowMessage,
@@ -4179,6 +4076,7 @@ class _DebugInfoPanel extends StatefulWidget {
 
   final NeriSettings? settings;
   final NeriApiClient apiClient;
+  final String? dinoRuntimeDetails;
   final bool debugModeSaving;
   final ValueChanged<bool> onDebugModeChanged;
   final ValueChanged<String> onShowMessage;
@@ -4381,6 +4279,8 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
           },
         ),
         _DebugFactRow(label: 'YOLO 依赖', value: dependenciesLabel),
+        if (widget.dinoRuntimeDetails case final details?)
+          _DebugFactRow(label: '联合模型运行环境', value: details),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
@@ -4429,10 +4329,7 @@ class _DebugInfoPanelState extends State<_DebugInfoPanel> {
             OutlinedButton.icon(
               onPressed: _simulatingBackendCrash ? null : _simulateBackendCrash,
               icon: _simulatingBackendCrash
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const SettingsProgressIndicator()
                   : const Icon(Icons.dangerous_outlined),
               label: const Text('模拟后端崩溃'),
             ),
@@ -4530,7 +4427,7 @@ class _InstalledPackagesDialogState extends State<_InstalledPackagesDialog> {
           future: _packagesFuture,
           builder: (context, snapshot) {
             if (snapshot.connectionState != ConnectionState.done) {
-              return const Center(child: CircularProgressIndicator());
+              return const Center(child: SettingsProgressIndicator());
             }
             if (snapshot.hasError) {
               return _DebugDialogMessage(
@@ -4669,7 +4566,7 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
           future: _logsFuture,
           builder: (context, snapshot) {
             if (snapshot.connectionState != ConnectionState.done) {
-              return const Center(child: CircularProgressIndicator());
+              return const Center(child: SettingsProgressIndicator());
             }
             if (snapshot.hasError) {
               return _DebugDialogMessage(
@@ -4767,7 +4664,7 @@ class _SoftwareLogsDialogState extends State<_SoftwareLogsDialog> {
       future: future,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
+          return const Center(child: SettingsProgressIndicator());
         }
         if (snapshot.hasError) {
           return _DebugDialogMessage(

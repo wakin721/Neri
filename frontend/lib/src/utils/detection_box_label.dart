@@ -26,14 +26,26 @@ DetectionBox detectionBoxWithDisplayMetadata(
   DetectionItem item,
   DetectionBox box,
   int index,
-) {
-  if (item.isSequencePending) {
+) => _withRejectionCluster(
+  box,
+  index,
+  sequencePending: item.isSequencePending,
+  rawBoxes: item.detectionData['检测框'],
+);
+
+DetectionBox _withRejectionCluster(
+  DetectionBox box,
+  int index, {
+  required bool sequencePending,
+  required Object? rawBoxes,
+}) {
+  if (sequencePending) {
     return box.rejectionCluster.isEmpty
         ? box
         : box.withRejectionCluster(const {});
   }
   if (box.rejectionCluster.isNotEmpty) return box;
-  final raw = findRawDinoBox(box, index, item.detectionData['检测框']);
+  final raw = findRawDinoBox(box, index, rawBoxes);
   final metadata = raw?['rejection_cluster'];
   return metadata is Map
       ? box.withRejectionCluster(Map<String, dynamic>.from(metadata))
@@ -49,10 +61,26 @@ List<DetectionBox> detectionBoxesWithDisplayMetadata(
   DetectionItem item,
   List<DetectionBox> boxes,
 ) {
+  if (boxes.isEmpty) return boxes;
+  final sequencePending = item.isSequencePending;
+  final rawBoxes = item.detectionData['检测框'];
+  if (!sequencePending &&
+      (rawBoxes is! List ||
+          !rawBoxes.whereType<Map>().any(
+            (raw) => raw['rejection_cluster'] is Map,
+          ))) {
+    return boxes;
+  }
   List<DetectionBox>? updated;
   for (var i = 0; i < boxes.length; i++) {
-    final next = detectionBoxWithDisplayMetadata(item, boxes[i], i);
-    if (!identical(next, boxes[i])) {
+    final box = boxes[i];
+    final next = _withRejectionCluster(
+      box,
+      i,
+      sequencePending: sequencePending,
+      rawBoxes: rawBoxes,
+    );
+    if (!identical(next, box)) {
       updated ??= List<DetectionBox>.of(boxes);
       updated[i] = next;
     }

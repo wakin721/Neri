@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api_client.dart';
+import '../widgets/settings_progress_indicator.dart';
 import 'privacy_consent_dialog.dart';
 import 'privacy_status.dart';
 
@@ -199,7 +200,7 @@ class _PrivacySettingsCardState extends State<PrivacySettingsCard> {
               const Center(
                 child: Padding(
                   padding: EdgeInsets.all(20),
-                  child: CircularProgressIndicator(),
+                  child: SettingsProgressIndicator(),
                 ),
               )
             else if (status == null)

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../widgets/settings_progress_indicator.dart';
 import 'privacy_status.dart';
 
 const privacyConsentDialogKey = Key('privacy-consent-dialog');
@@ -169,7 +170,7 @@ class _PrivacyConsentDialogState extends State<PrivacyConsentDialog> {
                               const SizedBox(
                                 height: 64,
                                 child: Center(
-                                  child: CircularProgressIndicator(),
+                                  child: SettingsProgressIndicator(),
                                 ),
                               )
                             else if (_agreementLoadError case final error?)
@@ -312,12 +313,7 @@ class _PrivacyConsentDialogState extends State<PrivacyConsentDialog> {
                                 ? () => unawaited(_save())
                                 : null,
                             child: _saving
-                                ? const SizedBox.square(
-                                    dimension: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
+                                ? const SettingsProgressIndicator()
                                 : const Text('保存并继续'),
                           ),
                         ],
@@ -408,7 +404,7 @@ class _PrivacyAgreementDocumentState extends State<PrivacyAgreementDocument> {
         if (!snapshot.hasData) {
           return const SizedBox(
             height: 120,
-            child: Center(child: CircularProgressIndicator()),
+            child: Center(child: SettingsProgressIndicator()),
           );
         }
         return _documentFrame(context, snapshot.data!);

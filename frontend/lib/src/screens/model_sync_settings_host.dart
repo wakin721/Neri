@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../widgets/notification_card.dart';
+import '../widgets/settings_progress_indicator.dart';
 import '../api_client.dart';
 import '../model_sync_controller.dart';
 import '../models/model_sync_status.dart';
@@ -532,11 +533,7 @@ class _ModelSyncMessageCard extends StatelessWidget {
                     child: FilledButton.tonalIcon(
                       onPressed: retrying ? null : onRetry,
                       icon: retrying
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
+                          ? const SettingsProgressIndicator()
                           : const Icon(Icons.refresh_rounded),
                       label: Text(retrying ? '重试中…' : '重试'),
                     ),

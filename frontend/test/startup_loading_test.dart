@@ -28,6 +28,7 @@ class StartupBackend {
   late final previewCache =
       _providedPreviewCache ?? PreviewSnapshotCache(directory: cacheDirectory);
   Completer<http.Response>? healthResponse;
+  Completer<http.Response>? gpuSettingsResponse;
   final preview = Completer<http.Response>();
   Completer<http.Response>? refreshedPreview;
   final scopedPreviews = <String, Completer<http.Response>>{};
@@ -39,6 +40,7 @@ class StartupBackend {
   Map<String, Object?>? previewMetadata;
   int dinoStatusRequests = 0;
   int settingsRequests = 0;
+  final gpuProbeRequests = <bool>[];
   int summaryRequests = 0;
   int previewRequests = 0;
   bool consent = true;
@@ -100,6 +102,13 @@ class StartupBackend {
       if (path == '/api/settings') {
         if (offline) throw http.ClientException('Backend offline');
         settingsRequests++;
+        if (request.method == 'GET') {
+          final probeGpu = request.url.queryParameters['probe_gpu'] != 'false';
+          gpuProbeRequests.add(probeGpu);
+          if (probeGpu && gpuSettingsResponse != null) {
+            return gpuSettingsResponse!.future;
+          }
+        }
         if (request.method == 'PUT') {
           savedSettings.addAll(
             (jsonDecode(request.body) as Map<String, dynamic>)['settings']
@@ -216,6 +225,9 @@ Future<void> flushPreviewCache(
 }
 
 Future<void> cleanup(WidgetTester tester, StartupBackend backend) async {
+  if (backend.gpuSettingsResponse?.isCompleted == false) {
+    backend.gpuSettingsResponse!.complete(http.Response('{}', 200));
+  }
   for (final preview in backend.scopedPreviews.values) {
     if (!preview.isCompleted) preview.complete(http.Response('[]', 200));
   }
@@ -287,7 +299,7 @@ void main() {
         find.text('Neri ${frontendVersion.split(RegExp(r'[-_+(]')).first}'),
         findsOneWidget,
       );
-      expect(backend.settingsRequests, 1);
+      expect(backend.settingsRequests, 2);
       expect(backend.dinoStatusRequests, 2);
       expect(backend.summaryRequests, 1);
       expect(backend.previewRequests, 1);
@@ -323,6 +335,36 @@ void main() {
       await cleanup(tester, backend);
     },
   );
+
+  testWidgets('slow GPU detection does not hold the shell or history polling', (
+    tester,
+  ) async {
+    final backend = StartupBackend()
+      ..gpuSettingsResponse = Completer<http.Response>();
+    await mount(tester, backend);
+    expect(backend.gpuProbeRequests, [false, true]);
+    expect(find.text('程序启动中'), findsNothing);
+    final start = tester.widget<StartScreen>(find.byType(StartScreen));
+    expect(start.settings, isNotNull);
+    expect(start.settings!.gpuAvailable, isFalse);
+    final summaries = backend.summaryRequests;
+    await tester.pump(const Duration(seconds: 2));
+    await settleStartup(tester);
+    expect(backend.summaryRequests, greaterThan(summaries));
+    expect(backend.details, isEmpty);
+    backend.gpuSettingsResponse!.complete(
+      http.Response('{"gpu_available":true}', 200),
+    );
+    await settleStartup(tester);
+    expect(
+      tester
+          .widget<StartScreen>(find.byType(StartScreen))
+          .settings!
+          .gpuAvailable,
+      isTrue,
+    );
+    await cleanup(tester, backend);
+  });
 
   testWidgets(
     'running detail advancing during request succeeds and retry recovers',

@@ -82,6 +82,10 @@ def test_cpu_gpu_share_new_species_feedback_and_undo_without_source_photos(pair,
         assert set(active_model(cpu).classes)=={'A','B','C','D'}
         assert learning.learning_status(cpu)['learned_count']==2
         assert learning.learning_status(gpu)['learned_count']==2
+        for path in (cpu, gpu):
+            details = learning.learning_status(path, include_species=True)
+            assert set(details['original_species']) == {'A', 'B'}
+            assert details['learned_species_counts'] == {'C': 1, 'D': 1}
         # Cached compatible features survive CPU->GPU and photo removal.
         learning.revert_staged_feedback(gpu,'cpu-confirm')
         learning.update_model(cpu)

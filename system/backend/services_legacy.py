@@ -21,6 +21,7 @@ import stat
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from datetime import datetime, timezone
@@ -513,6 +514,7 @@ class ProcessingJobManager:
             input_dir=_request_input_label(request),
             output_dir=request.output_dir,
             processed=initial_count,
+            failed_count=sum(bool(item.error) for item in initial_results),
             message=(
                 "继续任务已加入队列"
                 if resumed_from is not None
@@ -528,28 +530,23 @@ class ProcessingJobManager:
             self._cancelled_jobs.discard(job_id)
             self._deleted_jobs.discard(job_id)
             self._save_state_unlocked()
+            snapshot = job.model_copy(update={"results": list(job.results)})
         self._executor.submit(self._run_job, job_id, request, initial_results)
-        return job
+        return snapshot
 
     def cancel_job(self, job_id: str) -> JobSummary:
         """Request cancellation for a queued or running job."""
 
         with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise JobNotFoundError(job_id)
+            job = self._get_job_unlocked(job_id)
             if job.state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}:
                 return job.model_copy(deep=True)
             self._cancelled_jobs.add(job_id)
-            data = job.model_dump()
-            data.update(
-                {
-                    "state": JobState.CANCELLED,
-                    "message": "任务已停止",
-                    "updated_at": utc_now(),
-                }
-            )
-            self._jobs[job_id] = JobSummary(**data)
+            self._jobs[job_id] = job.model_copy(update={
+                "state": JobState.CANCELLED,
+                "message": "任务已停止",
+                "updated_at": utc_now(),
+            })
             self._save_state_unlocked()
             snapshot = self._snapshot_unlocked(job_id)
         _clear_torch_runtime_cache()
@@ -559,9 +556,7 @@ class ProcessingJobManager:
         """Continue a cancelled or failed job in-place."""
 
         with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise JobNotFoundError(job_id)
+            job = self._get_job_unlocked(job_id)
             if job_id in self._active_job_ids:
                 raise ValueError("任务仍在停止收尾，请稍后继续。")
             if job.state in {JobState.QUEUED, JobState.RUNNING}:
@@ -572,16 +567,12 @@ class ProcessingJobManager:
             if request is None:
                 raise ValueError("缺少原始任务参数，无法继续。")
             initial_results = [item.model_copy(deep=True) for item in job.results]
-            data = job.model_dump()
-            data.update(
-                {
-                    "state": JobState.QUEUED,
-                    "message": "继续任务已加入队列",
-                    "error": None,
-                    "updated_at": utc_now(),
-                }
-            )
-            self._jobs[job_id] = JobSummary(**data)
+            self._jobs[job_id] = job.model_copy(update={
+                "state": JobState.QUEUED,
+                "message": "继续任务已加入队列",
+                "error": None,
+                "updated_at": utc_now(),
+            })
             self._cancelled_jobs.discard(job_id)
             self._deleted_jobs.discard(job_id)
             self._save_state_unlocked()
@@ -594,9 +585,7 @@ class ProcessingJobManager:
     def retry_failed_job(self, job_id: str) -> JobSummary:
         """Start a separate, explicitly selected task for failed source files."""
         with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise JobNotFoundError(job_id)
+            job = self._get_job_unlocked(job_id)
             if job_id in self._active_job_ids or job.state in {JobState.QUEUED, JobState.RUNNING}:
                 raise ValueError("任务仍在运行，请等待任务结束后重试失败文件。")
             request = self._job_requests.get(job_id)
@@ -638,8 +627,6 @@ class ProcessingJobManager:
         """Return a snapshot of a job."""
 
         with self._lock:
-            if job_id not in self._jobs:
-                raise JobNotFoundError(job_id)
             return self._snapshot_unlocked(job_id)
 
     def list_jobs(self, *, include_results: bool = True) -> list[JobSummary]:
@@ -655,15 +642,19 @@ class ProcessingJobManager:
             ]
         return sorted(jobs, key=lambda item: item.created_at, reverse=True)
 
+    def _get_job_unlocked(self, job_id: str, *, include_results: bool = True) -> JobSummary:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise JobNotFoundError(job_id)
+        return job
+
     def _snapshot_unlocked(
         self,
         job_id: str,
         *,
         include_results: bool = True,
     ) -> JobSummary:
-        job = self._jobs.get(job_id)
-        if job is None:
-            raise JobNotFoundError(job_id)
+        job = self._get_job_unlocked(job_id, include_results=include_results)
         results = list(job.results) if include_results else []
         if include_results:
             from system.dinov3.detection_categories import normalize_detector_categories
@@ -684,17 +675,29 @@ class ProcessingJobManager:
             current = self._jobs.get(job_id)
             if current is None or job_id in self._deleted_jobs:
                 return
-            updates = dict(changes)
-            if "results" in updates:
-                updates["results"] = list(updates["results"])  # type: ignore[arg-type]
-                updates["failed_count"] = sum(bool(item.error) for item in updates["results"])
-            updates["updated_at"] = utc_now()
-            self._jobs[job_id] = current.model_copy(
-                update=updates,
-                deep=False,
-            )
-            if persist:
-                self._save_state_unlocked()
+            self._mutate_job_unlocked(job_id, current, persist=persist, **changes)
+
+    def _mutate_job_unlocked(
+        self,
+        job_id: str,
+        current: JobSummary,
+        *,
+        persist: bool,
+        appended_results: list[DetectionItem] | None = None,
+        **changes: object,
+    ) -> None:
+        if "results" in changes:
+            results = list(changes["results"])  # type: ignore[arg-type]
+            changes["results"] = results
+            changes["failed_count"] = sum(bool(item.error) for item in results)
+        elif appended_results is not None:
+            changes["failed_count"] = current.failed_count + sum(bool(item.error) for item in appended_results)
+            # The manager owns this list. Readers get a separate list under the same lock.
+            current.results.extend(appended_results)
+        changes["updated_at"] = utc_now()
+        self._jobs[job_id] = current.model_copy(update=changes, deep=False)
+        if persist:
+            self._save_state_unlocked()
 
     def _is_cancelled(self, job_id: str) -> bool:
         with self._lock:
@@ -949,6 +952,15 @@ class ProcessingJobManager:
             speed_start_processed = start_processed
             total_files = len(files)
             missing_file_keys: set[str] = set()
+            published_result_count = 0
+
+            def publish_results(*, replace: bool = False, **changes: object) -> None:
+                nonlocal published_result_count
+                if replace:
+                    self._mutate_job(job_id, results=results, **changes)
+                else:
+                    self._mutate_job(job_id, appended_results=results[published_result_count:], **changes)
+                published_result_count = len(results)
 
             def active_photo_count() -> int:
                 return sum(
@@ -1100,23 +1112,21 @@ class ProcessingJobManager:
                     logger.info("Skipping deleted input file: %s", path)
                 if removed:
                     total_files = max(processed, total_files - removed)
-                    self._mutate_job(
-                        job_id,
+                    publish_results(
+                        replace=True,
                         persist=False,
                         total=total_files,
                         processed=min(processed, total_files),
-                        results=results,
                         **progress_metrics(min(processed, total_files)),
                         message=f"已跳过 {len(missing_file_keys)} 个已删除文件",
                     )
                 return existing
 
-            self._mutate_job(
-                job_id,
+            publish_results(
+                replace=True,
                 state=JobState.RUNNING,
                 total=total_files,
                 processed=processed,
-                results=results,
                 **progress_metrics(processed),
                 message=(
                     f"继续任务：已完成 {processed}/{total_files}，剩余 {len(remaining_files)} 个文件"
@@ -1168,11 +1178,9 @@ class ProcessingJobManager:
                         processed >= total_files
                         or now - last_progress_publish >= 0.2
                     ):
-                        self._mutate_job(
-                            job_id,
+                        publish_results(
                             persist=False,
                             processed=processed,
-                            results=results,
                             **progress_metrics(processed),
                             message=f"正在预扫描{media_label} {processed}/{total_files}: {path.name}",
                         )
@@ -1288,11 +1296,9 @@ class ProcessingJobManager:
                             mark_cancelled_results(results)
                             return
                         last_path = batch[min(len(batch), len(detected_items)) - 1] if detected_items else batch[-1]
-                        self._mutate_job(
-                            job_id,
+                        publish_results(
                             persist=False,
                             processed=processed,
-                            results=results,
                             **progress_metrics(processed),
                             message=(
                                 f"正在批处理照片 {processed}/{total_files} "
@@ -1354,8 +1360,8 @@ class ProcessingJobManager:
                             mark_cancelled_results(results)
                             return
                         ensure_dinov3_sequences_completed(results)
-                        self._mutate_job(
-                            job_id, persist=False, results=results, sequence_stage=None,
+                        publish_results(
+                            replace=True, persist=False, sequence_stage=None,
                             sequence_processed=0, sequence_total=0, message=f"{joint_model_name}完整序列判定完成",
                         )
                     elif video_results:
@@ -1363,11 +1369,10 @@ class ProcessingJobManager:
                 video_files = existing_paths(video_files)
                 if video_files:
                     reset_speed_metrics(processed)
-                    self._mutate_job(
-                        job_id,
+                    publish_results(
+                        replace=True,
                         persist=False,
                         processed=processed,
-                        results=results,
                         **progress_metrics(processed),
                         message=f"正在准备处理视频 0/{len(video_files)}",
                     )
@@ -1401,8 +1406,8 @@ class ProcessingJobManager:
                         if processed < total_files and now - last_video_publish < 0.2:
                             return
                         last_video_publish = now
-                        self._mutate_job(
-                            job_id, persist=False, processed=processed, results=results,
+                        publish_results(
+                            persist=False, processed=processed,
                             **progress_metrics(processed),
                             message=f"正在快速处理视频 {processed}/{total_files}: {item.filename}",
                         )
@@ -1493,10 +1498,8 @@ class ProcessingJobManager:
                                 return
                             results.append(item)
                             processed += 1
-                            self._mutate_job(
-                                job_id,
+                            publish_results(
                                 processed=processed,
-                                results=results,
                                 **progress_metrics(processed),
                                 message=f"正在处理视频 {processed}/{total_files}: {path.name}",
                             )
@@ -1506,10 +1509,8 @@ class ProcessingJobManager:
                             len(video_files),
                             video_worker_count,
                         )
-                        base_results = list(results)
-                        detected_video_items: list[DetectionItem | None] = [
-                            None for _ in video_items
-                        ]
+                        base_result_count = len(results)
+                        completed_video_indices: list[int] = []
                         worker_state = threading.local()
                         primary_detector_lock = threading.Lock()
                         primary_detector_available = True
@@ -1577,18 +1578,20 @@ class ProcessingJobManager:
                                     item = video_items[completed_index].model_copy(
                                         update={"error": f"视频检测失败: {exc}"}
                                     )
-                                detected_video_items[completed_index] = item
+                                insert_earlier = bool(
+                                    completed_video_indices and completed_index < completed_video_indices[-1]
+                                )
+                                if insert_earlier:
+                                    position = bisect_left(completed_video_indices, completed_index)
+                                    completed_video_indices.insert(position, completed_index)
+                                    results.insert(base_result_count + position, item)
+                                else:
+                                    completed_video_indices.append(completed_index)
+                                    results.append(item)
                                 processed += 1
-                                current_video_results = [
-                                    detected
-                                    for detected in detected_video_items
-                                    if detected is not None
-                                ]
-                                results = [*base_results, *current_video_results]
-                                self._mutate_job(
-                                    job_id,
+                                publish_results(
+                                    replace=insert_earlier,
                                     processed=processed,
-                                    results=results,
                                     **progress_metrics(processed),
                                     message=(
                                         f"正在并发处理视频 {processed}/{total_files} "
@@ -1618,8 +1621,8 @@ class ProcessingJobManager:
                 )
                 if not self._is_cancelled(job_id):
                     ensure_dinov3_sequences_completed([item for item in results if not item.error])
-                    self._mutate_job(job_id, persist=False, results=results, sequence_stage=None,
-                                     sequence_processed=0, sequence_total=0)
+                    publish_results(replace=True, persist=False, sequence_stage=None,
+                                    sequence_processed=0, sequence_total=0)
             if self._is_cancelled(job_id):
                 if joint_media:
                     results = checkpoint_dinov3_cancellation(results)

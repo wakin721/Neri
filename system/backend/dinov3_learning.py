@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import closing, contextmanager, nullcontext
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -421,7 +422,41 @@ def _recalibrate(model, data):
                     sites=data.get("sites"), contents=data.get("contents"), adapted_features=adapted)
 
 
-def learning_status(model_path):
+@lru_cache(maxsize=16)
+def _read_original_classes(path, digest, mtime_ns, size):
+    """Cache the verified class list for an immutable base checkpoint."""
+    from system.dinov3.encoder import sha256
+
+    if sha256(path) != digest:
+        return None
+    with zipfile.ZipFile(path) as archive:
+        info = json.loads(archive.read("manifest.json"))
+    if info.get("metadata", {}).get("human_learning_samples"):
+        return None
+    return tuple(info["classes"])
+
+
+def _original_classes(manifest, payload, info):
+    from system.dinov3.runtime import resolve_manifest_asset
+
+    metadata = info.get("metadata", {})
+    base = metadata.get("human_learning_base")
+    if payload.get("learning_base"):
+        base = {"checkpoint": payload["learning_base"], "sha256": payload.get("learning_base_sha256")}
+    if base is None:
+        return None if metadata.get("human_learning_samples") else info["classes"]
+    try:
+        path = resolve_manifest_asset(manifest, base["checkpoint"])
+        if base["checkpoint"] == payload["checkpoint"] and base["sha256"] == payload["checkpoint_sha256"]:
+            return None if metadata.get("human_learning_samples") else info["classes"]
+        stat = path.stat()
+        return _read_original_classes(path, base["sha256"], stat.st_mtime_ns, stat.st_size)
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
+        # Older/moved deployments can retain learned counts without the original head.
+        return None
+
+
+def learning_status(model_path, include_species=False):
     from system.dinov3.runtime import read_manifest
 
     manifest = Path(model_path).expanduser().resolve()
@@ -430,7 +465,7 @@ def learning_status(model_path):
     with closing(_connect()) as conn:
         rows = conn.execute("SELECT data FROM samples WHERE model=? AND applied=0", (_key(manifest),)).fetchall()
         run = conn.execute("SELECT * FROM learning_runs WHERE model=?", (_key(manifest),)).fetchone()
-    counts = Counter(json.loads(row["data"])["species"] for row in rows if json.loads(row["data"])["species"])
+    counts = Counter(name for row in rows if (name := json.loads(row["data"])["species"]))
     learned = {}
     classes = []
     rejection = {}
@@ -468,11 +503,15 @@ def learning_status(model_path):
         message = run["message"]
     if state == "queued":
         message = "人工校验已保存，等待后台自动学习。"
+    details = {}
+    if include_species:
+        details["original_species"] = _original_classes(manifest, payload, info)
+        details["current_species"] = classes
     return dict(pending_count=len(rows), species_counts=dict(counts),
                 calibration_available=available, message=message, state=state,
                 learned_count=len(learned), learned_species_counts=dict(Counter(learned.values())),
                 class_count=len(classes), last_update=run["last_update"] if run else None,
-                last_error=run["last_error"] if run else None, rejection=rejection)
+                last_error=run["last_error"] if run else None, rejection=rejection, **details)
 
 
 def discard_pending(model_path):

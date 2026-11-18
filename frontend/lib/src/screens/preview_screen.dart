@@ -93,7 +93,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  return _buildWorkspace(context, constraints.maxWidth);
+                  return _buildWorkspace(context, constraints);
                 },
               ),
             ),
@@ -102,7 +102,8 @@ class _PreviewScreenState extends State<PreviewScreen> {
     );
   }
 
-  Widget _buildWorkspace(BuildContext context, double availableWidth) {
+  Widget _buildWorkspace(BuildContext context, BoxConstraints constraints) {
+    final availableWidth = constraints.maxWidth;
     final safeIndex = widget.selectedIndex
         .clamp(0, widget.items.length - 1)
         .toInt();
@@ -121,7 +122,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
       );
     }
 
-    final listHeight = availableWidth < 600 ? 220.0 : 280.0;
+    final preferredListHeight = availableWidth < 600 ? 220.0 : 280.0;
+    final listHeight = (constraints.maxHeight * 0.35)
+        .clamp(0.0, preferredListHeight)
+        .toDouble();
     return Column(
       children: [
         SizedBox(height: listHeight, child: _buildFileList(context)),
@@ -188,57 +192,72 @@ class _PreviewScreenState extends State<PreviewScreen> {
     final effectiveSpecies = filterApplies
         ? widget.selectedSpeciesFilter
         : previewAllSpeciesLabel;
-    final visibleBoxes = _filteredPreviewBoxes(item, effectiveSpecies);
+    final visibleBoxes = _filteredPreviewBoxes(item, effectiveSpecies, dino);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          child: Card.filled(
-            margin: EdgeInsets.zero,
-            clipBehavior: Clip.antiAlias,
-            child: DetectionMediaViewer(
-              item: item,
-              visibleBoxes: visibleBoxes,
-              showDetections: widget.showDetections,
-              onOpenExternal: () => widget.onOpenExternal(item.path),
+    final media = Card.filled(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: DetectionMediaViewer(
+        item: item,
+        visibleBoxes: visibleBoxes,
+        showDetections: widget.showDetections,
+        onOpenExternal: () => widget.onOpenExternal(item.path),
+      ),
+    );
+    final details = [
+      const SizedBox(height: 10), // 与校验界面保持 10 的间距
+      _ImageInfoCard(
+        item: item,
+        visibleBoxes: visibleBoxes,
+        speciesTypes: widget.speciesTypes,
+        useCombinedConfidence: widget.useCombinedConfidence,
+      ),
+      const SizedBox(height: 10),
+      _PreviewDetectionControls(
+        item: item,
+        dino: dino,
+        selectedSpecies: effectiveSpecies,
+        speciesOptions: speciesOptions,
+        showDetections: widget.showDetections,
+        onShowDetectionsChanged: widget.onShowDetectionsChanged,
+        confidenceThreshold: widget.confidenceThreshold,
+        onConfidenceThresholdChanged: widget.onConfidenceThresholdChanged,
+        detecting: widget.detecting,
+        onSpeciesFilterChanged: widget.onSpeciesFilterChanged,
+        onDetectCurrentImage: widget.onDetectCurrentImage,
+      ),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final minHeight = 280 + _previewTextGrowth(context) * 12;
+        return SingleChildScrollView(
+          primary: false,
+          child: SizedBox(
+            height: constraints.maxHeight.clamp(minHeight, double.infinity),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: media),
+                ...details,
+              ],
             ),
           ),
-        ),
-        const SizedBox(height: 10), // 与校验界面保持 10 的间距
-        _ImageInfoCard(
-          item: item,
-          visibleBoxes: visibleBoxes,
-          speciesTypes: widget.speciesTypes,
-          useCombinedConfidence: widget.useCombinedConfidence,
-        ),
-        const SizedBox(height: 10), // 与校验界面保持 10 的间距
-        _PreviewDetectionControls(
-          item: item,
-          selectedSpecies: effectiveSpecies,
-          speciesOptions: speciesOptions,
-          showDetections: widget.showDetections,
-          onShowDetectionsChanged: widget.onShowDetectionsChanged,
-          confidenceThreshold: widget.confidenceThreshold,
-          onConfidenceThresholdChanged: widget.onConfidenceThresholdChanged,
-          detecting: widget.detecting,
-          onSpeciesFilterChanged: widget.onSpeciesFilterChanged,
-          onDetectCurrentImage: widget.onDetectCurrentImage,
-        ),
-      ],
+        );
+      },
     );
   }
 
   List<DetectionBox> _filteredPreviewBoxes(
     DetectionItem item,
     String selectedSpecies,
+    bool dino,
   ) {
     final key = (selectedSpecies, widget.confidenceThreshold);
     if (identical(_filteredItem, item) && _filterKey == key)
       return _filteredBoxes;
     final boxes = <DetectionBox>[];
     for (final box in item.detectionBoxes) {
-      if (isDinoItem(item) || isDinoDecision(box)) {
+      if (dino) {
         final finalBox = dinoFinalBox(box);
         if (finalBox.species != '空' &&
             finalBox.bbox.length >= 4 &&
@@ -549,6 +568,7 @@ class _DetectionSummary {
 class _PreviewDetectionControls extends StatelessWidget {
   const _PreviewDetectionControls({
     required this.item,
+    required this.dino,
     required this.selectedSpecies,
     required this.speciesOptions,
     required this.showDetections,
@@ -561,6 +581,7 @@ class _PreviewDetectionControls extends StatelessWidget {
   });
 
   final DetectionItem item;
+  final bool dino;
   final String selectedSpecies;
   final List<String> speciesOptions;
   final bool showDetections;
@@ -573,94 +594,145 @@ class _PreviewDetectionControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (isDinoItem(item)) {
-      return Card.outlined(
-        margin: EdgeInsets.zero,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            children: [
-              const Text('显示结果'),
-              Switch(value: showDetections, onChanged: onShowDetectionsChanged),
-              const SizedBox(width: 10),
-              Expanded(
-                child: DinoRejectionScores(
-                  boxes: item.detectionBoxes,
-                  detectionData: item.detectionData,
-                ),
-              ),
-              const SizedBox(width: 10),
-              FilledButton(
-                onPressed: detecting || !_isPreviewImage(item)
-                    ? null
-                    : () => onDetectCurrentImage(item),
-                child: Text(detecting ? '检测中...' : '检测当前图像'),
-              ),
-            ],
-          ),
+    final toggle = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          '显示结果',
+          style: dino ? null : const TextStyle(fontWeight: FontWeight.w500),
         ),
-      );
-    }
+        if (!dino) const SizedBox(width: 4),
+        Switch(value: showDetections, onChanged: onShowDetectionsChanged),
+      ],
+    );
+    final onDetect = detecting || !_isPreviewImage(item)
+        ? null
+        : () => onDetectCurrentImage(item);
+    final detectLabel = Text(detecting ? '检测中...' : '检测当前图像');
+    final detectButton = dino
+        ? FilledButton(onPressed: onDetect, child: detectLabel)
+        : FilledButton.icon(
+            onPressed: onDetect,
+            icon: detecting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.center_focus_strong_rounded, size: 18),
+            label: detectLabel,
+          );
+
     return Card.outlined(
       margin: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Row(
-          children: [
-            const Text('显示结果', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(width: 4),
-            Switch(value: showDetections, onChanged: onShowDetectionsChanged),
-            const SizedBox(width: 16),
-            const Text('置信度', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 150,
-              child: DropdownMenu<String>(
-                initialSelection: selectedSpecies,
-                expandedInsets: EdgeInsets.zero,
-                menuStyle: appDropdownMenuStyle(context, minWidth: 150),
-                label: const Text('物种'),
-                dropdownMenuEntries: [
-                  for (final species in speciesOptions)
-                    DropdownMenuEntry<String>(value: species, label: species),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth;
+            final textGrowth = _previewTextGrowth(context);
+            final singleRow = dino
+                ? width >= 480 + textGrowth * 10
+                : width >= 640 + textGrowth * 17;
+            final filters = dino
+                ? DinoRejectionScores(
+                    boxes: item.detectionBoxes,
+                    detectionData: item.detectionData,
+                  )
+                : _buildConfidenceControls(
+                    context,
+                    stacked: width < 360 + textGrowth * 7,
+                  );
+            if (singleRow) {
+              final gap = dino ? 10.0 : 16.0;
+              return Row(
+                children: [
+                  toggle,
+                  SizedBox(width: gap),
+                  Expanded(child: filters),
+                  SizedBox(width: gap),
+                  detectButton,
                 ],
-                onSelected: (value) {
-                  if (value != null) onSpeciesFilterChanged(value);
-                },
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Slider(
-                value: confidenceThreshold,
-                min: 0.05, // 修改了最小值、最大值和分段数量以和校验界面严格统一
-                max: 0.95,
-                divisions: 90,
-                label: confidenceThreshold.toStringAsFixed(2),
-                onChanged: onConfidenceThresholdChanged,
-              ),
-            ),
-            SizedBox(
-              width: 36,
-              child: Text(confidenceThreshold.toStringAsFixed(2)),
-            ),
-            const SizedBox(width: 16),
-            FilledButton.icon(
-              onPressed: detecting || !_isPreviewImage(item)
-                  ? null
-                  : () => onDetectCurrentImage(item),
-              icon: detecting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.center_focus_strong_rounded, size: 18),
-              label: Text(detecting ? '检测中...' : '检测当前图像'),
-            ),
-          ],
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 12,
+                  runSpacing: 8,
+                  children: [toggle, detectButton],
+                ),
+                const SizedBox(height: 8),
+                filters,
+              ],
+            );
+          },
         ),
       ),
+    );
+  }
+
+  Widget _buildConfidenceControls(
+    BuildContext context, {
+    required bool stacked,
+  }) {
+    final speciesMenu = Wrap(
+      spacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        const Text('置信度', style: TextStyle(fontWeight: FontWeight.w500)),
+        SizedBox(
+          width: 150,
+          child: DropdownMenu<String>(
+            initialSelection: selectedSpecies,
+            expandedInsets: EdgeInsets.zero,
+            menuStyle: appDropdownMenuStyle(context, minWidth: 150),
+            label: const Text('物种'),
+            dropdownMenuEntries: [
+              for (final species in speciesOptions)
+                DropdownMenuEntry<String>(value: species, label: species),
+            ],
+            onSelected: (value) {
+              if (value != null) onSpeciesFilterChanged(value);
+            },
+          ),
+        ),
+      ],
+    );
+    final confidenceText = confidenceThreshold.toStringAsFixed(2);
+    final slider = Row(
+      children: [
+        Expanded(
+          child: Slider(
+            value: confidenceThreshold,
+            min: 0.05,
+            max: 0.95,
+            divisions: 90,
+            label: confidenceText,
+            onChanged: onConfidenceThresholdChanged,
+          ),
+        ),
+        ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 36),
+          child: Text(confidenceText, maxLines: 1),
+        ),
+      ],
+    );
+    if (stacked) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [speciesMenu, slider],
+      );
+    }
+    return Row(
+      children: [
+        speciesMenu,
+        const SizedBox(width: 16),
+        Expanded(child: slider),
+      ],
     );
   }
 
@@ -669,3 +741,8 @@ class _PreviewDetectionControls extends StatelessWidget {
     return imageTypes.contains(item.fileType.toLowerCase());
   }
 }
+
+double _previewTextGrowth(BuildContext context) =>
+    (MediaQuery.textScalerOf(context).scale(14) - 14)
+        .clamp(0.0, double.infinity)
+        .toDouble();

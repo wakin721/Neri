@@ -44,39 +44,53 @@ class SelectableListCard<T> extends StatefulWidget {
 }
 
 class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
-  final _selectedTileKey = GlobalKey();
-  int? _lastSelectedIndex;
+  static const _rowGap = 4.0;
+  final _scrollController = ScrollController();
+  final _prototypeKey = GlobalKey();
   PointerDeviceKind? _lastPointerKind;
+
+  EdgeInsetsGeometry get _contentPadding =>
+      widget.padding.add(const EdgeInsets.all(8));
 
   @override
   void initState() {
     super.initState();
-    _lastSelectedIndex = widget.selectedIndex;
     _scheduleSelectedTileScroll();
   }
 
   @override
   void didUpdateWidget(covariant SelectableListCard<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.selectedIndex != widget.selectedIndex) {
-      _scheduleSelectedTileScroll(previousIndex: oldWidget.selectedIndex);
+    final newlyAvailable = oldWidget.items.length <= widget.selectedIndex &&
+        widget.selectedIndex < widget.items.length;
+    if (oldWidget.selectedIndex != widget.selectedIndex || newlyAvailable) {
+      _scheduleSelectedTileScroll();
     }
   }
 
-  void _scheduleSelectedTileScroll({int? previousIndex}) {
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scheduleSelectedTileScroll() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || widget.selectedIndex < 0) return;
-      final selectedContext = _selectedTileKey.currentContext;
-      if (selectedContext == null) return;
-      final oldIndex = previousIndex ?? _lastSelectedIndex;
-      final policy = oldIndex != null && widget.selectedIndex < oldIndex
-          ? ScrollPositionAlignmentPolicy.keepVisibleAtStart
-          : ScrollPositionAlignmentPolicy.keepVisibleAtEnd;
-      _lastSelectedIndex = widget.selectedIndex;
-      Scrollable.ensureVisible(
-        selectedContext,
-        duration: Duration.zero,
-        alignmentPolicy: policy,
+      if (!mounted || !_scrollController.hasClients) return;
+      final index = widget.selectedIndex;
+      if (index < 0 || index >= widget.items.length) return;
+      final extent = _prototypeKey.currentContext?.size?.height;
+      if (extent == null) return;
+      final position = _scrollController.position;
+      final insets = _contentPadding.resolve(Directionality.of(context));
+      final top = insets.top + index * extent;
+      final bottom = top + extent - _rowGap;
+      final offset = position.pixels;
+      final lastVisibleOffset = offset + position.viewportDimension;
+      if (top >= offset && bottom <= lastVisibleOffset) return;
+      final target = top < offset ? top : bottom - position.viewportDimension;
+      _scrollController.jumpTo(
+        target.clamp(position.minScrollExtent, position.maxScrollExtent),
       );
     });
   }
@@ -89,22 +103,31 @@ class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
       color: scheme.surfaceContainerLow,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       clipBehavior: Clip.antiAlias,
-      child: ListView.separated(
-        padding: widget.padding.add(const EdgeInsets.all(8)),
+      child: ListView.builder(
+        controller: _scrollController,
+        padding: _contentPadding,
         itemCount: widget.items.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 4),
+        // Measure a one- or two-line tile using the actual theme and text scale.
+        // The resulting stride also locates selected rows outside the lazy cache.
+        prototypeItem: Padding(
+          key: _prototypeKey,
+          padding: const EdgeInsets.only(bottom: _rowGap),
+          child: ListTile(
+            title: const Text(' '),
+            subtitle: widget.subtitleBuilder == null ? null : const Text(' '),
+          ),
+        ),
         itemBuilder: (context, index) {
           final item = widget.items[index];
           final subtitle = widget.subtitleBuilder?.call(item);
           final selected =
               widget.isSelected?.call(index, item) ??
               index == widget.selectedIndex;
-          final scrollTarget = index == widget.selectedIndex;
           Widget buildTile({
             void Function(TapDownDetails details)? onMenuTapDown,
           }) {
             final hasMenu = onMenuTapDown != null;
-            final tile = Listener(
+            return Listener(
               onPointerDown: (event) => _lastPointerKind = event.kind,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
@@ -155,26 +178,24 @@ class _SelectableListCardState<T> extends State<SelectableListCard<T>> {
                 ),
               ),
             );
-            if (!scrollTarget) return tile;
-            return KeyedSubtree(key: _selectedTileKey, child: tile);
           }
 
           final menuBuilder = widget.menuChildrenBuilder;
-          if (menuBuilder != null) {
-            // 已移除有问题的 ExcludeSemantics，现在你的右键菜单可以正常展开且不报错了
-            return _LazyMenuAnchor<T>(
-              item: item,
-              index: index,
-              menuStyle: widget.menuStyle,
-              menuChildrenBuilder: menuBuilder,
-              onMenuOpening: widget.onMenuOpening,
-              tileBuilder: (context, openMenu) {
-                return buildTile(onMenuTapDown: openMenu);
-              },
-            );
-          }
-
-          return buildTile();
+          return Padding(
+            padding: const EdgeInsets.only(bottom: _rowGap),
+            child: menuBuilder == null
+                ? buildTile()
+                : _LazyMenuAnchor<T>(
+                    item: item,
+                    index: index,
+                    menuStyle: widget.menuStyle,
+                    menuChildrenBuilder: menuBuilder,
+                    onMenuOpening: widget.onMenuOpening,
+                    tileBuilder: (context, openMenu) {
+                      return buildTile(onMenuTapDown: openMenu);
+                    },
+                  ),
+          );
         },
       ),
     );

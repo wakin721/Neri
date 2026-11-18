@@ -24,6 +24,7 @@ class DinoV3FeedbackRevertRequest(BaseModel):
 
 class DinoV3LearningRequest(BaseModel):
     classification_model_path: str = Field(..., min_length=1)
+    include_species: bool = False
 
 
 class DinoV3CalibrationRequest(DinoV3LearningRequest):
@@ -60,7 +61,7 @@ def dino_feedback_router() -> APIRouter:
     @router.post("/learning/status")
     def learning_status(request: DinoV3LearningRequest):
         from .dinov3_learning import learning_status as status
-        return learning_call(status, request.classification_model_path)
+        return learning_call(status, request.classification_model_path, request.include_species)
 
     @router.post("/learning/update")
     def learning_update(request: DinoV3LearningRequest):

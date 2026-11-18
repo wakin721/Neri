@@ -1219,8 +1219,12 @@ void main() {
     await tester.tap(find.text('环境维护').first);
     await tester.pumpAndSettle();
 
-    expect(find.text('下载版本'), findsOneWidget);
-    expect(find.text('自动检测（默认）'), findsOneWidget);
+    expect(find.text('下载版本'), findsNothing);
+    expect(find.text('自动检测（默认）'), findsNothing);
+    expect(find.descendant(
+      of: find.byKey(const Key('dino-runtime-choice')),
+      matching: find.text('自动检测'),
+    ), findsOneWidget);
     expect(find.textContaining('仅 GPU 模式要求 PyTorch'), findsNothing);
 
     Finder runtimeChoiceTrigger() => find.descendant(
@@ -1233,7 +1237,7 @@ void main() {
     await tester.tap(runtimeChoiceTrigger());
     await tester.pumpAndSettle();
     expect(
-      find.widgetWithText(MenuItemButton, '自动检测（默认）'),
+      find.widgetWithText(MenuItemButton, '自动检测'),
       findsOneWidget,
     );
     expect(
@@ -1294,7 +1298,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('GPU（PyTorch）'), findsOneWidget);
-    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
+    expect(find.textContaining('当前已安装：'), findsNothing);
     expect(find.textContaining('需要 PyTorch 环境'), findsNothing);
     expect(find.widgetWithText(OutlinedButton, '删除'), findsOneWidget);
     expect(find.byKey(const Key('dino-component-switch')), findsOneWidget);
@@ -1315,7 +1319,7 @@ void main() {
     await tester.pumpAndSettle();
     final autoChoiceItem = find.widgetWithText(
       MenuItemButton,
-      '自动检测（默认）',
+      '自动检测',
     );
     await tester.ensureVisible(autoChoiceItem);
     await tester.pumpAndSettle();
@@ -1323,7 +1327,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 900));
     await tester.pumpAndSettle();
-    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
+    expect(find.textContaining('当前已安装：'), findsNothing);
     expect(find.textContaining('仅 GPU 模式要求 PyTorch'), findsNothing);
     await tester.pumpWidget(
       buildScreen(
@@ -1335,11 +1339,18 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
+    expect(find.textContaining('当前已安装：'), findsNothing);
+    expect(find.textContaining('仅 GPU 模式要求 PyTorch'), findsNothing);
+    await tester.tap(find.text('调试模式').first);
+    await tester.pumpAndSettle();
+    expect(find.text('联合模型运行环境'), findsOneWidget);
+    expect(find.textContaining('当前已安装：CPU（LiteRT FP32）'), findsOneWidget);
     expect(
       find.textContaining('仅 GPU 模式要求 PyTorch'),
       findsOneWidget,
     );
+    await tester.tap(find.text('环境维护').first);
+    await tester.pumpAndSettle();
     statusPayload = <String, dynamic>{
       'installed': false,
       'healthy': false,

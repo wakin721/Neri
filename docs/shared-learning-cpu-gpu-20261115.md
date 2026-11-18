@@ -1,6 +1,6 @@
 # Neri1.2preview CPU / GPU 共享学习
 
-同源的 Neri1.2preview LiteRT FP32 与 PyTorch 版本共用补图、新增物种、校准和撤销记录。2026-11-16 起，开始页与检测设置不再显示“运行方式”；在环境维护的“下载版本”选择自动检测（默认）、CPU（LiteRT FP32）或 GPU（PyTorch），通过 NeriCloud 安装或切换组件。自动检测根据支持的 GPU 硬件选择 GPU 版本，否则选择 CPU；CPU 不要求 PyTorch，GPU 所需的运行环境按需补齐。
+同源的 Neri1.2preview LiteRT FP32 与 PyTorch 版本共用补图、新增物种、校准和撤销记录。在“设置 → 环境维护”的 Neri1.2preview 组件中可选择“自动检测”、“CPU（LiteRT FP32）”或“GPU（PyTorch）”，通过 NeriCloud 安装或切换组件。默认使用自动检测，有支持的 GPU 时选择 GPU 版本，否则选择 CPU 版本。CPU 版本无需 PyTorch，GPU 版本按需补齐运行环境。已安装的运行版本和选择说明可在“设置 → 调试模式 → 联合模型运行环境”中查看。
 
 ## 模型身份与持久化
 

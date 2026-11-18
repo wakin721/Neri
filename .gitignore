@@ -39,6 +39,7 @@ ENV/
 !/tests/test_model_resource_paths.py
 !/tests/test_dinov3_*.py
 !/tests/test_litert_detection.py
+!/tests/test_job_dependency_gate.py
 !/tests/test_classification_export_results.py
 !/tests/test_csv_export_integration.py
 !/tests/test_job_failed_retry_api.py

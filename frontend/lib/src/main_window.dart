@@ -894,10 +894,11 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
 
   Future<void> _refreshInitialPageData({StartupTiming? timing}) async {
     timing ??= StartupTiming();
-    await _refresh(includeJobResults: false);
+    await _refresh(includeJobResults: false, probeGpu: false);
     timing.mark('initial_settings_and_job_summaries');
     if (!mounted || _closeFlowBlocksBackendStartup || !_backendReady) return;
     timing.mark('shell_ready');
+    unawaited(_loadStartupGpuStatus());
     unawaited(
       _dinoStartupCheck.run(
         generation: _backendStartupGeneration,
@@ -919,6 +920,32 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         force: true,
       ).whenComplete(() => timing!.mark('initial_preview')),
     );
+  }
+
+  Future<void> _loadStartupGpuStatus() async {
+    final generation = _backendStartupGeneration;
+    try {
+      final probed = await widget.apiClient.fetchSettings().timeout(
+        const Duration(seconds: 15),
+      );
+      if (!mounted ||
+          _closeFlowBlocksBackendStartup ||
+          !_backendReady ||
+          generation != _backendStartupGeneration ||
+          _settings == null) {
+        return;
+      }
+      setState(() {
+        // Only merge capability information: settings may have been edited
+        // while the optional GPU probe was running.
+        _settings = _settings!.copyWith(gpuAvailable: probed.gpuAvailable);
+        _useFp16 =
+            probed.gpuAvailable &&
+            _boolSetting(_settings!, 'use_fp16', _useFp16);
+      });
+    } catch (_) {
+      // Opening settings or starting inference can retry runtime detection.
+    }
   }
 
   void _scheduleStartupUpdateCheck() {
@@ -2349,6 +2376,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     bool includeJobResults = true,
     bool finishLoading = true,
     bool coalesce = false,
+    bool probeGpu = true,
   }) async {
     await _refreshGate.run(() async {
       if (!mounted || _closeFlowBlocksBackendStartup) return;
@@ -2357,6 +2385,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
         reloadSettings: reloadSettings,
         includeJobResults: includeJobResults,
         finishLoading: finishLoading,
+        probeGpu: probeGpu,
       );
     }, coalesce: coalesce);
   }
@@ -2366,6 +2395,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
     bool reloadSettings = false,
     bool includeJobResults = true,
     bool finishLoading = true,
+    bool probeGpu = true,
   }) async {
     if (_closeFlowBlocksBackendStartup) return;
     if (!silent) {
@@ -2377,9 +2407,9 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       final shouldFetchSettings =
           reloadSettings || !silent || _settings == null || !_backendReady;
       final settings = shouldFetchSettings
-          ? await widget.apiClient.fetchSettings().timeout(
-              const Duration(seconds: 15),
-            )
+          ? await widget.apiClient
+                .fetchSettings(probeGpu: probeGpu)
+                .timeout(const Duration(seconds: 15))
           : _settings;
       final mayFetchCompleteJobResults = shouldFetchCompleteJobResults(
         includeJobResults: includeJobResults,

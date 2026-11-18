@@ -68,6 +68,9 @@ def test_new_and_old_species_update_reload_and_retry(ready, tmp_path):
     stage(manifest, new, "C", "new")
     stage(manifest, new, "C", "new-again")
     assert learning.learning_status(manifest)["species_counts"] == {"A": 1, "C": 1}
+    pending = learning.learning_status(manifest, include_species=True)
+    assert set(pending["original_species"]) == set(pending["current_species"]) == {"A", "B"}
+    assert pending["learned_species_counts"] == {}
     thresholds = learning.learning_status(manifest)['rejection']
     assert thresholds['box_threshold'] == loaded(manifest).box_threshold
     assert thresholds['sequence_threshold'] == loaded(manifest).threshold
@@ -85,6 +88,11 @@ def test_new_and_old_species_update_reload_and_retry(ready, tmp_path):
     assert read_manifest(manifest)["checkpoint"] != before["checkpoint"]
     assert resolve_manifest_asset(manifest, before["checkpoint"]).exists()
     assert learning.learning_status(manifest)["pending_count"] == 0
+    status = learning.learning_status(manifest, include_species=True)
+    assert set(status["original_species"]) == {"A", "B"}
+    assert set(status["current_species"]) == {"A", "B", "C"}
+    assert status["learned_species_counts"] == {"A": 1, "C": 1}
+    assert "original_species" not in learning.learning_status(manifest)
     stable = manifest.read_bytes()
     assert learning.update_model(manifest)["updated_count"] == 0
     assert manifest.read_bytes() == stable
@@ -109,6 +117,14 @@ def test_same_content_deduplicates_across_paths_and_after_publication(ready, tmp
     before = manifest.read_bytes()
     assert learning.update_model(manifest)["updated_count"] == 0
     assert manifest.read_bytes() == before
+
+
+def test_species_origin_is_unknown_if_the_learning_base_is_missing(tmp_path):
+    manifest = tmp_path / "test.neri.json"
+    info = {"classes": ["A", "C"], "metadata": {"human_learning_samples": {"id": "C"}}}
+    assert learning._original_classes(manifest, {}, info) is None
+    info["metadata"]["human_learning_base"] = {"checkpoint": "missing.model", "sha256": "a" * 64}
+    assert learning._original_classes(manifest, {}, info) is None
 
 
 def test_pending_label_change_and_undo(ready, tmp_path):

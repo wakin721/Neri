@@ -6,9 +6,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:neri_flutter/src/api_client.dart';
+import 'package:neri_flutter/src/app_theme.dart';
 import 'package:neri_flutter/src/models/settings.dart';
 import 'package:neri_flutter/src/models/theme_settings.dart';
 import 'package:neri_flutter/src/screens/settings_screen.dart';
+import 'package:neri_flutter/src/widgets/settings_progress_indicator.dart';
 
 http.Response statusResponse({bool installed = false, bool? healthy}) =>
     http.Response(
@@ -22,9 +24,14 @@ http.Response statusResponse({bool installed = false, bool? healthy}) =>
     );
 
 class StatusHarness {
-  StatusHarness(Future<http.Response> Function(int) response) {
+  StatusHarness(
+    Future<http.Response> Function(int) response, {
+    Future<http.Response>? classes,
+  }) {
     api = NeriApiClient(
       httpClient: MockClient((request) async {
+        if (request.url.path == '/api/models/classes' && classes != null)
+          return classes;
         if (request.url.path == '/api/environment/dinov3-status') {
           return response(++requests);
         }
@@ -50,6 +57,7 @@ class StatusHarness {
   int removeRequests = 0;
 
   Widget screen() => MaterialApp(
+    theme: buildNeriTheme(ColorScheme.fromSeed(seedColor: kDefaultSeedColor)),
     home: Scaffold(
       body: SettingsScreen(
         settings: settings,
@@ -83,6 +91,62 @@ Future<void> mount(WidgetTester tester, StatusHarness harness) async {
 }
 
 void main() {
+  testWidgets('species and component settings paint a text-sized loading ring', (
+    tester,
+  ) async {
+    final classes = Completer<http.Response>();
+    final component = Completer<http.Response>();
+    final harness =
+        StatusHarness((_) => component.future, classes: classes.future)
+          ..settings = NeriSettings.fromJson({
+            'selected_model': 'detector.pt',
+            'available_models': [
+              {'name': 'Detector', 'path': 'detector.pt'},
+            ],
+          });
+    await tester.binding.setSurfaceSize(const Size(1400, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    addTearDown(harness.api.close);
+    addTearDown(harness.theme.dispose);
+    await tester.pumpWidget(harness.screen());
+    await tester.pump();
+    await tester.ensureVisible(find.byType(SettingsProgressIndicator));
+    await tester.pump();
+
+    void expectRing() {
+      final ring = find.descendant(
+        of: find.byType(SettingsProgressIndicator),
+        matching: find.byType(CircularProgressIndicator),
+      );
+      expect(tester.widget<CircularProgressIndicator>(ring).strokeWidth, 2);
+      final paint = find.descendant(
+        of: ring,
+        matching: find.byType(CustomPaint),
+      );
+      expect(tester.getSize(paint), const Size(14, 14));
+    }
+
+    expectRing();
+    expect(
+      tester
+          .widget<CircularProgressIndicator>(
+            find.byType(CircularProgressIndicator),
+          )
+          .semanticsLabel,
+      '正在读取识别物种',
+    );
+    classes.complete(http.Response('[]', 200));
+    await tester.pump();
+    expect(find.byType(SettingsProgressIndicator), findsNothing);
+    await tester.tap(find.text('环境维护').first);
+    await tester.pump();
+    expectRing();
+    component.complete(statusResponse(installed: true));
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('unhealthy installed component offers deletion beside repair', (
     tester,
   ) async {

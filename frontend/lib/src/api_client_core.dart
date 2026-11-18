@@ -35,8 +35,10 @@ class NeriApiClient {
     _ensureSuccess(response);
   }
 
-  Future<NeriSettings> fetchSettings() async {
-    final response = await _httpClient.get(_uri('/api/settings'));
+  Future<NeriSettings> fetchSettings({bool probeGpu = true}) async {
+    final response = await _httpClient.get(
+      _uri(probeGpu ? '/api/settings' : '/api/settings?probe_gpu=false'),
+    );
     _ensureSuccess(response);
     return NeriSettings.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,

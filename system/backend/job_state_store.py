@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import time
@@ -11,12 +12,20 @@ import time
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _SavedJob:
+    job: object
+    request: object
+    results: list | tuple | None
+    result_count: int
+
+
 class JobStateStore:
     def __init__(self, legacy_path: Path):
         self.path = legacy_path.with_suffix(".sqlite3")
-        self._saved: dict[str, tuple[object, object, tuple]] = {}
+        self._saved: dict[str, _SavedJob] = {}
 
-    def load(self):
+    def load(self, *, include_results: bool = True):
         if not self.path.exists():
             return None
         with closing(sqlite3.connect(self.path)) as conn:
@@ -33,21 +42,44 @@ class JobStateStore:
                 jobs[job_id]["results"] = []
                 if request is not None:
                     requests[job_id] = json.loads(request)
-            for job_id, payload in conn.execute(
-                "SELECT job_id,payload FROM results ORDER BY job_id,position"
-            ):
-                jobs[job_id]["results"].append(json.loads(payload))
+            if include_results:
+                for job_id, payload in conn.execute(
+                    "SELECT job_id,payload FROM results ORDER BY job_id,position"
+                ):
+                    jobs[job_id]["results"].append(json.loads(payload))
         return {"jobs": jobs, "requests": requests}
 
-    def remember(self, jobs, requests):
-        self._saved = {
-            key: (job, requests.get(key), tuple(job.results))
-            for key, job in jobs.items()
-        }
+    def load_results(self, job_id: str):
+        """Read only the selected task, using the existing primary-key index."""
+        with closing(sqlite3.connect(self.path)) as conn:
+            return [json.loads(row[0]) for row in conn.execute(
+                "SELECT payload FROM results WHERE job_id=? ORDER BY position", (job_id,)
+            )]
+
+    def remember_job(self, job_id, job, request):
+        previous = self._saved.get(job_id)
+        # Retain an older baseline after a failed metadata checkpoint, so
+        # hydrating results does not accidentally mark unsaved state as saved.
+        self._saved[job_id] = _SavedJob(
+            previous.job if previous is not None else job,
+            previous.request if previous is not None else request,
+            job.results,
+            len(job.results),
+        )
+
+    def remember(self, jobs, requests, *, unloaded_job_ids=frozenset(), append_only_result_lists=False):
+        saved = {}
+        for key, job in jobs.items():
+            results = None
+            if key not in unloaded_job_ids:
+                # The manager holds its lock and replaces the list for corrections.
+                results = job.results if append_only_result_lists else tuple(job.results)
+            saved[key] = _SavedJob(job, requests.get(key), results, len(results) if results is not None else 0)
+        self._saved = saved
 
     def has_saved(self, job_id, job):
         previous = self._saved.get(job_id)
-        return previous is not None and previous[0] is job
+        return previous is not None and previous.job is job
 
     def load_inputs(self, job_id: str, input_key: str):
         """Load a completed discovery snapshot without traversing source media."""
@@ -82,7 +114,7 @@ class JobStateStore:
                     (job_id, input_key, str(root), json.dumps([str(path) for path in paths], ensure_ascii=False)),
                 )
 
-    def save(self, jobs, requests):
+    def save(self, jobs, requests, *, unloaded_job_ids=frozenset(), append_only_result_lists=False):
         started = time.perf_counter()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=5)
@@ -112,7 +144,7 @@ class JobStateStore:
                 for key, job in jobs.items():
                     request = requests.get(key)
                     previous = self._saved.get(key) if key in persisted_ids else None
-                    if previous is not None and previous[0] is job and previous[1] is request:
+                    if previous is not None and previous.job is job and previous.request is request:
                         continue
                     payload = job.model_dump(mode="json", exclude={"results", "active"})
                     payload["active"] = False
@@ -122,7 +154,14 @@ class JobStateStore:
                         (key, json.dumps(payload, ensure_ascii=False),
                          json.dumps(request.model_dump(mode="json"), ensure_ascii=False) if request else None),
                     )
-                    old_results = previous[2] if previous else ()
+                    # A summary's empty results are a placeholder, never a
+                    # request to delete the task's persisted result rows.
+                    if key in unloaded_job_ids:
+                        continue
+                    results = job.results
+                    old_results = previous.results if previous and previous.results is not None else ()
+                    old_count = previous.result_count if previous else 0
+                    start = old_count if old_results is results else 0
                     # Corrections replace only their own positions. Finalization
                     # may replace every object, but must not delete/rebuild the
                     # task's result tree or rewrite byte-identical payloads.
@@ -130,15 +169,18 @@ class JobStateStore:
                         "INSERT INTO results VALUES(?,?,?) "
                         "ON CONFLICT(job_id,position) DO UPDATE SET payload=excluded.payload "
                         "WHERE results.payload<>excluded.payload",
-                        ((key, index, item.model_dump_json())
-                         for index, item in enumerate(job.results)
-                         if index >= len(old_results) or old_results[index] is not item),
+                        ((key, index, results[index].model_dump_json())
+                         for index in range(start, len(results))
+                         if index >= old_count or old_results[index] is not results[index]),
                     )
-                    if previous is None or len(job.results) < len(old_results):
-                        conn.execute("DELETE FROM results WHERE job_id=? AND position>=?", (key, len(job.results)))
+                    if previous is None or len(results) < old_count:
+                        conn.execute("DELETE FROM results WHERE job_id=? AND position>=?", (key, len(results)))
                 conn.execute("INSERT OR REPLACE INTO metadata VALUES('initialized','1')")
             # Advance the in-memory baseline only after a successful commit.
-            self.remember(jobs, requests)
+            self.remember(
+                jobs, requests, unloaded_job_ids=unloaded_job_ids,
+                append_only_result_lists=append_only_result_lists,
+            )
         finally:
             conn.close()
             logger.info("Job state checkpoint timing: elapsed=%.3fs", time.perf_counter() - started)

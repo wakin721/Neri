@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
+import 'dino_species_learning_dialog.dart';
+import 'summary_dialog_button.dart';
 
 class DinoLearningStatus extends StatefulWidget {
   const DinoLearningStatus({
@@ -30,6 +32,8 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
   int _request = 0;
   Timer? _timer;
   String? _lastCompletion;
+  DialogRoute<void>? _detailsRoute;
+  ValueNotifier<SpeciesLearningSnapshot>? _details;
 
   @override
   void initState() {
@@ -53,6 +57,7 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
         oldWidget.active != widget.active ||
         oldWidget.apiClient != widget.apiClient) {
       _request++;
+      _closeDetails();
       _loading = false;
       _status = null;
       _error = null;
@@ -65,22 +70,80 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
   void dispose() {
     _timer?.cancel();
     _request++;
+    _closeDetails();
     super.dispose();
+  }
+
+  void _closeDetails() {
+    final route = _detailsRoute;
+    if (route == null) return;
+    _details = null;
+    _detailsRoute = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (route.isActive) route.navigator?.removeRoute(route);
+    });
+  }
+
+  Future<void> _showDetails() async {
+    if (_detailsRoute != null) return;
+    final data = ValueNotifier<SpeciesLearningSnapshot>((
+      status: null,
+      error: null,
+      busy: true,
+    ));
+    final route = DialogRoute<void>(
+      context: context,
+      builder: (_) => DinoSpeciesLearningDialog(
+        data: data,
+        onRefresh: _refresh,
+        onRetry: () => _run('retry'),
+        onImportCalibration: _importCalibration,
+      ),
+    );
+    _detailsRoute = route;
+    _details = data;
+    final closed = Navigator.of(context, rootNavigator: true).push(route);
+    unawaited(_refresh());
+    try {
+      await closed;
+    } finally {
+      if (identical(_detailsRoute, route)) {
+        _detailsRoute = null;
+        _details = null;
+      }
+      unawaited(route.completed.whenComplete(data.dispose));
+    }
+  }
+
+  void _publishDialog({Map<String, dynamic>? status}) {
+    final details = _details;
+    if (details == null) return;
+    details.value = (
+      status: status ?? details.value.status,
+      error: _error,
+      busy: _loading || _working,
+    );
   }
 
   Future<void> _refresh() async {
     final request = ++_request;
+    final details = _details;
     setState(() => _loading = true);
+    _publishDialog();
     try {
       final status = await widget.apiClient.dinoLearning(
         'status',
         widget.modelPath,
+        includeSpecies: details != null,
       );
       if (!mounted || request != _request) return;
       setState(() {
         _status = status;
         _error = null;
       });
+      if (details != null && identical(details, _details)) {
+        _publishDialog(status: status);
+      }
       final completion = status['last_update']?.toString();
       if (status['state'] == 'ready' &&
           completion != null &&
@@ -89,9 +152,14 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
         widget.onLearned?.call();
       }
     } catch (error) {
-      if (mounted && request == _request) setState(() => _error = '$error');
+      if (mounted && request == _request) {
+        setState(() => _error = '$error');
+      }
     } finally {
-      if (mounted && request == _request) setState(() => _loading = false);
+      if (mounted && request == _request) {
+        setState(() => _loading = false);
+        _publishDialog();
+      }
     }
   }
 
@@ -99,6 +167,7 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
     if (_working) return;
     final model = widget.modelPath;
     setState(() => _working = true);
+    _publishDialog();
     try {
       await widget.apiClient.dinoLearning(
         action,
@@ -112,15 +181,20 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
         setState(() => _error = '$error');
       }
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) {
+        setState(() => _working = false);
+        _publishDialog();
+      }
     }
   }
 
   Future<void> _importCalibration() async {
+    final model = widget.modelPath;
     var path = '';
     final chosen = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: const Text('导入校准数据'),
         content: SizedBox(
           width: 480,
@@ -149,97 +223,28 @@ class _DinoLearningStatusState extends State<DinoLearningStatus> {
         ],
       ),
     );
-    if (chosen != null && chosen.isNotEmpty && mounted) {
+    if (mounted &&
+        widget.active &&
+        widget.modelPath == model &&
+        chosen != null &&
+        chosen.isNotEmpty) {
       await _run('calibration', calibrationPath: chosen);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = _status?['state']?.toString() ?? 'idle';
-    final title = switch (state) {
-      'queued' => '等待学习',
-      'running' => '正在学习',
-      'ready' => '学习已完成',
-      'blocked' => '学习暂不可用',
-      'failed' => '学习失败',
-      _ => '自动学习已就绪',
-    };
-    final pending = (_status?['pending_count'] as num?)?.toInt() ?? 0;
-    final learned = (_status?['learned_count'] as num?)?.toInt() ?? 0;
-    final classes = (_status?['class_count'] as num?)?.toInt() ?? 0;
-    final rejection = _status?['rejection'] as Map<String, dynamic>? ?? {};
-    final experiment = rejection['gate_mode'] == 'sequence';
-    String threshold(String key) =>
-        (rejection[key] as num?)?.toStringAsFixed(3) ?? '未记录';
-    final species =
-        _status?['learned_species_counts'] as Map<String, dynamic>? ?? {};
-    final last = DateTime.tryParse(
-      _status?['last_update']?.toString() ?? '',
-    )?.toLocal();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          _status == null && _loading ? '正在读取学习状态…' : title,
-          style: Theme.of(context).textTheme.titleSmall,
-        ),
-        const SizedBox(height: 6),
-        const Text('人工确认或修改物种后在后台自动学习，完成后用于下一次识别。'),
-        if (_status != null) ...[
-          Text('当前模型：$classes 个物种 · 已学习 $learned 个独立样本 · 等待处理 $pending 个检测框'),
-          if (species.isNotEmpty)
-            Text(species.entries.map((e) => '${e.key}：${e.value}').join('，')),
-          if (last != null) Text('最近完成：${last.toString().split('.').first}'),
-          Text(_status?['message']?.toString() ?? ''),
-          const Divider(),
-          const Text(
-            'DINO 拒识门限（只读）',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          Text(
-            experiment
-                ? '实验事件门限 ${threshold('sequence_threshold')}'
-                : '单框门限 ${threshold('box_threshold')}  ·  序列门限 ${threshold('sequence_threshold')}',
-          ),
-          Text(
-            experiment
-                ? '事件分数达到门限才接纳。门限由模型自动校准，不能手动拖动。'
-                : '分数越低越容易拒识；两级都通过才接纳。门限由模型自动校准，不能手动拖动。',
-          ),
-        ],
-        if (_error != null)
-          Text(
-            _error!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        if (state == 'running' || state == 'queued')
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: LinearProgressIndicator(),
-          ),
-        Wrap(
-          spacing: 8,
-          children: [
-            TextButton(
-              onPressed: _loading || _working ? null : _refresh,
-              child: const Text('刷新学习状态'),
-            ),
-            if (_status?['calibration_available'] == false)
-              TextButton(
-                onPressed: _working ? null : _importCalibration,
-                child: const Text('导入校准数据'),
-              ),
-            if (state == 'failed' ||
-                (state == 'blocked' &&
-                    _status?['calibration_available'] == true))
-              TextButton(
-                onPressed: _working ? null : () => _run('retry'),
-                child: const Text('重试自动学习'),
-              ),
-          ],
-        ),
-      ],
+    final label = _error != null
+        ? '状态暂不可用'
+        : _status == null
+        ? (_loading ? '正在读取…' : '查看学习状态')
+        : learningStateLabel(_status!);
+    return Tooltip(
+      message: '查看学习明细',
+      child: SummaryDialogButton(
+        summary: label,
+        onPressed: widget.active ? _showDetails : null,
+      ),
     );
   }
 }

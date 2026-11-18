@@ -229,7 +229,7 @@ def _exit_with_simulated_crash(delay: float) -> None:
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
-def settings() -> SettingsResponse:
+def settings(probe_gpu: bool = True) -> SettingsResponse:
     """Return Neri runtime settings and supported media formats."""
 
     stored_settings = settings_manager.load_settings() or {}
@@ -322,7 +322,9 @@ def settings() -> SettingsResponse:
         selected_model=selected_model,
         selected_classification_model=selected_classification_model,
         species_types=load_species_types(),
-        gpu_available=detect_gpu_available(),
+        # The first screen must not import PyTorch just to display settings.
+        # The client requests the full GPU status after the shell is ready.
+        gpu_available=detect_gpu_available() if probe_gpu else False,
         missing_yolo_dependencies=missing_yolo,
         pytorch_available=pytorch_available,
         litert_available=litert_available,
@@ -505,18 +507,44 @@ def reinstall_package(
     return MaintenanceStartResponse(**status)
 
 
+def _missing_job_pytorch_dependencies(request: CreateJobRequest) -> list[str]:
+    """Keep LiteRT jobs independent of unused YOLO/PyTorch packages."""
+    from .services import (
+        _dino_manifest_payload,
+        _resolve_classification_model_path,
+        _resolve_model_path,
+    )
+
+    options = request.options
+    if options.model_path:
+        detector = _resolve_model_path(options.model_path)
+        if detector.suffix.lower() not in {".tflite", ".litert"}:
+            return missing_yolo_dependencies()
+    if options.classification_model_path:
+        classifier = _resolve_classification_model_path(options.classification_model_path)
+        manifest = _dino_manifest_payload(classifier)
+        if manifest is None:
+            return missing_yolo_dependencies()
+        if manifest.get("encoder_backend", "pytorch") != "litert":
+            return ["torch"] if importlib.util.find_spec("torch") is None else []
+    return []
+
+
 @app.post("/api/jobs", response_model=JobSummary, status_code=202)
 def create_job(request: CreateJobRequest) -> JobSummary:
     """Start an asynchronous folder processing job."""
 
     if request.options.enable_detection:
-        missing = missing_yolo_dependencies()
+        try:
+            missing = _missing_job_pytorch_dependencies(request)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if missing:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "missing_yolo_dependencies",
-                    "message": "缺少 YOLO 处理依赖，请先安装依赖后再开始识别。",
+                    "message": "所选模型缺少处理依赖，请先安装依赖后再开始识别。",
                     "missing": missing,
                 },
             )

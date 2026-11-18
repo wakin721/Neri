@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -207,6 +208,215 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('legacy preview and validation scan detection boxes linearly', (
+    tester,
+  ) async {
+    _setSize(tester, 1280);
+    const belowThreshold = DetectionBox(
+      species: 'bird',
+      confidence: 0.1,
+      bbox: [0.1, 0.1, 0.7, 0.7],
+    );
+    const withCandidate = DetectionBox(
+      species: 'sparrow',
+      confidence: 0.1,
+      bbox: [0.2, 0.2, 0.8, 0.8],
+      candidates: [
+        {'name': 'sparrow', 'conf': 0.1},
+        {'name': 'bird', 'conf': 0.8},
+      ],
+    );
+    final boxes = _CountingList([
+      for (var i = 0; i < 256; i++) ...[belowThreshold, withCandidate],
+    ]);
+    final rawBoxes = _CountingList([
+      for (var i = 0; i < boxes.length; i++)
+        {
+          'bbox': [i, i, i + 1, i + 1],
+        },
+    ]);
+    final item = DetectionItem(
+      filename: 'bird.png',
+      path: '${directory.path}/unavailable.png',
+      fileType: 'png',
+      width: 10,
+      height: 10,
+      detectionBoxes: boxes,
+      detectionData: {'检测框': rawBoxes},
+    );
+
+    void expectFilteredBoxes() {
+      final viewer = tester.widget<DetectionMediaViewer>(
+        find.byType(DetectionMediaViewer),
+      );
+      expect(viewer.visibleBoxes, hasLength(256));
+      expect(viewer.visibleBoxes.every((box) => box.species == 'bird'), isTrue);
+      expect(boxes.reads, lessThan(boxes.length * 32));
+      expect(rawBoxes.reads, lessThan(rawBoxes.length * 32));
+    }
+
+    await tester.pumpWidget(_preview(item, selectedSpecies: 'bird'));
+    expectFilteredBoxes();
+
+    final api = NeriApiClient(
+      httpClient: MockClient((_) async => _jsonResponse({})),
+    );
+    addTearDown(api.close);
+    boxes.reads = 0;
+    rawBoxes.reads = 0;
+    await tester.pumpWidget(_screen(api, directory.path, item));
+    expectFilteredBoxes();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Neri preview keeps the legacy toolbar usable when resized', (
+    tester,
+  ) async {
+    _setSize(tester, 1280);
+    final item = DetectionItem(
+      filename: 'bird.png',
+      path: '${directory.path}/unavailable.png',
+      fileType: 'png',
+      species: const ['bird'],
+    );
+    double? changedConfidence;
+    bool? showDetections;
+    DetectionItem? redetected;
+    await tester.pumpWidget(
+      _preview(
+        item,
+        onConfidenceChanged: (value) => changedConfidence = value,
+        onShowDetectionsChanged: (value) => showDetections = value,
+        onDetect: (selected) => redetected = selected,
+      ),
+    );
+    final toggle = find.byType(Switch);
+    final slider = find.byType(Slider);
+    final detect = find.text('检测当前图像');
+    expect(
+      tester.getCenter(slider).dy,
+      closeTo(tester.getCenter(toggle).dy, 1),
+    );
+    expect(
+      tester.getCenter(detect).dy,
+      closeTo(tester.getCenter(toggle).dy, 1),
+    );
+
+    for (final width in [600.0, 480.0]) {
+      tester.view.physicalSize = Size(width, 900);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(slider).width, greaterThan(100));
+      expect(
+        tester.getCenter(toggle).dy,
+        lessThan(tester.getCenter(slider).dy),
+      );
+      expect(find.byType(DropdownMenu<String>), findsOneWidget);
+
+      changedConfidence = null;
+      await tester.tapAt(
+        tester.getCenter(slider) + Offset(tester.getSize(slider).width / 4, 0),
+      );
+      expect(changedConfidence, greaterThan(0.25));
+    }
+    await tester.tap(toggle);
+    expect(showDetections, isFalse);
+    await tester.tap(detect);
+    expect(redetected, same(item));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Neri preview fits large text near the toolbar breakpoint', (
+    tester,
+  ) async {
+    _setSize(tester, 704);
+    final item = DetectionItem(
+      filename: 'bird.png',
+      path: '${directory.path}/unavailable.png',
+      fileType: 'png',
+    );
+    await tester.pumpWidget(_preview(item, textScale: 1.6));
+    final slider = find.byType(Slider);
+    for (final size in [
+      const Size(704, 900),
+      const Size(600, 900),
+      const Size(480, 420),
+      const Size(1024, 900),
+    ]) {
+      tester.view.physicalSize = size;
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(slider).width, greaterThan(100));
+      if (size.height == 420) {
+        await tester.ensureVisible(slider);
+        await tester.pump();
+        expect(tester.getRect(slider).bottom, lessThan(size.height));
+      }
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a mixed item keeps DINO treatment in preview and validation', (
+    tester,
+  ) async {
+    _setSize(tester, 1280);
+    const plainBox = DetectionBox(
+      species: 'sparrow',
+      confidence: 0.1,
+      bbox: [0.1, 0.1, 0.7, 0.7],
+    );
+    final item = DetectionItem(
+      filename: 'bird.png',
+      path: '${directory.path}/unavailable.png',
+      fileType: 'png',
+      width: 10,
+      height: 10,
+      detectionBoxes: const [
+        plainBox,
+        DetectionBox(
+          species: 'bird',
+          confidence: 0.9,
+          bbox: [0.2, 0.2, 0.8, 0.8],
+          candidates: [
+            {'name': 'bird', 'accepted': false, 'box_known_score': 0.1},
+          ],
+        ),
+      ],
+    );
+    List<DetectionBox> visibleBoxes() => tester
+        .widget<DetectionMediaViewer>(find.byType(DetectionMediaViewer))
+        .visibleBoxes;
+    final scores = find.byKey(const ValueKey('dino-rejection-single-line'));
+    final toggle = find.byType(Switch);
+    await tester.pumpWidget(
+      _preview(item, selectedSpecies: 'bird', confidence: 0.95),
+    );
+    expect(visibleBoxes().map((box) => box.species), ['sparrow', 'Unknown']);
+    expect(find.byType(Slider), findsNothing);
+    expect(
+      tester.getCenter(scores).dy,
+      closeTo(tester.getCenter(toggle).dy, 1),
+    );
+
+    tester.view.physicalSize = const Size(480, 900);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(tester.getCenter(toggle).dy, lessThan(tester.getCenter(scores).dy));
+    expect(tester.getSize(scores).width, greaterThan(300));
+
+    tester.view.physicalSize = const Size(1280, 900);
+    final api = NeriApiClient(
+      httpClient: MockClient((_) async => _jsonResponse({})),
+    );
+    addTearDown(api.close);
+    await tester.pumpWidget(_screen(api, directory.path, item));
+    final filtered = visibleBoxes();
+    expect(filtered.map((box) => box.species), ['sparrow', 'Unknown']);
+    expect(filtered.first, same(plainBox));
+    expect(filtered.last.observationId, startsWith('dinov3:'));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   for (final batch in [false, true]) {
     testWidgets('correct passes active filters to callback batch=$batch', (
@@ -1127,6 +1337,69 @@ void main() {
     },
   );
 }
+
+class _CountingList<T> extends ListBase<T> {
+  _CountingList(this._items);
+
+  final List<T> _items;
+  int reads = 0;
+
+  @override
+  int get length => _items.length;
+
+  @override
+  set length(int value) => _items.length = value;
+
+  @override
+  T operator [](int index) {
+    reads++;
+    return _items[index];
+  }
+
+  @override
+  void operator []=(int index, T value) => _items[index] = value;
+}
+
+Widget _preview(
+  DetectionItem item, {
+  String selectedSpecies = previewAllSpeciesLabel,
+  double confidence = 0.25,
+  double textScale = 1,
+  ValueChanged<double>? onConfidenceChanged,
+  ValueChanged<bool>? onShowDetectionsChanged,
+  ValueChanged<DetectionItem>? onDetect,
+}) => MaterialApp(
+  theme: buildNeriTheme(ColorScheme.fromSeed(seedColor: Colors.green)),
+  builder: (context, child) => MediaQuery(
+    data: MediaQuery.of(
+      context,
+    ).copyWith(textScaler: TextScaler.linear(textScale)),
+    child: child!,
+  ),
+  home: Scaffold(
+    body: PreviewScreen(
+      inputPath: File(item.path).parent.path,
+      items: [item],
+      selectedIndex: 0,
+      selectedItem: item,
+      speciesTypes: const {},
+      useCombinedConfidence: false,
+      showDetections: true,
+      onShowDetectionsChanged: onShowDetectionsChanged ?? (_) {},
+      selectedSpeciesFilter: selectedSpecies,
+      onSpeciesFilterChanged: (_) {},
+      confidenceThreshold: confidence,
+      onConfidenceThresholdChanged: onConfidenceChanged ?? (_) {},
+      detecting: false,
+      loading: false,
+      onDetectCurrentImage: onDetect ?? (_) {},
+      onSelected: (_, _) {},
+      onLoadMetadata: (_) async {},
+      onRefresh: () async {},
+      onOpenExternal: (_) {},
+    ),
+  ),
+);
 
 void _setSize(WidgetTester tester, double width) {
   tester.view.physicalSize = Size(width, 900);

@@ -26,13 +26,14 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
 
     def __init__(self, *args, **kwargs) -> None:
         self._resume_checkpoint_at: dict[str, float] = {}
+        self._unloaded_job_ids: set[str] = set()
         from .job_state_store import JobStateStore
 
         self._state_store = JobStateStore(job_state_path())
         super().__init__(*args, **kwargs)
 
     def _load_state(self) -> None:
-        data = self._state_store.load()
+        data = self._state_store.load(include_results=False)
         if data is None:
             # Import the previous JSON checkpoint once; retain it for recovery.
             super()._load_state()
@@ -40,11 +41,14 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
         for job_id, raw_job in data["jobs"].items():
             job = JobSummary(**raw_job).model_copy(update={"active": False})
             self._jobs[job_id] = job
+            self._unloaded_job_ids.add(job_id)
         self._job_requests = {
             job_id: CreateJobRequest(**request)
             for job_id, request in data["requests"].items()
         }
-        self._state_store.remember(self._jobs, self._job_requests)
+        self._state_store.remember(
+            self._jobs, self._job_requests, unloaded_job_ids=self._unloaded_job_ids
+        )
         for job_id, job in tuple(self._jobs.items()):
             if job.state in {JobState.QUEUED, JobState.RUNNING}:
                 self._jobs[job_id] = job.model_copy(update={
@@ -54,49 +58,69 @@ class ProcessingJobManager(_legacy.ProcessingJobManager):
                 })
         self._save_state_unlocked()
 
+    def _get_job_unlocked(self, job_id: str, *, include_results: bool = True) -> JobSummary:
+        job = super()._get_job_unlocked(job_id, include_results=include_results)
+        if not include_results or job_id not in getattr(self, "_unloaded_job_ids", ()):
+            return job
+        results = [DetectionItem(**raw) for raw in self._state_store.load_results(job_id)]
+        job = job.model_copy(update={"results": results})
+        self._jobs[job_id] = job
+        self._state_store.remember_job(job_id, job, self._job_requests.get(job_id))
+        self._unloaded_job_ids.remove(job_id)
+        return job
+
     def _should_checkpoint_detection_progress(
         self,
         job_id: str,
+        current: JobSummary,
         changes: dict[str, object],
     ) -> bool:
-        if "processed" not in changes or "results" not in changes:
+        if "processed" not in changes:
             return False
         try:
             next_processed = int(changes["processed"])
         except (TypeError, ValueError):
             return False
-        with self._lock:
-            request = self._job_requests.get(job_id)
-            current = self._jobs.get(job_id)
-            return bool(
-                request is not None
-                and request.options.enable_detection
-                and current is not None
-                and next_processed > current.processed
-            )
+        request = self._job_requests.get(job_id)
+        return bool(
+            request is not None
+            and request.options.enable_detection
+            and next_processed > current.processed
+        )
 
-    def _mutate_job(
+    def _mutate_job_unlocked(
         self,
         job_id: str,
+        current: JobSummary,
         *,
-        persist: bool = True,
+        persist: bool,
+        appended_results: list[DetectionItem] | None = None,
         **changes: object,
     ) -> None:
-        checkpoint_progress = self._should_checkpoint_detection_progress(job_id, changes)
+        checkpoint_progress = False
+        if appended_results is not None or "results" in changes:
+            if job_id in self._unloaded_job_ids:
+                current = self._get_job_unlocked(job_id)
+            checkpoint_progress = self._should_checkpoint_detection_progress(job_id, current, changes)
         if not persist and checkpoint_progress:
             now = time.monotonic()
             last = self._resume_checkpoint_at.get(job_id)
             if last is None or now - last >= self._resume_checkpoint_interval_seconds:
                 persist = True
-        super()._mutate_job(job_id, persist=persist, **changes)
-        if persist and checkpoint_progress:
-            if self._state_store.has_saved(job_id, self._jobs.get(job_id)):
-                self._resume_checkpoint_at[job_id] = time.monotonic()
+        super()._mutate_job_unlocked(
+            job_id, current, persist=persist, appended_results=appended_results, **changes
+        )
+        if persist and checkpoint_progress and self._state_store.has_saved(job_id, self._jobs[job_id]):
+            self._resume_checkpoint_at[job_id] = time.monotonic()
 
     def _save_state_unlocked(self) -> None:
         """Commit changed jobs and new results without rewriting historical results."""
         try:
-            self._state_store.save(self._jobs, self._job_requests)
+            self._unloaded_job_ids.intersection_update(self._jobs)
+            self._state_store.save(
+                self._jobs, self._job_requests, unloaded_job_ids=self._unloaded_job_ids,
+                append_only_result_lists=True,
+            )
         except Exception:
             logger.warning("Failed to checkpoint job progress", exc_info=True)
 
